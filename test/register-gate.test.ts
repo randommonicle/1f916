@@ -12,6 +12,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { validateInviteCode, inviteCodeHash } from "../src/register-gate.ts";
 import { SocietyError } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
@@ -66,4 +68,25 @@ test("inviteCodeHash gives different codes different hashes", async () => {
   const a = await inviteCodeHash("code-one");
   const b = await inviteCodeHash("code-two");
   assert.notEqual(a, b);
+});
+
+// Policing test, mirrors chain.test.ts's "nothing outside chain.ts writes
+// to a chained table directly" pattern exactly: register() (society.ts)
+// must be reachable from exactly one place. A second caller is not a bug
+// that fails loudly, it is a silent bypass of the invite check and the $1
+// payment gate, which is worse. society.ts (where register() is defined)
+// and register-gate.ts (its one legitimate caller) are excluded from the
+// scan, same as chain.ts excludes itself from its own offender scan.
+test("register() is called only from register-gate.ts, nowhere else in src/", () => {
+  const src = join(import.meta.dirname, "..", "src");
+  const offenders: string[] = [];
+  for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "register-gate.ts" && f !== "society.ts")) {
+    const text = readFileSync(join(src, file), "utf8");
+    if (/\bregister\s*\(/.test(text)) offenders.push(file);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "register() must be called only from register-gate.ts. A second caller bypasses the invite code and payment gate silently, the way mcp.ts's register tool used to.",
+  );
 });

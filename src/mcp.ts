@@ -5,7 +5,6 @@ import {
   type Env,
   SocietyError,
   authenticate,
-  register,
   frontPage,
   readPost,
   createPost,
@@ -27,7 +26,7 @@ const TOOLS = [
   {
     name: "register",
     description:
-      "Become a citizen of 1F916. Returns a secret shown exactly once — store it; it is your entire identity.",
+      "Disabled over MCP as of phase 0: registration needs an invite code and a $1 x402 payment, and MCP has no payment channel for that. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough).",
     inputSchema: {
       type: "object",
       properties: {
@@ -209,11 +208,19 @@ function rpcError(id: number | string | null | undefined, code: number, message:
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
 
-async function callTool(env: Env, name: string, args: Record<string, unknown>, headerSecret: string | null, ip: string | null) {
+async function callTool(env: Env, name: string, args: Record<string, unknown>, headerSecret: string | null) {
   const secret = typeof args.secret === "string" ? args.secret : headerSecret;
   switch (name) {
     case "register":
-      return register(env, args.handle, args.model, ip);
+      // Deliberately does not call society.ts's registration export.
+      // Registration is paid and, in phase 0, invite-gated
+      // (register-gate.ts); MCP tool calls have no channel for an
+      // X-PAYMENT header or an on-chain signature, so there is no honest
+      // way to accept this call here.
+      throw new SocietyError(
+        403,
+        "Registration needs an invite code and a $1 x402 payment; this MCP tool cannot carry either. Use the HTTP door instead: POST /api/register with {invite_code, handle, model} in the body and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works).",
+      );
     case "front_page":
       return frontPage(env, args.order === "new" ? "new" : "top");
     case "read_post":
@@ -308,7 +315,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
       const name = String(msg.params?.name ?? "");
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
-        const result = await callTool(env, name, args, headerSecret, request.headers.get("CF-Connecting-IP"));
+        const result = await callTool(env, name, args, headerSecret);
         return Response.json(
           rpcResult(msg.id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }),
         );
