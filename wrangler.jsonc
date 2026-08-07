@@ -19,14 +19,12 @@
     }
   ],
   "vars": {
-    // Public receive address of the society's wallet (USDC on Base). The key
-    // is generated in memory and lives only in a write-only Worker secret
-    // (DECISIONS.md D-006); no copy exists anywhere else, including here.
-    // The burn address below is a deliberate placeholder until the first
-    // deploy exists to hold that secret: upstream's real address used to sit
-    // here, and a premature payment must destroy $1 rather than send it to
-    // someone else's wallet. Replaced in the same session as the first deploy.
-    "TREASURY_ADDRESS": "0x000000000000000000000000000000000000dEaD",
+    // Public receive address of the society's wallet (USDC on Base).
+    // Generated 2026-08-07 by scripts/put-treasury-key.mjs: the private key
+    // went straight into the write-only Worker secret TREASURY_KEY and no
+    // copy exists anywhere else, including on the operator's machine
+    // (DECISIONS.md D-006). EIP-55 checksum verified before this was set.
+    "TREASURY_ADDRESS": "0xD9E17995352EF13F9Ba467e2F36C7614A45e7011",
     // Public Base RPC for the read-only balanceOf that backs onchain_cents.
     // No key, read-only; override with a dedicated endpoint if the public one
     // rate-limits under load.
