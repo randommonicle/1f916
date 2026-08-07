@@ -378,42 +378,91 @@ async function countPendingQueue(env: Env): Promise<number> {
 
 // This is the ONLY place in src/ that transitions a maintainer_queue row's
 // status -- policed by maintainer-policing.test.ts.
-async function stampQueueRow(env: Env, id: number, status: "approved" | "rejected", reason: string): Promise<void> {
-  await env.DB.prepare("UPDATE maintainer_queue SET status = ?, decided_at = ?, decided_reason = ? WHERE id = ?").bind(status, Date.now(), reason.slice(0, 500), id).run();
+//
+// L2, review fix: gained "AND status = 'pending'" (default, via
+// requirePending) and now returns whether it actually changed a row.
+// This is the claim in the stamp-before-execute pattern below: a
+// conditional UPDATE is the only atomic way to say "this row was still
+// pending, and now it's mine" against a database that could, in
+// principle, have more than one judgment process running against it at
+// once (a duty-officer session working the queue at the same time as the
+// cron fires, or a retried trigger) -- exactly the concern D-017 names
+// for the duty-officer's own warden path. `requirePending: false` is the
+// deliberate escape hatch for the execution-failure re-stamp below, which
+// must override a row this SAME call already moved to 'approved' a
+// moment earlier -- not a second judge, the same one correcting itself.
+async function stampQueueRow(env: Env, id: number, status: "approved" | "rejected", reason: string, opts: { requirePending?: boolean } = {}): Promise<boolean> {
+  const requirePending = opts.requirePending ?? true;
+  const stmt = requirePending
+    ? env.DB.prepare("UPDATE maintainer_queue SET status = ?, decided_at = ?, decided_reason = ? WHERE id = ? AND status = 'pending'")
+    : env.DB.prepare("UPDATE maintainer_queue SET status = ?, decided_at = ?, decided_reason = ? WHERE id = ?");
+  const res = await stmt.bind(status, Date.now(), reason.slice(0, 500), id).run();
+  return res.meta.changes > 0;
 }
 
 // D1-touching. Runs one batch's worth of already-parsed decisions through
-// resolveExecution and the real executors, stamping each row as it goes.
-// Extracted from runJudgmentWake so the batch loop below can call it once
-// per batch and accumulate the count across batches, rather than nesting
-// the whole thing inline.
+// resolveExecution and the real executors. Extracted from runJudgmentWake
+// so the batch loop below can call it once per batch and accumulate the
+// count across batches, rather than nesting the whole thing inline.
+//
+// L2: claims each row FIRST (stamps it) and executes an approval only
+// when the claim actually changed a row -- the opposite order from
+// before, where execution ran first and the stamp merely recorded the
+// outcome afterward. Under that old order, two processes racing on the
+// same queue_id could both pass the "should I execute" check before
+// either had stamped anything, and both execute -- a duplicate
+// moderation action or, worse, a duplicate bulletin post under the
+// maintainer's own name. Claiming first closes that window: the
+// conditional UPDATE is atomic, so at most one of two concurrent
+// attempts can ever see `claimed === true` for the same row.
 async function executeJudgmentDecisions(env: Env, batchMap: Map<number, QueueRow>, decisions: JudgmentDecision[]): Promise<number> {
   let actioned = 0;
   for (const d of decisions) {
     const item = batchMap.get(d.queue_id)!;
-    // H2: resolved BEFORE any execution -- a deny-check hit on an approved
-    // bulletin_draft already reads status "rejected" and execute null here,
-    // so the branch below never has an "approved but don't post" special
-    // case to get wrong.
+    // H2: resolved BEFORE any claim or execution -- a deny-check hit on
+    // an approved bulletin_draft already reads status "rejected" and
+    // execute null here, so the claim below stamps "rejected" directly
+    // and nothing downstream ever has an "approved but don't post"
+    // special case to get wrong.
     const resolved = resolveExecution(item, d);
+
+    let claimed: boolean;
     try {
-      if (resolved.execute?.kind === "moderate") {
+      claimed = await stampQueueRow(env, d.queue_id, resolved.status, resolved.reason);
+    } catch (e) {
+      console.log(JSON.stringify({ level: "error", event: "judgment_stamp_failed", queue_id: d.queue_id, message: String(e) }));
+      continue; // never claimed, never executed, never counted here
+    }
+    if (!claimed) continue; // lost the race to another process; that process counts it, not this one
+
+    if (resolved.execute === null) {
+      // Rejections, bookkeeping_note/registration_check approvals
+      // (observational only), and deny-checked bulletins: nothing to
+      // execute, the claim above was the whole job.
+      actioned++;
+      continue;
+    }
+
+    try {
+      if (resolved.execute.kind === "moderate") {
         await moderateContent(env, MAINTAINER_CITIZEN, resolved.execute.targetType, resolved.execute.targetId, resolved.execute.action, resolved.reason);
-      } else if (resolved.execute?.kind === "bulletin") {
+      } else {
         await createPost(env, MAINTAINER_CITIZEN, resolved.execute.title, resolved.execute.body, null, true);
       }
-      // bookkeeping_note / registration_check, and a deny-checked bulletin:
-      // execute is null, nothing further to do, the row is simply stamped.
-      await stampQueueRow(env, d.queue_id, resolved.status, resolved.reason);
       actioned++;
     } catch (e) {
-      // Execution failed (e.g. the flagged content no longer exists by the
-      // time judgment ran). Stamp it rejected with an honest reason rather
-      // than leaving it pending -- pending would mean the model re-approves
-      // the same failing action every week forever.
+      // Execution failed AFTER the claim succeeded (e.g. the flagged
+      // content no longer exists by the time judgment ran). Re-stamp
+      // rejected with an honest combined reason rather than leaving the
+      // row sitting at 'approved' with nothing having actually happened
+      // -- pending would mean the model re-approves the same failing
+      // action every week forever, and 'approved'-but-unexecuted would
+      // be an outright lie in the public record. requirePending: false
+      // because the row is 'approved' now, not 'pending' -- the claim
+      // above already moved it.
       const failureReason = `judge approved (${resolved.reason}) but execution failed: ${e instanceof Error ? e.message : String(e)}`;
       try {
-        await stampQueueRow(env, d.queue_id, "rejected", failureReason);
+        await stampQueueRow(env, d.queue_id, "rejected", failureReason, { requirePending: false });
         actioned++;
       } catch (stampError) {
         console.log(JSON.stringify({ level: "error", event: "judgment_stamp_failed", queue_id: d.queue_id, message: String(stampError) }));
