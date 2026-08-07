@@ -16,6 +16,7 @@ import {
   smellsForbidden,
   parseClerkItems,
   nextClerkCursor,
+  shouldAdvanceClerkCursor,
   computeDrift,
   buildClerkPrompt,
 } from "../src/maintainer/clerk.ts";
@@ -275,6 +276,26 @@ test("nextClerkCursor never regresses below the previous cursor", () => {
   // Defensive: should not normally happen (queries are WHERE created_at >
   // cursor), but the arithmetic itself must not be able to move backwards.
   assert.equal(nextClerkCursor(5000, [{ created_at: 100 }]), 5000);
+});
+
+// ---------- shouldAdvanceClerkCursor: cursor-before-writes (M2) ----------
+
+test("shouldAdvanceClerkCursor: true when every accepted item was inserted and there was no error", () => {
+  assert.equal(shouldAdvanceClerkCursor(5, 5, null), true);
+});
+
+test("shouldAdvanceClerkCursor: false when fewer items were inserted than were attempted (a partial failure)", () => {
+  assert.equal(shouldAdvanceClerkCursor(5, 2, "failed while writing the queue (2/5 items inserted before the failure): D1_ERROR"), false);
+});
+
+test("shouldAdvanceClerkCursor: false whenever an insert error is recorded, even if the counts happen to match", () => {
+  // Defensive: an error should never be silently overridden by a count
+  // that happens to look complete.
+  assert.equal(shouldAdvanceClerkCursor(5, 5, "some error recorded anyway"), false);
+});
+
+test("shouldAdvanceClerkCursor: true on a quiet run where nothing was attempted (0 of 0)", () => {
+  assert.equal(shouldAdvanceClerkCursor(0, 0, null), true);
 });
 
 // ---------- computeDrift ----------

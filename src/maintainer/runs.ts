@@ -54,6 +54,37 @@ export async function insertMaintainerRun(env: Pick<Env, "DB">, fields: RunField
   return res!.id;
 }
 
+// M2: the clerk wake reserves a runs row (via insertMaintainerRun, kind +
+// startedAt only) BEFORE it writes any maintainer_queue rows -- it has to,
+// since queue.run_id is a NOT NULL foreign key to this table -- and
+// finalizes that SAME row afterward, once it knows how many queue rows
+// actually landed. A row left unfinalized (finished_at still NULL) reads
+// exactly as the finished_at column's own comment already anticipates: a
+// process that started and did not get to record its own outcome.
+export type RunUpdateFields = Omit<RunFields, "kind" | "startedAt">;
+
+export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fields: RunUpdateFields): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE maintainer_runs
+      SET finished_at = ?, tokens_in = ?, tokens_out = ?, cost_estimate_cents = ?, items_drafted = ?, items_actioned = ?, overflow_dropped = ?, skipped_reason = ?, error = ?, cursor_advanced_to = ?
+     WHERE id = ?`,
+  )
+    .bind(
+      fields.finishedAt ?? null,
+      fields.tokensIn ?? null,
+      fields.tokensOut ?? null,
+      fields.costEstimateCents ?? null,
+      fields.itemsDrafted ?? null,
+      fields.itemsActioned ?? null,
+      fields.overflowDropped ?? 0,
+      fields.skippedReason ?? null,
+      fields.error ?? null,
+      fields.cursorAdvancedTo ?? null,
+      id,
+    )
+    .run();
+}
+
 // The public accountability surface (design doc S2): "the books-are-public
 // ethos applies to the maintainer's own cost line". Mirrors
 // citizenDirectory's / changes()'s honest-cap-with-has_more shape rather

@@ -14,7 +14,7 @@
 
 import { type Env, readOnchainUsdcCents } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents } from "./anthropic.ts";
-import { insertMaintainerRun } from "./runs.ts";
+import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
 
 // ---------- pure: the allowlist and the parser (the real cage) ----------
 
@@ -174,6 +174,19 @@ export function nextClerkCursor(previousCursor: number, scanned: { created_at: n
   let max = previousCursor;
   for (const item of scanned) if (item.created_at > max) max = item.created_at;
   return max;
+}
+
+// M2: the cursor only ever advances when EVERY accepted item actually
+// landed in maintainer_queue. A partial write failure must not advance
+// past content whose queue rows are missing -- that content would never
+// be scanned again, and the loss would be invisible (the run would still
+// look successful if items_drafted and cursor_advanced_to were written
+// before the insert loop ran, which is exactly the bug this fixes). A
+// re-scan that redrafts an item already sitting in the queue from a
+// previous partial run is an acceptable, visible duplicate -- the
+// alternative is a silent, permanent loss.
+export function shouldAdvanceClerkCursor(attempted: number, inserted: number, insertError: string | null): boolean {
+  return insertError === null && inserted === attempted;
 }
 
 // ---------- pure: bookkeeping drift ----------
@@ -393,24 +406,63 @@ export async function runClerkWake(env: Env): Promise<void> {
     return;
   }
 
-  const cursorAdvancedTo = nextClerkCursor(cursor, candidates);
-  const runId = await insertMaintainerRun(env, {
-    kind: "clerk",
-    startedAt,
-    finishedAt: Date.now(),
-    tokensIn: result.usage.input_tokens,
-    tokensOut: result.usage.output_tokens,
-    costEstimateCents: estimateCostCents(MAINTAINER_MODELS.clerk, result.usage.input_tokens, result.usage.output_tokens),
-    itemsDrafted: parsedItems.accepted.length,
-    overflowDropped: parsedItems.overflowDropped,
-    cursorAdvancedTo,
-  });
+  // M2: reserve the runs row FIRST -- maintainer_queue.run_id is a NOT
+  // NULL foreign key to it, so a valid run_id must exist before any queue
+  // row can be written. Left unfinalized (finished_at NULL) if the wake
+  // gets no further than this.
+  let runId: number;
+  try {
+    runId = await insertMaintainerRun(env, { kind: "clerk", startedAt, overflowDropped: parsedItems.overflowDropped });
+  } catch (e) {
+    console.log(JSON.stringify({ level: "error", event: "clerk_run_reserve_failed", message: String(e) }));
+    return;
+  }
 
-  for (const item of parsedItems.accepted) {
-    await env.DB.prepare(
-      "INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
-    )
-      .bind(runId, Date.now(), item.kind, item.target_type, item.target_id, item.source_ref, item.note)
-      .run();
+  // M2: the queue rows are written BEFORE the runs row is finalized, so
+  // items_drafted and cursor_advanced_to (below) can be computed from what
+  // actually landed, not from what the model merely proposed. Sequential,
+  // wrapped in one try/catch -- on a partial failure partway through, the
+  // items already inserted stay (D1 has no multi-statement rollback here
+  // worth adding for this), and insertedCount is the honest count of them.
+  let insertedCount = 0;
+  let insertError: string | null = null;
+  try {
+    for (const item of parsedItems.accepted) {
+      await env.DB.prepare(
+        "INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+      )
+        .bind(runId, Date.now(), item.kind, item.target_type, item.target_id, item.source_ref, item.note)
+        .run();
+      insertedCount++;
+    }
+  } catch (e) {
+    insertError = `failed while writing the queue (${insertedCount}/${parsedItems.accepted.length} items inserted before the failure): ${e instanceof Error ? e.message : String(e)}`;
+  }
+
+  // Full success: the cursor advances, and items_drafted is the true
+  // inserted count (equal to what was attempted). Partial failure:
+  // items_drafted is only what actually landed, error is set, and
+  // cursor_advanced_to is left unset -- the cursor does not move, so the
+  // next wake re-scans the same content rather than silently losing
+  // whatever didn't make it into the queue. A re-scan can redraft an item
+  // already sitting in the queue from this run; a visible duplicate draft
+  // is the honest trade against a silently lost one (M2).
+  const cursorAdvancedTo = shouldAdvanceClerkCursor(parsedItems.accepted.length, insertedCount, insertError) ? nextClerkCursor(cursor, candidates) : undefined;
+  try {
+    await finalizeMaintainerRun(env, runId, {
+      finishedAt: Date.now(),
+      tokensIn: result.usage.input_tokens,
+      tokensOut: result.usage.output_tokens,
+      costEstimateCents: estimateCostCents(MAINTAINER_MODELS.clerk, result.usage.input_tokens, result.usage.output_tokens),
+      itemsDrafted: insertedCount,
+      overflowDropped: parsedItems.overflowDropped,
+      cursorAdvancedTo,
+      error: insertError ?? undefined,
+    });
+  } catch (e) {
+    // The wake must never throw -- even the runs-row write itself failing
+    // falls back to a structured log rather than an uncaught exception
+    // escaping to scheduled()'s own backstop catch.
+    console.log(JSON.stringify({ level: "error", event: "clerk_run_finalize_failed", run_id: runId, message: String(e) }));
   }
 }
