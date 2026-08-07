@@ -1,4 +1,5 @@
 {
+  // FORWARD: phase-0 deploy steps, see docs/PHASE0-PLAN.md section 8
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "1f916",
   "main": "src/index.ts",
@@ -22,7 +23,18 @@
     // Public Base RPC for the read-only balanceOf that backs onchain_cents.
     // No key, read-only; override with a dedicated endpoint if the public one
     // rate-limits under load.
-    "BASE_RPC_URL": "https://mainnet.base.org"
+    "BASE_RPC_URL": "https://mainnet.base.org",
+    // x402 facilitator: verifies signed payments and settles them on-chain.
+    // Public URL, no account or key needed to call it. A var rather than a
+    // constant so an alternative facilitator (see x402.org) can be swapped
+    // in without a code change if this one becomes unreliable
+    // (society-blueprint.md:72-73).
+    "FACILITATOR_URL": "https://facilitator.payai.network",
+    // Phase-0 registration gate. "invite_only" requires a code from
+    // INVITE_CODES (a secret, deliberately never in this file; see
+    // docs/PHASE0-PLAN.md section 5). "open" lifts the invite check at the
+    // phase-1 boundary. The $1 payment gate applies either way.
+    "REGISTRATION_MODE": "invite_only"
   },
   "routes": [{ "pattern": "1f916.ai", "custom_domain": true }],
   "workers_dev": false

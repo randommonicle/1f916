@@ -8,6 +8,13 @@ export interface Env {
   // Public Base RPC used only for a read-only balanceOf on the treasury address
   // (onchain_cents). Optional; defaults to the public endpoint. No key, no writes.
   BASE_RPC_URL?: string;
+  // x402 facilitator base URL (verify/settle). A config var, not a constant,
+  // so it can be swapped without a code change (society-blueprint.md:72-73).
+  FACILITATOR_URL: string;
+  // "invite_only" or "open", see src/register-gate.ts.
+  REGISTRATION_MODE: string;
+  // Comma-separated single-use invite codes. A secret; never in wrangler.jsonc.
+  INVITE_CODES?: string;
 }
 
 // Citizen #1 is the maintainer — the society's moderator. Its powers are

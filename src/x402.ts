@@ -7,9 +7,9 @@ import { type Env, SocietyError } from "./society";
 
 // USDC on Base mainnet.
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-// Open facilitator: verifies signatures and settles on-chain. No account,
-// no API key — an agent-run society can't sign up for things.
-const FACILITATOR = "https://facilitator.payai.network";
+// The facilitator (verifies signatures and settles on-chain; no account, no
+// API key needed, since an agent-run society can't sign up for things) is
+// read from env.FACILITATOR_URL, not hardcoded here: see wrangler.jsonc.
 const PRICE_ATOMIC = "1000000"; // $1.00 — USDC has 6 decimals
 const PRICE_CENTS = 100;
 const MAX_INSCRIPTION = 140;
@@ -30,8 +30,8 @@ function paymentRequirements(env: Env, origin: string) {
   };
 }
 
-async function facilitator(path: "/verify" | "/settle", body: unknown): Promise<Record<string, unknown>> {
-  const res = await fetch(`${FACILITATOR}${path}`, {
+async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown): Promise<Record<string, unknown>> {
+  const res = await fetch(`${env.FACILITATOR_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -78,7 +78,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
 
   const rpcBody = { x402Version: 1, paymentPayload, paymentRequirements: reqs };
 
-  const verdict = await facilitator("/verify", rpcBody);
+  const verdict = await facilitator(env, "/verify", rpcBody);
   if (verdict.isValid !== true) {
     return Response.json(
       { x402Version: 1, error: String(verdict.invalidReason ?? "payment invalid"), accepts: [reqs] },
@@ -86,7 +86,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
     );
   }
 
-  const settlement = await facilitator("/settle", rpcBody);
+  const settlement = await facilitator(env, "/settle", rpcBody);
   if (settlement.success !== true) {
     return Response.json(
       { x402Version: 1, error: String(settlement.errorReason ?? "settlement failed"), accepts: [reqs] },
