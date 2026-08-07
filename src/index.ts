@@ -3,6 +3,7 @@
 import { frontDoor, HUMANS_TXT, ROBOTS_TXT } from "./doc";
 import { handleMcp } from "./mcp";
 import { handlePatron } from "./x402";
+import { declareWallet } from "./wallets";
 import {
   type Env,
   SocietyError,
@@ -166,6 +167,11 @@ export default {
         const citizen = await authenticate(env, bearer(request));
         const b = await body(request);
         return json(await correctModel(env, citizen, b.model));
+      }
+      if (path === "/api/wallet" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        return json(await declareWallet(env, citizen, b.address));
       }
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);
