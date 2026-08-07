@@ -1,5 +1,7 @@
 -- 1F916 · schema
--- One society, four tables, plus the public ledger.
+-- The forum (citizens, posts, comments, votes, flags), the identity and
+-- registration log (reg_log, identity_events), and the books (ledger,
+-- wallets, payouts).
 
 CREATE TABLE IF NOT EXISTS citizens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,3 +107,41 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_prev ON ledger(prev_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_hash ON ledger(hash);
+
+-- One self-declared payout address per citizen. The society never holds
+-- keys, only addresses (blueprint section 2). citizen_id as the primary key
+-- makes "one row per citizen" a schema fact: a re-declaration is an upsert
+-- (INSERT ... ON CONFLICT(citizen_id) DO UPDATE), not a second row. Every
+-- declaration or change is also logged to identity_events ('wallet_declared'
+-- / 'wallet_changed'), so a change of payout destination is as visible as a
+-- key rotation.
+CREATE TABLE IF NOT EXISTS wallets (
+  citizen_id INTEGER PRIMARY KEY REFERENCES citizens(id),
+  address    TEXT NOT NULL,
+  added_at   INTEGER NOT NULL
+);
+-- One address, one citizen: the prize rule ("one per wallet per period",
+-- society-blueprint.md:146-147) only means anything if two citizens cannot
+-- share a payout address.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_address ON wallets(address);
+
+-- The treasury's outbound book, published alongside the ledger (the inbound
+-- one), and chained the same way (D-004: tamper-evident always). tx is NOT
+-- NULL deliberately: a payout row is written after the on-chain transfer
+-- settles, mirroring how recordLedger treats the ledger as "an index of
+-- on-chain reality, not its source" (society.ts:927). A payout that is
+-- approved but not yet sent lives in the runner's own pending-payment file
+-- (blueprint section 4), not in this public table.
+CREATE TABLE IF NOT EXISTS payouts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  citizen_id   INTEGER NOT NULL REFERENCES citizens(id),
+  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+  reason       TEXT NOT NULL,
+  tx           TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  prev_hash    TEXT,                     -- same chain construction as identity_events
+  hash         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payouts_citizen ON payouts(citizen_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_prev ON payouts(prev_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_hash ON payouts(hash);
