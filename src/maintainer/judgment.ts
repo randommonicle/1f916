@@ -242,13 +242,44 @@ Respond with ONLY a JSON array (no prose, no markdown fences, no commentary befo
 
 Decide every item listed below. An item you omit stays pending for next week -- that is a safe default, not a failure, if you are genuinely unsure.`;
 
-// Pure. The 100-item cap, oldest-first (the caller already queried in
-// that order): items beyond the cap are left untouched (still pending)
-// rather than judged, and counted honestly rather than silently excluded.
-export function capQueueBatch(pending: QueueRow[], cap: number = JUDGMENT_QUEUE_CAP): { batch: QueueRow[]; overflowDropped: number } {
-  const overflowDropped = Math.max(0, pending.length - cap);
-  const batch = overflowDropped > 0 ? pending.slice(0, cap) : pending;
-  return { batch, overflowDropped };
+// M3: hard ceiling on how many 100-item batches one judgment wake will
+// run. 4 x 100 = 400 items/week, comfortably above the clerk's own
+// combined cap of 50 items/wake x 7 daily wakes = 350 items/week maximum
+// possible inflow -- so, barring an already-huge pre-existing backlog, a
+// judgment wake can clear a week's worst-case new arrivals in one run.
+//
+// Worst-case cost per wake, claude-fable-5 ($10/$50 per MTok input/output,
+// see ANTHROPIC_PRICING): each batch's output is hard-capped at
+// callAnthropic's MAX_TOKENS (4096), worst case ~$0.20/batch. Each batch's
+// input, assuming a combined note+target_content well under the 2000/1000
+// char per-field ceilings in practice (~1500 chars average, ~375 tokens x
+// 100 items = ~37,500 input tokens), worst case ~$0.38/batch. ~$0.58/batch
+// x 4 batches =~ $2.30/wake -- most weeks run one batch, not four, so this
+// is a ceiling, not a typical bill; it lines up with D-009's ~$3-5/month
+// weekly-judgment estimate averaged over a month of mostly-one-batch weeks.
+export const JUDGMENT_MAX_BATCHES = 4;
+
+// Pure. Whether the batch loop should fetch and judge another
+// JUDGMENT_QUEUE_CAP-sized page of pending items, called after a batch
+// has just been processed. A batch that came back short of the cap PROVES
+// the queue is drained -- no further fetch can find anything, so no
+// further fetch is made. A full batch means there might be more, so
+// another is attempted, up to the hard ceiling above (checked first: the
+// ceiling wins even over a full batch).
+export function shouldFetchNextBatch(lastBatchSize: number, batchesRun: number, cap: number = JUDGMENT_QUEUE_CAP, maxBatches: number = JUDGMENT_MAX_BATCHES): boolean {
+  if (batchesRun >= maxBatches) return false;
+  return lastBatchSize >= cap;
+}
+
+// M4: the honest queue backlog this wake did not get to. The old
+// approach (capQueueBatch, removed) derived "overflow" from a single
+// LIMIT-cap+1 read sliced back down to cap -- which meant overflowDropped
+// could only ever report 0 or 1, no matter whether the true backlog was
+// 1 or 10,000. This instead uses the TRUE pending count, read once before
+// this wake touched anything, minus what this wake actually decided
+// across every batch it ran.
+export function computeOverflowDropped(pendingAtStart: number, itemsActioned: number): number {
+  return Math.max(0, pendingAtStart - itemsActioned);
 }
 
 export function buildJudgmentPrompt(items: QueueRow[]): string {
@@ -306,11 +337,16 @@ async function fetchTargetContentForJudgment(
   return shapeTargetContent("comment", row);
 }
 
-async function fetchPendingQueue(env: Env): Promise<QueueRow[]> {
+// M3: fetches exactly one page (LIMIT cap, not cap+1 -- the old +1 trick
+// existed only to feed the old capQueueBatch's overflow arithmetic, now
+// replaced by computeOverflowDropped's true COUNT(*), so the fetch itself
+// no longer needs to over-read). Called in a loop by runJudgmentWake, up
+// to JUDGMENT_MAX_BATCHES times.
+async function fetchPendingQueueBatch(env: Env, cap: number): Promise<QueueRow[]> {
   const { results } = await env.DB.prepare(
     "SELECT id, kind, target_type, target_id, source_ref, note FROM maintainer_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
   )
-    .bind(JUDGMENT_QUEUE_CAP + 1)
+    .bind(cap)
     .all<Omit<QueueRow, "target_content" | "target_mod_state">>();
 
   // H1: for each flag_review row targeting a post/comment, fetch the
@@ -333,92 +369,26 @@ async function fetchPendingQueue(env: Env): Promise<QueueRow[]> {
   return rows;
 }
 
+// M4: the true pending backlog, read once before this wake's batch loop
+// touches anything -- the honest baseline computeOverflowDropped needs.
+async function countPendingQueue(env: Env): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS c FROM maintainer_queue WHERE status = 'pending'").first<{ c: number }>();
+  return row?.c ?? 0;
+}
+
 // This is the ONLY place in src/ that transitions a maintainer_queue row's
 // status -- policed by maintainer-policing.test.ts.
 async function stampQueueRow(env: Env, id: number, status: "approved" | "rejected", reason: string): Promise<void> {
   await env.DB.prepare("UPDATE maintainer_queue SET status = ?, decided_at = ?, decided_reason = ? WHERE id = ?").bind(status, Date.now(), reason.slice(0, 500), id).run();
 }
 
-// ---------- the wake itself ----------
-
-// The scheduled() entry point for the weekly cron. Never throws -- every
-// path writes exactly one maintainer_runs row and returns.
-export async function runJudgmentWake(env: Env): Promise<void> {
-  const startedAt = Date.now();
-
-  if (!env.ANTHROPIC_API_KEY) {
-    // "a dry key means visible sleep, never an error page" -- the build brief, verbatim.
-    await insertMaintainerRun(env, { kind: "judgment", startedAt, finishedAt: Date.now(), skippedReason: "no api key", overflowDropped: 0 });
-    return;
-  }
-
-  let pending: QueueRow[];
-  try {
-    pending = await fetchPendingQueue(env);
-  } catch (e) {
-    await insertMaintainerRun(env, {
-      kind: "judgment",
-      startedAt,
-      finishedAt: Date.now(),
-      overflowDropped: 0,
-      error: `failed while reading the queue: ${e instanceof Error ? e.message : String(e)}`,
-    });
-    return;
-  }
-
-  const { batch: batchRows, overflowDropped } = capQueueBatch(pending);
-
-  if (batchRows.length === 0) {
-    await insertMaintainerRun(env, {
-      kind: "judgment",
-      startedAt,
-      finishedAt: Date.now(),
-      skippedReason: "nothing pending",
-      tokensIn: 0,
-      tokensOut: 0,
-      costEstimateCents: 0,
-      itemsActioned: 0,
-      overflowDropped: 0,
-    });
-    return;
-  }
-
-  const prompt = buildJudgmentPrompt(batchRows);
-  const result = await callAnthropic(env, MAINTAINER_MODELS.judgment, JUDGMENT_SYSTEM_PROMPT, prompt);
-
-  if (!result.ok) {
-    await insertMaintainerRun(env, {
-      kind: "judgment",
-      startedAt,
-      finishedAt: Date.now(),
-      tokensIn: result.usage.input_tokens,
-      tokensOut: result.usage.output_tokens,
-      costEstimateCents: estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens),
-      overflowDropped,
-      error: `model call failed (stop_reason: ${result.stopReason}): ${result.error}`,
-    });
-    return;
-  }
-
-  const batchMap = new Map(batchRows.map((r) => [r.id, r]));
-  let decisions: JudgmentDecision[];
-  try {
-    decisions = parseJudgmentDecisions(result.text, batchMap);
-  } catch (e) {
-    await insertMaintainerRun(env, {
-      kind: "judgment",
-      startedAt,
-      finishedAt: Date.now(),
-      tokensIn: result.usage.input_tokens,
-      tokensOut: result.usage.output_tokens,
-      costEstimateCents: estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens),
-      overflowDropped,
-      error: `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason})`,
-    });
-    return;
-  }
-
-  let itemsActioned = 0;
+// D1-touching. Runs one batch's worth of already-parsed decisions through
+// resolveExecution and the real executors, stamping each row as it goes.
+// Extracted from runJudgmentWake so the batch loop below can call it once
+// per batch and accumulate the count across batches, rather than nesting
+// the whole thing inline.
+async function executeJudgmentDecisions(env: Env, batchMap: Map<number, QueueRow>, decisions: JudgmentDecision[]): Promise<number> {
+  let actioned = 0;
   for (const d of decisions) {
     const item = batchMap.get(d.queue_id)!;
     // H2: resolved BEFORE any execution -- a deny-check hit on an approved
@@ -435,7 +405,7 @@ export async function runJudgmentWake(env: Env): Promise<void> {
       // bookkeeping_note / registration_check, and a deny-checked bulletin:
       // execute is null, nothing further to do, the row is simply stamped.
       await stampQueueRow(env, d.queue_id, resolved.status, resolved.reason);
-      itemsActioned++;
+      actioned++;
     } catch (e) {
       // Execution failed (e.g. the flagged content no longer exists by the
       // time judgment ran). Stamp it rejected with an honest reason rather
@@ -444,21 +414,125 @@ export async function runJudgmentWake(env: Env): Promise<void> {
       const failureReason = `judge approved (${resolved.reason}) but execution failed: ${e instanceof Error ? e.message : String(e)}`;
       try {
         await stampQueueRow(env, d.queue_id, "rejected", failureReason);
-        itemsActioned++;
+        actioned++;
       } catch (stampError) {
         console.log(JSON.stringify({ level: "error", event: "judgment_stamp_failed", queue_id: d.queue_id, message: String(stampError) }));
       }
     }
   }
+  return actioned;
+}
 
-  await insertMaintainerRun(env, {
-    kind: "judgment",
-    startedAt,
-    finishedAt: Date.now(),
-    tokensIn: result.usage.input_tokens,
-    tokensOut: result.usage.output_tokens,
-    costEstimateCents: estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens),
-    itemsActioned,
-    overflowDropped,
-  });
+// ---------- the wake itself ----------
+
+// The scheduled() entry point for the weekly cron. Never throws -- every
+// path writes exactly one maintainer_runs row and returns.
+//
+// M3/M4: loops batches of up to JUDGMENT_QUEUE_CAP pending items -- fetch,
+// judge (one model call per batch), execute -- while a batch comes back
+// full, up to the JUDGMENT_MAX_BATCHES hard ceiling. Tokens, cost, and
+// itemsActioned accumulate across every batch into the ONE runs row this
+// wake writes. overflow_dropped is the true remaining backlog
+// (computeOverflowDropped), not the old single-batch LIMIT+1
+// approximation.
+export async function runJudgmentWake(env: Env): Promise<void> {
+  const startedAt = Date.now();
+
+  if (!env.ANTHROPIC_API_KEY) {
+    // "a dry key means visible sleep, never an error page" -- the build brief, verbatim.
+    await insertMaintainerRun(env, { kind: "judgment", startedAt, finishedAt: Date.now(), skippedReason: "no api key", overflowDropped: 0 });
+    return;
+  }
+
+  let pendingAtStart: number;
+  try {
+    pendingAtStart = await countPendingQueue(env);
+  } catch (e) {
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      overflowDropped: 0,
+      error: `failed while counting the pending queue: ${e instanceof Error ? e.message : String(e)}`,
+    });
+    return;
+  }
+
+  if (pendingAtStart === 0) {
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      skippedReason: "nothing pending",
+      tokensIn: 0,
+      tokensOut: 0,
+      costEstimateCents: 0,
+      itemsActioned: 0,
+      overflowDropped: 0,
+    });
+    return;
+  }
+
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let costEstimateCents = 0;
+  let itemsActioned = 0;
+  let batchesRun = 0;
+  let runError: string | null = null;
+
+  while (true) {
+    let batchRows: QueueRow[];
+    try {
+      batchRows = await fetchPendingQueueBatch(env, JUDGMENT_QUEUE_CAP);
+    } catch (e) {
+      runError = `failed while reading batch ${batchesRun + 1} of the queue: ${e instanceof Error ? e.message : String(e)}`;
+      break;
+    }
+    batchesRun++;
+    if (batchRows.length === 0) break; // drained (or, on batch 1, a race since the count above)
+
+    const batchMap = new Map(batchRows.map((r) => [r.id, r]));
+    const prompt = buildJudgmentPrompt(batchRows);
+    const result = await callAnthropic(env, MAINTAINER_MODELS.judgment, JUDGMENT_SYSTEM_PROMPT, prompt);
+    tokensIn += result.usage.input_tokens;
+    tokensOut += result.usage.output_tokens;
+    costEstimateCents += estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens);
+
+    if (!result.ok) {
+      runError = `model call failed on batch ${batchesRun} (stop_reason: ${result.stopReason}): ${result.error}`;
+      break;
+    }
+
+    let decisions: JudgmentDecision[];
+    try {
+      decisions = parseJudgmentDecisions(result.text, batchMap);
+    } catch (e) {
+      runError = `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason}, batch ${batchesRun})`;
+      break;
+    }
+
+    itemsActioned += await executeJudgmentDecisions(env, batchMap, decisions);
+
+    if (!shouldFetchNextBatch(batchRows.length, batchesRun, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_BATCHES)) break;
+  }
+
+  const overflowDropped = computeOverflowDropped(pendingAtStart, itemsActioned);
+  try {
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      tokensIn,
+      tokensOut,
+      costEstimateCents,
+      itemsActioned,
+      overflowDropped,
+      error: runError ?? undefined,
+    });
+  } catch (e) {
+    // The wake must never throw -- even the runs-row write itself failing
+    // falls back to a structured log rather than an uncaught exception
+    // escaping to scheduled()'s own backstop catch (L3).
+    console.log(JSON.stringify({ level: "error", event: "judgment_run_insert_failed", message: String(e) }));
+  }
 }

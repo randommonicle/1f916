@@ -1,8 +1,9 @@
 // Tests for the judge's pure logic: bulletin splitting, decision parsing
-// (the executor's own allowlist against a real batch), and the 100-item
-// cap. No network, no D1 -- fetchPendingQueue/stampQueueRow/runJudgmentWake
-// itself are accepted as manual/local-D1 coverage only, same acceptance as
-// the rest of this repo's D1-touching functions.
+// (the executor's own allowlist against a real batch), and the batch-loop
+// arithmetic (M3/M4). No network, no D1 -- fetchPendingQueueBatch/
+// countPendingQueue/stampQueueRow/runJudgmentWake itself are accepted as
+// manual/local-D1 coverage only, same acceptance as the rest of this
+// repo's D1-touching functions.
 //
 // Run: npm test
 
@@ -10,12 +11,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JUDGMENT_QUEUE_CAP,
+  JUDGMENT_MAX_BATCHES,
   JUDGMENT_SYSTEM_PROMPT,
   splitBulletinDraft,
   bulletinDenyCheck,
   parseJudgmentDecisions,
   resolveExecution,
-  capQueueBatch,
+  shouldFetchNextBatch,
+  computeOverflowDropped,
   buildJudgmentPrompt,
   shapeTargetContent,
   type QueueRow,
@@ -159,26 +162,55 @@ test("resolveExecution: an approved bookkeeping_note executes nothing but still 
   assert.equal(resolved.execute, null);
 });
 
-// ---------- capQueueBatch: the 100-item cap ----------
-
-test("capQueueBatch passes a small batch through untouched, zero overflow", () => {
-  const pending = Array.from({ length: 10 }, (_, i) => row({ id: i }));
-  const { batch, overflowDropped } = capQueueBatch(pending);
-  assert.equal(batch.length, 10);
-  assert.equal(overflowDropped, 0);
-});
-
-test("capQueueBatch caps at exactly 100, oldest-first, counting the rest as overflow", () => {
-  const pending = Array.from({ length: 130 }, (_, i) => row({ id: i }));
-  const { batch, overflowDropped } = capQueueBatch(pending);
-  assert.equal(batch.length, 100);
-  assert.equal(overflowDropped, 30);
-  assert.equal(batch[0].id, 0); // oldest first, so index 0 is kept
-  assert.equal(batch[99].id, 99);
-});
+// ---------- shouldFetchNextBatch / computeOverflowDropped: the batch loop (M3/M4) ----------
 
 test("JUDGMENT_QUEUE_CAP is 100", () => {
   assert.equal(JUDGMENT_QUEUE_CAP, 100);
+});
+
+test("JUDGMENT_MAX_BATCHES is 4", () => {
+  assert.equal(JUDGMENT_MAX_BATCHES, 4);
+});
+
+test("shouldFetchNextBatch: continues when the last batch came back full and the ceiling is not reached", () => {
+  assert.equal(shouldFetchNextBatch(100, 1, 100, 4), true);
+  assert.equal(shouldFetchNextBatch(100, 3, 100, 4), true);
+});
+
+test("shouldFetchNextBatch: stops when the last batch came back short of the cap -- the queue is proven drained", () => {
+  assert.equal(shouldFetchNextBatch(37, 1, 100, 4), false);
+  assert.equal(shouldFetchNextBatch(0, 1, 100, 4), false);
+});
+
+test("shouldFetchNextBatch: stops at the hard ceiling even when the last batch came back full", () => {
+  assert.equal(shouldFetchNextBatch(100, 4, 100, 4), false);
+});
+
+test("shouldFetchNextBatch: the ceiling is checked before the batch-size test, not after", () => {
+  // A batch full AND at the ceiling must stop -- the ceiling wins.
+  assert.equal(shouldFetchNextBatch(100, 4, 100, 4), false);
+  assert.equal(shouldFetchNextBatch(9999, 10, 100, 4), false);
+});
+
+test("computeOverflowDropped: zero when this wake actioned everything that was pending at the start", () => {
+  assert.equal(computeOverflowDropped(50, 50), 0);
+});
+
+test("computeOverflowDropped: reports the TRUE backlog left behind, not capped at 1 like the old LIMIT+1-read approach", () => {
+  // The old capQueueBatch derived overflow from a single LIMIT-cap+1 read
+  // sliced back to cap, so it could only ever report 0 or 1 regardless of
+  // the real backlog. A 550-pending / 400-actioned week (the
+  // JUDGMENT_MAX_BATCHES ceiling reached) must show the true 150 left
+  // over, not 1.
+  assert.equal(computeOverflowDropped(550, 400), 150);
+});
+
+test("computeOverflowDropped: never goes negative even if itemsActioned somehow exceeds the starting count", () => {
+  // Defensive: pending can only grow between the initial count and a
+  // batch fetch in the extremely unlikely case of concurrent writers, so
+  // actioned should never exceed the start count in practice -- but the
+  // arithmetic itself must not report a negative "overflow".
+  assert.equal(computeOverflowDropped(10, 12), 0);
 });
 
 // ---------- parseJudgmentDecisions ----------
