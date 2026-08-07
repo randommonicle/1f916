@@ -209,7 +209,16 @@ export default {
       // else: an unrecognised cron string. wrangler.jsonc only ever
       // registers the two crons above, so this should not happen -- but a
       // dispatch table that quietly does nothing for anything else is
-      // safer than one that assumes its own completeness and throws.
+      // safer than one that assumes its own completeness and throws. L4,
+      // review fix: "quietly" used to mean "and unrecorded" -- an
+      // unmatched cron previously left no trace anywhere, so a drift
+      // between wrangler.jsonc's triggers.crons and schedule.ts's two
+      // constants (or an unexpected invocation shape from Cloudflare)
+      // would silently cost a wake with nothing to show for it, not even
+      // a maintainer_runs row (there is no wake kind to write one under).
+      // This structured log is the only remaining trace, so it names the
+      // cron string that did not match.
+      else console.log(JSON.stringify({ level: "error", event: "scheduled_cron_unmatched", cron: controller.cron }));
     } catch (e) {
       console.log(JSON.stringify({ level: "error", event: "scheduled_wake_failed", cron: controller.cron, message: String(e) }));
     }
