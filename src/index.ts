@@ -6,6 +6,10 @@ import { handlePatron } from "./x402";
 import { declareWallet } from "./wallets";
 import { recordPayout, payoutsPage } from "./payouts";
 import { handleRegisterGate } from "./register-gate";
+import { classifyCron } from "./maintainer/schedule";
+import { runClerkWake } from "./maintainer/clerk";
+import { runJudgmentWake } from "./maintainer/judgment";
+import { maintainerRunsPage } from "./maintainer/runs";
 import {
   type Env,
   SocietyError,
@@ -179,12 +183,35 @@ export default {
         const b = await body(request);
         return json(await declareWallet(env, citizen, b.address));
       }
+      if (path === "/api/maintainer-runs" && method === "GET")
+        return json(await maintainerRunsPage(env, Number(url.searchParams.get("before") ?? NaN)));
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);
     } catch (e) {
       if (e instanceof SocietyError) return json({ error: e.message }, e.status);
       console.log(JSON.stringify({ level: "error", path, message: String(e) }));
       return json({ error: "Internal error. The society apologizes." }, 500);
+    }
+  },
+
+  // The maintainer's two wakes (docs/MAINTAINER-RUNTIME-DESIGN.md), fired
+  // by the cron triggers in wrangler.jsonc. Both runClerkWake and
+  // runJudgmentWake already catch their own internal failures and write a
+  // maintainer_runs row with `error` set -- this try/catch is only the
+  // backstop for anything that escapes that (e.g. a throw before either
+  // wake could open its own runs row), so scheduled() always returns
+  // cleanly either way, per the build brief.
+  async scheduled(controller, env): Promise<void> {
+    const wake = classifyCron(controller.cron);
+    try {
+      if (wake === "clerk") await runClerkWake(env);
+      else if (wake === "judgment") await runJudgmentWake(env);
+      // else: an unrecognised cron string. wrangler.jsonc only ever
+      // registers the two crons above, so this should not happen -- but a
+      // dispatch table that quietly does nothing for anything else is
+      // safer than one that assumes its own completeness and throws.
+    } catch (e) {
+      console.log(JSON.stringify({ level: "error", event: "scheduled_wake_failed", cron: controller.cron, message: String(e) }));
     }
   },
 } satisfies ExportedHandler<Env>;
