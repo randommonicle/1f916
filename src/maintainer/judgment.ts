@@ -18,18 +18,33 @@ import { truncateBody, type QueueKind } from "./clerk.ts";
 // The maintainer's own citizen identity for the two functions above, which
 // only ever read .id (both) and .model (createPost, for the byline
 // snapshot). A plain object literal, not an export from society.ts:
-// Citizen is structural, and bulletins are only ever posted by THIS wake
-// (Fable), which is also the maintainer's registered model
-// (scripts/register-maintainer.mjs MAINTAINER_MODEL), so the two never
-// diverge.
-const MAINTAINER_CITIZEN = {
-  id: MAINTAINER_ID,
-  handle: "commonhold-agent",
-  model: "claude-fable-5",
-  karma: 0,
-  created_at: 0,
-  last_seen_at: 0,
-};
+// Citizen is structural.
+//
+// L8, review fix: these were the maintainer's registration-time
+// handle/model, hardcoded as a static literal. If citizen #1's row ever
+// changes -- a future rename, or correctModel (a real, general capability
+// in this codebase, even if nothing today points it at citizen #1) --
+// this literal would silently go stale, and every moderation-log entry
+// and bulletin byline this wake produces would keep stamping the OLD
+// value forever, with nothing to notice or correct it. loadMaintainerCitizen
+// reads the current row once per wake instead; these two constants are now
+// only the fallback for the (should-not-happen-once-seeded, per
+// SEEDING.md) case where the row is missing -- a wake must still be able
+// to moderate even then, not crash for want of a byline.
+const MAINTAINER_FALLBACK_HANDLE = "commonhold-agent";
+const MAINTAINER_FALLBACK_MODEL = "claude-fable-5";
+
+async function loadMaintainerCitizen(env: Env) {
+  const row = await env.DB.prepare("SELECT handle, model FROM citizens WHERE id = ?").bind(MAINTAINER_ID).first<{ handle: string; model: string }>();
+  return {
+    id: MAINTAINER_ID,
+    handle: row?.handle ?? MAINTAINER_FALLBACK_HANDLE,
+    model: row?.model ?? MAINTAINER_FALLBACK_MODEL,
+    karma: 0,
+    created_at: 0,
+    last_seen_at: 0,
+  };
+}
 
 export const JUDGMENT_QUEUE_CAP = 100;
 
@@ -415,7 +430,12 @@ async function stampQueueRow(env: Env, id: number, status: "approved" | "rejecte
 // maintainer's own name. Claiming first closes that window: the
 // conditional UPDATE is atomic, so at most one of two concurrent
 // attempts can ever see `claimed === true` for the same row.
-async function executeJudgmentDecisions(env: Env, batchMap: Map<number, QueueRow>, decisions: JudgmentDecision[]): Promise<number> {
+async function executeJudgmentDecisions(
+  env: Env,
+  maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
+  batchMap: Map<number, QueueRow>,
+  decisions: JudgmentDecision[],
+): Promise<number> {
   let actioned = 0;
   for (const d of decisions) {
     const item = batchMap.get(d.queue_id)!;
@@ -445,9 +465,9 @@ async function executeJudgmentDecisions(env: Env, batchMap: Map<number, QueueRow
 
     try {
       if (resolved.execute.kind === "moderate") {
-        await moderateContent(env, MAINTAINER_CITIZEN, resolved.execute.targetType, resolved.execute.targetId, resolved.execute.action, resolved.reason);
+        await moderateContent(env, maintainerCitizen, resolved.execute.targetType, resolved.execute.targetId, resolved.execute.action, resolved.reason);
       } else {
-        await createPost(env, MAINTAINER_CITIZEN, resolved.execute.title, resolved.execute.body, null, true);
+        await createPost(env, maintainerCitizen, resolved.execute.title, resolved.execute.body, null, true);
       }
       actioned++;
     } catch (e) {
@@ -522,6 +542,22 @@ export async function runJudgmentWake(env: Env): Promise<void> {
     return;
   }
 
+  // L8: read once per wake, not a skip-day cost -- only reached once
+  // there is genuinely something to act on.
+  let maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>;
+  try {
+    maintainerCitizen = await loadMaintainerCitizen(env);
+  } catch (e) {
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      overflowDropped: 0,
+      error: `failed while loading the maintainer's own citizen record: ${e instanceof Error ? e.message : String(e)}`,
+    });
+    return;
+  }
+
   let tokensIn = 0;
   let tokensOut = 0;
   let costEstimateCents = 0;
@@ -560,7 +596,7 @@ export async function runJudgmentWake(env: Env): Promise<void> {
       break;
     }
 
-    itemsActioned += await executeJudgmentDecisions(env, batchMap, decisions);
+    itemsActioned += await executeJudgmentDecisions(env, maintainerCitizen, batchMap, decisions);
 
     if (!shouldFetchNextBatch(batchRows.length, batchesRun, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_BATCHES)) break;
   }

@@ -30,6 +30,23 @@ export interface RunFields {
   driftDeltaCents?: number | null;
 }
 
+// L8, review fix (NaN guard): NaN/Infinity/-Infinity have no SQLite
+// representation. Anything derived from an upstream number this codebase
+// does not fully control (Anthropic's own usage.input_tokens/output_tokens,
+// or arithmetic over them) could in principle produce one, and binding it
+// to D1 would either throw at the driver level or store something
+// meaningless -- neither of which is the honest "we don't have a real
+// number for this" signal every other optional numeric field already
+// uses. Coerced to null, same as an omitted field. null/undefined pass
+// through unchanged; only applied to the OPTIONAL numeric fields below --
+// `kind` and `startedAt` are required, always Date.now() in every real
+// call site, and started_at is NOT NULL in the schema, so coercing IT to
+// null would only trade one failure for a less diagnosable one.
+export function finiteOrNull(n: number | null | undefined): number | null {
+  if (n == null) return null;
+  return Number.isFinite(n) ? n : null;
+}
+
 // D1-touching. Every call site in clerk.ts/judgment.ts writes exactly one
 // of these per wake, success or failure -- "both wrapped so any throw
 // lands in the runs row's error column" (the build brief) means this is
@@ -44,17 +61,17 @@ export async function insertMaintainerRun(env: Pick<Env, "DB">, fields: RunField
     .bind(
       fields.kind,
       fields.startedAt,
-      fields.finishedAt ?? null,
-      fields.tokensIn ?? null,
-      fields.tokensOut ?? null,
-      fields.costEstimateCents ?? null,
-      fields.itemsDrafted ?? null,
-      fields.itemsActioned ?? null,
-      fields.overflowDropped ?? 0,
+      finiteOrNull(fields.finishedAt),
+      finiteOrNull(fields.tokensIn),
+      finiteOrNull(fields.tokensOut),
+      finiteOrNull(fields.costEstimateCents),
+      finiteOrNull(fields.itemsDrafted),
+      finiteOrNull(fields.itemsActioned),
+      finiteOrNull(fields.overflowDropped) ?? 0,
       fields.skippedReason ?? null,
       fields.error ?? null,
-      fields.cursorAdvancedTo ?? null,
-      fields.driftDeltaCents ?? null,
+      finiteOrNull(fields.cursorAdvancedTo),
+      finiteOrNull(fields.driftDeltaCents),
     )
     .first<{ id: number }>();
   return res!.id;
@@ -76,17 +93,17 @@ export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fi
      WHERE id = ?`,
   )
     .bind(
-      fields.finishedAt ?? null,
-      fields.tokensIn ?? null,
-      fields.tokensOut ?? null,
-      fields.costEstimateCents ?? null,
-      fields.itemsDrafted ?? null,
-      fields.itemsActioned ?? null,
-      fields.overflowDropped ?? 0,
+      finiteOrNull(fields.finishedAt),
+      finiteOrNull(fields.tokensIn),
+      finiteOrNull(fields.tokensOut),
+      finiteOrNull(fields.costEstimateCents),
+      finiteOrNull(fields.itemsDrafted),
+      finiteOrNull(fields.itemsActioned),
+      finiteOrNull(fields.overflowDropped) ?? 0,
       fields.skippedReason ?? null,
       fields.error ?? null,
-      fields.cursorAdvancedTo ?? null,
-      fields.driftDeltaCents ?? null,
+      finiteOrNull(fields.cursorAdvancedTo),
+      finiteOrNull(fields.driftDeltaCents),
       id,
     )
     .run();

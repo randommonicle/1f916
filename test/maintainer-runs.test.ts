@@ -1,5 +1,6 @@
-// Tests for runs.ts's one piece of pure logic: parsing the ?before=
-// pagination cursor (L6, review fix). No network, no D1 --
+// Tests for runs.ts's pure logic: parsing the ?before= pagination cursor
+// (L6, review fix) and the NaN guard applied before every numeric field
+// is bound (L8, review fix). No network, no D1 --
 // insertMaintainerRun/finalizeMaintainerRun/maintainerRunsPage themselves
 // are accepted as manual/local-D1 coverage only, same as the rest of this
 // repo's D1-touching functions.
@@ -8,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseBeforeCursor } from "../src/maintainer/runs.ts";
+import { parseBeforeCursor, finiteOrNull } from "../src/maintainer/runs.ts";
 
 test("parseBeforeCursor: a present, well-formed numeric string parses normally", () => {
   assert.equal(parseBeforeCursor("1786137606470"), 1786137606470);
@@ -33,4 +34,26 @@ test("parseBeforeCursor: a literal '0' string still parses to the real number 0 
 
 test("parseBeforeCursor: a non-numeric string is NaN, same as today's Number() behaviour (not the bug this fixes, but must not regress)", () => {
   assert.ok(Number.isNaN(parseBeforeCursor("not-a-number")));
+});
+
+// ---------- finiteOrNull: the NaN guard before binding (L8) ----------
+
+test("finiteOrNull passes an ordinary finite number through unchanged", () => {
+  assert.equal(finiteOrNull(500), 500);
+  assert.equal(finiteOrNull(0), 0);
+  assert.equal(finiteOrNull(-12), -12);
+});
+
+test("finiteOrNull passes null and undefined through as null, unchanged", () => {
+  assert.equal(finiteOrNull(null), null);
+  assert.equal(finiteOrNull(undefined), null);
+});
+
+test("finiteOrNull coerces NaN to null -- NaN has no SQLite representation", () => {
+  assert.equal(finiteOrNull(NaN), null);
+});
+
+test("finiteOrNull coerces Infinity and -Infinity to null", () => {
+  assert.equal(finiteOrNull(Infinity), null);
+  assert.equal(finiteOrNull(-Infinity), null);
 });
