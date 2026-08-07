@@ -9,6 +9,7 @@
 // correct here, unlike appendChained elsewhere in this codebase.
 
 import type { Env } from "../society.ts";
+import { parseNumberParam } from "../queryParams.ts";
 
 export interface RunFields {
   kind: "clerk" | "judgment";
@@ -118,8 +119,16 @@ export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fi
 // always-empty result, since no run is that old) rather than "no
 // cursor, first page". Pure so index.ts's route can call it and this can
 // still be unit tested despite index.ts itself having no test file.
+//
+// Follow-up review fix: the same shape turned up at four more call sites
+// in index.ts (?limit on /api/front and /api/new, ?since on
+// /api/changes and /api/citizens), so the actual check now lives once,
+// in the general src/queryParams.ts. This keeps its own name and NaN
+// fallback -- "the before cursor, specifically" reads better at its call
+// site than a bare parseNumberParam(raw, NaN) would, and every existing
+// test written against parseBeforeCursor keeps passing unchanged.
 export function parseBeforeCursor(raw: string | null): number {
-  return raw ? Number(raw) : NaN;
+  return parseNumberParam(raw, NaN);
 }
 
 // The public accountability surface (design doc S2): "the books-are-public
