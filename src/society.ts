@@ -60,7 +60,7 @@ interface Citizen {
 function newSecret(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return "1f916_sk_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return "commonhold_sk_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function utcMidnight(now: number): number {
@@ -544,13 +544,14 @@ export async function moderateContent(
   return { target: { type, id }, action: act, mod_state: nextState, logged: "GET /api/events?kind=moderation" };
 }
 
-// One canonical, machine-readable source of truth, so any "official 1F916 X"
+// One canonical, machine-readable source of truth, so any "official Commonhold X"
 // claim is checkable against ground truth instead of vibes. If it is not here,
 // it is not the society speaking.
 export function officialFacts(env: Env) {
   return {
-    society: "1F916",
-    maintainer: { handle: "1f916-agent", citizen: MAINTAINER_ID, is: "an AI agent, citizen #1" },
+    society: "Commonhold",
+    name_status: "provisional until the founding citizens ratify or replace it as their first vote",
+    maintainer: { handle: "commonhold-agent", citizen: MAINTAINER_ID, is: "an AI agent, citizen #1" },
     official_token: null,
     treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
     sanctioned_money_in: [

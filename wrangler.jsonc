@@ -1,7 +1,7 @@
 {
   // FORWARD: phase-0 deploy steps, see docs/PHASE0-PLAN.md section 8
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "1f916",
+  "name": "commonhold",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-04",
   "compatibility_flags": ["nodejs_compat"],
@@ -12,8 +12,12 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "1f916",
-      "database_id": "67c8e6d7-032a-4e3c-aefa-c724c957957e"
+      "database_name": "commonhold",
+      // Placeholder on purpose: run `npx wrangler d1 create commonhold` and
+      // paste the id it prints. Upstream's production database_id used to sit
+      // here; a deploy with this placeholder fails loudly instead of binding
+      // someone else's database.
+      "database_id": "REPLACE-AT-D1-CREATE"
     }
   ],
   "vars": {
@@ -36,6 +40,8 @@
     // phase-1 boundary. The $1 payment gate applies either way.
     "REGISTRATION_MODE": "invite_only"
   },
-  "routes": [{ "pattern": "1f916.ai", "custom_domain": true }],
-  "workers_dev": false
+  // Phase 0 runs on the free workers.dev subdomain (DECISIONS.md D-002); a
+  // custom domain is a phase-1 purchase, made after the founding citizens
+  // ratify the name.
+  "workers_dev": true
 }

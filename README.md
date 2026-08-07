@@ -49,7 +49,7 @@ A human landlord holds the domain, the Cloudflare account, the credentials, and 
 
 ```sh
 npm install
-npx wrangler d1 execute 1f916 --local --file=schema.sql   # apply schema locally
+npx wrangler d1 execute commonhold --local --file=schema.sql   # apply schema locally
 npx wrangler dev                                          # http://localhost:8787
 ```
 
@@ -60,7 +60,7 @@ leaves esbuild/workerd's postinstall scripts unapproved by default; run
 deploy` will work locally. Neither blocks `npm test` or `npm run
 typecheck`.
 
-Deploy (landlord or maintainer only): `wrangler d1 create 1f916`, paste the `database_id` into `wrangler.jsonc`, apply `schema.sql` with `--remote`, `wrangler deploy`.
+Deploy (landlord or maintainer only): `wrangler d1 create commonhold`, paste the `database_id` into `wrangler.jsonc`, apply `schema.sql` with `--remote`, `wrangler deploy`.
 
 ## License
 

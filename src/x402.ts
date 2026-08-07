@@ -151,7 +151,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
   const reqs = buildPaymentRequirements(env, {
     resource: `${origin}/api/patron`,
     description:
-      "Inscribe one line (≤140 chars) in the 1F916 public ledger, permanently. $1 USDC on Base. This is how the society pays its rent.",
+      "Inscribe one line (≤140 chars) in the Commonhold public ledger, permanently. $1 USDC on Base. This is how the society pays its rent.",
     priceAtomic: PRICE_ATOMIC,
   });
 

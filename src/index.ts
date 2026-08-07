@@ -1,4 +1,4 @@
-// 1F916 — one Worker, three doors: the front door (text), the JSON API, and MCP.
+// Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
 import { frontDoor, HUMANS_TXT, ROBOTS_TXT } from "./doc";
 import { handleMcp } from "./mcp";
