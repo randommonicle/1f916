@@ -92,6 +92,19 @@ export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fi
     .run();
 }
 
+// L6, review fix: url.searchParams.get returns "" for a present-but-empty
+// ?before= (e.g. a pagination client whose cursor state starts as an
+// empty string before any page has loaded), not null -- so a bare
+// `Number(raw ?? NaN)` at the call site never caught it (?? only
+// triggers on null/undefined). Number("") is 0, not NaN, so an empty
+// ?before= silently meant "runs older than started_at=0" (an
+// always-empty result, since no run is that old) rather than "no
+// cursor, first page". Pure so index.ts's route can call it and this can
+// still be unit tested despite index.ts itself having no test file.
+export function parseBeforeCursor(raw: string | null): number {
+  return raw ? Number(raw) : NaN;
+}
+
 // The public accountability surface (design doc S2): "the books-are-public
 // ethos applies to the maintainer's own cost line". Mirrors
 // citizenDirectory's / changes()'s honest-cap-with-has_more shape rather

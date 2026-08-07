@@ -9,7 +9,7 @@ import { handleRegisterGate } from "./register-gate";
 import { classifyCron } from "./maintainer/schedule";
 import { runClerkWake } from "./maintainer/clerk";
 import { runJudgmentWake } from "./maintainer/judgment";
-import { maintainerRunsPage } from "./maintainer/runs";
+import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs";
 import {
   type Env,
   SocietyError,
@@ -184,7 +184,7 @@ export default {
         return json(await declareWallet(env, citizen, b.address));
       }
       if (path === "/api/maintainer-runs" && method === "GET")
-        return json(await maintainerRunsPage(env, Number(url.searchParams.get("before") ?? NaN)));
+        return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);
     } catch (e) {
