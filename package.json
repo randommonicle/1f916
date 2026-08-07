@@ -17,6 +17,11 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260804.1",
     "typescript": "^7.0.2",
+    "viem": "^2.55.11",
     "wrangler": "^4.118.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260730.1": true
   }
 }
