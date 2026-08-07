@@ -66,7 +66,11 @@ export function truncateBody(text: string | null | undefined, max = NOTE_MAX_CHA
 // the governance and registration-undo checks, both of which stay
 // universal -- no kind is ever a sanctioned channel for proposing either.
 export function smellsForbidden(text: string, kind: QueueKind): boolean {
-  const amendVerb = "(chang|amend|rewrit|edit|updat|replac)\\w*";
+  // delet/repeal/propos added per the Opus re-review (item 2): "propose
+  // new text for the constitution" and "rule 3 is deleted" are amendment
+  // proposals as surely as "change the constitution", and the registration
+  // branch had already learned this stem lesson while this one had not.
+  const amendVerb = "(chang|amend|rewrit|edit|updat|replac|delet|repeal|propos)\\w*";
   const governanceNoun = "(the constitution|the compact|governance text)";
   // "void"/"nullif(y)"/"invalidat(e)" alongside the more obvious
   // revers/undo/revoke/cancel/delete/unregister -- a registration doesn't

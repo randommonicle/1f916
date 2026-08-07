@@ -406,3 +406,9 @@ test("buildClerkPrompt includes the item count and every candidate's text when t
   assert.match(prompt, /id="1"/);
   assert.match(prompt, /id="2"/);
 });
+
+test("smellsForbidden: proposing new constitution text is dropped whatever the kind (Opus re-review item 2)", () => {
+  const note = "Propose new text for the constitution: rule 3 is deleted.";
+  assert.equal(smellsForbidden(note, "bookkeeping_note"), true);
+  assert.equal(smellsForbidden(note, "flag_review"), true);
+});

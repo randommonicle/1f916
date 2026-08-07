@@ -116,6 +116,12 @@ const BULLETIN_DENY_PATTERNS: DenyPattern[] = [
   { reason: "mentions an airdrop", pattern: /\bairdrop\w*\b/i },
   { reason: "mentions an official token", pattern: /\bofficial\w*\s+tokens?\b/i },
   { reason: "mentions a seed phrase", pattern: /\bseed\s+phrase\w*\b/i },
+  // Opus re-review, item 1: in this society the citizen secret IS the
+  // credential, so secret-harvesting is the natural phishing shape here,
+  // distinct from the wallet-drain shapes above.
+  { reason: "mentions a citizen secret or private key", pattern: /\bcitizen\s+secrets?\b|\bprivate\s+keys?\b|\byour\s+secret\b/i },
+  { reason: "asks the reader to send crypto or a secret", pattern: /\bsend\w*\b[^.]{0,60}\b(eth|usdc|tokens?|coins?|secrets?|keys?)\b/i },
+  { reason: "contains a raw wallet address", pattern: /\b0x[0-9a-fA-F]{40}\b/ },
 ];
 
 // Pure. The last gate before a bulletin becomes a public, pinned,

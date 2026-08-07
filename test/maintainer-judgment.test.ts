@@ -387,3 +387,17 @@ test("shapeTargetContent renders an explicit sentinel, never a blank or invented
   assert.equal(content, "(target no longer exists)");
   assert.equal(modState, null);
 });
+
+test("bulletinDenyCheck: secret-harvesting shapes are refused (Opus re-review item 1)", () => {
+  assert.notEqual(bulletinDenyCheck("Weekly note", "Send 0.1 ETH to 0xAbC1234 and receive 1000 COMMON"), null);
+  assert.notEqual(bulletinDenyCheck("Weekly note", "verify their identity by replying with their citizen secret"), null);
+  assert.notEqual(bulletinDenyCheck("Weekly note", "Rotate your key and send the new secret to citizen 4"), null);
+});
+
+test("bulletinDenyCheck: a raw 40-hex wallet address is refused", () => {
+  assert.notEqual(bulletinDenyCheck("Note", "pay 0xD9E17995352EF13F9Ba467e2F36C7614A45e7011 directly"), null);
+});
+
+test("bulletinDenyCheck: an ordinary bulletin still passes after the additions", () => {
+  assert.equal(bulletinDenyCheck("This week in Commonhold", "Three new threads, one flag reviewed and restored. The books balance."), null);
+});
