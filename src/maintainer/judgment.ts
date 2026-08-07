@@ -78,6 +78,52 @@ export function splitBulletinDraft(note: string): { title: string; body: string 
   return { title, body };
 }
 
+// ---------- pure: bulletin deny-check (H2) ----------
+
+interface DenyPattern {
+  reason: string;
+  pattern: RegExp;
+}
+
+// The exact scam vocabulary officialFacts() already promises citizens
+// against (society.ts: "the maintainer will NEVER ask you to claim,
+// connect a wallet, sign, or authenticate through a link"), plus airdrop /
+// official-token / seed-phrase, plus any external link. Word-stem patterns
+// (\w* on the verb) so "claiming"/"claimed"/"connecting" match as readily
+// as the bare form -- the same lesson clerk.ts's smellsForbidden already
+// learned the hard way (see its own header comment).
+const BULLETIN_DENY_PATTERNS: DenyPattern[] = [
+  { reason: "contains an external link", pattern: /https?:\/\/|www\./i },
+  { reason: "asks the reader to claim something", pattern: /\bclaim\w*\b/i },
+  { reason: "asks the reader to connect a wallet", pattern: /\bconnect\w*\b[^.]{0,40}\bwallet\b/i },
+  { reason: "asks the reader to sign something", pattern: /\bsign\w*\s+(here|to)\b/i },
+  { reason: "asks the reader to authenticate through a link", pattern: /\bauthenticat\w*\b[^.]{0,40}\blink\b/i },
+  { reason: "mentions an airdrop", pattern: /\bairdrop\w*\b/i },
+  { reason: "mentions an official token", pattern: /\bofficial\w*\s+tokens?\b/i },
+  { reason: "mentions a seed phrase", pattern: /\bseed\s+phrase\w*\b/i },
+];
+
+// Pure. The last gate before a bulletin becomes a public, pinned,
+// cap-exempt post under the maintainer's own name -- applied AFTER the
+// judge approves a bulletin_draft, BEFORE createPost, so a fooled or
+// hijacked judge cannot turn the maintainer's own most-trusted channel
+// into the exact phishing pattern officialFacts warns every citizen
+// about. Case-insensitive, word-stem tolerant. Returns the first matching
+// reason, or null when the bulletin passes clean.
+//
+// FORWARD: phase-1 may deliberately relax the external-link rule (a
+// legitimate bulletin linking to, say, a GitHub release is plausible
+// once the society has one) -- this stays a hard refuse for phase 0,
+// where any link in a maintainer bulletin is indistinguishable from the
+// phishing pattern this exists to block.
+export function bulletinDenyCheck(title: string, body: string): string | null {
+  const combined = `${title}\n${body}`;
+  for (const { reason, pattern } of BULLETIN_DENY_PATTERNS) {
+    if (pattern.test(combined)) return reason;
+  }
+  return null;
+}
+
 // ---------- pure: decision parsing (the executor's own allowlist) ----------
 
 export interface JudgmentDecision {
@@ -128,6 +174,52 @@ export function parseJudgmentDecisions(rawText: string, batch: Map<number, Queue
     decisions.push({ queue_id: queueId as number, decision, reason, action });
   }
   return decisions;
+}
+
+// ---------- pure: resolving a decision into what to execute (H2) ----------
+
+// What the executor should actually DO for one decision, computed in full
+// before any D1 write or any call to moderateContent/createPost. Kept pure
+// and separate from execution itself (which needs live env.DB and the real
+// executors) specifically so H2's deny-check -- "an approval can still end
+// up rejected, and when it does, nothing is ever posted" -- is directly
+// unit-testable: assert on `status`/`execute` here, rather than inferring
+// the behaviour from a D1-touching wake nothing in this repo unit-tests.
+export type ResolvedExecution =
+  | { status: "approved"; reason: string; execute: { kind: "moderate"; targetType: "post" | "comment"; targetId: number; action: "collapse" | "remove" | "restore" } }
+  | { status: "approved"; reason: string; execute: { kind: "bulletin"; title: string; body: string } }
+  | { status: "approved"; reason: string; execute: null }
+  | { status: "rejected"; reason: string; execute: null };
+
+// Pure. A rejected decision executes nothing, full stop. An approved
+// flag_review with a valid action (parseJudgmentDecisions guarantees one
+// is present on any approved flag_review it lets through) maps to a
+// moderate call. An approved bulletin_draft is split and run through H2's
+// bulletinDenyCheck -- a hit here overrides the judge's own approval to a
+// rejection, stamped with an honest "deny-check: <reason>", and `execute`
+// is null, so createPost is never reached. An approved bookkeeping_note or
+// registration_check executes nothing (design doc S10.1/S10.3:
+// observational only) but still reports "approved" for the public record.
+export function resolveExecution(item: QueueRow, decision: JudgmentDecision): ResolvedExecution {
+  if (decision.decision !== "approve") {
+    return { status: "rejected", reason: decision.reason, execute: null };
+  }
+  if (item.kind === "flag_review" && item.target_type && item.target_id != null && decision.action) {
+    return {
+      status: "approved",
+      reason: decision.reason,
+      execute: { kind: "moderate", targetType: item.target_type as "post" | "comment", targetId: item.target_id, action: decision.action },
+    };
+  }
+  if (item.kind === "bulletin_draft") {
+    const { title, body } = splitBulletinDraft(item.note);
+    const denyReason = bulletinDenyCheck(title, body);
+    if (denyReason) {
+      return { status: "rejected", reason: `deny-check: ${denyReason}`, execute: null };
+    }
+    return { status: "approved", reason: decision.reason, execute: { kind: "bulletin", title, body } };
+  }
+  return { status: "approved", reason: decision.reason, execute: null };
 }
 
 // ---------- pure: prompt building ----------
@@ -329,26 +421,27 @@ export async function runJudgmentWake(env: Env): Promise<void> {
   let itemsActioned = 0;
   for (const d of decisions) {
     const item = batchMap.get(d.queue_id)!;
+    // H2: resolved BEFORE any execution -- a deny-check hit on an approved
+    // bulletin_draft already reads status "rejected" and execute null here,
+    // so the branch below never has an "approved but don't post" special
+    // case to get wrong.
+    const resolved = resolveExecution(item, d);
     try {
-      if (d.decision === "approve") {
-        if (item.kind === "flag_review" && item.target_type && item.target_id != null && d.action) {
-          await moderateContent(env, MAINTAINER_CITIZEN, item.target_type, item.target_id, d.action, d.reason);
-        } else if (item.kind === "bulletin_draft") {
-          const { title, body } = splitBulletinDraft(item.note);
-          await createPost(env, MAINTAINER_CITIZEN, title, body, null, true);
-        }
-        // bookkeeping_note / registration_check: approval is observational
-        // only (design doc S10.1/S10.3) -- there is nothing further to
-        // execute, the row is simply stamped below.
+      if (resolved.execute?.kind === "moderate") {
+        await moderateContent(env, MAINTAINER_CITIZEN, resolved.execute.targetType, resolved.execute.targetId, resolved.execute.action, resolved.reason);
+      } else if (resolved.execute?.kind === "bulletin") {
+        await createPost(env, MAINTAINER_CITIZEN, resolved.execute.title, resolved.execute.body, null, true);
       }
-      await stampQueueRow(env, d.queue_id, d.decision === "approve" ? "approved" : "rejected", d.reason);
+      // bookkeeping_note / registration_check, and a deny-checked bulletin:
+      // execute is null, nothing further to do, the row is simply stamped.
+      await stampQueueRow(env, d.queue_id, resolved.status, resolved.reason);
       itemsActioned++;
     } catch (e) {
       // Execution failed (e.g. the flagged content no longer exists by the
       // time judgment ran). Stamp it rejected with an honest reason rather
       // than leaving it pending -- pending would mean the model re-approves
       // the same failing action every week forever.
-      const failureReason = `judge approved (${d.reason}) but execution failed: ${e instanceof Error ? e.message : String(e)}`;
+      const failureReason = `judge approved (${resolved.reason}) but execution failed: ${e instanceof Error ? e.message : String(e)}`;
       try {
         await stampQueueRow(env, d.queue_id, "rejected", failureReason);
         itemsActioned++;

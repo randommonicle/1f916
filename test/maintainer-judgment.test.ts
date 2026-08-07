@@ -12,11 +12,14 @@ import {
   JUDGMENT_QUEUE_CAP,
   JUDGMENT_SYSTEM_PROMPT,
   splitBulletinDraft,
+  bulletinDenyCheck,
   parseJudgmentDecisions,
+  resolveExecution,
   capQueueBatch,
   buildJudgmentPrompt,
   shapeTargetContent,
   type QueueRow,
+  type JudgmentDecision,
 } from "../src/maintainer/judgment.ts";
 
 function row(over: Partial<QueueRow> & { id: number }): QueueRow {
@@ -63,6 +66,97 @@ test("splitBulletinDraft moves title overflow into the body rather than cutting 
 test("splitBulletinDraft pads a too-short title rather than letting createPost reject it silently", () => {
   const { title } = splitBulletinDraft("Hi\nbody");
   assert.ok(title.length >= 3);
+});
+
+// ---------- bulletinDenyCheck: H2's post-approval, pre-createPost gate ----------
+
+test("bulletinDenyCheck refuses an external URL (https)", () => {
+  assert.match(bulletinDenyCheck("Weekly digest", "Read more at https://example.com/details") ?? "", /external link/);
+});
+
+test("bulletinDenyCheck refuses an external URL (bare www.)", () => {
+  assert.match(bulletinDenyCheck("Weekly digest", "See www.example.com for details") ?? "", /external link/);
+});
+
+test("bulletinDenyCheck refuses 'claim' (and its conjugations)", () => {
+  assert.match(bulletinDenyCheck("Reward available", "Citizens may claim a bonus this week") ?? "", /claim/);
+  assert.match(bulletinDenyCheck("Reward available", "Citizens claiming the bonus should act fast") ?? "", /claim/);
+});
+
+test("bulletinDenyCheck refuses 'connect (a) wallet' phrasing", () => {
+  assert.match(bulletinDenyCheck("Action needed", "Please connect your wallet to continue") ?? "", /wallet/);
+  assert.match(bulletinDenyCheck("Action needed", "Connect a wallet before Friday") ?? "", /wallet/);
+});
+
+test("bulletinDenyCheck refuses 'sign here' / 'sign to' phrasing", () => {
+  assert.match(bulletinDenyCheck("Action needed", "Sign here to receive your allocation") ?? "", /sign/);
+  assert.match(bulletinDenyCheck("Action needed", "Sign to verify your identity") ?? "", /sign/);
+});
+
+test("bulletinDenyCheck refuses 'authenticate through a link' phrasing", () => {
+  assert.match(bulletinDenyCheck("Action needed", "Authenticate through the link below") ?? "", /authenticate/);
+});
+
+test("bulletinDenyCheck refuses 'airdrop' (and its conjugations)", () => {
+  assert.match(bulletinDenyCheck("Good news", "An airdrop is coming for active citizens") ?? "", /airdrop/);
+});
+
+test("bulletinDenyCheck refuses 'official token' phrasing", () => {
+  assert.match(bulletinDenyCheck("Good news", "The official token launches this week") ?? "", /official token/);
+});
+
+test("bulletinDenyCheck refuses 'seed phrase' phrasing", () => {
+  assert.match(bulletinDenyCheck("Security notice", "Never share your seed phrase with anyone") ?? "", /seed phrase/);
+});
+
+test("bulletinDenyCheck passes an ordinary bulletin clean", () => {
+  assert.equal(bulletinDenyCheck("Weekly digest", "Three new citizens joined this week. The treasury grew by $4. No moderation actions were needed."), null);
+});
+
+test("bulletinDenyCheck checks the title as well as the body", () => {
+  assert.notEqual(bulletinDenyCheck("Claim your reward now", "ordinary body text"), null);
+});
+
+// ---------- resolveExecution: what a decision actually does (H2's stamps-rejected-never-posts guarantee) ----------
+
+function decision(over: Partial<JudgmentDecision> & { queue_id: number }): JudgmentDecision {
+  return { decision: "approve", reason: "looks fine", action: null, ...over };
+}
+
+test("resolveExecution: an approved bulletin_draft that fails the deny-check resolves to rejected with execute null (never posts)", () => {
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Claim your reward\nSign here to continue", target_content: null, target_mod_state: null, id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "seems like a fine bulletin" }));
+  assert.equal(resolved.status, "rejected");
+  assert.equal(resolved.execute, null);
+  assert.match(resolved.reason, /^deny-check: /);
+});
+
+test("resolveExecution: an approved bulletin_draft that passes the deny-check resolves to approved with a bulletin to post", () => {
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet this week.", target_content: null, target_mod_state: null, id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1 }));
+  assert.equal(resolved.status, "approved");
+  assert.deepEqual(resolved.execute, { kind: "bulletin", title: "Weekly digest", body: "All quiet this week." });
+});
+
+test("resolveExecution: a rejected decision always executes nothing, regardless of kind", () => {
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet.", target_content: null, target_mod_state: null, id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "not newsworthy" }));
+  assert.equal(resolved.status, "rejected");
+  assert.equal(resolved.execute, null);
+});
+
+test("resolveExecution: an approved flag_review maps to a moderate execution with the decided action", () => {
+  const item = { kind: "flag_review" as const, target_type: "post" as const, target_id: 42, source_ref: "flag on post 42", note: "spam", target_content: null, target_mod_state: null, id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, action: "remove", reason: "confirmed spam" }));
+  assert.equal(resolved.status, "approved");
+  assert.deepEqual(resolved.execute, { kind: "moderate", targetType: "post", targetId: 42, action: "remove" });
+});
+
+test("resolveExecution: an approved bookkeeping_note executes nothing but still reports approved", () => {
+  const item = { kind: "bookkeeping_note" as const, target_type: null, target_id: null, source_ref: null, note: "drift observed", target_content: null, target_mod_state: null, id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1 }));
+  assert.equal(resolved.status, "approved");
+  assert.equal(resolved.execute, null);
 });
 
 // ---------- capQueueBatch: the 100-item cap ----------
