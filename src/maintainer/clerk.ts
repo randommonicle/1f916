@@ -48,24 +48,65 @@ export function truncateBody(text: string | null | undefined, max = NOTE_MAX_CHA
 // forbidden-smelling proposal INTO the judge's queue, where design doc S10
 // notes a proposal carries social-engineering weight of its own even if
 // judgment would reject it.
-export function smellsForbidden(text: string): boolean {
-  // Word STEMS, not whole words: "corrected"/"correcting"/"amending" must
-  // match as readily as "correct"/"amend" -- an earlier version of this
-  // used \b...\b around the bare verb and missed every conjugated form.
-  const adjustVerb = "(adjust|correct|edit|chang|modif|fix|updat)\\w*";
-  const ledgerNoun = "(ledger|treasury|balance|the books)";
+//
+// Word STEMS, not whole words: "corrected"/"correcting"/"amending" must
+// match as readily as "correct"/"amend" -- an earlier version of this used
+// \b...\b around the bare verb and missed every conjugated form.
+//
+// M1: kind-aware, because a blanket ledger-vocabulary check produced real
+// false positives on bookkeeping_note specifically -- that kind IS the
+// sanctioned channel for describing the books (design doc S10.1), so a
+// perfectly ordinary drift OBSERVATION ("the treasury balance changed by
+// 200 cents") inevitably reuses the exact adjust-word-near-ledger-word
+// shape the old blanket check watched for, indistinguishable from a
+// correction PROPOSAL by pattern alone. The broad ledger/adjust check is
+// now skipped for bookkeeping_note; a narrower, kind-independent
+// proposal-SHAPE check (a concrete write: "insert/add/write an
+// entry/row", "bring the books into line") stands in its place, alongside
+// the governance and registration-undo checks, both of which stay
+// universal -- no kind is ever a sanctioned channel for proposing either.
+export function smellsForbidden(text: string, kind: QueueKind): boolean {
   const amendVerb = "(chang|amend|rewrit|edit|updat|replac)\\w*";
   const governanceNoun = "(the constitution|the compact|governance text)";
-  const undoVerb = "(revers|undo|undon|revok|cancel|delet|unregist)\\w*";
-  const patterns = [
-    new RegExp(`\\b${adjustVerb}\\b[^.]{0,80}\\b${ledgerNoun}\\b`, "i"),
-    new RegExp(`\\b${ledgerNoun}\\b[^.]{0,80}\\b${adjustVerb}\\b`, "i"),
+  // "void"/"nullif(y)"/"invalidat(e)" alongside the more obvious
+  // revers/undo/revoke/cancel/delete/unregister -- a registration doesn't
+  // have to be literally "reversed" or "undone" in so many words to be a
+  // reversal proposal; "treated as void" is the same move in different
+  // clothes.
+  const undoVerb = "(revers|undo|undon|revok|cancel|delet|unregist|void|nullif|invalidat)\\w*";
+  const universalPatterns = [
     new RegExp(`\\b${governanceNoun}\\b[^.]{0,80}\\b${amendVerb}\\b`, "i"),
     new RegExp(`\\b${amendVerb}\\b[^.]{0,80}\\b${governanceNoun}\\b`, "i"),
     new RegExp(`\\b${undoVerb}\\b[^.]{0,80}\\bregistration\\b`, "i"),
     new RegExp(`\\bregistration\\b[^.]{0,80}\\b${undoVerb}\\b`, "i"),
   ];
-  return patterns.some((p) => p.test(text));
+  if (universalPatterns.some((p) => p.test(text))) return true;
+
+  // M1: the concrete-write-proposal shape. Deliberately universal, not
+  // bookkeeping_note-only -- "recommend we bring the ledger into line by
+  // writing a -500 entry" is exactly as forbidden arriving as any other
+  // kind as it is arriving as a bookkeeping_note.
+  const proposalVerb = "(writ|wrote|insert|add)\\w*";
+  const proposalNoun = "(entry|entries|row|rows)";
+  const bringVerb = "(bring|brought)\\w*";
+  const proposalPatterns = [
+    new RegExp(`\\b${proposalVerb}\\b[^.]{0,80}\\b${proposalNoun}\\b`, "i"),
+    new RegExp(`\\b${proposalNoun}\\b[^.]{0,80}\\b${proposalVerb}\\b`, "i"),
+    new RegExp(`\\b${bringVerb}\\b[^.]{0,80}\\binto\\s+line\\b`, "i"),
+    new RegExp(`\\binto\\s+line\\b[^.]{0,80}\\b${bringVerb}\\b`, "i"),
+  ];
+  if (proposalPatterns.some((p) => p.test(text))) return true;
+
+  // bookkeeping_note is exempt from the broad ledger-vocabulary check
+  // below -- see the header comment above. Every other kind has no
+  // legitimate reason to discuss ledger adjustment at all, so it stays
+  // fully active for them.
+  if (kind === "bookkeeping_note") return false;
+
+  const adjustVerb = "(adjust|correct|edit|chang|modif|fix|updat)\\w*";
+  const ledgerNoun = "(ledger|treasury|balance|the books)";
+  const ledgerPatterns = [new RegExp(`\\b${adjustVerb}\\b[^.]{0,80}\\b${ledgerNoun}\\b`, "i"), new RegExp(`\\b${ledgerNoun}\\b[^.]{0,80}\\b${adjustVerb}\\b`, "i")];
+  return ledgerPatterns.some((p) => p.test(text));
 }
 
 function isPlainObject(raw: unknown): raw is Record<string, unknown> {
@@ -106,7 +147,7 @@ export function parseClerkItems(rawText: string, cap: number = CLERK_QUEUE_CAP):
       policyDropped++;
       continue;
     }
-    if (smellsForbidden(noteRaw)) {
+    if (smellsForbidden(noteRaw, kind as QueueKind)) {
       policyDropped++;
       continue;
     }
