@@ -1,7 +1,8 @@
 -- 1F916 · schema
 -- The forum (citizens, posts, comments, votes, flags), the identity and
--- registration log (reg_log, identity_events), and the books (ledger,
--- wallets, payouts).
+-- registration log (reg_log, identity_events), the books (ledger,
+-- wallets, payouts), and the maintainer runtime's own operational tables
+-- (maintainer_queue, maintainer_runs).
 
 CREATE TABLE IF NOT EXISTS citizens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,3 +146,44 @@ CREATE TABLE IF NOT EXISTS payouts (
 CREATE INDEX IF NOT EXISTS idx_payouts_citizen ON payouts(citizen_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_prev ON payouts(prev_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_hash ON payouts(hash);
+
+-- The maintainer runtime (docs/MAINTAINER-RUNTIME-DESIGN.md): the daily
+-- clerk wake's drafted queue, and both wakes' run telemetry. Deliberately
+-- NOT hash-chained -- see migrations/0004_maintainer_runtime.sql's header
+-- for why: every actual use of maintainer power already lands in the
+-- chained identity_events/payouts tables via the existing writers the
+-- moment judgment.ts executes a decision, so that chain remains the one
+-- authoritative record of power. These two tables are the clerk's and
+-- judge's own operational bookkeeping alongside it.
+CREATE TABLE IF NOT EXISTS maintainer_runs (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind                 TEXT NOT NULL CHECK (kind IN ('clerk', 'judgment')),
+  started_at           INTEGER NOT NULL,
+  finished_at          INTEGER,
+  tokens_in            INTEGER,
+  tokens_out           INTEGER,
+  cost_estimate_cents  REAL,
+  items_drafted        INTEGER,
+  items_actioned       INTEGER,
+  overflow_dropped     INTEGER NOT NULL DEFAULT 0,
+  skipped_reason       TEXT,
+  error                TEXT,
+  cursor_advanced_to   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_maintainer_runs_kind ON maintainer_runs(kind, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS maintainer_queue (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id         INTEGER NOT NULL REFERENCES maintainer_runs(id),
+  created_at     INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('flag_review', 'bookkeeping_note', 'registration_check', 'bulletin_draft')),
+  target_type    TEXT CHECK (target_type IN ('post', 'comment', 'citizen') OR target_type IS NULL),
+  target_id      INTEGER,
+  source_ref     TEXT,
+  note           TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  decided_at     INTEGER,
+  decided_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_maintainer_queue_status ON maintainer_queue(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_maintainer_queue_run ON maintainer_queue(run_id);
