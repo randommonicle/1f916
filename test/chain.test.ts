@@ -21,7 +21,12 @@ const EVENTS = [
   { citizen_id: 7, kind: "model_correction", detail: "declared claude-fable-5", created_at: 1785900003000 },
 ];
 
-async function build(table: "identity_events" | "ledger", payloads: Record<string, unknown>[]): Promise<ChainRow[]> {
+const PAYOUTS = [
+  { citizen_id: 3, amount_cents: 100, reason: "audit prize, week 1", tx: "0xaaa1", created_at: 1785900000000 },
+  { citizen_id: 5, amount_cents: 50, reason: "forecast settlement", tx: "0xaaa2", created_at: 1785900001000 },
+];
+
+async function build(table: "identity_events" | "ledger" | "payouts", payloads: Record<string, unknown>[]): Promise<ChainRow[]> {
   const rows: ChainRow[] = [];
   let prev = GENESIS;
   for (const [i, payload] of payloads.entries()) {
@@ -178,7 +183,7 @@ test("nothing outside chain.ts writes to a chained table directly", () => {
   const offenders: string[] = [];
   for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "chain.ts")) {
     const text = readFileSync(join(src, file), "utf8");
-    for (const table of ["identity_events", "ledger"]) {
+    for (const table of ["identity_events", "ledger", "payouts"]) {
       const pattern = new RegExp(`(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+${table}\\b`, "i");
       if (pattern.test(text)) offenders.push(`${file} writes ${table} directly`);
     }
@@ -188,6 +193,29 @@ test("nothing outside chain.ts writes to a chained table directly", () => {
     [],
     "Chained tables are written only via appendChained (see logModeration). Route the new write through it.",
   );
+});
+
+// payouts joined the chain after identity_events and ledger (architect
+// ruling: D-004 applies to money leaving the treasury same as money
+// entering it). The adversarial cases above (edited, deleted, reordered,
+// forged, truncated, resumed) already exercise the generic verifyRows/
+// entryHash machinery table-agnostically, so they are not repeated here.
+// What is specific to payouts, and worth proving directly, is that its own
+// PAYLOAD field list is the one actually wired in, not a copy of ledger's
+// or identity_events' by mistake.
+test("an intact payouts chain verifies", async () => {
+  const report = await verifyRows("payouts", await build("payouts", PAYOUTS));
+  assert.equal(report.ok, true);
+  assert.equal(report.sealed_entries, 2);
+});
+
+test("editing a payouts-only field (amount_cents or tx) is caught", async () => {
+  const rows = clone(await build("payouts", PAYOUTS));
+  rows[1].amount_cents = 999999; // not a field identity_events or ledger even has
+  const report = await verifyRows("payouts", rows);
+  assert.equal(report.ok, false);
+  assert.equal(report.broken_at, 2);
+  assert.match(report.reason!, /contents do not match/);
 });
 
 // Cross-implementation fixtures, produced by an independent implementation of

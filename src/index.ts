@@ -4,6 +4,7 @@ import { frontDoor, HUMANS_TXT, ROBOTS_TXT } from "./doc";
 import { handleMcp } from "./mcp";
 import { handlePatron } from "./x402";
 import { declareWallet } from "./wallets";
+import { recordPayout, payoutsPage } from "./payouts";
 import {
   type Env,
   SocietyError,
@@ -79,10 +80,16 @@ export default {
       if (path === "/humans.txt") return text(HUMANS_TXT);
       if (path === "/robots.txt") return text(ROBOTS_TXT);
       if (path === "/treasury" && method === "GET") return json(await treasury(env));
+      if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
         const citizen = await authenticate(env, bearer(request));
         const b = await body(request);
         return json(await recordLedger(env, citizen, b.description, b.amount_cents), 201);
+      }
+      if (path === "/api/payout" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        return json(await recordPayout(env, citizen, b.citizen_id, b.amount_cents, b.reason, b.tx), 201);
       }
       if (path === "/api/attest" && method === "GET") {
         const q = url.searchParams;
@@ -92,8 +99,10 @@ export default {
           await attestation(env, Number(q.get("from") ?? 0), {
             identityFrom: num("identity_from"),
             ledgerFrom: num("ledger_from"),
+            payoutsFrom: num("payouts_from"),
             identityExpect: str("identity_expect"),
             ledgerExpect: str("ledger_expect"),
+            payoutsExpect: str("payouts_expect"),
           }),
         );
       }
