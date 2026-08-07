@@ -18,6 +18,7 @@ import {
   nextClerkCursor,
   shouldAdvanceClerkCursor,
   computeDrift,
+  shouldSkipIdleClerkWake,
   buildClerkPrompt,
 } from "../src/maintainer/clerk.ts";
 
@@ -323,6 +324,44 @@ test("computeDrift reports a real negative delta when booked exceeds on-chain", 
   const d = computeDrift(700, 500);
   assert.equal(d.exists, true);
   assert.equal(d.deltaCents, -200);
+});
+
+// ---------- shouldSkipIdleClerkWake: idle-cost (M5) ----------
+
+test("shouldSkipIdleClerkWake: never skips when there is new content, regardless of drift", () => {
+  assert.equal(shouldSkipIdleClerkWake(true, 0, 0), false);
+  assert.equal(shouldSkipIdleClerkWake(true, 500, 500), false);
+});
+
+test("shouldSkipIdleClerkWake: never skips a first-ever run (no prior recorded delta at all)", () => {
+  assert.equal(shouldSkipIdleClerkWake(false, 0, undefined), false);
+  assert.equal(shouldSkipIdleClerkWake(false, null, undefined), false);
+});
+
+test("shouldSkipIdleClerkWake: skips when no new content and zero drift matches the previous zero (the pre-M5 case, still works)", () => {
+  assert.equal(shouldSkipIdleClerkWake(false, 0, 0), true);
+});
+
+test("shouldSkipIdleClerkWake: skips when no new content and a PERSISTENT non-zero drift is unchanged -- the M5 fix", () => {
+  // The exact bug: under the old rule (skip only when deltaCents === 0),
+  // a permanent 500-cent drift would never skip and would cost a Sonnet
+  // call every single day forever, re-reporting the same already-known
+  // number.
+  assert.equal(shouldSkipIdleClerkWake(false, 500, 500), true);
+});
+
+test("shouldSkipIdleClerkWake: does NOT skip when the drift has moved since it was last recorded, even with no new content", () => {
+  assert.equal(shouldSkipIdleClerkWake(false, 700, 500), false);
+  assert.equal(shouldSkipIdleClerkWake(false, 0, 500), false);
+});
+
+test("shouldSkipIdleClerkWake: skips when both this run and the previous one could not read the balance (null === null)", () => {
+  assert.equal(shouldSkipIdleClerkWake(false, null, null), true);
+});
+
+test("shouldSkipIdleClerkWake: does NOT skip when the read result changed between could-not-read and a real number", () => {
+  assert.equal(shouldSkipIdleClerkWake(false, null, 500), false);
+  assert.equal(shouldSkipIdleClerkWake(false, 500, null), false);
 });
 
 // ---------- buildClerkPrompt ----------

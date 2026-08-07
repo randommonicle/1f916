@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS maintainer_runs (
   overflow_dropped     INTEGER NOT NULL DEFAULT 0, -- items dropped this run for ANY policing reason: over the volume cap, off the §10 allowlist, or smelling of a forbidden category (see src/maintainer/clerk.ts)
   skipped_reason       TEXT,                     -- e.g. 'nothing to review', 'nothing pending', 'no api key' -- set only when no model call was made, so an idle day is visibly $0, not a blank row
   error                TEXT,                     -- set when the wake threw; the wake still writes this row rather than letting scheduled() see an unrecorded failure
-  cursor_advanced_to   INTEGER                   -- clerk only: max created_at actually scanned this run. NULL on any run that didn't advance the cursor (skipped, or failed before finishing) -- MAX() ignores NULLs, so the next run's cursor lookup needs no special-casing
+  cursor_advanced_to   INTEGER,                  -- clerk only: max created_at actually scanned this run. NULL on any run that didn't advance the cursor (skipped, or failed before finishing) -- MAX() ignores NULLs, so the next run's cursor lookup needs no special-casing
+  drift_delta_cents    INTEGER                   -- clerk only (M5, review fix): the on-chain-vs-booked drift this run observed, onchain_cents - booked_cents. NULL means "could not read live this run" (mirrors computeDrift's own onchainCents-null handling), never a guessed 0. Read back as "the most recent clerk run's recorded delta" to decide whether a persistent, unchanged, non-zero drift is genuinely idle (skip) or has moved since it was last noted (don't skip) -- see shouldSkipIdleClerkWake in src/maintainer/clerk.ts.
 );
 CREATE INDEX IF NOT EXISTS idx_maintainer_runs_kind ON maintainer_runs(kind, started_at DESC);
 

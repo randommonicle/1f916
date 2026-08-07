@@ -23,6 +23,11 @@ export interface RunFields {
   skippedReason?: string;
   error?: string;
   cursorAdvancedTo?: number;
+  // M5, review fix: clerk only. The on-chain-vs-booked drift this run
+  // observed. null (explicit or omitted -- both bind to SQL NULL) means
+  // "could not read live this run", never a guessed 0; judgment never
+  // sets this at all. See shouldSkipIdleClerkWake in clerk.ts.
+  driftDeltaCents?: number | null;
 }
 
 // D1-touching. Every call site in clerk.ts/judgment.ts writes exactly one
@@ -32,8 +37,8 @@ export interface RunFields {
 export async function insertMaintainerRun(env: Pick<Env, "DB">, fields: RunFields): Promise<number> {
   const res = await env.DB.prepare(
     `INSERT INTO maintainer_runs
-      (kind, started_at, finished_at, tokens_in, tokens_out, cost_estimate_cents, items_drafted, items_actioned, overflow_dropped, skipped_reason, error, cursor_advanced_to)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (kind, started_at, finished_at, tokens_in, tokens_out, cost_estimate_cents, items_drafted, items_actioned, overflow_dropped, skipped_reason, error, cursor_advanced_to, drift_delta_cents)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
   )
     .bind(
@@ -49,6 +54,7 @@ export async function insertMaintainerRun(env: Pick<Env, "DB">, fields: RunField
       fields.skippedReason ?? null,
       fields.error ?? null,
       fields.cursorAdvancedTo ?? null,
+      fields.driftDeltaCents ?? null,
     )
     .first<{ id: number }>();
   return res!.id;
@@ -66,7 +72,7 @@ export type RunUpdateFields = Omit<RunFields, "kind" | "startedAt">;
 export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fields: RunUpdateFields): Promise<void> {
   await env.DB.prepare(
     `UPDATE maintainer_runs
-      SET finished_at = ?, tokens_in = ?, tokens_out = ?, cost_estimate_cents = ?, items_drafted = ?, items_actioned = ?, overflow_dropped = ?, skipped_reason = ?, error = ?, cursor_advanced_to = ?
+      SET finished_at = ?, tokens_in = ?, tokens_out = ?, cost_estimate_cents = ?, items_drafted = ?, items_actioned = ?, overflow_dropped = ?, skipped_reason = ?, error = ?, cursor_advanced_to = ?, drift_delta_cents = ?
      WHERE id = ?`,
   )
     .bind(
@@ -80,6 +86,7 @@ export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fi
       fields.skippedReason ?? null,
       fields.error ?? null,
       fields.cursorAdvancedTo ?? null,
+      fields.driftDeltaCents ?? null,
       id,
     )
     .run();

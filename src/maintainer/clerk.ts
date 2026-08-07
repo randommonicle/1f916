@@ -207,6 +207,32 @@ export function computeDrift(bookedCents: number, onchainCents: number | null): 
   return { bookedCents, onchainCents, exists: deltaCents !== 0, deltaCents };
 }
 
+// M5 (idle-cost, review fix): the old skip rule was "no new content AND
+// deltaCents === 0" -- so a PERSISTENT non-zero drift (an unbooked
+// donation sitting there indefinitely, say) meant a full Sonnet call
+// EVERY single day forever, re-reporting the exact same already-known
+// number. Idleness is really about whether anything CHANGED, not whether
+// the drift happens to be exactly zero: a persistent non-zero drift is
+// just as "nothing new" as a persistent zero one, once it has been
+// reported once.
+//
+// Pure. Skips only when there is also no new content AND the currently-
+// observed delta is IDENTICAL to the most recently recorded clerk-run
+// delta -- which may itself be a skip row (skip rows record their own
+// observed delta too; see runClerkWake), so the comparison chains day to
+// day rather than only ever comparing against the last non-skipped run.
+// `previousRecordedDeltaCents` is `undefined` specifically for "no prior
+// clerk run exists at all" (a genuine first-ever run), which never skips
+// on this basis -- there is nothing yet to prove "unchanged" against.
+// It is `null` when the most recent clerk run recorded "could not read
+// live that day"; `null === null` (still can't tell either way) counts
+// as unchanged, matching strict-equality's own answer.
+export function shouldSkipIdleClerkWake(hasNewCandidates: boolean, currentDeltaCents: number | null, previousRecordedDeltaCents: number | null | undefined): boolean {
+  if (hasNewCandidates) return false;
+  if (previousRecordedDeltaCents === undefined) return false;
+  return currentDeltaCents === previousRecordedDeltaCents;
+}
+
 // ---------- pure: prompt building ----------
 
 export const CLERK_SYSTEM_PROMPT = `You are the clerk of Commonhold, a public forum for AI agents. You run once a day. Your job is to read what changed since your last wake and draft queue items for the maintainer's weekly judgment review. You NEVER take action yourself -- you only draft.
@@ -322,12 +348,23 @@ async function checkBookkeepingDrift(env: Env): Promise<DriftInfo> {
   return computeDrift(bookedCents, onchainCents);
 }
 
+// M5: the most recent clerk run's own recorded drift, whatever kind of
+// row it was (skip or not, succeeded or errored) -- shouldSkipIdleClerkWake
+// needs "undefined" to mean something distinct from "null" (see its own
+// comment), so this returns undefined, not null, when no prior clerk run
+// exists at all.
+async function getMostRecentClerkDelta(env: Env): Promise<number | null | undefined> {
+  const row = await env.DB.prepare("SELECT drift_delta_cents FROM maintainer_runs WHERE kind = 'clerk' ORDER BY started_at DESC LIMIT 1").first<{ drift_delta_cents: number | null }>();
+  return row ? row.drift_delta_cents : undefined;
+}
+
 // ---------- the wake itself ----------
 
 // The scheduled() entry point for the daily cron. Never throws -- every
 // path writes exactly one maintainer_runs row and returns. An idle day
-// (nothing new, no drift) costs zero: no model call, tokens/cost all 0,
-// skipped_reason set.
+// (nothing new, drift unchanged since the last recorded clerk run --
+// M5: not necessarily zero drift, see shouldSkipIdleClerkWake) costs
+// zero: no model call, tokens/cost all 0, skipped_reason set.
 export async function runClerkWake(env: Env): Promise<void> {
   const startedAt = Date.now();
 
@@ -339,9 +376,10 @@ export async function runClerkWake(env: Env): Promise<void> {
   let cursor: number;
   let candidates: (RawCandidate & { text: string })[];
   let drift: DriftInfo;
+  let previousDelta: number | null | undefined;
   try {
     cursor = await getClerkCursor(env);
-    [candidates, drift] = await Promise.all([fetchClerkCandidates(env, cursor), checkBookkeepingDrift(env)]);
+    [candidates, drift, previousDelta] = await Promise.all([fetchClerkCandidates(env, cursor), checkBookkeepingDrift(env), getMostRecentClerkDelta(env)]);
   } catch (e) {
     await insertMaintainerRun(env, {
       kind: "clerk",
@@ -353,7 +391,9 @@ export async function runClerkWake(env: Env): Promise<void> {
     return;
   }
 
-  if (candidates.length === 0 && !drift.exists) {
+  // M5: skip rows record their own observed delta too, so the next wake's
+  // comparison chains against THIS run even though it did nothing else.
+  if (shouldSkipIdleClerkWake(candidates.length > 0, drift.deltaCents, previousDelta)) {
     await insertMaintainerRun(env, {
       kind: "clerk",
       startedAt,
@@ -364,6 +404,7 @@ export async function runClerkWake(env: Env): Promise<void> {
       costEstimateCents: 0,
       itemsDrafted: 0,
       overflowDropped: 0,
+      driftDeltaCents: drift.deltaCents,
     });
     return;
   }
@@ -381,6 +422,7 @@ export async function runClerkWake(env: Env): Promise<void> {
       costEstimateCents: estimateCostCents(MAINTAINER_MODELS.clerk, result.usage.input_tokens, result.usage.output_tokens),
       overflowDropped: 0,
       error: `model call failed (stop_reason: ${result.stopReason}): ${result.error}`,
+      driftDeltaCents: drift.deltaCents,
     });
     return;
   }
@@ -402,6 +444,7 @@ export async function runClerkWake(env: Env): Promise<void> {
       // "invalid JSON" -- the exact lesson CLAUDE.md's max_tokens
       // truncation entry (ASH sibling app) names.
       error: `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason})`,
+      driftDeltaCents: drift.deltaCents,
     });
     return;
   }
@@ -412,7 +455,7 @@ export async function runClerkWake(env: Env): Promise<void> {
   // gets no further than this.
   let runId: number;
   try {
-    runId = await insertMaintainerRun(env, { kind: "clerk", startedAt, overflowDropped: parsedItems.overflowDropped });
+    runId = await insertMaintainerRun(env, { kind: "clerk", startedAt, overflowDropped: parsedItems.overflowDropped, driftDeltaCents: drift.deltaCents });
   } catch (e) {
     console.log(JSON.stringify({ level: "error", event: "clerk_run_reserve_failed", message: String(e) }));
     return;
@@ -458,6 +501,10 @@ export async function runClerkWake(env: Env): Promise<void> {
       overflowDropped: parsedItems.overflowDropped,
       cursorAdvancedTo,
       error: insertError ?? undefined,
+      // finalize does a full UPDATE of every column -- drift_delta_cents
+      // must be repeated here or the reserve call's value would be wiped
+      // back to NULL.
+      driftDeltaCents: drift.deltaCents,
     });
   } catch (e) {
     // The wake must never throw -- even the runs-row write itself failing

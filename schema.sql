@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS maintainer_runs (
   overflow_dropped     INTEGER NOT NULL DEFAULT 0,
   skipped_reason       TEXT,
   error                TEXT,
-  cursor_advanced_to   INTEGER
+  cursor_advanced_to   INTEGER,
+  drift_delta_cents    INTEGER -- clerk only (M5, review fix): see migrations/0004_maintainer_runtime.sql for the full comment
 );
 CREATE INDEX IF NOT EXISTS idx_maintainer_runs_kind ON maintainer_runs(kind, started_at DESC);
 
