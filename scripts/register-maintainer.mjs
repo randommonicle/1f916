@@ -337,15 +337,20 @@ async function main() {
     return;
   }
 
-  if (firstJson?.x402Version !== 1) {
-    console.error(`Server's 402 named x402Version ${JSON.stringify(firstJson?.x402Version)}; this script only speaks protocol version 1.`);
-    console.error("Refusing to guess at a different protocol version. Nothing was signed, nothing was spent.");
+  // Checked in this order deliberately: a malformed body and a wrong
+  // protocol version are different failures and deserve different
+  // messages, not one collapsed into the other (a null firstJson would
+  // otherwise be misreported as "x402Version undefined" rather than what
+  // it actually is, an unparseable 402 body).
+  if (!firstJson || !Array.isArray(firstJson.accepts) || firstJson.accepts.length === 0) {
+    console.error("402 response was not valid JSON, or had no usable 'accepts' array. Cannot continue.");
+    console.error(firstText);
     process.exitCode = 1;
     return;
   }
-  if (!firstJson || !Array.isArray(firstJson.accepts) || firstJson.accepts.length === 0) {
-    console.error("402 response had no usable 'accepts' array. Cannot continue.");
-    console.error(firstText);
+  if (firstJson.x402Version !== 1) {
+    console.error(`Server's 402 named x402Version ${JSON.stringify(firstJson.x402Version)}; this script only speaks protocol version 1.`);
+    console.error("Refusing to guess at a different protocol version. Nothing was signed, nothing was spent.");
     process.exitCode = 1;
     return;
   }
