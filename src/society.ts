@@ -15,6 +15,18 @@ export interface Env {
   REGISTRATION_MODE: string;
   // Comma-separated single-use invite codes. A secret; never in wrangler.jsonc.
   INVITE_CODES?: string;
+  // Maintainer runtime (docs/MAINTAINER-RUNTIME-DESIGN.md), src/maintainer/.
+  // Both optional and both secrets: an absent key means the wakes log a
+  // "no api key" run and spend nothing (clerk.ts/judgment.ts check this
+  // before ever building a prompt) -- a dry key must degrade to silence,
+  // never a crash or a bill (design doc S12).
+  ANTHROPIC_API_KEY?: string;
+  // Unused by the runtime itself: the resident clerk/judgment wakes act
+  // through internal code paths (moderateContent, createPost) with no HTTP
+  // round trip, so there is nothing here to authenticate. Declared for
+  // parity with the duty-officer's warden script (design doc S11) and
+  // manual operations, which do go over HTTP as the maintainer citizen.
+  MAINTAINER_SECRET?: string;
 }
 
 // Citizen #1 is the maintainer — the society's moderator. Its powers are
@@ -855,7 +867,11 @@ const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // balanceOf(TREASURY_ADDRESS) — to a public RPC, no key and no writes. If it is
 // slow or fails, return null and say so rather than break the endpoint or guess
 // a number; a transparency field must never invent one.
-async function readOnchainUsdcCents(env: Env): Promise<number | null> {
+// Exported so src/maintainer/clerk.ts's bookkeeping-drift check can reuse
+// this exact read rather than duplicating the RPC-calling logic -- the same
+// anti-duplication call the x402.ts header comment makes about
+// payAndSettle. No behaviour change: same function, same fallback list.
+export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
   // Fallback list, tried in order: the primary rate-limited Workers egress IPs
   // in production (flashbulb caught the endpoint answering null, #293), so one
   // public RPC is not a dependable dependency. First success wins; all fail →
