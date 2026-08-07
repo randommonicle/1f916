@@ -57,6 +57,12 @@ export function estimateCostCents(model: string, inputTokens: number, outputToke
 const MAX_TOKENS = 4096;
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
+// L7, review fix: a scheduled Worker with no bound on a single fetch can
+// hang indefinitely on a slow or wedged upstream, leaving the wake stuck
+// rather than failing cleanly into its own runs row. 120s is generous for
+// a single judgment batch (worst case ~100 items of prompt, up to
+// MAX_TOKENS of output) while still bounded and diagnosable.
+const ANTHROPIC_TIMEOUT_MS = 120_000;
 
 export interface AnthropicContentBlock {
   type: string;
@@ -103,6 +109,19 @@ export interface AnthropicCallResult {
 
 const EMPTY_USAGE = { input_tokens: 0, output_tokens: 0 };
 
+// Pure. Distinguishes an aborted-by-us request (the timeout below) from
+// any other fetch failure, so the caller gets an honest, specific
+// stopReason ("timeout") rather than being lumped in with a generic
+// "network_error" that could just as easily mean the API is genuinely
+// unreachable -- a distinction worth keeping in the public runs-row
+// record, since one is "we gave up waiting" and the other is "it never
+// answered at all". Matches both the DOMException a real aborted fetch
+// throws and a plain Error with the same .name, for testability without
+// needing a real network call (see maintainer-anthropic.test.ts).
+export function isAbortError(e: unknown): boolean {
+  return e instanceof Error && e.name === "AbortError";
+}
+
 // The only impure function in this file. stop_reason: "refusal" and a
 // truncated/no-text response are both handled explicitly here -- neither
 // throws; both come back as a typed, ok:false (or ok:true-with-a-flagged-
@@ -123,6 +142,10 @@ export async function callAnthropic(
     return { ok: false, text: "", stopReason: "no_api_key", usage: EMPTY_USAGE, error: "ANTHROPIC_API_KEY is not set" };
   }
 
+  // L7: bounds the single fetch below so a hung or wedged upstream cannot
+  // leave a scheduled wake running indefinitely -- see ANTHROPIC_TIMEOUT_MS.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ANTHROPIC_TIMEOUT_MS);
   let res: Response;
   try {
     res = await fetch(ANTHROPIC_API_URL, {
@@ -133,9 +156,15 @@ export async function callAnthropic(
         "anthropic-version": ANTHROPIC_VERSION,
       },
       body: JSON.stringify(buildRequestBody(model, system, userContent)),
+      signal: ctrl.signal,
     });
   } catch (e) {
+    if (isAbortError(e)) {
+      return { ok: false, text: "", stopReason: "timeout", usage: EMPTY_USAGE, error: `Anthropic API did not respond within ${ANTHROPIC_TIMEOUT_MS / 1000}s` };
+    }
     return { ok: false, text: "", stopReason: "network_error", usage: EMPTY_USAGE, error: `could not reach the Anthropic API: ${String(e)}` };
+  } finally {
+    clearTimeout(timer);
   }
 
   let body: AnthropicMessageResponse & { error?: { message?: string } };

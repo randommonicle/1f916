@@ -1,9 +1,13 @@
 // Tests for the maintainer runtime's Anthropic API wrapper: pure logic
-// only (extractText, buildRequestBody, estimateCostCents). callAnthropic
-// itself makes a real fetch() call and is not exercised here -- no network
-// in this suite, per the repo's own convention (see wallets.test.ts /
-// payouts.test.ts's header notes on what's accepted as manual-only
-// coverage at this project's scale).
+// only (extractText, buildRequestBody, estimateCostCents, isAbortError).
+// callAnthropic itself makes a real fetch() call and is not exercised
+// here -- no network in this suite, per the repo's own convention (see
+// wallets.test.ts / payouts.test.ts's header notes on what's accepted as
+// manual-only coverage at this project's scale). The L7 timeout's error-
+// classification logic (isAbortError) is pure and IS covered directly;
+// the full wiring (a real hung request actually getting aborted after
+// ANTHROPIC_TIMEOUT_MS) was verified manually against a local server that
+// never responds -- see the review-fixes checkpoint log entry for L7.
 //
 // Run: npm test
 
@@ -15,6 +19,7 @@ import {
   estimateCostCents,
   extractText,
   buildRequestBody,
+  isAbortError,
   type AnthropicContentBlock,
 } from "../src/maintainer/anthropic.ts";
 
@@ -122,4 +127,32 @@ test("estimateCostCents on a tiny idle-adjacent wake is a small positive fractio
 
 test("estimateCostCents(0, 0) is exactly zero", () => {
   assert.equal(estimateCostCents("claude-fable-5", 0, 0), 0);
+});
+
+// ---------- isAbortError: distinguishing a timeout from any other fetch failure (L7) ----------
+
+test("isAbortError recognises a real DOMException named AbortError -- what fetch actually throws on abort", () => {
+  // The exact shape a real aborted fetch() rejects with, in both browsers
+  // and workerd (Cloudflare's runtime): a DOMException whose .name is
+  // "AbortError". Constructed directly here (no real fetch, no network)
+  // since DOMException is a standard global.
+  assert.ok(isAbortError(new DOMException("The operation was aborted", "AbortError")));
+});
+
+test("isAbortError also recognises a plain Error with .name set to AbortError (defensive, not just DOMException)", () => {
+  const e = new Error("aborted");
+  e.name = "AbortError";
+  assert.ok(isAbortError(e));
+});
+
+test("isAbortError returns false for an ordinary network error, so it is never mistaken for a timeout", () => {
+  assert.equal(isAbortError(new TypeError("fetch failed")), false);
+  assert.equal(isAbortError(new Error("some other failure")), false);
+});
+
+test("isAbortError returns false for a non-Error value, never throws", () => {
+  assert.equal(isAbortError("not an error"), false);
+  assert.equal(isAbortError(null), false);
+  assert.equal(isAbortError(undefined), false);
+  assert.equal(isAbortError({ name: "AbortError" }), false); // not an Error instance
 });
