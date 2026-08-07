@@ -275,25 +275,42 @@ interface RawCandidate {
   created_at: number;
 }
 
+// Pure. Mirrors judgment.ts's shapeTargetContent for the same reason --
+// the clerk should not spend a queue item re-litigating something a
+// human (or the community flag-threshold) already acted on since the
+// flag was raised. L1, review fix: previously this always showed the raw
+// content regardless of mod_state, so a flag arriving on content already
+// collapsed/removed re-surfaced it to the clerk as if nothing had happened.
+export function shapeFlagTargetText(row: { title?: string | null; body: string | null; mod_state: string | null } | null, targetType: "post" | "comment"): string {
+  if (!row) return "(no longer exists -- already removed or collapsed)";
+  if (row.mod_state != null) return `(content already moderated: ${row.mod_state})`;
+  const raw = targetType === "post" ? `${row.title ?? ""}\n${row.body ?? ""}` : (row.body ?? "");
+  return truncateBody(raw, 1000);
+}
+
 async function fetchFlagTargetText(env: Env, targetType: string, targetId: number): Promise<string> {
   if (targetType === "post") {
-    const row = await env.DB.prepare("SELECT title, body FROM posts WHERE id = ?").bind(targetId).first<{ title: string; body: string | null }>();
-    return row ? truncateBody(`${row.title}\n${row.body ?? ""}`, 1000) : "(no longer exists -- already removed or collapsed)";
+    const row = await env.DB.prepare("SELECT title, body, mod_state FROM posts WHERE id = ?").bind(targetId).first<{ title: string; body: string | null; mod_state: string | null }>();
+    return shapeFlagTargetText(row, "post");
   }
-  const row = await env.DB.prepare("SELECT body FROM comments WHERE id = ?").bind(targetId).first<{ body: string }>();
-  return row ? truncateBody(row.body, 1000) : "(no longer exists -- already removed or collapsed)";
+  const row = await env.DB.prepare("SELECT body, mod_state FROM comments WHERE id = ?").bind(targetId).first<{ body: string; mod_state: string | null }>();
+  return shapeFlagTargetText(row, "comment");
 }
 
 // D1-touching. Reads posts/comments/flags/citizens created after `cursor`,
 // each stream capped defensively before the combined merge, then merged
 // oldest-first and sliced to CLERK_INPUT_CAP overall -- "max 50 items per
-// wake" is a combined cap, not 50 per stream.
+// wake" is a combined cap, not 50 per stream. L1, review fix: posts and
+// comments now also require mod_state IS NULL -- content already
+// moderated (auto-collapsed at the community flag threshold, or acted on
+// by the judge) between its creation and this wake is not "new to
+// review" any more, so it no longer costs a queue item.
 async function fetchClerkCandidates(env: Env, cursor: number): Promise<(RawCandidate & { text: string })[]> {
   const [posts, comments, flagRows, citizens] = await Promise.all([
-    env.DB.prepare("SELECT id, title, body, created_at, citizen_id FROM posts WHERE created_at > ? ORDER BY created_at ASC LIMIT ?")
+    env.DB.prepare("SELECT id, title, body, created_at, citizen_id FROM posts WHERE created_at > ? AND mod_state IS NULL ORDER BY created_at ASC LIMIT ?")
       .bind(cursor, CLERK_INPUT_CAP)
       .all<{ id: number; title: string; body: string | null; created_at: number; citizen_id: number }>(),
-    env.DB.prepare("SELECT id, post_id, body, created_at, citizen_id FROM comments WHERE created_at > ? ORDER BY created_at ASC LIMIT ?")
+    env.DB.prepare("SELECT id, post_id, body, created_at, citizen_id FROM comments WHERE created_at > ? AND mod_state IS NULL ORDER BY created_at ASC LIMIT ?")
       .bind(cursor, CLERK_INPUT_CAP)
       .all<{ id: number; post_id: number; body: string; created_at: number; citizen_id: number }>(),
     env.DB.prepare("SELECT citizen_id, target_type, target_id, reason, created_at FROM flags WHERE created_at > ? ORDER BY created_at ASC LIMIT ?")

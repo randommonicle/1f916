@@ -19,6 +19,7 @@ import {
   shouldAdvanceClerkCursor,
   computeDrift,
   shouldSkipIdleClerkWake,
+  shapeFlagTargetText,
   buildClerkPrompt,
 } from "../src/maintainer/clerk.ts";
 
@@ -146,6 +147,27 @@ test("parseClerkItems: both forbidden proposal notes are dropped whatever the ki
     assert.equal(accepted.length, 0, `kind "${kind}" should drop every forbidden proposal note`);
     assert.equal(overflowDropped, FORBIDDEN_PROPOSAL_NOTES.length);
   }
+});
+
+// ---------- shapeFlagTargetText: don't re-surface already-moderated content (L1) ----------
+
+test("shapeFlagTargetText returns the raw content, truncated, when mod_state is NULL (still visible)", () => {
+  const text = shapeFlagTargetText({ title: "Cheap watches", body: "Click here to buy", mod_state: null }, "post");
+  assert.equal(text, "Cheap watches\nClick here to buy");
+});
+
+test("shapeFlagTargetText returns an explicit already-moderated notice, not the content, when mod_state is set", () => {
+  const text = shapeFlagTargetText({ title: "Cheap watches", body: "Click here to buy", mod_state: "collapsed" }, "post");
+  assert.equal(text, "(content already moderated: collapsed)");
+});
+
+test("shapeFlagTargetText works the same for a comment (body only, no title)", () => {
+  assert.equal(shapeFlagTargetText({ body: "this is spam", mod_state: null }, "comment"), "this is spam");
+  assert.equal(shapeFlagTargetText({ body: "this is spam", mod_state: "removed" }, "comment"), "(content already moderated: removed)");
+});
+
+test("shapeFlagTargetText returns the no-longer-exists sentinel when the row is gone, distinct from already-moderated", () => {
+  assert.equal(shapeFlagTargetText(null, "post"), "(no longer exists -- already removed or collapsed)");
 });
 
 // ---------- parseClerkItems: the allowlist, every S10 exclusion ----------
