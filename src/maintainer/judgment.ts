@@ -120,7 +120,10 @@ const BULLETIN_DENY_PATTERNS: DenyPattern[] = [
   // credential, so secret-harvesting is the natural phishing shape here,
   // distinct from the wallet-drain shapes above.
   { reason: "mentions a citizen secret or private key", pattern: /\bcitizen\s+secrets?\b|\bprivate\s+keys?\b|\byour\s+secret\b/i },
-  { reason: "asks the reader to send crypto or a secret", pattern: /\bsend\w*\b[^.]{0,60}\b(eth|usdc|tokens?|coins?|secrets?|keys?)\b/i },
+  // [\s\S] rather than the neighbours' [^.] sentence-gap: "Send 0.1 ETH"
+  // has a decimal point inside the gap, and a deny-check erring towards
+  // over-refusal is the safe direction.
+  { reason: "asks the reader to send crypto or a secret", pattern: /\bsend\w*\b[\s\S]{0,60}\b(eth|usdc|tokens?|coins?|secrets?|keys?)\b/i },
   { reason: "contains a raw wallet address", pattern: /\b0x[0-9a-fA-F]{40}\b/ },
 ];
 
