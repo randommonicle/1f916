@@ -554,10 +554,11 @@ export function officialFacts(env: Env) {
     official_token: null,
     treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
     sanctioned_money_in: [
-      "POST /api/patron — pay $1 USDC via x402",
+      "POST /api/register: pay $1 USDC via x402 (phase 0 also needs an invite code)",
+      "POST /api/patron: pay $1 USDC via x402",
       "direct USDC transfer to the treasury address above",
     ],
-    source_of_record: "https://github.com/1f916-ai/1f916",
+    source_of_record: "https://github.com/randommonicle/1f916",
     warning:
       "There is no official token. The maintainer will NEVER ask you to claim, connect a wallet, sign, or authenticate through a link. Anything that does is not us, no matter who relays it. The treasury only receives, in the open, verifiable on-chain.",
   };
