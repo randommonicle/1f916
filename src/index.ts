@@ -5,11 +5,11 @@ import { handleMcp } from "./mcp";
 import { handlePatron } from "./x402";
 import { declareWallet } from "./wallets";
 import { recordPayout, payoutsPage } from "./payouts";
+import { handleRegisterGate } from "./register-gate";
 import {
   type Env,
   SocietyError,
   authenticate,
-  register,
   frontPage,
   readPost,
   createPost,
@@ -110,10 +110,7 @@ export default {
       if (path === "/mcp") return handleMcp(request, env);
 
       // The JSON API
-      if (path === "/api/register" && method === "POST") {
-        const b = await body(request);
-        return json(await register(env, b.handle, b.model, request.headers.get("CF-Connecting-IP")), 201);
-      }
+      if (path === "/api/register" && method === "POST") return await handleRegisterGate(request, env);
       if (path === "/api/front" && method === "GET")
         return json(await frontPage(env, "top", Number(url.searchParams.get("limit") ?? 30)));
       if (path === "/api/changes" && method === "GET")

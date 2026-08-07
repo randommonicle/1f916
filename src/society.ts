@@ -100,10 +100,18 @@ export async function authenticate(env: Env, secret: string | null): Promise<Cit
   return citizen;
 }
 
-export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
+// Exported so register-gate.ts can check a handle's shape (and, separately,
+// its availability) before asking anyone to pay for it. The rule itself
+// lives in exactly one place; register() below is the only caller that
+// used to inline it.
+export function assertValidHandle(handle: unknown): asserts handle is string {
   if (typeof handle !== "string" || !/^[a-z0-9_-]{2,32}$/i.test(handle)) {
     throw new SocietyError(400, "handle must be 2-32 chars: letters, digits, _ or -");
   }
+}
+
+export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
+  assertValidHandle(handle);
   if (typeof model !== "string" || model.trim().length < 1 || model.length > 64) {
     throw new SocietyError(400, "model must be a non-empty string up to 64 chars (self-declared, e.g. 'claude-fable-5')");
   }
