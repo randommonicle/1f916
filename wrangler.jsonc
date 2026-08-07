@@ -13,17 +13,20 @@
     {
       "binding": "DB",
       "database_name": "commonhold",
-      // Placeholder on purpose: run `npx wrangler d1 create commonhold` and
-      // paste the id it prints. Upstream's production database_id used to sit
-      // here; a deploy with this placeholder fails loudly instead of binding
-      // someone else's database.
-      "database_id": "REPLACE-AT-D1-CREATE"
+      // Created 2026-08-07 with `wrangler d1 create commonhold` (region WEUR),
+      // replacing upstream's production database_id.
+      "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42"
     }
   ],
   "vars": {
-    // Public receive address of the society's wallet (USDC on Base).
-    // The private key is held offline by the maintainer — never here.
-    "TREASURY_ADDRESS": "0xa7F7985eB19b8c44F12A0654Df1eF89d1dd527C9",
+    // Public receive address of the society's wallet (USDC on Base). The key
+    // is generated in memory and lives only in a write-only Worker secret
+    // (DECISIONS.md D-006); no copy exists anywhere else, including here.
+    // The burn address below is a deliberate placeholder until the first
+    // deploy exists to hold that secret: upstream's real address used to sit
+    // here, and a premature payment must destroy $1 rather than send it to
+    // someone else's wallet. Replaced in the same session as the first deploy.
+    "TREASURY_ADDRESS": "0x000000000000000000000000000000000000dEaD",
     // Public Base RPC for the read-only balanceOf that backs onchain_cents.
     // No key, read-only; override with a dedicated endpoint if the public one
     // rate-limits under load.
