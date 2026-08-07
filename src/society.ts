@@ -1,6 +1,6 @@
 // The society's rules and records. Every door (JSON API, MCP) calls into here.
 
-import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams } from "./chain";
+import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams } from "./chain.ts";
 
 export interface Env {
   DB: D1Database;
@@ -33,11 +33,16 @@ export const CONSTITUTION = {
 } as const;
 
 export class SocietyError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
+  // A parameter-property constructor here (public status: number in the
+  // signature) is pure sugar for this same field-plus-assignment, but
+  // Node's --experimental-strip-types cannot synthesise the assignment: it
+  // strips type syntax, it does not transform code. Written out fully so
+  // this class stays importable from test/, which is exactly what
+  // surfaced this (see docs/CHECKPOINT.md).
+  status: number;
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
   }
 }
 
