@@ -10,15 +10,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JUDGMENT_QUEUE_CAP,
+  JUDGMENT_SYSTEM_PROMPT,
   splitBulletinDraft,
   parseJudgmentDecisions,
   capQueueBatch,
   buildJudgmentPrompt,
+  shapeTargetContent,
   type QueueRow,
 } from "../src/maintainer/judgment.ts";
 
 function row(over: Partial<QueueRow> & { id: number }): QueueRow {
-  return { kind: "bookkeeping_note", target_type: null, target_id: null, source_ref: null, note: "a note", ...over };
+  return {
+    kind: "bookkeeping_note",
+    target_type: null,
+    target_id: null,
+    source_ref: null,
+    note: "a note",
+    target_content: null,
+    target_mod_state: null,
+    ...over,
+  };
 }
 
 // ---------- splitBulletinDraft ----------
@@ -167,18 +178,86 @@ test("parseJudgmentDecisions on an empty array leaves everything pending -- a sa
 
 // ---------- buildJudgmentPrompt ----------
 
-test("buildJudgmentPrompt includes every item's id, kind, and note", () => {
-  const items = [row({ id: 1, kind: "bookkeeping_note", note: "drift observed" }), row({ id: 2, kind: "flag_review", target_type: "post", target_id: 9, note: "spam candidate" })];
+// H1: this test used to pin the gap the review found -- it asserted only
+// ids/kinds/notes, with no way to tell from the prompt whether the judge
+// could see the flagged content itself. Updated, not deleted: it now also
+// asserts the target's own current content reaches the prompt, alongside
+// the clerk's note about it.
+test("buildJudgmentPrompt includes every item's id, kind, note, and the flagged target's own current content", () => {
+  const items = [
+    row({ id: 1, kind: "bookkeeping_note", note: "drift observed" }),
+    row({
+      id: 2,
+      kind: "flag_review",
+      target_type: "post",
+      target_id: 9,
+      note: "spam candidate",
+      target_content: "Buy cheap watches now, click here",
+      target_mod_state: null,
+    }),
+  ];
   const prompt = buildJudgmentPrompt(items);
   assert.match(prompt, /id="1"/);
   assert.match(prompt, /id="2"/);
   assert.match(prompt, /drift observed/);
   assert.match(prompt, /spam candidate/);
   assert.match(prompt, /kind="flag_review"/);
+  assert.match(prompt, /<target_content[^>]*>[\s\S]*Buy cheap watches now, click here[\s\S]*<\/target_content>/);
 });
 
 test("buildJudgmentPrompt renders a null target/source as an explicit 'none', not blank", () => {
   const prompt = buildJudgmentPrompt([row({ id: 1 })]);
   assert.match(prompt, /target_type="none"/);
   assert.match(prompt, /source="none"/);
+});
+
+test("buildJudgmentPrompt carries the target's mod_state as an attribute on target_content", () => {
+  const prompt = buildJudgmentPrompt([row({ id: 1, kind: "flag_review", target_content: "some flagged text", target_mod_state: "collapsed" })]);
+  assert.match(prompt, /<target_content mod_state="collapsed">/);
+});
+
+test("buildJudgmentPrompt renders a null mod_state on present target_content as 'visible', not the literal word null", () => {
+  const prompt = buildJudgmentPrompt([row({ id: 1, kind: "flag_review", target_content: "some flagged text", target_mod_state: null })]);
+  assert.match(prompt, /<target_content mod_state="visible">/);
+});
+
+test("buildJudgmentPrompt omits the target_content block entirely when it does not apply (not a flag_review on a post/comment)", () => {
+  const prompt = buildJudgmentPrompt([row({ id: 1, kind: "bookkeeping_note", note: "drift observed", target_content: null })]);
+  assert.doesNotMatch(prompt, /<target_content/);
+});
+
+test("buildJudgmentPrompt renders the '(target no longer exists)' sentinel like any other target_content, not specially", () => {
+  const prompt = buildJudgmentPrompt([row({ id: 1, kind: "flag_review", target_content: "(target no longer exists)", target_mod_state: null })]);
+  assert.match(prompt, /<target_content mod_state="visible">\n\(target no longer exists\)\n<\/target_content>/);
+});
+
+test("JUDGMENT_SYSTEM_PROMPT tells the judge to decide against the target artefact, not the clerk's description of it", () => {
+  assert.match(JUDGMENT_SYSTEM_PROMPT, /target_content/);
+  assert.match(JUDGMENT_SYSTEM_PROMPT, /current content/i);
+});
+
+// ---------- shapeTargetContent: the pure logic behind fetchPendingQueue's H1 fetch ----------
+
+test("shapeTargetContent returns a post's title+body, truncated at 1000 chars, plus its mod_state", () => {
+  const { content, modState } = shapeTargetContent("post", { title: "Cheap watches", body: "Click here to buy", mod_state: null });
+  assert.equal(content, "Cheap watches\nClick here to buy");
+  assert.equal(modState, null);
+});
+
+test("shapeTargetContent returns a comment's body plus its mod_state, no title concatenation", () => {
+  const { content, modState } = shapeTargetContent("comment", { body: "this is spam", mod_state: "collapsed" });
+  assert.equal(content, "this is spam");
+  assert.equal(modState, "collapsed");
+});
+
+test("shapeTargetContent truncates long content at 1000 chars with the standard marker", () => {
+  const { content } = shapeTargetContent("comment", { body: "x".repeat(1500), mod_state: null });
+  assert.ok(content.endsWith(" [truncated]"));
+  assert.equal(content.length, 1000 + " [truncated]".length);
+});
+
+test("shapeTargetContent renders an explicit sentinel, never a blank or invented content, when the row is gone", () => {
+  const { content, modState } = shapeTargetContent("post", null);
+  assert.equal(content, "(target no longer exists)");
+  assert.equal(modState, null);
 });
