@@ -157,6 +157,12 @@ export function insertIdentityEvent(d1: LocalD1, citizenId: number, kind: string
 // scenarios (docs/REVIEW-DEMOCRACY.md H2/M6) to differ from the row's
 // own defaults -- overriding here mirrors what createProposal would
 // have written at open, not a fixture-only shortcut.
+//
+// post_id defaults to a freshly-created, linked, minimal debate post,
+// so a fixture proposal is ballotable by default -- castBallot refuses
+// any proposal whose post_id IS NULL (docs/REVIEW-DEMOCRACY.md M1).
+// Pass `post_id: null` explicitly for the tests that exist specifically
+// to exercise that refusal.
 export function insertProposal(
   d1: LocalD1,
   overrides: Partial<{
@@ -169,13 +175,25 @@ export function insertProposal(
     closes_at: number;
     registration_mode: string;
     founding_ratified: boolean;
+    post_id: number | null;
   }> = {},
 ): number {
   const now = Date.now();
   const proposerId = overrides.proposer_id ?? insertCitizen(d1);
+
+  let postId: number | null;
+  if (overrides.post_id === undefined) {
+    const postResult = d1.raw
+      .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)")
+      .run(proposerId, `Proposal: ${overrides.title ?? "test proposal"}`, overrides.body ?? "test body", `dupe-${Math.random().toString(36).slice(2)}`, "test-model", now);
+    postId = Number(postResult.lastInsertRowid);
+  } else {
+    postId = overrides.post_id;
+  }
+
   const result = d1.raw
     .prepare(
-      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, status, registration_mode, founding_ratified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, status, registration_mode, founding_ratified, post_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .run(
       overrides.kind ?? "resolution",
@@ -187,6 +205,7 @@ export function insertProposal(
       overrides.status ?? "open",
       overrides.registration_mode ?? "invite_only",
       overrides.founding_ratified === true ? 1 : 0,
+      postId,
       now,
     );
   return Number(result.lastInsertRowid);

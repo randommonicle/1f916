@@ -514,8 +514,33 @@ export async function createProposal(
     // already frames NULL as "briefly", not permanently, possible.
     // Compensating delete: proposals is not chained (commit 1), so
     // removing a row nothing has linked a ballot to or acted on yet is
-    // clean, not a rewrite of history.
-    await env.DB.prepare("DELETE FROM proposals WHERE id = ?").bind(proposalId).run();
+    // clean, not a rewrite of history. Safe against a ballot landing in
+    // this exact window (docs/REVIEW-DEMOCRACY.md M1, reproduced under
+    // FK enforcement as a raw "FOREIGN KEY constraint failed" that
+    // replaced this citizen's honest refusal): castBallot below now
+    // refuses any proposal whose post_id is still NULL, so no ballot can
+    // ever come to reference this row while it is deletable.
+    try {
+      await env.DB.prepare("DELETE FROM proposals WHERE id = ?").bind(proposalId).run();
+    } catch (deleteError) {
+      // If the delete itself throws anyway (defence in depth -- some
+      // other reason, not the ballot window this commit closes), the
+      // ORIGINAL createPost error is what the caller must see, never
+      // the delete's: a citizen's honest "daily post spent" refusal
+      // must not be replaced by a raw constraint error the delete
+      // happened to hit. Logged loudly since a proposal row can now be
+      // left behind with post_id NULL, which the maintainer should know
+      // about even though no citizen-facing surface can act on it.
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "proposal_compensating_delete_failed",
+          proposal_id: proposalId,
+          delete_error: String(deleteError),
+          original_error: String(e),
+        }),
+      );
+    }
     throw e;
   }
 
@@ -542,7 +567,7 @@ export async function castBallot(
   const choice = choiceInput;
 
   const proposal = await env.DB.prepare(
-    "SELECT id, kind, status, opened_at, closes_at, registration_mode, founding_ratified FROM proposals WHERE id = ?",
+    "SELECT id, kind, status, opened_at, closes_at, post_id, registration_mode, founding_ratified FROM proposals WHERE id = ?",
   )
     .bind(proposalId)
     .first<{
@@ -551,10 +576,23 @@ export async function castBallot(
       status: string;
       opened_at: number;
       closes_at: number;
+      post_id: number | null;
       registration_mode: string;
       founding_ratified: number;
     }>();
   if (!proposal) throw new SocietyError(404, `proposal ${proposalId} does not exist`);
+
+  // docs/REVIEW-DEMOCRACY.md M1: the debate post is the one deliberation
+  // chamber (design doc §5 point 2), and `post_id` starts NULL for the
+  // brief span between the proposal row's insert and createProposal's
+  // own post-creation step landing. Refusing here closes the window a
+  // ballot could otherwise land in during that span (or, in the
+  // pathological case, on a row `createProposal`'s compensating delete
+  // failed to remove): a proposal with no debate post is never
+  // ballotable, full stop, regardless of status or timing.
+  if (proposal.post_id == null) {
+    throw new SocietyError(409, "not yet open for balloting: the debate post is still being created");
+  }
 
   const now = Date.now();
   if (proposal.status !== "open" || now >= proposal.closes_at) {

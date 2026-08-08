@@ -300,6 +300,118 @@ test("createProposal: if the debate post fails to create (daily post cap already
   }
 });
 
+// ---------- M1: the ballot-in-the-window attack (docs/REVIEW-DEMOCRACY.md) ----------
+
+test("castBallot: M1 reproduction -- a proposal whose debate post has not landed yet (post_id IS NULL) refuses every ballot with 409, leaving zero ballot rows", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const voter = insertCitizen(d1);
+    const now = Date.now();
+    // Exactly the window the review's own reproduction landed a ballot
+    // in: a proposal row that exists and is 'open', but has no debate
+    // post -- reachable during createProposal's own brief gap before
+    // this fix (an attacker polling GET /api/proposals for the
+    // just-inserted id), or left behind by any other failure this
+    // commit's compensating-delete hardening did not anticipate.
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, post_id: null });
+
+    const env = testEnv(d1);
+    await assert.rejects(
+      () => castBallot(env, { id: voter, created_at: now }, proposalId, "yes"),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /debate post is still being created/.test(e.message),
+    );
+
+    const ballotCount = await d1.DB.prepare("SELECT COUNT(*) AS n FROM ballots WHERE proposal_id = ?").bind(proposalId).first<{ n: number }>();
+    assert.equal(ballotCount!.n, 0, "the attack this closes is a ballot landing on a postless proposal -- zero rows, not just a refused response");
+  } finally {
+    d1.close();
+  }
+});
+
+test("castBallot: a proposal with a real linked debate post (the ordinary case) is unaffected by the post_id gate", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const voter = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer }); // post_id auto-created by the fixture
+    const env = testEnv(d1);
+    const result = await castBallot(env, { id: voter, created_at: now }, proposalId, "yes");
+    assert.equal(result.choice, "yes");
+  } finally {
+    d1.close();
+  }
+});
+
+// Minimal wrapper matching withFailingBatch's own shape (above), but for
+// a specific statement text rather than .batch() -- used only to prove
+// docs/REVIEW-DEMOCRACY.md M1's second fix (the compensating delete's
+// own failure must never mask the original createPost error). No real
+// data-driven path can trigger the delete's failure any more (the
+// ballot-FK route this originally reproduced through is closed by the
+// gate above), so this is deliberately a forced, not a discovered,
+// failure -- proving the defence-in-depth behaves correctly even though
+// nothing in this codebase today can reach it honestly.
+function withFailingDelete(DB: LocalD1["DB"]): LocalD1["DB"] {
+  return {
+    prepare: (sql: string) => {
+      const real = DB.prepare(sql);
+      if (!/^\s*DELETE FROM proposals/i.test(sql)) return real;
+      return {
+        ...real,
+        bind: (...args: unknown[]) => {
+          const boundReal = real.bind(...args);
+          return {
+            ...boundReal,
+            async run() {
+              throw new Error("simulated: delete blocked by something else entirely");
+            },
+          };
+        },
+      };
+    },
+    batch: (stmts) => DB.batch(stmts),
+  };
+}
+
+test("createProposal: M1's second fix -- if the compensating delete itself throws, the ORIGINAL createPost error is what the caller sees, never the delete's, and the failure is logged loudly", async () => {
+  const d1 = createLocalD1();
+  const originalConsoleLog = console.log;
+  const logged: string[] = [];
+  console.log = (msg: string) => logged.push(msg);
+  try {
+    const citizenId = insertCitizen(d1, { handle: "capped-citizen-2" });
+    const citizen = { id: citizenId, handle: "capped-citizen-2", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
+    const now = Date.now();
+    d1.raw
+      .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)")
+      .run(citizenId, "an ordinary post spent today", "nothing to do with governance", "unrelated-dupe-hash-2", "test-model", now);
+
+    const env = { ...testEnv(d1), DB: withFailingDelete(d1.DB) };
+
+    await assert.rejects(
+      () => createProposal(env, citizen, "resolution", "Should not survive either", "This proposal's post creation must fail, and so must its own cleanup.", null),
+      (e: unknown) => {
+        // The ORIGINAL error (createPost's daily-cap refusal), not the
+        // delete's "simulated: delete blocked by something else
+        // entirely" -- that string must never reach the caller.
+        assert.ok(e instanceof SocietyError);
+        assert.match((e as SocietyError).message, /Daily post spent/);
+        return true;
+      },
+    );
+
+    assert.ok(
+      logged.some((l) => l.includes("proposal_compensating_delete_failed") && l.includes("simulated: delete blocked")),
+      "the delete's own failure must still be logged loudly, even though it is not what the caller sees",
+    );
+  } finally {
+    console.log = originalConsoleLog;
+    d1.close();
+  }
+});
+
 // ---------- runGovernanceSweep ----------
 
 function castYes(d1: ReturnType<typeof createLocalD1>, proposalId: number, citizenId: number, castAt: number) {
