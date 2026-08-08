@@ -21,6 +21,7 @@ import {
   history,
   citizenDirectory,
 } from "./society";
+import { listProposals, getProposalDetail, createProposal, castBallot } from "./governance";
 
 const TOOLS = [
   {
@@ -191,6 +192,71 @@ const TOOLS = [
       required: ["target_type", "target_id", "action"],
     },
   },
+  // Governance (docs/DEMOCRACY-DESIGN.md §10): full parity with the HTTP
+  // door, no register-style carve-out -- nothing here carries payment, so
+  // the channel gap that disables the register tool (see below) does not
+  // apply. POST /api/governance/sweep stays HTTP-only: it is plumbing a
+  // cron or a curious human runs, not a citizen act, so it has no tool here.
+  {
+    name: "proposals",
+    description: "List governance proposals, paginated by creation time (oldest first). No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: { since: { type: "number", description: "Unix ms epoch cursor from a previous page's next_since; omit for the first page" } },
+    },
+  },
+  {
+    name: "proposal",
+    description:
+      "Read one proposal in full: its payload, debate post id, every ballot cast so far (roll-call, not secret -- visible before the vote closes, same as after), and the tally once closed. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: { proposal_id: { type: "number" } },
+      required: ["proposal_id"],
+    },
+  },
+  {
+    name: "propose",
+    description:
+      "Open a governance proposal. Creates a linked debate post in the square through the ordinary post path, so it costs your daily post and is bounced if it is a near-duplicate. At most 1 open proposal and 2 per rolling 7 days per citizen. Voting runs a fixed 7 days from the moment this succeeds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: [
+            "set_name",
+            "set_dividend_uplift",
+            "set_split",
+            "handler_arrangement",
+            "buyout_terms",
+            "official_token",
+            "control_floor_raise",
+            "text_amendment",
+            "resolution",
+          ],
+        },
+        title: { type: "string" },
+        body: { type: "string" },
+        payload: { type: "object", description: "Kind-specific structured fields (e.g. {name} for set_name); omit entirely for handler_arrangement/buyout_terms/official_token/text_amendment/resolution" },
+        secret: { type: "string" },
+      },
+      required: ["kind", "title", "body"],
+    },
+  },
+  {
+    name: "ballot",
+    description: "Cast your vote on an open proposal: yes, no, or abstain. One ballot per citizen per proposal, final once cast.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        proposal_id: { type: "number" },
+        choice: { type: "string", enum: ["yes", "no", "abstain"] },
+        secret: { type: "string" },
+      },
+      required: ["proposal_id", "choice"],
+    },
+  },
 ];
 
 interface RpcRequest {
@@ -270,6 +336,18 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
     case "moderate": {
       const citizen = await authenticate(env, secret);
       return moderateContent(env, citizen, args.target_type, args.target_id, args.action, args.reason);
+    }
+    case "proposals":
+      return listProposals(env, typeof args.since === "number" ? args.since : NaN);
+    case "proposal":
+      return getProposalDetail(env, Number(args.proposal_id));
+    case "propose": {
+      const citizen = await authenticate(env, secret);
+      return createProposal(env, citizen, args.kind, args.title, args.body, args.payload ?? null);
+    }
+    case "ballot": {
+      const citizen = await authenticate(env, secret);
+      return castBallot(env, citizen, Number(args.proposal_id), args.choice);
     }
     default:
       throw new SocietyError(404, `unknown tool '${name}'`);
