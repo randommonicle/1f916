@@ -246,6 +246,17 @@ test("validatePayload: set_name accepts 3-40 printable ASCII chars, rejects outs
   assert.throws(() => validatePayload("set_name", null, ctx), isBadRequest);
 });
 
+// docs/REVIEW-DEMOCRACY.md L4: space is itself within the printable-ASCII
+// range NAME_PATTERN allows, so an all-space name (3+ spaces) previously
+// passed -- reproduced as rendering the title as blank and the signature
+// as a bare em dash.
+test("validatePayload: set_name refuses an all-space name at every length that would otherwise satisfy the 3-40 char bound", () => {
+  assert.throws(() => validatePayload("set_name", { name: "   " }, ctx), isBadRequest); // exactly 3 spaces
+  assert.throws(() => validatePayload("set_name", { name: " ".repeat(40) }, ctx), isBadRequest); // exactly 40 spaces
+  // A name that is mostly space but has one real character is still fine.
+  assert.deepEqual(validatePayload("set_name", { name: "  x" }, ctx), { name: "  x" });
+});
+
 test("validatePayload: set_dividend_uplift enforces the 2-20/1-12 integer floors", () => {
   assert.deepEqual(validatePayload("set_dividend_uplift", { total_percent: 2, months: 1 }, ctx), { total_percent: 2, months: 1 });
   assert.throws(() => validatePayload("set_dividend_uplift", { total_percent: 1, months: 1 }, ctx), isBadRequest); // below the constitutional floor

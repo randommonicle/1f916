@@ -169,7 +169,12 @@ export interface PayloadContext {
   currentControlFloorPercent: number;
 }
 
-const NAME_PATTERN = /^[\x20-\x7E]{3,40}$/; // printable ASCII plus space, 3-40 chars
+// printable ASCII plus space, 3-40 chars, at least one non-space
+// character (docs/REVIEW-DEMOCRACY.md L4: space is itself in the
+// printable-ASCII range, so without the lookahead "   " -- three spaces
+// -- passed this pattern, rendering as a blank title and a bare "—"
+// signature).
+const NAME_PATTERN = /^(?=.*\S)[\x20-\x7E]{3,40}$/;
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);

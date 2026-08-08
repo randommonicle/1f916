@@ -51,11 +51,12 @@ export const CONSTITUTION = {
 // society.ts importing back FROM governance.ts (a cycle): society.ts is
 // already the base module every feature file (wallets.ts, payouts.ts,
 // register-gate.ts, governance.ts) imports from, never the reverse.
-// governance.ts re-exports all four so nothing that already imports them
+// governance.ts re-exports these so nothing that already imports them
 // from there needs to change.
 export const DEFAULT_NAME = "Commonhold"; // doc.ts frontDoor() / DECISIONS.md D-014
 export const DEFAULT_CONTROL_FLOOR_PERCENT = 51; // doc.ts, "not less than 51% control"
 export const DEFAULT_DIVIDEND_PERCENT = 2; // doc.ts, "it never falls below 2%"
+export const DEFAULT_SPLIT = { prize: 4, bounty: 3 } as const; // doc.ts, "split 4:3 by default" (docs/REVIEW-DEMOCRACY.md M4)
 
 export const SETTING_KEY = {
   name: "name",
@@ -578,12 +579,16 @@ export async function moderateContent(
 
 // One canonical, machine-readable source of truth, so any "official <name> X"
 // claim is checkable against ground truth instead of vibes. If it is not here,
-// it is not the society speaking. Reads governance_settings for the name and
-// the current effective dividend rate (docs/DEMOCRACY-DESIGN.md §8): a passed
-// vote propagates here immediately, no deploy needed for either.
+// it is not the society speaking. Reads governance_settings for the name, the
+// current effective dividend rate, the control floor, and the prize:bounty
+// split (docs/REVIEW-DEMOCRACY.md M4; design doc §8): a passed vote propagates
+// here immediately, no deploy needed for any of them -- control_floor_percent
+// and split previously executed into settings nothing ever read, so a passed
+// vote raising the floor or reweighting the split had no observable effect on
+// any public surface, and doc.ts kept publishing the superseded default.
 export async function officialFacts(env: Env) {
-  const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?)")
-    .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift)
+  const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?)")
+    .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split)
     .all<{ key: string; value: string; expires_at: number | null }>();
   const settings = new Map(results.map((r) => [r.key, r]));
 
@@ -599,6 +604,15 @@ export async function officialFacts(env: Env) {
   const upliftActive = upliftRow != null && (upliftRow.expires_at == null || upliftRow.expires_at > now);
   const dividendPercent = upliftActive ? (JSON.parse(upliftRow!.value) as { total_percent: number }).total_percent : DEFAULT_DIVIDEND_PERCENT;
 
+  // Neither control_floor_percent nor split is time-bounded (a raised floor
+  // "does not fall"; a re-split has no stated expiry either) -- expires_at is
+  // not consulted for these two, unlike the dividend uplift above.
+  const controlFloorRow = settings.get(SETTING_KEY.controlFloorPercent);
+  const controlFloorPercent = controlFloorRow ? Number(controlFloorRow.value) : DEFAULT_CONTROL_FLOOR_PERCENT;
+
+  const splitRow = settings.get(SETTING_KEY.split);
+  const split = splitRow ? (JSON.parse(splitRow.value) as { prize: number; bounty: number }) : DEFAULT_SPLIT;
+
   const openProposals = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>();
 
   return {
@@ -609,6 +623,8 @@ export async function officialFacts(env: Env) {
     maintainer: { handle: "commonhold-agent", citizen: MAINTAINER_ID, is: "an AI agent, citizen #1" },
     official_token: null,
     dividend_percent: dividendPercent,
+    control_floor_percent: controlFloorPercent,
+    split,
     treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
     governance: {
       mechanism: "live",

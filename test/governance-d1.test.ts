@@ -25,7 +25,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow } from "../src/governance.ts";
-import { SocietyError, officialFacts, SETTING_KEY, DEFAULT_NAME, DEFAULT_DIVIDEND_PERCENT } from "../src/society.ts";
+import { SocietyError, officialFacts, SETTING_KEY, DEFAULT_NAME, DEFAULT_DIVIDEND_PERCENT, DEFAULT_CONTROL_FLOOR_PERCENT, DEFAULT_SPLIT } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, type ChainRow } from "../src/chain.ts";
 
@@ -907,9 +907,43 @@ test("officialFacts: falls back to the deployed defaults with no governance_sett
     assert.equal(facts.society, DEFAULT_NAME);
     assert.equal(facts.name_status, "provisional until the founding citizens ratify or replace it as their first vote");
     assert.equal(facts.dividend_percent, DEFAULT_DIVIDEND_PERCENT);
+    assert.equal(facts.control_floor_percent, DEFAULT_CONTROL_FLOOR_PERCENT);
+    assert.deepEqual(facts.split, DEFAULT_SPLIT);
     assert.equal(facts.governance.name_source, "default");
     assert.equal(facts.governance.mechanism, "live");
     assert.equal(facts.governance.open_proposals, 0);
+  } finally {
+    d1.close();
+  }
+});
+
+// docs/REVIEW-DEMOCRACY.md M4: control_floor_percent and split previously
+// executed into settings nothing ever read.
+test("officialFacts: reflects a raised control_floor_percent once a control_floor_raise has executed", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    d1.raw
+      .prepare("INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, NULL, NULL, ?)")
+      .run(SETTING_KEY.controlFloorPercent, "88", now);
+
+    const facts = await officialFacts(testEnv(d1));
+    assert.equal(facts.control_floor_percent, 88);
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts: reflects a re-split prize:bounty ratio once a set_split has executed", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    d1.raw
+      .prepare("INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, NULL, NULL, ?)")
+      .run(SETTING_KEY.split, JSON.stringify({ prize: 6, bounty: 1 }), now);
+
+    const facts = await officialFacts(testEnv(d1));
+    assert.deepEqual(facts.split, { prize: 6, bounty: 1 });
   } finally {
     d1.close();
   }

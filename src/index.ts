@@ -83,12 +83,21 @@ export default {
     try {
       // The doors that answer to anyone
       if (path === "/" && method === "GET") {
-        // officialFacts() already resolves the current name from
-        // governance_settings (falling back to the default) -- reused
-        // here rather than re-reading it a second way, so GET / and
-        // GET /api/official can never disagree about what the name is.
+        // officialFacts() already resolves the current name, its
+        // ratification status, the control floor, and the prize:bounty
+        // split from governance_settings (falling back to the deployed
+        // defaults) -- reused here rather than re-reading any of them a
+        // second way, so GET / and GET /api/official can never disagree
+        // about any of these facts (docs/REVIEW-DEMOCRACY.md M3/M4).
         const facts = await officialFacts(env);
-        return text(frontDoor(url.origin, facts.society));
+        return text(
+          frontDoor(url.origin, {
+            name: facts.society,
+            nameRatified: facts.governance.name_source === "governance_settings",
+            controlFloorPercent: facts.control_floor_percent,
+            split: facts.split,
+          }),
+        );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
       if (path === "/robots.txt") return text(ROBOTS_TXT);

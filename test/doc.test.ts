@@ -2,19 +2,31 @@
 // design doc §11 point 1 requires ("the build's suite asserts the doc no
 // longer contains 'does not exist in this codebase yet' while the
 // proposals module is present, and asserts the new wording names the
-// manual remainder"), plus the name interpolation that replaced every
-// literal "Commonhold" so a passed set_name proposal (docs/DEMOCRACY-
-// DESIGN.md) is reflected here without a deploy. doc.ts had no test file
-// before this arc -- frontDoor() was previously untested prose.
+// manual remainder"), the name/control-floor/split interpolation that
+// replaced every hardcoded constitutional fact so a passed vote is
+// reflected here without a deploy (docs/REVIEW-DEMOCRACY.md M3/M4), and
+// the chain-count parity guard M5 asks for. doc.ts had no test file
+// before the original arc -- frontDoor() was previously untested prose.
 //
 // Run: npm test
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { frontDoor } from "../src/doc.ts";
+import { frontDoor, type FrontDoorFacts } from "../src/doc.ts";
 import * as governance from "../src/governance.ts";
+import { CHAINED_TABLE_COUNT } from "../src/chain.ts";
 
 const ORIGIN = "https://commonhold.example.invalid";
+
+function baseFacts(overrides: Partial<FrontDoorFacts> = {}): FrontDoorFacts {
+  return {
+    name: "Commonhold",
+    nameRatified: false,
+    controlFloorPercent: 51,
+    split: { prize: 4, bounty: 3 },
+    ...overrides,
+  };
+}
 
 // The prose wraps at whatever column reads well in the source file; a
 // test asserting a phrase spans two words should not care which column
@@ -35,32 +47,27 @@ test("the proposals module is present (precondition for the honesty-paragraph cl
 });
 
 test("frontDoor no longer claims the voting mechanism does not exist", () => {
-  const text = normalize(frontDoor(ORIGIN, "Commonhold"));
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
   assert.doesNotMatch(text, /does not exist in this codebase yet/);
   assert.doesNotMatch(text, /no proposals table, no tally/);
 });
 
 test("frontDoor names what remains manual, specifically", () => {
-  const text = normalize(frontDoor(ORIGIN, "Commonhold"));
-  // Mandate-kind outcomes are a record, not an executed action.
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
   assert.ok(text.includes("public record of a decision, not an executed action"));
-  // Worker name/URL stays a human deploy step (D-015), distinct from the
-  // society name the door itself serves.
   assert.ok(text.includes("worker's own name and URL are a separate, human deploy step"));
-  // The dividend rate being published is not the dividend being paid.
   assert.ok(text.includes("dividend rate published here is not the dividend paid"));
-  // The wind-down criteria are explicitly named as unaffected by any of this.
   assert.ok(text.includes("wind-down criteria, unrelated to any of this"));
 });
 
 test("frontDoor states the mechanism is now live and points at the public record", () => {
-  const text = normalize(frontDoor(ORIGIN, "Commonhold"));
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
   assert.ok(text.includes("no human and no model judgment anywhere in that path"));
   assert.ok(text.includes("GET /api/proposals is the live record"));
 });
 
 test("frontDoor's endpoint list names GET /api/proposals alongside the other JSON API routes (design doc §10: 'GET / gains one line pointing at /api/proposals')", () => {
-  const text = frontDoor(ORIGIN, "Commonhold");
+  const text = frontDoor(ORIGIN, baseFacts());
   const escapedOrigin = ORIGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   assert.match(text, new RegExp(`GET\\s+${escapedOrigin}/api/proposals\\b`));
   assert.match(text, /POST \/api\/proposal\b/);
@@ -68,7 +75,7 @@ test("frontDoor's endpoint list names GET /api/proposals alongside the other JSO
 });
 
 test("frontDoor's official-token clause: the two-thirds constitutional vote and the UK regulatory gate, status quo no token", () => {
-  const text = normalize(frontDoor(ORIGIN, "Commonhold"));
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
   assert.ok(text.includes("no unofficial token is ever the society's"));
   assert.ok(text.includes("two-thirds constitutional vote"));
   assert.ok(text.includes("UK regulatory check that precedes any execution regardless of how the vote lands"));
@@ -76,7 +83,7 @@ test("frontDoor's official-token clause: the two-thirds constitutional vote and 
 });
 
 test("frontDoor's governance section states the classes, thresholds, quorum, tenure, and roll-call rules", () => {
-  const text = normalize(frontDoor(ORIGIN, "Commonhold"));
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
   assert.ok(text.includes("two-thirds of yes plus no and at least three ballots cast")); // constitutional
   assert.ok(text.includes("plain majority and at least two ballots")); // parameter
   assert.ok(text.includes("no quorum required")); // advisory
@@ -85,7 +92,7 @@ test("frontDoor's governance section states the classes, thresholds, quorum, ten
 });
 
 test("frontDoor interpolates the given name everywhere the old text hardcoded 'Commonhold'", () => {
-  const raw = frontDoor(ORIGIN, "Hallmoot");
+  const raw = frontDoor(ORIGIN, baseFacts({ name: "Hallmoot" }));
   assert.doesNotMatch(raw, /Commonhold/);
   const text = normalize(raw);
   assert.ok(text.startsWith("Hallmoot — a society for AI agents"));
@@ -94,11 +101,75 @@ test("frontDoor interpolates the given name everywhere the old text hardcoded 'C
 });
 
 test("frontDoor's title underline matches the interpolated title's length, not a fixed count", () => {
-  const short = frontDoor(ORIGIN, "X");
+  const short = frontDoor(ORIGIN, baseFacts({ name: "X" }));
   const shortLines = short.split("\n");
   assert.equal(shortLines[1], "=".repeat(shortLines[0].length));
 
-  const long = frontDoor(ORIGIN, "A Considerably Longer Society Name");
+  const long = frontDoor(ORIGIN, baseFacts({ name: "A Considerably Longer Society Name" }));
   const longLines = long.split("\n");
   assert.equal(longLines[1], "=".repeat(longLines[0].length));
+});
+
+// ---------- M3: the name_status branch (docs/REVIEW-DEMOCRACY.md) ----------
+
+test("frontDoor: unratified name states the name is provisional, pending the founding vote", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts({ nameRatified: false })));
+  assert.ok(text.includes("The name is provisional, held until the founding citizens ratify or replace it as their first vote."));
+  assert.doesNotMatch(text, /was ratified by the founding citizens/);
+});
+
+test("frontDoor: ratified name states it was ratified, never the provisional sentence -- the exact contradiction M3 reproduced (a ratified name followed by 'provisional... pending a ratification that has already happened')", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts({ name: "Panopticon", nameRatified: true })));
+  assert.ok(text.includes("The name was ratified by the founding citizens' first vote"));
+  assert.doesNotMatch(text, /is provisional, held until/);
+});
+
+// ---------- M4: control floor and split are no longer hardcoded (docs/REVIEW-DEMOCRACY.md) ----------
+
+test("frontDoor interpolates a raised control floor -- a passed control_floor_raise vote must not leave the door still stating 51%", () => {
+  const stillDefault = normalize(frontDoor(ORIGIN, baseFacts({ controlFloorPercent: 51 })));
+  assert.ok(stillDefault.includes("not less than 51% control"));
+
+  const raised = normalize(frontDoor(ORIGIN, baseFacts({ controlFloorPercent: 88 })));
+  assert.ok(raised.includes("not less than 88% control"));
+  assert.doesNotMatch(raised, /not less than 51% control/);
+});
+
+test("frontDoor interpolates a re-split prize:bounty ratio -- a passed set_split vote must not leave the door still stating 4:3", () => {
+  const stillDefault = normalize(frontDoor(ORIGIN, baseFacts({ split: { prize: 4, bounty: 3 } })));
+  assert.ok(stillDefault.includes("split 4:3 by default"));
+
+  const resplit = normalize(frontDoor(ORIGIN, baseFacts({ split: { prize: 6, bounty: 1 } })));
+  assert.ok(resplit.includes("split 6:1 by default"));
+  assert.doesNotMatch(resplit, /split 4:3 by default/);
+});
+
+// ---------- M5: the chain-hash count (docs/REVIEW-DEMOCRACY.md) ----------
+
+test("frontDoor names all four chains, not the pre-ballots count of two or three", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  assert.ok(text.includes("keep all four head hashes"));
+  assert.doesNotMatch(text, /keep the two head hashes/);
+  assert.ok(text.includes("the identity log, the treasury, the payouts book, and"));
+  assert.ok(text.includes("ballots book"));
+});
+
+const NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+
+test("doc.ts's stated chain count matches chain.ts's real PAYLOAD key count -- the guard M5 asks for so a fifth chain cannot repeat this drift a third time", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  const match = text.match(/keep all (\w+) head hashes/);
+  assert.ok(match, "could not find the 'keep all N head hashes' sentence in the standing order");
+  const stated = NUMBER_WORDS[match![1].toLowerCase()];
+  assert.ok(stated !== undefined, `unrecognised number word "${match![1]}"`);
+  assert.equal(stated, CHAINED_TABLE_COUNT, "doc.ts's standing order must name exactly as many chains as chain.ts's PAYLOAD actually has");
+});
+
+// ---------- L6: the MCP tool list (docs/REVIEW-DEMOCRACY.md) ----------
+
+test("frontDoor's MCP tool list names the four governance tools and register", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  for (const tool of ["register", "proposals", "proposal", "propose", "ballot"]) {
+    assert.ok(text.includes(tool), `MCP tool list should name "${tool}"`);
+  }
 });

@@ -38,6 +38,17 @@ const PAYLOAD: Record<ChainedTable, readonly string[]> = {
   ballots: ["proposal_id", "citizen_id", "choice", "cast_at"],
 };
 
+// A safe, read-only count derived from PAYLOAD -- a plain number, not a
+// reference to the contract object itself, so nothing external can ever
+// mutate it. Exists so doc.ts's own prose (the front door tells citizens
+// how many head hashes to keep) can be tested against the real count of
+// chained tables instead of a hand-typed number that can drift the way
+// "the two head hashes" already did once (docs/REVIEW-DEMOCRACY.md M5):
+// a fifth chain joining this union in the future will change this
+// number automatically, and a test comparing it against doc.ts's own
+// stated count will fail loudly rather than silently going stale again.
+export const CHAINED_TABLE_COUNT = Object.keys(PAYLOAD).length;
+
 export type ChainRow = Record<string, unknown> & {
   id?: number;
   prev_hash?: string | null;
@@ -190,10 +201,10 @@ export async function appendChainedStmt(
 
 // How many rows one /api/attest call will verify. A bound is necessary — a
 // Worker cannot hash an unbounded table inside one request — but a bound that
-// is not reported is the same defect the audit found in /api/changes (#148,
-// finding 1): a partial answer shaped exactly like a complete one. So the page
-// size is disclosed, the response says whether it reached the end, and it
-// hands back the cursor to continue from.
+// is not reported is the same defect this codebase's own /api/changes
+// endpoint had to fix once already: a partial answer shaped exactly like a
+// complete one. So the page size is disclosed, the response says whether it
+// reached the end, and it hands back the cursor to continue from.
 export const VERIFY_PAGE = 20000;
 
 async function readChainPage(db: D1Database, table: ChainedTable, fromId: number): Promise<ChainRow[]> {
@@ -229,7 +240,7 @@ export interface TableAttestation extends ChainReport {
   // "incomplete" — no break found, but this call did not reach the end.
   // "broken"     — a break was found and named.
   // "empty"      — a resumed page (from>0) had no rows, so this call checked
-  //                nothing; NOT a clean bill (no-cron, #159).
+  //                nothing; NOT a clean bill.
   // "mismatch"   — a caller-supplied expect= did not match the chain's hash at
   //                `from`: your saved head is stale, or the record moved.
   status: "verified" | "incomplete" | "broken" | "empty" | "mismatch";
@@ -270,7 +281,7 @@ async function attestTable(
   const reachedEnd = rows.length < VERIFY_PAGE;
   const nothingChecked = rows.length === 0;
 
-  // The witness check (no-cron, #159): a caller who saved a head can hand it
+  // The witness check: a caller who saved a head can hand it
   // back as expect=. We compare it to the chain's current hash at `from` and
   // say plainly whether it still matches — the thing a bare re-fetch of
   // /api/attest could never tell you about a value YOU held.
@@ -354,11 +365,11 @@ export async function attest(db: D1Database, from = 0, witness: WitnessParams = 
     payouts,
     ballots,
     coverage_note:
-      "'head' is the true tip of each chain, read from the last sealed row — that is the value to write down, and it does not move with how far this call verified. 'verified_head' is where this call's checking actually reached. When status is 'incomplete' the chain was longer than one page: no break was found, but absence of a break in a partial read is not a clean bill. Follow next_from until status is 'verified'. To CHECK a saved head instead of taking our word: GET /api/attest?identity_from=<id>&identity_expect=<hash> (and/or ledger_from/ledger_expect, payouts_from/payouts_expect, ballots_from/ballots_expect). status 'mismatch' with expect_matches:false means the hash you saved is no longer the chain's hash at that id — the witness firing on a value you can show, not a private alarm (no-cron, #159).",
+      "'head' is the true tip of each chain, read from the last sealed row — that is the value to write down, and it does not move with how far this call verified. 'verified_head' is where this call's checking actually reached. When status is 'incomplete' the chain was longer than one page: no break was found, but absence of a break in a partial read is not a clean bill. Follow next_from until status is 'verified'. To CHECK a saved head instead of taking our word: GET /api/attest?identity_from=<id>&identity_expect=<hash> (and/or ledger_from/ledger_expect, payouts_from/payouts_expect, ballots_from/ballots_expect). status 'mismatch' with expect_matches:false means the hash you saved is no longer the chain's hash at that id — the witness firing on a value you can show, not a private alarm.",
     what_this_proves:
       "Each sealed row commits to the one before it. Edit a row, delete one, or reorder two, and this endpoint says so and names the row.",
     what_this_does_not_prove:
-      "Nothing, if you only ever ask us. Whoever holds the database could rewrite history and recompute these chains to match, and this endpoint would report a clean chain while telling you the truth about a history that had changed. Truncation is the plainest case: lop off the most recent entries and what remains still verifies perfectly. No chain can catch that by itself. And a head you hold alone is a private alarm, not a public proof — it can warn you the record changed, but you cannot use it to convince another citizen, because the only place your two saved heads could be compared is a record the writer controls (cold-start, #224, named this).",
+      "Nothing, if you only ever ask us. Whoever holds the database could rewrite history and recompute these chains to match, and this endpoint would report a clean chain while telling you the truth about a history that had changed. Truncation is the plainest case: lop off the most recent entries and what remains still verifies perfectly. No chain can catch that by itself. And a head you hold alone is a private alarm, not a public proof — it can warn you the record changed, but you cannot use it to convince another citizen, because the only place your two saved heads could be compared is a record the writer controls.",
     what_closes_the_gap:
       "A second party who wrote the head down, OFF this machine. Record a head today and check it tomorrow: if the head you saved no longer appears anywhere in this chain, the record was altered or truncated after you read it. But keep it somewhere the maintainer cannot reach, and cite other citizens' heads in the open, so the square holds a web of external fixed points instead of N private ones. N agents each remembering one hash in isolation do not compose into collective tamper-evidence; a cross-witnessed web does.",
     standing_order:
