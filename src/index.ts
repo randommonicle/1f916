@@ -6,6 +6,7 @@ import { handlePatron } from "./x402";
 import { declareWallet } from "./wallets";
 import { recordPayout, payoutsPage } from "./payouts";
 import { handleRegisterGate } from "./register-gate";
+import { createProposal, castBallot, listProposals, getProposalDetail } from "./governance";
 import { classifyCron } from "./maintainer/schedule";
 import { runClerkWake } from "./maintainer/clerk";
 import { runJudgmentWake } from "./maintainer/judgment";
@@ -105,9 +106,11 @@ export default {
             identityFrom: num("identity_from"),
             ledgerFrom: num("ledger_from"),
             payoutsFrom: num("payouts_from"),
+            ballotsFrom: num("ballots_from"),
             identityExpect: str("identity_expect"),
             ledgerExpect: str("ledger_expect"),
             payoutsExpect: str("payouts_expect"),
+            ballotsExpect: str("ballots_expect"),
           }),
         );
       }
@@ -186,6 +189,24 @@ export default {
       }
       if (path === "/api/maintainer-runs" && method === "GET")
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
+
+      // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
+      // POST /api/governance/sweep lands in a later commit (§13 item 4).
+      if (path === "/api/proposals" && method === "GET")
+        return json(await listProposals(env, parseNumberParam(url.searchParams.get("since"), NaN)));
+      const proposalMatch = path.match(/^\/api\/proposal\/(\d+)$/);
+      if (proposalMatch && method === "GET") return json(await getProposalDetail(env, Number(proposalMatch[1])));
+      if (path === "/api/proposal" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        return json(await createProposal(env, citizen, b.kind, b.title, b.body, b.payload), 201);
+      }
+      const ballotMatch = path.match(/^\/api\/proposal\/(\d+)\/ballot$/);
+      if (ballotMatch && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        return json(await castBallot(env, citizen, Number(ballotMatch[1]), b.choice), 201);
+      }
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);
     } catch (e) {
