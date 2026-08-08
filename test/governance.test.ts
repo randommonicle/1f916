@@ -23,6 +23,8 @@ import {
   tally,
   validatePayload,
   assertEligible,
+  countEligible,
+  monthsFromNow,
   type ProposalKind,
   type EligibilityInput,
 } from "../src/governance.ts";
@@ -434,4 +436,114 @@ test("assertEligible: an unrecognised registration mode falls through to the str
     () => assertEligible(baseInput({ registrationMode: "closed", voteClass: "advisory", kind: "resolution", citizenCreatedAt: 100 * DAY, proposalOpenedAt: 100 * DAY })),
     isForbidden,
   );
+});
+
+// ---------- countEligible ----------
+
+test("countEligible: an empty citizen list counts zero", () => {
+  const n = countEligible([], new Set(), {
+    kind: "resolution",
+    voteClass: "advisory",
+    registrationMode: "invite_only",
+    foundingRatified: true,
+    proposalOpenedAt: 100 * DAY,
+  });
+  assert.equal(n, 0);
+});
+
+test("countEligible: invite_only mode counts every citizen regardless of tenure", () => {
+  const citizens = [
+    { id: 1, created_at: 100 * DAY }, // registered the same instant the proposal opened -- zero tenure
+    { id: 2, created_at: 50 * DAY },
+    { id: 3, created_at: 0 },
+  ];
+  const n = countEligible(citizens, new Set(), {
+    kind: "resolution",
+    voteClass: "advisory",
+    registrationMode: "invite_only",
+    foundingRatified: true,
+    proposalOpenedAt: 100 * DAY,
+  });
+  assert.equal(n, 3);
+});
+
+test("countEligible: open mode excludes citizens short of tenure, counts the rest", () => {
+  const opened = 100 * DAY;
+  const citizens = [
+    { id: 1, created_at: opened - 14 * DAY }, // exactly 14 days: eligible for constitutional
+    { id: 2, created_at: opened - 13 * DAY }, // one day short: not eligible
+    { id: 3, created_at: opened - 30 * DAY }, // long-registered: eligible
+  ];
+  const n = countEligible(citizens, new Set(), {
+    kind: "official_token",
+    voteClass: "constitutional",
+    registrationMode: "open",
+    foundingRatified: true,
+    proposalOpenedAt: opened,
+  });
+  assert.equal(n, 2);
+});
+
+test("countEligible: a founding-gated kind while unratified counts only founders", () => {
+  const citizens = [
+    { id: 1, created_at: 0 },
+    { id: 2, created_at: 0 },
+    { id: 3, created_at: 0 },
+  ];
+  const founderIds = new Set([1, 3]);
+  const n = countEligible(citizens, founderIds, {
+    kind: "set_name",
+    voteClass: "constitutional",
+    registrationMode: "invite_only",
+    foundingRatified: false,
+    proposalOpenedAt: 100 * DAY,
+  });
+  assert.equal(n, 2);
+});
+
+test("countEligible: once founding is ratified, non-founders are counted too", () => {
+  const citizens = [
+    { id: 1, created_at: 0 },
+    { id: 2, created_at: 0 },
+  ];
+  const n = countEligible(citizens, new Set([1]), {
+    kind: "set_name",
+    voteClass: "constitutional",
+    registrationMode: "invite_only",
+    foundingRatified: true,
+    proposalOpenedAt: 100 * DAY,
+  });
+  assert.equal(n, 2);
+});
+
+// ---------- monthsFromNow ----------
+
+test("monthsFromNow: adds calendar months, not a fixed number of days", () => {
+  const jan15 = Date.UTC(2026, 0, 15); // 2026-01-15
+  const feb15 = Date.UTC(2026, 1, 15);
+  assert.equal(monthsFromNow(jan15, 1), feb15);
+});
+
+test("monthsFromNow: crosses a year boundary correctly", () => {
+  const dec1 = Date.UTC(2026, 11, 1); // 2026-12-01
+  const feb1NextYear = Date.UTC(2027, 1, 1);
+  assert.equal(monthsFromNow(dec1, 2), feb1NextYear);
+});
+
+test("monthsFromNow: 12 months lands on the same day next year", () => {
+  const mar3 = Date.UTC(2026, 2, 3);
+  const mar3NextYear = Date.UTC(2027, 2, 3);
+  assert.equal(monthsFromNow(mar3, 12), mar3NextYear);
+});
+
+test("monthsFromNow: a month-end source date can overflow into the following month (documented JS Date behaviour, not a governance rule)", () => {
+  // Jan 31 + 1 month: February has no 31st, so JS Date's setUTCMonth
+  // overflows into early March rather than clamping to Feb 28/29. Named
+  // and pinned here so this is a known, tested behaviour rather than a
+  // silent surprise the first time a dividend-uplift proposal happens to
+  // pass on the 31st of a month.
+  const jan31 = Date.UTC(2026, 0, 31);
+  const result = monthsFromNow(jan31, 1);
+  const d = new Date(result);
+  assert.equal(d.getUTCMonth(), 2, "overflows into March (month index 2), does not clamp to the end of February");
 });

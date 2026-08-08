@@ -17,11 +17,14 @@
 // requires Node >=22.6, and node:sqlite shipped experimentally in 22.5).
 // This shims only the slice of the real D1Database interface application
 // code actually calls -- prepare().bind(...args).first<T>()/.all<T>()/
-// .run() -- not a general D1 emulator. verified directly against a real
-// D1 error (`UNIQUE constraint failed: <table>.<column>`, the exact
-// string chain.ts's appendChained checks for) before this was trusted:
-// node:sqlite raises the identical message text for the identical
-// violation, since D1 is SQLite under the hood.
+// .run(), plus batch() -- not a general D1 emulator. Verified directly
+// against real node:sqlite behaviour before either was trusted: a UNIQUE
+// violation raises the identical message text
+// (`UNIQUE constraint failed: <table>.<column>`) chain.ts's appendChained
+// pattern-matches on, since D1 is SQLite under the hood; and
+// BEGIN/COMMIT/ROLLBACK via .exec() give batch() a real transaction, with
+// a failed statement's ROLLBACK confirmed to undo an already-succeeded
+// statement earlier in the same batch, not just abort the failing one.
 
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -32,11 +35,17 @@ interface D1StatementLike {
   first<T>(): Promise<T | null>;
   all<T>(): Promise<{ results: T[] }>;
   run(): Promise<{ meta: { changes: number; last_row_id: number } }>;
+  // Internal only, read by batch() below to recover the sql+args a
+  // D1StatementLike closure otherwise keeps private. Not part of the real
+  // D1PreparedStatement type; application code under test never reads
+  // these, only batch()'s own implementation does.
+  __sql: string;
+  __args: unknown[];
 }
 
 interface D1Like {
   prepare(sql: string): D1StatementLike;
-  batch(stmts: unknown[]): Promise<unknown[]>;
+  batch<T = unknown>(stmts: D1StatementLike[]): Promise<T[]>;
 }
 
 export interface LocalD1 {
@@ -61,6 +70,8 @@ export function createLocalD1(): LocalD1 {
   // convention works here exactly as it does against the real binding.
   function statement(sql: string, args: unknown[] = []): D1StatementLike {
     return {
+      __sql: sql,
+      __args: args,
       bind(...boundArgs: unknown[]) {
         return statement(sql, boundArgs);
       },
@@ -83,12 +94,26 @@ export function createLocalD1(): LocalD1 {
     prepare(sql: string) {
       return statement(sql);
     },
-    // Not a real transaction (node:sqlite's DatabaseSync has no async
-    // batch primitive to borrow); good enough for what this helper is
-    // for, since nothing under test here calls env.DB.batch(...). Present
-    // only so the D1Like shape is total, not because anything exercises it.
-    async batch(stmts: unknown[]) {
-      throw new Error("local-d1 test helper: .batch() is not implemented -- nothing under test here calls it");
+    // A real transaction: every statement runs inside BEGIN/COMMIT, and
+    // any failure (e.g. a UNIQUE collision on the chained log row)
+    // rolls back everything in the batch, not just the failing statement
+    // -- verified directly (see the file header) before this was trusted,
+    // since "atomicity" is exactly the property src/governance.ts's
+    // commitOutcome relies on this for.
+    async batch<T = unknown>(stmts: D1StatementLike[]): Promise<T[]> {
+      raw.exec("BEGIN");
+      try {
+        const out: unknown[] = [];
+        for (const stmt of stmts) {
+          const result = raw.prepare(stmt.__sql).run(...(stmt.__args as never[]));
+          out.push({ meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } });
+        }
+        raw.exec("COMMIT");
+        return out as T[];
+      } catch (e) {
+        raw.exec("ROLLBACK");
+        throw e;
+      }
     },
   };
 

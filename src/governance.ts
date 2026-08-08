@@ -11,7 +11,7 @@
 // reads or branches on citizen #1's special identifier, and
 // test/governance.test.ts polices that directly, not just by inspection.
 
-import { appendChained } from "./chain.ts";
+import { appendChained, appendChainedStmt } from "./chain.ts";
 import { type Env, SocietyError, CONSTITUTION, createPost } from "./society.ts";
 
 // ---------- vote classes ----------
@@ -138,6 +138,16 @@ export function tally(voteClass: VoteClass, yes: number, no: number, abstain: nu
   }
   const passed = voteClass === "constitutional" ? yes >= 2 * no && yes > 0 : yes > no;
   return passed ? { status: "passed", cast } : { status: "failed", cast, reason: "margin" };
+}
+
+// Calendar-accurate month arithmetic for a dividend uplift's expiry
+// (§7: "months an integer 1-12"). A fixed 30-day approximation would
+// drift up to two real days off "N months" for no reason -- this is
+// cheap to get right with the platform's own calendar math instead.
+export function monthsFromNow(now: number, months: number): number {
+  const d = new Date(now);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.getTime();
 }
 
 // ---------- payload validation ----------
@@ -285,6 +295,39 @@ export function assertEligible(input: EligibilityInput): void {
       `Citizens must be registered ${requiredDays} days before a ${input.voteClass} proposal opens to take part in it. Registering mid-vote does not enfranchise you for that vote.`,
     );
   }
+}
+
+// How many citizens WOULD be eligible to ballot on a proposal of this
+// shape right now (design doc §4: "eligible count is snapshotted onto
+// the proposal at close ... so every historical quorum check remains
+// recomputable"). Pure: the D1 reads (every citizen's id/created_at, the
+// set of founder citizen ids) happen once in the caller (the sweep), not
+// per-citizen -- this just runs assertEligible over the results and
+// counts who does not throw, so the same rule balloting uses is the rule
+// the census is measured against, with no second copy of it to drift.
+export function countEligible(
+  citizens: readonly { id: number; created_at: number }[],
+  founderIds: ReadonlySet<number>,
+  params: { kind: ProposalKind; voteClass: VoteClass; registrationMode: string; foundingRatified: boolean; proposalOpenedAt: number },
+): number {
+  let count = 0;
+  for (const citizen of citizens) {
+    try {
+      assertEligible({
+        citizenCreatedAt: citizen.created_at,
+        isFounder: founderIds.has(citizen.id),
+        registrationMode: params.registrationMode,
+        foundingRatified: params.foundingRatified,
+        kind: params.kind,
+        voteClass: params.voteClass,
+        proposalOpenedAt: params.proposalOpenedAt,
+      });
+      count++;
+    } catch {
+      // ineligible; not counted -- the specific reason does not matter here.
+    }
+  }
+  return count;
 }
 
 // ---------- founder and founding-ratification derivation (D1-touching) ----------
@@ -614,4 +657,159 @@ export async function getProposalDetail(env: Env, proposalId: number) {
     how_to_verify_ballots:
       "Each ballot's own hash is independently recomputable from public data: sha256(prev_hash + '\\n' + JSON.stringify([proposal_id, citizen_id, choice, cast_at])) must equal hash (the preimage in chain.ts) -- this proves THIS row's content is exactly what was recorded. Ballots span every proposal in one chain, so confirming full chain order (nothing spliced in or removed between ballots) needs the complete, unfiltered chain: GET /api/attest.",
   };
+}
+
+// ---------- sweep: claim-then-tally-then-execute (D1-touching) ----------
+//
+// Design doc §5 points 5-6, §6, §8. Deterministic, idempotent,
+// permissionless: POST /api/governance/sweep and both maintainer cron
+// wakes (wired in before their own model-call gate, so a dry API key
+// never blocks governance) call the same runGovernanceSweep. Two
+// concurrent callers cannot double-execute the same proposal -- the claim
+// UPDATE below is the same claim-then-act shape judgment.ts's
+// stampQueueRow uses (DEMOCRACY-SURFACE.md §6): only the caller whose
+// UPDATE actually changed a row proceeds past this point for that
+// proposal; the other sees changes:0 and moves on.
+
+const MACHINE_EXECUTABLE_KINDS: readonly ProposalKind[] = ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise"];
+
+function upsertSettingStmt(env: Env, key: string, value: string, expiresAt: number | null, proposalId: number, now: number) {
+  return env.DB.prepare(
+    `INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at, proposal_id = excluded.proposal_id, updated_at = excluded.updated_at`,
+  ).bind(key, value, expiresAt, proposalId, now);
+}
+
+// The governance_settings write for a passed machine-executable kind's
+// payload -- one statement, added to the same atomic batch as the
+// proposal status update and the chained outcome event (§8). Mandate
+// kinds (handler_arrangement, buyout_terms, official_token,
+// text_amendment, resolution) never reach here; they set status passed
+// with no settings write at all -- "their force is the public record" (§8).
+function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Record<string, unknown> | null, proposalId: number, now: number) {
+  if (!payload) return null;
+  switch (kind) {
+    case "set_name":
+      return upsertSettingStmt(env, SETTING_KEY.name, String(payload.name), null, proposalId, now);
+    case "control_floor_raise":
+      return upsertSettingStmt(env, SETTING_KEY.controlFloorPercent, String(payload.percent), null, proposalId, now);
+    case "set_dividend_uplift":
+      return upsertSettingStmt(
+        env,
+        SETTING_KEY.dividendUplift,
+        JSON.stringify({ total_percent: payload.total_percent }),
+        monthsFromNow(now, Number(payload.months)),
+        proposalId,
+        now,
+      );
+    case "set_split":
+      return upsertSettingStmt(env, SETTING_KEY.split, JSON.stringify({ prize: payload.prize, bounty: payload.bounty }), null, proposalId, now);
+    default:
+      return null;
+  }
+}
+
+// Atomic: the outcome event and whatever state change goes with it commit
+// together or not at all -- the commitWithModLog precedent (society.ts),
+// generalised to N state statements instead of exactly one.
+async function commitOutcome(env: Env, stateStmts: D1PreparedStatement[], actorId: number, detail: string): Promise<{ hash: string }> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const log = await appendChainedStmt(env.DB, "identity_events", {
+      citizen_id: actorId,
+      kind: "proposal_decided",
+      detail,
+      created_at: Date.now(),
+    });
+    try {
+      await env.DB.batch([...stateStmts, log.stmt]);
+      return { hash: log.hash };
+    } catch (e) {
+      if (!String(e).includes("UNIQUE")) throw e;
+      // head moved between our read and the batch; re-prepare and retry.
+    }
+  }
+  throw new SocietyError(500, "proposal-outcome chain head moved four times running; refusing to commit an outcome without its record");
+}
+
+export type SweepOutcome = "claimed_elsewhere" | "passed" | "executed" | "failed";
+
+async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number): Promise<SweepOutcome> {
+  const claim = await env.DB.prepare("UPDATE proposals SET status = 'tallying' WHERE id = ? AND status = 'open' AND closes_at <= ?")
+    .bind(proposalId, now)
+    .run();
+  if (claim.meta.changes === 0) return "claimed_elsewhere";
+
+  const proposal = await env.DB.prepare("SELECT id, kind, payload, proposer_id, opened_at FROM proposals WHERE id = ?")
+    .bind(proposalId)
+    .first<{ id: number; kind: ProposalKind; payload: string | null; proposer_id: number; opened_at: number }>();
+  if (!proposal) throw new SocietyError(500, `claimed proposal ${proposalId} vanished before it could be tallied`);
+
+  const voteClass = classOf(proposal.kind);
+  const { results: ballotCounts } = await env.DB.prepare("SELECT choice, COUNT(*) AS n FROM ballots WHERE proposal_id = ? GROUP BY choice")
+    .bind(proposalId)
+    .all<{ choice: Choice; n: number }>();
+  const countOf = (c: Choice) => ballotCounts.find((b) => b.choice === c)?.n ?? 0;
+  const yes = countOf("yes");
+  const no = countOf("no");
+  const abstain = countOf("abstain");
+
+  const foundingRatified =
+    proposal.kind === "set_name" || proposal.kind === "text_amendment" ? await isFoundingRatified(env, proposal.kind) : true;
+  const [{ results: citizens }, { results: founderRows }] = await Promise.all([
+    env.DB.prepare("SELECT id, created_at FROM citizens").all<{ id: number; created_at: number }>(),
+    env.DB.prepare("SELECT DISTINCT citizen_id FROM identity_events WHERE kind = 'invite_redeemed'").all<{ citizen_id: number }>(),
+  ]);
+  const founderIds = new Set(founderRows.map((r) => r.citizen_id));
+  const eligible = countEligible(citizens, founderIds, {
+    kind: proposal.kind,
+    voteClass,
+    registrationMode: env.REGISTRATION_MODE,
+    foundingRatified,
+    proposalOpenedAt: proposal.opened_at,
+  });
+
+  const result = tally(voteClass, yes, no, abstain, eligible);
+
+  const isExecutable = result.status === "passed" && MACHINE_EXECUTABLE_KINDS.includes(proposal.kind);
+  const finalStatus: "passed" | "failed" | "executed" = result.status === "failed" ? "failed" : isExecutable ? "executed" : "passed";
+
+  const stateStmts: D1PreparedStatement[] = [];
+  if (isExecutable) {
+    const parsedPayload = proposal.payload ? (JSON.parse(proposal.payload) as Record<string, unknown>) : null;
+    const settingStmt = settingsStatementForExecution(env, proposal.kind, parsedPayload, proposalId, now);
+    if (settingStmt) stateStmts.push(settingStmt);
+  }
+  stateStmts.push(
+    env.DB
+      .prepare(
+        "UPDATE proposals SET status = ?, tally_yes = ?, tally_no = ?, tally_abstain = ?, eligible_count = ?, tallied_at = ? WHERE id = ? AND status = 'tallying'",
+      )
+      .bind(finalStatus, yes, no, abstain, eligible, now, proposalId),
+  );
+
+  const detail = `proposal ${proposalId} (${proposal.kind}) ${finalStatus}: yes=${yes} no=${no} abstain=${abstain} eligible=${eligible}`;
+  await commitOutcome(env, stateStmts, proposal.proposer_id, detail);
+
+  return finalStatus;
+}
+
+// POST /api/governance/sweep, and both maintainer cron wakes before their
+// own model-call gate. Permissionless by design (§5 point 5): closing and
+// tallying a proposal is deterministic code, not a privileged act -- and
+// idempotent: a due proposal already claimed (by an earlier call, or by a
+// concurrent one) is reported "claimed_elsewhere", never reprocessed.
+export async function runGovernanceSweep(env: Env, now = Date.now()) {
+  const { results: due } = await env.DB.prepare("SELECT id FROM proposals WHERE status = 'open' AND closes_at <= ?").bind(now).all<{ id: number }>();
+  const results: Array<{ proposal_id: number; outcome: SweepOutcome | "error"; error?: string }> = [];
+  for (const { id } of due) {
+    try {
+      const outcome = await claimTallyAndExecuteOne(env, id, now);
+      results.push({ proposal_id: id, outcome });
+    } catch (e) {
+      // Per-proposal isolation: one bad proposal must not block the rest
+      // of the sweep from processing everything else that is due.
+      results.push({ proposal_id: id, outcome: "error", error: e instanceof SocietyError ? e.message : String(e) });
+    }
+  }
+  return { swept_at: now, due: due.length, processed: results.length, results };
 }

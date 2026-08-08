@@ -1,10 +1,10 @@
 // D1-backed tests for governance.ts's founder/founding-ratification
-// derivation and the ballot-casting concurrency behaviours design doc §13
-// item 3 names explicitly. Uses test/helpers/local-d1.ts (node:sqlite,
-// the real schema.sql, no new dependency) rather than a mock -- the
-// architect's ruling on isFounderCitizen/isFoundingRatified, and design
-// doc §13 item 3's own test list, both name D1-dependent behaviours no
-// pure-function test can exercise honestly.
+// derivation, the ballot-casting concurrency behaviours design doc §13
+// item 3 names explicitly, and the sweep (§13 item 4: idempotency, the
+// double-claimant race, execution batch atomicity, dry-key operation).
+// Uses test/helpers/local-d1.ts (node:sqlite, the real schema.sql, no new
+// dependency) rather than a mock -- these are all D1-dependent behaviours
+// no pure-function test can exercise honestly.
 //
 // Everything else governance.ts's D1-touching functions do (the ordinary
 // happy paths of listProposals/getProposalDetail, most of createProposal's
@@ -19,7 +19,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal } from "./helpers/local-d1.ts";
-import { isFounderCitizen, isFoundingRatified, castBallot, createProposal } from "../src/governance.ts";
+import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow } from "../src/governance.ts";
 import { SocietyError } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, type ChainRow } from "../src/chain.ts";
@@ -290,6 +290,229 @@ test("createProposal: if the debate post fails to create (daily post cap already
 
     const after = await d1.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>();
     assert.equal(after!.n, before!.n, "the failed attempt must leave the proposals table exactly as it found it -- no half-formed row");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- runGovernanceSweep ----------
+
+function castYes(d1: ReturnType<typeof createLocalD1>, proposalId: number, citizenId: number, castAt: number) {
+  d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'yes', ?)").run(proposalId, citizenId, castAt);
+}
+
+test("runGovernanceSweep: an advisory proposal that passes lands as 'passed' with a chained proposal_decided event, no settings write", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const voter = insertCitizen(d1);
+    castYes(d1, proposalId, voter, now - 2000);
+
+    const env = testEnv(d1);
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.due, 1);
+    assert.equal(result.results[0].outcome, "passed");
+
+    const row = await d1.DB.prepare("SELECT status, tally_yes, tally_no, tally_abstain, eligible_count FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; tally_yes: number; eligible_count: number }>();
+    assert.equal(row!.status, "passed");
+    assert.equal(row!.tally_yes, 1);
+    assert.equal(row!.eligible_count, 2, "proposer + voter, both eligible in invite_only mode");
+
+    const event = await d1.DB.prepare("SELECT detail FROM identity_events WHERE kind = 'proposal_decided'").first<{ detail: string }>();
+    assert.ok(event, "the outcome must land in identity_events");
+    assert.match(event!.detail, /proposal \d+ \(resolution\) passed/);
+
+    const settings = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings").first<{ n: number }>();
+    assert.equal(settings!.n, 0, "a mandate kind's pass never writes governance_settings");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: a proposal that fails quorum lands as 'failed', no settings write", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    for (let i = 0; i < 9; i++) insertCitizen(d1); // 10 citizens total, all eligible in invite_only mode -> quorum = ceil(10/2) = 5
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "set_split", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    // no ballots cast at all
+
+    const env = testEnv(d1);
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "failed");
+
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "failed");
+
+    const settings = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings").first<{ n: number }>();
+    assert.equal(settings!.n, 0, "a failed tally must never write a governance_settings row");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: a passed set_name proposal executes -- governance_settings, proposals.status, and the chained outcome event all land together (execution batch atomicity)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    insertIdentityEvent(d1, proposer, "invite_redeemed"); // set_name is founding-gated and unratified on its first-ever vote -- everyone counted must be a founder
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "set_name", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ name: "Hallmoot" }), proposalId);
+
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    for (const v of voters) {
+      insertIdentityEvent(d1, v, "invite_redeemed");
+      castYes(d1, proposalId, v, now - 2000);
+    }
+    // eligible = proposer + 3 voters, all founders = 4; constitutional quorum = ceil(4/2) = 2, floor = 3; cast = 3 clears both; 3 >= 2*0 && 3 > 0 -> passed -> executed.
+
+    const env = testEnv(d1);
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "executed");
+
+    const proposal = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(proposal!.status, "executed");
+
+    const setting = await d1.DB.prepare("SELECT value, proposal_id FROM governance_settings WHERE key = 'name'").first<{ value: string; proposal_id: number }>();
+    assert.ok(setting, "governance_settings must carry the new name");
+    assert.equal(setting!.value, "Hallmoot");
+    assert.equal(setting!.proposal_id, proposalId, "provenance: which proposal set this value");
+
+    const event = await d1.DB.prepare("SELECT detail FROM identity_events WHERE kind = 'proposal_decided'").first<{ detail: string }>();
+    assert.match(event!.detail, /executed/);
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: a passed set_dividend_uplift executes with a calendar-correct expires_at and a JSON value", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "set_dividend_uplift", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ total_percent: 5, months: 3 }), proposalId);
+    const v1 = insertCitizen(d1);
+    const v2 = insertCitizen(d1);
+    castYes(d1, proposalId, v1, now - 2000);
+    castYes(d1, proposalId, v2, now - 2000);
+    // eligible = proposer + v1 + v2 = 3; parameter quorum = ceil(3/2) = 2, floor = 2; cast = 2 clears both; 2 > 0 -> passed -> executed.
+
+    const env = testEnv(d1);
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "executed");
+
+    const setting = await d1.DB.prepare("SELECT value, expires_at FROM governance_settings WHERE key = 'dividend_uplift'")
+      .first<{ value: string; expires_at: number }>();
+    assert.ok(setting);
+    assert.deepEqual(JSON.parse(setting!.value), { total_percent: 5 });
+    assert.equal(setting!.expires_at, monthsFromNow(now, 3), "expiry must be calendar-accurate, computed by the same function the pure tests pin");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: idempotency -- a second call after everything is processed finds nothing due and writes nothing further", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const env = testEnv(d1);
+
+    const first = await runGovernanceSweep(env, now);
+    assert.equal(first.due, 1);
+
+    const second = await runGovernanceSweep(env, now);
+    assert.equal(second.due, 0, "the proposal is no longer 'open', so it is not fetched as due a second time");
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one outcome event, not two");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: two concurrent calls racing on the same due proposal -- only one executes it, exactly one outcome event written (the double-claimant race)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const env = testEnv(d1);
+
+    const [r1, r2] = await Promise.all([runGovernanceSweep(env, now), runGovernanceSweep(env, now)]);
+    const outcomes = [r1.results[0]?.outcome, r2.results[0]?.outcome].sort();
+    // No ballots cast: the one that actually processes it finds cast=0 < floor(1) -> "failed". The other finds it already claimed.
+    assert.deepEqual(outcomes, ["claimed_elsewhere", "failed"]);
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "the race must not produce two outcome events for one proposal");
+
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "failed");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: multiple due proposals in one call are all processed", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const p1 = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const p2 = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 500 });
+    const env = testEnv(d1);
+
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.due, 2);
+    assert.equal(result.processed, 2);
+
+    const { results } = await d1.DB.prepare("SELECT status FROM proposals WHERE id IN (?, ?) ORDER BY id").bind(p1, p2).all<{ status: string }>();
+    assert.deepEqual(results.map((r) => r.status), ["failed", "failed"]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: a proposal not yet due (closes_at in the future) is left untouched", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now, closes_at: now + 86_400_000 });
+    const env = testEnv(d1);
+
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.due, 0);
+
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "open");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: functions with no ANTHROPIC_API_KEY set (dry key) -- it makes no model call and does not need one", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const voter = insertCitizen(d1);
+    castYes(d1, proposalId, voter, now - 2000);
+
+    const env = testEnv(d1); // ANTHROPIC_API_KEY intentionally absent, as it is for every test in this file
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "passed");
   } finally {
     d1.close();
   }

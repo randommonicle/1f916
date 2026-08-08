@@ -6,7 +6,7 @@ import { handlePatron } from "./x402";
 import { declareWallet } from "./wallets";
 import { recordPayout, payoutsPage } from "./payouts";
 import { handleRegisterGate } from "./register-gate";
-import { createProposal, castBallot, listProposals, getProposalDetail } from "./governance";
+import { createProposal, castBallot, listProposals, getProposalDetail, runGovernanceSweep } from "./governance";
 import { classifyCron } from "./maintainer/schedule";
 import { runClerkWake } from "./maintainer/clerk";
 import { runJudgmentWake } from "./maintainer/judgment";
@@ -191,7 +191,7 @@ export default {
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
 
       // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
-      // POST /api/governance/sweep lands in a later commit (§13 item 4).
+      if (path === "/api/governance/sweep" && method === "POST") return json(await runGovernanceSweep(env));
       if (path === "/api/proposals" && method === "GET")
         return json(await listProposals(env, parseNumberParam(url.searchParams.get("since"), NaN)));
       const proposalMatch = path.match(/^\/api\/proposal\/(\d+)$/);
@@ -224,6 +224,22 @@ export default {
   // wake could open its own runs row), so scheduled() always returns
   // cleanly either way, per the build brief.
   async scheduled(controller, env): Promise<void> {
+    // Governance sweep first, on every wake, before either wake's own
+    // model-call gate (docs/DEMOCRACY-DESIGN.md §2 point 7 and §13 item
+    // 4): closing and tallying a proposal is deterministic code with no
+    // model call in it, so it must keep running even on a dry
+    // ANTHROPIC_API_KEY, and it is not "the clerk's job" or "the
+    // judgment's job" specifically -- it runs regardless of which cron
+    // fired, including one classifyCron does not recognise, since
+    // sweeping costs nothing extra and only helps. Isolated in its own
+    // try/catch so a sweep failure can never prevent the wake below from
+    // still attempting to run, and vice versa.
+    try {
+      await runGovernanceSweep(env);
+    } catch (e) {
+      console.log(JSON.stringify({ level: "error", event: "governance_sweep_failed", cron: controller.cron, message: String(e) }));
+    }
+
     const wake = classifyCron(controller.cron);
     try {
       if (wake === "clerk") await runClerkWake(env);
