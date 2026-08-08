@@ -38,6 +38,39 @@ function walkTsFiles(dir: string): string[] {
   return out;
 }
 
+// Source-scan helpers, mirroring test/governance-policing.test.ts's own M2
+// review fix, applied here to the four CHAINED tables. chain.test.ts carried
+// the identical pattern weakness against arguably higher-stakes tables (money
+// movement and cast votes, not proposal metadata): the old inline pattern
+// `(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+<table>\b` with no comment-stripping
+// missed every quoted, bracketed, backtick-quoted or schema-qualified spelling,
+// `INSERT OR REPLACE`/`INSERT OR IGNORE`/bare `REPLACE INTO`, and any offending
+// write sharing a line with an `https://` URL (the old whole-text //-strip ate
+// everything after the `//`). Line-wise stripping blanks a line only when its
+// first non-whitespace token is `//`; a trailing same-line comment is left
+// alone, which risks a false CAUGHT (fixable by rewording) but never a false
+// clean, the only direction that matters for a bypass guard.
+function stripComments(text: string): string {
+  const withoutBlocks = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  return withoutBlocks
+    .split("\n")
+    .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+    .join("\n");
+}
+
+function readSourceWithoutComments(path: string): string {
+  return stripComments(readFileSync(path, "utf8"));
+}
+
+function tableWritePattern(table: string): RegExp {
+  return new RegExp(
+    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
+    "i",
+  );
+}
+
+const CHAINED_TABLES = ["identity_events", "ledger", "payouts", "ballots"];
+
 const EVENTS = [
   { citizen_id: 1, kind: "moderation", detail: "pinned post 3", created_at: 1785900000000 },
   { citizen_id: 4, kind: "key_rotation", detail: "custody changed", created_at: 1785900001000 },
@@ -211,10 +244,9 @@ test("nothing outside chain.ts writes to a chained table directly", () => {
   const offenders: string[] = [];
   for (const file of walkTsFiles(SRC)) {
     if (file === CHAIN_PATH) continue;
-    const text = readFileSync(file, "utf8");
-    for (const table of ["identity_events", "ledger", "payouts", "ballots"]) {
-      const pattern = new RegExp(`(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+${table}\\b`, "i");
-      if (pattern.test(text)) offenders.push(`${file} writes ${table} directly`);
+    const text = readSourceWithoutComments(file);
+    for (const table of CHAINED_TABLES) {
+      if (tableWritePattern(table).test(text)) offenders.push(`${file} writes ${table} directly`);
     }
   }
   assert.deepEqual(
@@ -222,6 +254,54 @@ test("nothing outside chain.ts writes to a chained table directly", () => {
     [],
     "Chained tables are written only via appendChained (see logModeration). Route the new write through it.",
   );
+});
+
+// M2-parity red-proof for the broadened pattern and line-wise comment-stripper
+// above, mirroring test/governance-policing.test.ts's own eleven-candidate red
+// proof but retargeted at the four chained tables. The four SQLite-specific
+// spellings, the comment-adjacent-`https://` blind spot, and the one accepted
+// residual (a table name built from a runtime variable, which no static scan
+// can see) all apply identically here. If a future edit narrows either the
+// pattern or the stripper back down, this is what goes red.
+const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> = [
+  { text: "UPDATE ledger SET amount_cents = 1", caught: true, note: "the control" },
+  { text: "UPDATE \"ledger\" SET amount_cents = 1", caught: true, note: "double-quoted table name" },
+  { text: "UPDATE [payouts] SET amount_cents = 1", caught: true, note: "bracket-quoted table name" },
+  { text: "UPDATE `ballots` SET choice = 'yes'", caught: true, note: "backtick-quoted table name" },
+  { text: "UPDATE main.identity_events SET detail = 'x'", caught: true, note: "schema-qualified table name" },
+  { text: "INSERT OR REPLACE INTO ledger (id) VALUES (1)", caught: true, note: "idiomatic upsert, not hypothetical" },
+  { text: "REPLACE INTO payouts (id) VALUES (1)", caught: true, note: "bare REPLACE INTO" },
+  { text: "INSERT OR IGNORE INTO ballots (id) VALUES (1)", caught: true, note: "INSERT OR IGNORE" },
+  { text: "INSERT INTO \"identity_events\" (id) VALUES (1)", caught: true, note: "double-quoted table name" },
+  {
+    text: "const s=\"https://x\"; await db.prepare(\"UPDATE ledger SET amount_cents = 1\")",
+    caught: true,
+    note: "was the live blind spot: the old whole-text //-strip ate everything after https:// on this line, hiding the real UPDATE that followed it",
+  },
+  {
+    text: "const T='ledger'; const q = \"UPDATE ${T} SET amount_cents = 1\";",
+    caught: false,
+    note: "known residual: the table name is a runtime value, not literal text in the source -- no static scan can see it",
+  },
+];
+
+test("the broadened pattern and comment-stripper catch the bypass candidates against the chained tables (M2-parity red-proof)", () => {
+  const missed = BYPASS_CANDIDATES.filter((c) => !c.caught);
+  assert.equal(
+    missed.length,
+    1,
+    "exactly one candidate (the const-template rewrite) is expected to remain a known, documented residual -- any other MISSED means the fix regressed",
+  );
+
+  for (const candidate of BYPASS_CANDIDATES) {
+    const stripped = stripComments(candidate.text);
+    const isCaught = CHAINED_TABLES.some((table) => tableWritePattern(table).test(stripped));
+    assert.equal(
+      isCaught,
+      candidate.caught,
+      `expected ${candidate.caught ? "CAUGHT" : "MISSED"} for [${candidate.note}]: ${candidate.text}`,
+    );
+  }
 });
 
 // payouts joined the chain after identity_events and ledger (architect
