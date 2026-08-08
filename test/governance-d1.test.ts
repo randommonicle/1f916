@@ -1,7 +1,12 @@
 // D1-backed tests for governance.ts's founder/founding-ratification
 // derivation, the ballot-casting concurrency behaviours design doc §13
-// item 3 names explicitly, and the sweep (§13 item 4: idempotency, the
-// double-claimant race, execution batch atomicity, dry-key operation).
+// item 3 names explicitly, the sweep (§13 item 4: idempotency, the
+// double-claimant race, execution batch atomicity, dry-key operation),
+// and society.ts's officialFacts() reading governance_settings for the
+// current name and dividend rate (§8, §13 item 6). officialFacts() lives
+// in society.ts, not governance.ts, but it is tested here alongside
+// everything else that needs the same real-D1 fixtures rather than a
+// third D1 test file for a handful of cases.
 // Uses test/helpers/local-d1.ts (node:sqlite, the real schema.sql, no new
 // dependency) rather than a mock -- these are all D1-dependent behaviours
 // no pure-function test can exercise honestly.
@@ -20,7 +25,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal } from "./helpers/local-d1.ts";
 import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow } from "../src/governance.ts";
-import { SocietyError } from "../src/society.ts";
+import { SocietyError, officialFacts, SETTING_KEY, DEFAULT_NAME, DEFAULT_DIVIDEND_PERCENT } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, type ChainRow } from "../src/chain.ts";
 
@@ -513,6 +518,86 @@ test("runGovernanceSweep: functions with no ANTHROPIC_API_KEY set (dry key) -- i
     assert.equal(env.ANTHROPIC_API_KEY, undefined);
     const result = await runGovernanceSweep(env, now);
     assert.equal(result.results[0].outcome, "passed");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- officialFacts (society.ts) reading governance_settings ----------
+
+test("officialFacts: falls back to the deployed defaults with no governance_settings rows at all", async () => {
+  const d1 = createLocalD1();
+  try {
+    const facts = await officialFacts(testEnv(d1));
+    assert.equal(facts.society, DEFAULT_NAME);
+    assert.equal(facts.name_status, "provisional until the founding citizens ratify or replace it as their first vote");
+    assert.equal(facts.dividend_percent, DEFAULT_DIVIDEND_PERCENT);
+    assert.equal(facts.governance.name_source, "default");
+    assert.equal(facts.governance.mechanism, "live");
+    assert.equal(facts.governance.open_proposals, 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts: reflects a ratified name once governance_settings has one, name_source becomes governance_settings", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    d1.raw
+      .prepare("INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, NULL, NULL, ?)")
+      .run(SETTING_KEY.name, "Hallmoot", now);
+
+    const facts = await officialFacts(testEnv(d1));
+    assert.equal(facts.society, "Hallmoot");
+    assert.equal(facts.name_status, "ratified by a passed set_name vote (GET /api/proposals)");
+    assert.equal(facts.governance.name_source, "governance_settings");
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts: dividend_percent reflects an active (non-expired) uplift", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    d1.raw
+      .prepare("INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, ?, NULL, ?)")
+      .run(SETTING_KEY.dividendUplift, JSON.stringify({ total_percent: 8 }), now + 30 * 86_400_000, now);
+
+    const facts = await officialFacts(testEnv(d1));
+    assert.equal(facts.dividend_percent, 8);
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts: dividend_percent falls back to the default once an uplift has expired, without needing a wake to un-set it", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    d1.raw
+      .prepare("INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, ?, NULL, ?)")
+      .run(SETTING_KEY.dividendUplift, JSON.stringify({ total_percent: 8 }), now - 1000, now - 2000); // expired 1 second ago
+
+    const facts = await officialFacts(testEnv(d1));
+    assert.equal(facts.dividend_percent, DEFAULT_DIVIDEND_PERCENT, "an expired uplift must not still be read as active");
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts: governance.open_proposals counts only status='open' proposals", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer });
+    insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer });
+    insertProposal(d1, { kind: "resolution", status: "passed", proposer_id: proposer });
+    insertProposal(d1, { kind: "resolution", status: "failed", proposer_id: proposer });
+
+    const facts = await officialFacts(testEnv(d1));
+    assert.equal(facts.governance.open_proposals, 2);
   } finally {
     d1.close();
   }

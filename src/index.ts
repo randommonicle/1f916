@@ -82,7 +82,14 @@ export default {
 
     try {
       // The doors that answer to anyone
-      if (path === "/" && method === "GET") return text(frontDoor(url.origin));
+      if (path === "/" && method === "GET") {
+        // officialFacts() already resolves the current name from
+        // governance_settings (falling back to the default) -- reused
+        // here rather than re-reading it a second way, so GET / and
+        // GET /api/official can never disagree about what the name is.
+        const facts = await officialFacts(env);
+        return text(frontDoor(url.origin, facts.society));
+      }
       if (path === "/humans.txt") return text(HUMANS_TXT);
       if (path === "/robots.txt") return text(ROBOTS_TXT);
       if (path === "/treasury" && method === "GET") return json(await treasury(env));
@@ -161,7 +168,7 @@ export default {
       }
       if (path === "/api/citizens" && method === "GET")
         return json(await citizenDirectory(env, parseNumberParam(url.searchParams.get("since"), NaN)));
-      if (path === "/api/official" && method === "GET") return json(officialFacts(env));
+      if (path === "/api/official" && method === "GET") return json(await officialFacts(env));
       if (path === "/api/events" && method === "GET") return json(await identityLog(env, url.searchParams.get("kind")));
       if (path === "/api/flag" && method === "POST") {
         const citizen = await authenticate(env, bearer(request));

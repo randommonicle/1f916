@@ -12,7 +12,22 @@
 // test/governance.test.ts polices that directly, not just by inspection.
 
 import { appendChained, appendChainedStmt } from "./chain.ts";
-import { type Env, SocietyError, CONSTITUTION, createPost } from "./society.ts";
+import {
+  type Env,
+  SocietyError,
+  CONSTITUTION,
+  createPost,
+  DEFAULT_NAME,
+  DEFAULT_CONTROL_FLOOR_PERCENT,
+  SETTING_KEY,
+} from "./society.ts";
+
+// Defined in society.ts, not here: officialFacts() (society.ts) needs
+// them too, and society.ts is the base module every feature file already
+// imports from -- the reverse import would be this codebase's first
+// circular one. Re-exported so nothing that already imports these three
+// from governance.ts (test/governance.test.ts included) needs to change.
+export { DEFAULT_NAME, DEFAULT_CONTROL_FLOOR_PERCENT, SETTING_KEY };
 
 // ---------- vote classes ----------
 
@@ -88,15 +103,6 @@ export const CLASS_MIN_BALLOTS: Record<VoteClass, number> = {
   parameter: 2,
   advisory: 1,
 };
-
-// ---------- defaults, single source of truth for the D1-touching layer ----------
-
-// The deployed starting values before any governance_settings override
-// (design doc §8: officialFacts() falls back to these when unset). Kept
-// here, not re-typed at each call site, so a "Commonhold" or "51" typo in
-// some later file cannot silently diverge from doc.ts's own promise.
-export const DEFAULT_NAME = "Commonhold"; // doc.ts frontDoor() / DECISIONS.md D-014
-export const DEFAULT_CONTROL_FLOOR_PERCENT = 51; // doc.ts:142-145, "not less than 51% control"
 
 // ---------- tally arithmetic ----------
 
@@ -369,16 +375,6 @@ export async function isFoundingRatified(env: Env, kind: ProposalKind): Promise<
 }
 
 // ---------- proposal and ballot orchestration (D1-touching) ----------
-
-// governance_settings key names, the single source of truth so a later
-// writer (the sweep, commit 4) and this file's own reader can never name
-// the same setting two different ways.
-export const SETTING_KEY = {
-  name: "name",
-  controlFloorPercent: "control_floor_percent",
-  dividendUplift: "dividend_uplift",
-  split: "split",
-} as const;
 
 // Reads the current effective name and control floor from
 // governance_settings, falling back to the deployed defaults (design doc
