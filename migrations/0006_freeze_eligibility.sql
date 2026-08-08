@@ -1,0 +1,45 @@
+-- Freezes the eligibility rule a proposal is judged under at the moment
+-- it opens (docs/REVIEW-DEMOCRACY.md H2, reproduced): registration_mode
+-- and founding_ratified were previously read LIVE at both cast time and
+-- close time, from env.REGISTRATION_MODE and a fresh isFoundingRatified()
+-- query respectively. Two ways that census can drift from the ballots it
+-- is measured against:
+--
+--   H2: REGISTRATION_MODE flips from invite_only to open (a planned,
+--   routine operator action, design doc §4) while a proposal is open.
+--   The tally at close recomputes the eligible census under the NEW
+--   mode against the OLD ballots -- reproduced turning a FAILED vote
+--   (quorum not met under 8 citizens, invite_only) into an EXECUTED
+--   rename (quorum trivially met once the recomputed census reads 0
+--   eligible under the new mode's tenure gate).
+--
+--   M6: founding_ratified moves the moment ANY proposal of that kind
+--   passes. Two set_name proposals open simultaneously; A closes first
+--   and passes, which silently widens B's eligible census (now counting
+--   every non-founder) even though non-founders were refused a ballot on
+--   B the whole time it was open.
+--
+-- Both are the same bug in two different guises: the "eligible" side of
+-- the tally computed at close must read the SAME facts the "cast" side
+-- was measured against at cast time, not whatever is currently true.
+-- Snapshotting both onto the row at open, and reading the row (never
+-- env, never a live query) at both cast time and close time, makes
+-- cast-time and close-time rules identical by construction -- the fix
+-- closes the whole class, not just the one reproduction.
+--
+-- Run once against the live database:
+--   wrangler d1 execute <DB> --remote --file=migrations/0006_freeze_eligibility.sql
+--
+-- Additive only. Both columns are NOT NULL, which SQLite's ALTER TABLE
+-- ADD COLUMN requires a non-NULL DEFAULT for regardless of whether the
+-- table currently holds rows (verified: local proposals table holds 0
+-- rows today, and the statement's own validity does not depend on that).
+-- Defaults chosen to match this deployment's actual phase-0 starting
+-- state (registration_mode: the current REGISTRATION_MODE var,
+-- invite_only; founding_ratified: 0, the conservative/unratified
+-- reading) so that IF a row somehow predates this migration, it is
+-- treated exactly as strictly as a real phase-0 proposal would be.
+-- No existing row in any other table is read, rewritten, or deleted.
+
+ALTER TABLE proposals ADD COLUMN registration_mode TEXT NOT NULL DEFAULT 'invite_only';
+ALTER TABLE proposals ADD COLUMN founding_ratified INTEGER NOT NULL DEFAULT 0;

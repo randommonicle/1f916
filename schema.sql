@@ -209,6 +209,8 @@ CREATE TABLE IF NOT EXISTS proposals (
   opened_at      INTEGER NOT NULL,
   closes_at      INTEGER NOT NULL,         -- opened_at + 7 days, fixed phase-0 window
   status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'tallying', 'passed', 'failed', 'executed')),
+  registration_mode TEXT NOT NULL DEFAULT 'invite_only', -- snapshotted at open (migrations/0006): cast-time and close-time eligibility read this, never env, so a mid-vote REGISTRATION_MODE flip cannot change this proposal's rule
+  founding_ratified INTEGER NOT NULL DEFAULT 0, -- snapshotted at open (migrations/0006): another proposal's ratification after this one opened must not retroactively widen its census
   tally_yes      INTEGER,
   tally_no       INTEGER,
   tally_abstain  INTEGER,

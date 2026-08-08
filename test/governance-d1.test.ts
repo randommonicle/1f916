@@ -361,6 +361,159 @@ test("runGovernanceSweep: a proposal that fails quorum lands as 'failed', no set
   }
 });
 
+// ---------- H2/M6: frozen eligibility (docs/REVIEW-DEMOCRACY.md, migration 0006) ----------
+
+test("runGovernanceSweep: H2 reproduction -- a proposal frozen under invite_only stays judged under invite_only even after REGISTRATION_MODE flips to open", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    // 8 citizens, all registered 9 days ago -- exactly the review's own
+    // reproduction numbers, so the eligible_count assertion below is a
+    // direct check against its reported branch (A) result.
+    const citizens = Array.from({ length: 8 }, () => insertCitizen(d1, { created_at: now - 9 * 86_400_000 }));
+    const proposalId = insertProposal(d1, {
+      kind: "set_name",
+      status: "open",
+      proposer_id: citizens[0],
+      registration_mode: "invite_only", // frozen at open
+      founding_ratified: true, // isolates this test to the mode question, not M6's
+      opened_at: now - 8 * 86_400_000,
+      closes_at: now - 1000,
+    });
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ name: "Panopticon" }), proposalId);
+
+    // 3 ballots cast while the door was still invite_only: 2 yes, 1 no.
+    castYes(d1, proposalId, citizens[0], now - 500);
+    castYes(d1, proposalId, citizens[1], now - 500);
+    d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'no', ?)").run(proposalId, citizens[2], now - 500);
+
+    // The mode has since flipped to open -- env says so -- but the
+    // proposal's OWN frozen registration_mode must be what the sweep
+    // reads, not env.
+    const env = testEnv(d1, "open");
+    const result = await runGovernanceSweep(env, now);
+
+    const row = await d1.DB.prepare("SELECT status, eligible_count, tally_yes, tally_no FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; eligible_count: number; tally_yes: number; tally_no: number }>();
+    // Under the frozen invite_only rule, tenure is waived and all 8
+    // registered citizens are eligible -> quorum ceil(8/2)=4, cast=3 < 4
+    // -> FAILS. Before this fix, reading the live (now "open") mode
+    // would recompute eligible via the 14-day tenure gate against these
+    // citizens' actual registration (9 days ago, so none qualify),
+    // giving eligible=0, quorum=0, and an EXECUTED rename on the
+    // identical ballots -- the review's exact branch (B).
+    assert.equal(row!.eligible_count, 8);
+    assert.equal(row!.status, "failed");
+    assert.equal(result.results[0].outcome, "failed");
+
+    const settings = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings WHERE key = 'name'").first<{ n: number }>();
+    assert.equal(settings!.n, 0, "the name must never be written here -- this is the exact wrong outcome H2 reproduced");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: M6 reproduction -- one proposal's ratification does not retroactively widen a DIFFERENT in-flight proposal's eligible census", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    const founders = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    for (const f of founders) insertIdentityEvent(d1, f, "invite_redeemed");
+    // Present so eligible would jump 3 -> 6 if the freeze leaked live.
+    insertCitizen(d1);
+    insertCitizen(d1);
+    insertCitizen(d1);
+
+    const proposalA = insertProposal(d1, {
+      kind: "set_name",
+      status: "open",
+      proposer_id: founders[0],
+      registration_mode: "invite_only",
+      founding_ratified: false, // frozen: unratified when A opened
+      closes_at: now - 2000,
+    });
+    const proposalB = insertProposal(d1, {
+      kind: "set_name",
+      status: "open",
+      proposer_id: founders[1],
+      registration_mode: "invite_only",
+      founding_ratified: false, // frozen: also unratified when B opened, same instant as A
+      closes_at: now + 999_999_999, // not due in the first sweep
+    });
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ name: "Hallmoot" }), proposalA);
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ name: "Freehold" }), proposalB);
+
+    // 3 founders pass A: constitutional quorum ceil(3/2)=2, floor 3, cast=3 clears both; 3>=0 && 3>0.
+    for (const f of founders) castYes(d1, proposalA, f, now - 1000);
+
+    const env = testEnv(d1);
+    const sweepA = await runGovernanceSweep(env, now);
+    assert.equal(sweepA.results.find((r) => r.proposal_id === proposalA)?.outcome, "executed");
+    assert.equal(await isFoundingRatified(env, "set_name"), true, "live check now says set_name IS ratified -- the trap this test proves B does not fall into");
+
+    // Cast the same 3 founders on B, then force B due for a second sweep.
+    for (const f of founders) castYes(d1, proposalB, f, now - 500);
+    d1.raw.prepare("UPDATE proposals SET closes_at = ? WHERE id = ?").run(now, proposalB);
+    await runGovernanceSweep(env, now);
+
+    const bRow = await d1.DB.prepare("SELECT eligible_count, status FROM proposals WHERE id = ?")
+      .bind(proposalB)
+      .first<{ eligible_count: number; status: string }>();
+    assert.equal(bRow!.eligible_count, 3, "B's own frozen founding_ratified=0 must keep its census founders-only (3), not widen to 6 just because A ratified the kind afterward");
+    assert.equal(bRow!.status, "executed");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: cast exceeding eligible is refused as invariant_violation, never committed or clamped (the H2 belt)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    // Only one citizen has enough tenure to be eligible under 'open'
+    // mode's 7-day advisory gate.
+    const eligibleCitizen = insertCitizen(d1, { created_at: now - 30 * 86_400_000 });
+    const tooNew1 = insertCitizen(d1, { created_at: now - 1000 });
+    const tooNew2 = insertCitizen(d1, { created_at: now - 1000 });
+
+    const proposalId = insertProposal(d1, {
+      kind: "resolution",
+      status: "open",
+      proposer_id: eligibleCitizen,
+      registration_mode: "open",
+      founding_ratified: true,
+      opened_at: now - 8 * 86_400_000,
+      closes_at: now - 1000,
+    });
+
+    // Directly insert ballots for citizens who are NOT eligible under
+    // this proposal's own frozen rule -- simulating cast > eligible, the
+    // exact state H2's freeze is meant to make structurally impossible,
+    // to prove the belt catches it if it were ever reached anyway (not a
+    // reachable path today, through castBallot's own real gate).
+    for (const c of [eligibleCitizen, tooNew1, tooNew2]) castYes(d1, proposalId, c, now - 500);
+
+    const env = testEnv(d1, "open");
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "invariant_violation");
+
+    const row = await d1.DB.prepare("SELECT status, tally_yes, tallied_at FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; tally_yes: number | null; tallied_at: number | null }>();
+    assert.equal(row!.status, "tallying", "left exactly where the claim put it -- not committed, not silently clamped");
+    assert.equal(row!.tally_yes, null, "no tally written");
+    assert.equal(row!.tallied_at, null, "not stamped, so it is eligible for stale-claim recovery (commit B)");
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 0, "no outcome event for a violation");
+    const settings = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings").first<{ n: number }>();
+    assert.equal(settings!.n, 0);
+  } finally {
+    d1.close();
+  }
+});
+
 test("runGovernanceSweep: a passed set_name proposal executes -- governance_settings, proposals.status, and the chained outcome event all land together (execution batch atomicity)", async () => {
   const d1 = createLocalD1();
   try {

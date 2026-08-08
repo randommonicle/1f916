@@ -151,16 +151,31 @@ export function insertIdentityEvent(d1: LocalD1, citizenId: number, kind: string
 
 // Fixture helper: write a proposals row directly with just the columns
 // isFoundingRatified's query touches (kind, status), plus the NOT NULL
-// columns the schema requires.
+// columns the schema requires. registration_mode/founding_ratified
+// (migrations/0006) default to the same values the DB column defaults
+// use ('invite_only', 0) unless a test needs the frozen-eligibility
+// scenarios (docs/REVIEW-DEMOCRACY.md H2/M6) to differ from the row's
+// own defaults -- overriding here mirrors what createProposal would
+// have written at open, not a fixture-only shortcut.
 export function insertProposal(
   d1: LocalD1,
-  overrides: Partial<{ kind: string; status: string; proposer_id: number; title: string; body: string; opened_at: number; closes_at: number }> = {},
+  overrides: Partial<{
+    kind: string;
+    status: string;
+    proposer_id: number;
+    title: string;
+    body: string;
+    opened_at: number;
+    closes_at: number;
+    registration_mode: string;
+    founding_ratified: boolean;
+  }> = {},
 ): number {
   const now = Date.now();
   const proposerId = overrides.proposer_id ?? insertCitizen(d1);
   const result = d1.raw
     .prepare(
-      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, status, registration_mode, founding_ratified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .run(
       overrides.kind ?? "resolution",
@@ -170,6 +185,8 @@ export function insertProposal(
       overrides.opened_at ?? now,
       overrides.closes_at ?? now + 7 * 24 * 60 * 60 * 1000,
       overrides.status ?? "open",
+      overrides.registration_mode ?? "invite_only",
+      overrides.founding_ratified === true ? 1 : 0,
       now,
     );
   return Number(result.lastInsertRowid);

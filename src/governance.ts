@@ -486,11 +486,17 @@ export async function createProposal(
   const closesAt = now + VOTE_WINDOW_MS;
   const payloadText = validatedPayload === null ? null : JSON.stringify(validatedPayload);
 
+  // Frozen at open, per docs/REVIEW-DEMOCRACY.md H2/M6 (migration 0006):
+  // castBallot and the sweep's close-time census read these two columns
+  // off THIS row from here on, never env.REGISTRATION_MODE and never a
+  // live isFoundingRatified() re-query, so a REGISTRATION_MODE flip or a
+  // different proposal's ratification mid-vote cannot change the rule
+  // this proposal's own ballots were cast under.
   const inserted = await env.DB.prepare(
-    `INSERT INTO proposals (kind, title, body, payload, proposer_id, opened_at, closes_at, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?) RETURNING id`,
+    `INSERT INTO proposals (kind, title, body, payload, proposer_id, opened_at, closes_at, status, registration_mode, founding_ratified, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) RETURNING id`,
   )
-    .bind(kind, title, body, payloadText, citizen.id, now, closesAt, now)
+    .bind(kind, title, body, payloadText, citizen.id, now, closesAt, env.REGISTRATION_MODE, foundingRatified ? 1 : 0, now)
     .first<{ id: number }>();
   const proposalId = inserted?.id;
   if (proposalId == null) throw new SocietyError(500, "failed to create the proposal row");
@@ -535,9 +541,19 @@ export async function castBallot(
   }
   const choice = choiceInput;
 
-  const proposal = await env.DB.prepare("SELECT id, kind, status, opened_at, closes_at FROM proposals WHERE id = ?")
+  const proposal = await env.DB.prepare(
+    "SELECT id, kind, status, opened_at, closes_at, registration_mode, founding_ratified FROM proposals WHERE id = ?",
+  )
     .bind(proposalId)
-    .first<{ id: number; kind: ProposalKind; status: string; opened_at: number; closes_at: number }>();
+    .first<{
+      id: number;
+      kind: ProposalKind;
+      status: string;
+      opened_at: number;
+      closes_at: number;
+      registration_mode: string;
+      founding_ratified: number;
+    }>();
   if (!proposal) throw new SocietyError(404, `proposal ${proposalId} does not exist`);
 
   const now = Date.now();
@@ -550,14 +566,19 @@ export async function castBallot(
 
   const voteClass = classOf(proposal.kind);
   const isFounder = await isFounderCitizen(env, citizen.id);
-  const foundingRatified =
-    proposal.kind === "set_name" || proposal.kind === "text_amendment" ? await isFoundingRatified(env, proposal.kind) : true;
 
+  // registration_mode and founding_ratified are read off THIS row, frozen
+  // at open, never env.REGISTRATION_MODE and never a live
+  // isFoundingRatified() re-query (docs/REVIEW-DEMOCRACY.md H2/M6): the
+  // rule a ballot is cast under and the rule the close-time census is
+  // measured under must be the identical snapshot, or a routine
+  // REGISTRATION_MODE flip or an unrelated proposal's ratification can
+  // silently change which ballots this one's outcome depends on.
   assertEligible({
     citizenCreatedAt: citizen.created_at,
     isFounder,
-    registrationMode: env.REGISTRATION_MODE,
-    foundingRatified,
+    registrationMode: proposal.registration_mode,
+    foundingRatified: proposal.founding_ratified === 1,
     kind: proposal.kind,
     voteClass,
     proposalOpenedAt: proposal.opened_at,
@@ -727,7 +748,7 @@ async function commitOutcome(env: Env, stateStmts: D1PreparedStatement[], actorI
   throw new SocietyError(500, "proposal-outcome chain head moved four times running; refusing to commit an outcome without its record");
 }
 
-export type SweepOutcome = "claimed_elsewhere" | "passed" | "executed" | "failed";
+export type SweepOutcome = "claimed_elsewhere" | "passed" | "executed" | "failed" | "invariant_violation";
 
 async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number): Promise<SweepOutcome> {
   const claim = await env.DB.prepare("UPDATE proposals SET status = 'tallying' WHERE id = ? AND status = 'open' AND closes_at <= ?")
@@ -735,9 +756,19 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
     .run();
   if (claim.meta.changes === 0) return "claimed_elsewhere";
 
-  const proposal = await env.DB.prepare("SELECT id, kind, payload, proposer_id, opened_at FROM proposals WHERE id = ?")
+  const proposal = await env.DB.prepare(
+    "SELECT id, kind, payload, proposer_id, opened_at, registration_mode, founding_ratified FROM proposals WHERE id = ?",
+  )
     .bind(proposalId)
-    .first<{ id: number; kind: ProposalKind; payload: string | null; proposer_id: number; opened_at: number }>();
+    .first<{
+      id: number;
+      kind: ProposalKind;
+      payload: string | null;
+      proposer_id: number;
+      opened_at: number;
+      registration_mode: string;
+      founding_ratified: number;
+    }>();
   if (!proposal) throw new SocietyError(500, `claimed proposal ${proposalId} vanished before it could be tallied`);
 
   const voteClass = classOf(proposal.kind);
@@ -749,8 +780,12 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   const no = countOf("no");
   const abstain = countOf("abstain");
 
-  const foundingRatified =
-    proposal.kind === "set_name" || proposal.kind === "text_amendment" ? await isFoundingRatified(env, proposal.kind) : true;
+  // registration_mode and founding_ratified are read off THIS row, the
+  // exact snapshot castBallot judged every ballot above against -- never
+  // env.REGISTRATION_MODE and never a live isFoundingRatified() re-query
+  // (docs/REVIEW-DEMOCRACY.md H2/M6). This is what makes cast-time and
+  // close-time eligibility identical by construction rather than merely
+  // usually agreeing.
   const [{ results: citizens }, { results: founderRows }] = await Promise.all([
     env.DB.prepare("SELECT id, created_at FROM citizens").all<{ id: number; created_at: number }>(),
     env.DB.prepare("SELECT DISTINCT citizen_id FROM identity_events WHERE kind = 'invite_redeemed'").all<{ citizen_id: number }>(),
@@ -759,12 +794,25 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   const eligible = countEligible(citizens, founderIds, {
     kind: proposal.kind,
     voteClass,
-    registrationMode: env.REGISTRATION_MODE,
-    foundingRatified,
+    registrationMode: proposal.registration_mode,
+    foundingRatified: proposal.founding_ratified === 1,
     proposalOpenedAt: proposal.opened_at,
   });
 
   const result = tally(voteClass, yes, no, abstain, eligible);
+
+  // Belt (docs/REVIEW-DEMOCRACY.md H2 fix, part 2): cast ballots can never
+  // legitimately exceed the eligible census once cast-time and close-time
+  // rules are frozen identical above -- if this ever fires, something
+  // else is wrong in a way this arc did not anticipate. Do not commit and
+  // do not clamp: clamping would silently launder a real eligibility bug
+  // into a plausible-looking outcome, exactly what this check exists to
+  // refuse. The row is left exactly as the claim above left it
+  // (status='tallying'), which is what makes it eligible for stale-claim
+  // recovery rather than requiring a second, bespoke recovery path.
+  if (result.cast > eligible) {
+    return "invariant_violation";
+  }
 
   const isExecutable = result.status === "passed" && MACHINE_EXECUTABLE_KINDS.includes(proposal.kind);
   const finalStatus: "passed" | "failed" | "executed" = result.status === "failed" ? "failed" : isExecutable ? "executed" : "passed";
