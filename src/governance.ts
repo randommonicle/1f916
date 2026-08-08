@@ -690,11 +690,25 @@ export async function getProposalDetail(env: Env, proposalId: number) {
 
 const MACHINE_EXECUTABLE_KINDS: readonly ProposalKind[] = ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise"];
 
+// docs/REVIEW-DEMOCRACY.md H1's belt: a re-claim (below) can, in the
+// narrow window it exists for, race a still-live-but-slow original
+// claimant reaching this same statement. WHERE EXISTS guards the write
+// on the proposal still being 'tallying' at the moment this statement
+// actually executes -- verified directly against node:sqlite (not just
+// reasoned about) that once a proposal's status has moved off
+// 'tallying', a second attempt at this exact statement affects zero
+// rows and leaves the existing setting value completely untouched,
+// upsert path included. Paired with the same guard the final status
+// UPDATE already carried since commit 4 (`AND status = 'tallying'`),
+// both statements in the execution batch are now conditional, not just
+// one of the two.
 function upsertSettingStmt(env: Env, key: string, value: string, expiresAt: number | null, proposalId: number, now: number) {
   return env.DB.prepare(
-    `INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at) VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at)
+     SELECT ?, ?, ?, ?, ?
+     WHERE EXISTS (SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying')
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at, proposal_id = excluded.proposal_id, updated_at = excluded.updated_at`,
-  ).bind(key, value, expiresAt, proposalId, now);
+  ).bind(key, value, expiresAt, proposalId, now, proposalId);
 }
 
 // The governance_settings write for a passed machine-executable kind's
@@ -750,9 +764,31 @@ async function commitOutcome(env: Env, stateStmts: D1PreparedStatement[], actorI
 
 export type SweepOutcome = "claimed_elsewhere" | "passed" | "executed" | "failed" | "invariant_violation";
 
+// docs/REVIEW-DEMOCRACY.md H1, reproduced: a throw anywhere between the
+// claim UPDATE below and commitOutcome's own commit (five-plus more D1
+// round trips, plus the chained append and its own retry loop) left a
+// proposal parked at status='tallying' forever -- the due query only
+// ever looked for status='open', so nothing anywhere ever read it
+// again. 15 minutes is comfortably beyond any real Worker request's
+// lifetime, so a claim still legitimately in flight at that age is not
+// a real possibility to plan around; a claim that old is abandoned.
+const STALE_CLAIM_MS = 15 * 60 * 1000;
+
 async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number): Promise<SweepOutcome> {
-  const claim = await env.DB.prepare("UPDATE proposals SET status = 'tallying' WHERE id = ? AND status = 'open' AND closes_at <= ?")
-    .bind(proposalId, now)
+  // Claims from 'open' (the normal case) exactly as before, OR
+  // re-claims a 'tallying' row whose own claim stamp (tallied_at,
+  // reused rather than adding a fifth column) is older than
+  // STALE_CLAIM_MS -- the identical claim-then-act shape, so a second,
+  // bespoke recovery path is not needed. tallied_at is stamped with
+  // THIS claim's own `now` regardless of which branch matched, which is
+  // what lets a second stale check ever succeed again if this claimant
+  // also stalls: the clock restarts on whoever holds the claim, not on
+  // when the proposal first went stale.
+  const claim = await env.DB.prepare(
+    `UPDATE proposals SET status = 'tallying', tallied_at = ?
+     WHERE id = ? AND ((status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND tallied_at <= ?))`,
+  )
+    .bind(now, proposalId, now, now - STALE_CLAIM_MS)
     .run();
   if (claim.meta.changes === 0) return "claimed_elsewhere";
 
@@ -842,18 +878,41 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
 // tallying a proposal is deterministic code, not a privileged act -- and
 // idempotent: a due proposal already claimed (by an earlier call, or by a
 // concurrent one) is reported "claimed_elsewhere", never reprocessed.
+//
+// Due is now two populations, matching claimTallyAndExecuteOne's own
+// claim UPDATE exactly (docs/REVIEW-DEMOCRACY.md H1): freshly closed
+// ('open', past closes_at) or abandoned ('tallying' for longer than
+// STALE_CLAIM_MS). `reclaimed: true` on a result marks the second kind,
+// so a caller reading the response can tell "just closed" from "was
+// stuck and just got recovered" without a second query.
 export async function runGovernanceSweep(env: Env, now = Date.now()) {
-  const { results: due } = await env.DB.prepare("SELECT id FROM proposals WHERE status = 'open' AND closes_at <= ?").bind(now).all<{ id: number }>();
-  const results: Array<{ proposal_id: number; outcome: SweepOutcome | "error"; error?: string }> = [];
-  for (const { id } of due) {
+  const { results: due } = await env.DB.prepare(
+    `SELECT id, status FROM proposals WHERE (status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND tallied_at <= ?)`,
+  )
+    .bind(now, now - STALE_CLAIM_MS)
+    .all<{ id: number; status: string }>();
+
+  const results: Array<{ proposal_id: number; outcome: SweepOutcome | "error"; reclaimed?: true; error?: string }> = [];
+  for (const { id, status } of due) {
+    const reclaimed = status === "tallying" ? ({ reclaimed: true } as const) : {};
     try {
       const outcome = await claimTallyAndExecuteOne(env, id, now);
-      results.push({ proposal_id: id, outcome });
+      results.push({ proposal_id: id, outcome, ...reclaimed });
     } catch (e) {
       // Per-proposal isolation: one bad proposal must not block the rest
       // of the sweep from processing everything else that is due.
-      results.push({ proposal_id: id, outcome: "error", error: e instanceof SocietyError ? e.message : String(e) });
+      results.push({ proposal_id: id, outcome: "error", ...reclaimed, error: e instanceof SocietyError ? e.message : String(e) });
     }
   }
-  return { swept_at: now, due: due.length, processed: results.length, results };
+
+  // Named separately from `results` (docs/REVIEW-DEMOCRACY.md H1: "report
+  // strands... instead of them being visible only row by row"): every
+  // proposal still at 'tallying' once this call is done, whether it was
+  // too fresh to reclaim yet, or reclaimed here and still did not reach
+  // a final state, or was never touched by this call at all. A citizen
+  // or the operator reading POST /api/governance/sweep's response sees
+  // a stuck proposal directly, not only by querying the row.
+  const { results: strandedRows } = await env.DB.prepare("SELECT id FROM proposals WHERE status = 'tallying'").all<{ id: number }>();
+
+  return { swept_at: now, due: due.length, processed: results.length, results, stranded: strandedRows.map((r) => r.id) };
 }

@@ -23,7 +23,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal } from "./helpers/local-d1.ts";
+import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow } from "../src/governance.ts";
 import { SocietyError, officialFacts, SETTING_KEY, DEFAULT_NAME, DEFAULT_DIVIDEND_PERCENT } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
@@ -306,6 +306,25 @@ function castYes(d1: ReturnType<typeof createLocalD1>, proposalId: number, citiz
   d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'yes', ?)").run(proposalId, citizenId, castAt);
 }
 
+// docs/REVIEW-DEMOCRACY.md H1's reproduction, real, not simulated: wraps
+// a real D1Like so its first `failCount` calls to .batch() throw exactly
+// the review's own transient error message, then delegate to the real
+// implementation from then on. .prepare() (the claim UPDATE, the reads)
+// passes straight through untouched, so only commitOutcome's own batch
+// call is ever affected -- the claim itself always succeeds, matching
+// the review's own reproduction shape precisely.
+function withFailingBatch(DB: LocalD1["DB"], failCount: number): LocalD1["DB"] {
+  let calls = 0;
+  return {
+    prepare: (sql: string) => DB.prepare(sql),
+    async batch<T = unknown>(stmts: Parameters<LocalD1["DB"]["batch"]>[0]): Promise<T[]> {
+      calls++;
+      if (calls <= failCount) throw new Error("Network connection lost.");
+      return DB.batch(stmts) as Promise<T[]>;
+    },
+  };
+}
+
 test("runGovernanceSweep: an advisory proposal that passes lands as 'passed' with a chained proposal_decided event, no settings write", async () => {
   const d1 = createLocalD1();
   try {
@@ -503,7 +522,7 @@ test("runGovernanceSweep: cast exceeding eligible is refused as invariant_violat
       .first<{ status: string; tally_yes: number | null; tallied_at: number | null }>();
     assert.equal(row!.status, "tallying", "left exactly where the claim put it -- not committed, not silently clamped");
     assert.equal(row!.tally_yes, null, "no tally written");
-    assert.equal(row!.tallied_at, null, "not stamped, so it is eligible for stale-claim recovery (commit B)");
+    assert.equal(row!.tallied_at, now, "the claim's own stamp (commit B), not the outcome's -- this is what makes it eligible for stale-claim recovery once it ages past STALE_CLAIM_MS");
 
     const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
     assert.equal(events!.n, 0, "no outcome event for a violation");
@@ -671,6 +690,97 @@ test("runGovernanceSweep: functions with no ANTHROPIC_API_KEY set (dry key) -- i
     assert.equal(env.ANTHROPIC_API_KEY, undefined);
     const result = await runGovernanceSweep(env, now);
     assert.equal(result.results[0].outcome, "passed");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- H1: stale-claim recovery (docs/REVIEW-DEMOCRACY.md, STALE_CLAIM_MS) ----------
+
+test("runGovernanceSweep: H1 reproduction -- a real transient batch failure strands a proposal at 'tallying'; too-fresh sweeps report it stranded without touching it; sweep past STALE_CLAIM_MS recovers it", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const voter = insertCitizen(d1);
+    castYes(d1, proposalId, voter, now - 2000);
+    castYes(d1, proposalId, proposer, now - 2000);
+
+    const flakyEnv = { ...testEnv(d1), DB: withFailingBatch(d1.DB, 1) };
+
+    // Sweep 1: the claim (a plain UPDATE, not batch()) succeeds; the
+    // outcome commit's batch() throws -- the review's own reproduction,
+    // reproduced here for real rather than asserted from reading.
+    const sweep1 = await runGovernanceSweep(flakyEnv, now);
+    assert.equal(sweep1.results[0].outcome, "error");
+    assert.match(sweep1.results[0].error!, /Network connection lost/);
+    assert.deepEqual(sweep1.stranded, [proposalId]);
+
+    const afterSweep1 = await d1.DB.prepare("SELECT status, tallied_at FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; tallied_at: number }>();
+    assert.equal(afterSweep1!.status, "tallying");
+    assert.equal(afterSweep1!.tallied_at, now, "stamped with the claim's own time, per commit B");
+
+    // Sweep 2, 60s later, real DB (no longer poisoned): still too fresh
+    // to reclaim (STALE_CLAIM_MS is 15 minutes) -- must not be touched,
+    // but must still be visibly reported as stranded.
+    const soon = now + 60_000;
+    const sweep2 = await runGovernanceSweep(testEnv(d1), soon);
+    assert.equal(sweep2.due, 0, "not yet stale -- a too-eager reclaim would itself be a race hazard");
+    assert.deepEqual(sweep2.stranded, [proposalId], "still visibly stuck even though nothing was due to process");
+
+    // Sweep 3, 16 minutes later: past STALE_CLAIM_MS, recovers it.
+    const later = now + 16 * 60 * 1000;
+    const sweep3 = await runGovernanceSweep(testEnv(d1), later);
+    assert.equal(sweep3.due, 1);
+    assert.equal(sweep3.results[0].reclaimed, true);
+    assert.equal(sweep3.results[0].outcome, "passed");
+    assert.deepEqual(sweep3.stranded, [], "recovered -- no longer stranded");
+
+    const finalRow = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(finalRow!.status, "passed");
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one outcome event -- sweep 1's failed attempt must not have left a partial one");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: a concurrent re-claim race on a stale 'tallying' proposal cannot double-execute", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    castYes(d1, proposalId, proposer, now - 500);
+
+    // Directly stamp the row into the abandoned-claim state H1's real
+    // strand leaves behind (constructed directly here to isolate the
+    // race itself, rather than re-deriving it from a forced failure
+    // again -- that path is exercised end to end by the test above).
+    d1.raw.prepare("UPDATE proposals SET status = 'tallying', tallied_at = ? WHERE id = ?").run(now - 20 * 60 * 1000, proposalId);
+
+    const env = testEnv(d1);
+    const [r1, r2] = await Promise.all([runGovernanceSweep(env, now), runGovernanceSweep(env, now)]);
+
+    const outcomes = [r1.results[0]?.outcome, r2.results[0]?.outcome].sort();
+    // One caller's re-claim UPDATE actually changes the row (and moves
+    // tallied_at out of the stale window in the same statement); the
+    // other's identical UPDATE, evaluated against the now-current row,
+    // affects zero rows and reports claimed_elsewhere -- the same
+    // compare-and-swap-by-WHERE-clause guarantee the original
+    // 'open'->'tallying' claim already relied on, now covering the
+    // 'tallying'(stale)->'tallying'(reclaimed) transition too.
+    assert.deepEqual(outcomes, ["claimed_elsewhere", "passed"]);
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "the race must not produce two outcome events for one proposal");
+
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "passed");
   } finally {
     d1.close();
   }
