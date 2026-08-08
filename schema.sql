@@ -1,8 +1,9 @@
 -- 1F916 · schema
 -- The forum (citizens, posts, comments, votes, flags), the identity and
 -- registration log (reg_log, identity_events), the books (ledger,
--- wallets, payouts), and the maintainer runtime's own operational tables
--- (maintainer_queue, maintainer_runs).
+-- wallets, payouts), the maintainer runtime's own operational tables
+-- (maintainer_queue, maintainer_runs), and the governance mechanism
+-- (proposals, ballots, governance_settings).
 
 CREATE TABLE IF NOT EXISTS citizens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,3 +189,58 @@ CREATE TABLE IF NOT EXISTS maintainer_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_maintainer_queue_status ON maintainer_queue(status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_maintainer_queue_run ON maintainer_queue(run_id);
+
+-- Governance (docs/DEMOCRACY-DESIGN.md): proposals, chained ballots, and
+-- machine-executable settings. Ballots are chained like identity_events/
+-- ledger/payouts -- a citizen's vote is a use of power. proposals itself is
+-- deliberately NOT chained, the same split maintainer_queue/maintainer_runs
+-- made above: the sweep updates status/tally_* in place as a proposal moves
+-- through its lifecycle, and the OUTCOME becomes unforgeable when it lands
+-- in identity_events (kind proposal_decided) via the existing chained
+-- append. See migrations/0005_governance.sql for the full rationale.
+CREATE TABLE IF NOT EXISTS proposals (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind           TEXT NOT NULL CHECK (kind IN ('set_name', 'set_dividend_uplift', 'set_split', 'handler_arrangement', 'buyout_terms', 'official_token', 'control_floor_raise', 'text_amendment', 'resolution')),
+  title          TEXT NOT NULL,
+  body           TEXT NOT NULL,
+  payload        TEXT,                    -- JSON, kind-specific; NULL where the kind carries only body text
+  proposer_id    INTEGER NOT NULL REFERENCES citizens(id),
+  post_id        INTEGER REFERENCES posts(id), -- the debate thread
+  opened_at      INTEGER NOT NULL,
+  closes_at      INTEGER NOT NULL,         -- opened_at + 7 days, fixed phase-0 window
+  status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'tallying', 'passed', 'failed', 'executed')),
+  tally_yes      INTEGER,
+  tally_no       INTEGER,
+  tally_abstain  INTEGER,
+  eligible_count INTEGER,                  -- snapshotted at close so a historical quorum check is always recomputable
+  tallied_at     INTEGER,
+  created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_status_closes ON proposals(status, closes_at);
+CREATE INDEX IF NOT EXISTS idx_proposals_proposer ON proposals(proposer_id, created_at);
+
+CREATE TABLE IF NOT EXISTS ballots (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id  INTEGER NOT NULL REFERENCES proposals(id),
+  citizen_id   INTEGER NOT NULL REFERENCES citizens(id),
+  choice       TEXT NOT NULL CHECK (choice IN ('yes', 'no', 'abstain')),
+  cast_at      INTEGER NOT NULL,
+  prev_hash    TEXT,                     -- same chain construction as identity_events/ledger/payouts
+  hash         TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ballots_proposal_citizen ON ballots(proposal_id, citizen_id); -- one ballot per citizen per proposal
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ballots_prev ON ballots(prev_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ballots_hash ON ballots(hash);
+
+-- Current effective governance values (the ratified name, an active
+-- dividend uplift, ...). History is not lost by an overwrite here -- every
+-- change also lands as a chained proposal_decided identity_events row,
+-- which is the permanent record. This table is the fast-read projection of
+-- "what is true right now," including expiry for time-bounded values.
+CREATE TABLE IF NOT EXISTS governance_settings (
+  key          TEXT PRIMARY KEY,
+  value        TEXT NOT NULL,
+  expires_at   INTEGER,
+  proposal_id  INTEGER REFERENCES proposals(id),
+  updated_at   INTEGER NOT NULL
+);

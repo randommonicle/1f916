@@ -23,7 +23,7 @@
 
 export const GENESIS = "0".repeat(64);
 
-export type ChainedTable = "identity_events" | "ledger" | "payouts";
+export type ChainedTable = "identity_events" | "ledger" | "payouts" | "ballots";
 
 // The hashed fields, in order. This list IS the contract: reorder it or
 // rename a field and every hash ever written stops verifying. New columns
@@ -32,6 +32,9 @@ const PAYLOAD: Record<ChainedTable, readonly string[]> = {
   identity_events: ["citizen_id", "kind", "detail", "created_at"],
   ledger: ["entry_date", "description", "amount_cents", "created_at"],
   payouts: ["citizen_id", "amount_cents", "reason", "tx", "created_at"],
+  // A citizen's vote (docs/DEMOCRACY-DESIGN.md) -- id/prev_hash/hash
+  // excluded, same as every other table above.
+  ballots: ["proposal_id", "citizen_id", "choice", "cast_at"],
 };
 
 export type ChainRow = Record<string, unknown> & {

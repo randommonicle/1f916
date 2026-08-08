@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GENESIS, entryHash, verifyRows, type ChainRow } from "../src/chain.ts";
+import { GENESIS, entryHash, verifyRows, type ChainRow, type ChainedTable } from "../src/chain.ts";
 
 const EVENTS = [
   { citizen_id: 1, kind: "moderation", detail: "pinned post 3", created_at: 1785900000000 },
@@ -26,7 +26,12 @@ const PAYOUTS = [
   { citizen_id: 5, amount_cents: 50, reason: "forecast settlement", tx: "0xaaa2", created_at: 1785900001000 },
 ];
 
-async function build(table: "identity_events" | "ledger" | "payouts", payloads: Record<string, unknown>[]): Promise<ChainRow[]> {
+const BALLOTS = [
+  { proposal_id: 1, citizen_id: 1, choice: "yes", cast_at: 1785900000000 },
+  { proposal_id: 1, citizen_id: 2, choice: "no", cast_at: 1785900001000 },
+];
+
+async function build(table: ChainedTable, payloads: Record<string, unknown>[]): Promise<ChainRow[]> {
   const rows: ChainRow[] = [];
   let prev = GENESIS;
   for (const [i, payload] of payloads.entries()) {
@@ -183,7 +188,7 @@ test("nothing outside chain.ts writes to a chained table directly", () => {
   const offenders: string[] = [];
   for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "chain.ts")) {
     const text = readFileSync(join(src, file), "utf8");
-    for (const table of ["identity_events", "ledger", "payouts"]) {
+    for (const table of ["identity_events", "ledger", "payouts", "ballots"]) {
       const pattern = new RegExp(`(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+${table}\\b`, "i");
       if (pattern.test(text)) offenders.push(`${file} writes ${table} directly`);
     }
@@ -213,6 +218,27 @@ test("editing a payouts-only field (amount_cents or tx) is caught", async () => 
   const rows = clone(await build("payouts", PAYOUTS));
   rows[1].amount_cents = 999999; // not a field identity_events or ledger even has
   const report = await verifyRows("payouts", rows);
+  assert.equal(report.ok, false);
+  assert.equal(report.broken_at, 2);
+  assert.match(report.reason!, /contents do not match/);
+});
+
+// ballots joined the chain in docs/DEMOCRACY-DESIGN.md's arc: a citizen's
+// vote is a use of power (D-004 applies same as money moving). Same
+// reasoning as the payouts tests above: the generic machinery is already
+// proven table-agnostic; what is worth proving directly is that ballots'
+// own PAYLOAD field list (proposal_id, citizen_id, choice, cast_at) is the
+// one actually wired in chain.ts, not a copy of another table's by mistake.
+test("an intact ballots chain verifies", async () => {
+  const report = await verifyRows("ballots", await build("ballots", BALLOTS));
+  assert.equal(report.ok, true);
+  assert.equal(report.sealed_entries, 2);
+});
+
+test("editing a ballots-only field (proposal_id or choice) is caught", async () => {
+  const rows = clone(await build("ballots", BALLOTS));
+  rows[1].choice = "yes"; // the maintainer quietly rewrites a citizen's cast vote
+  const report = await verifyRows("ballots", rows);
   assert.equal(report.ok, false);
   assert.equal(report.broken_at, 2);
   assert.match(report.reason!, /contents do not match/);
