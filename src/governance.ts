@@ -150,10 +150,24 @@ export function tally(voteClass: VoteClass, yes: number, no: number, abstain: nu
 // (§7: "months an integer 1-12"). A fixed 30-day approximation would
 // drift up to two real days off "N months" for no reason -- this is
 // cheap to get right with the platform's own calendar math instead.
+//
+// docs/REVIEW-DEMOCRACY.md L3: the naive `d.setUTCMonth(d.getUTCMonth() +
+// months)` overshoots whenever the start day does not exist in the target
+// month -- JS silently rolls the excess into the month after (31 Jan + 1
+// -> 3 Mar, not the intended "one month later"; 31 Mar + 1 -> 1 May), up to
+// ~3 days longer than the vote authorised, on the money path, always in
+// the operator's favour. Fixed by computing the target month's real last
+// day first (day 0 of the following month, a standard JS idiom) and
+// clamping the original day-of-month to it, rather than letting the Date
+// object overflow and normalise on its own. Time-of-day is preserved
+// exactly; only the date can move.
 export function monthsFromNow(now: number, months: number): number {
   const d = new Date(now);
-  d.setUTCMonth(d.getUTCMonth() + months);
-  return d.getTime();
+  const year = d.getUTCFullYear();
+  const targetMonth = d.getUTCMonth() + months; // may be outside 0-11; Date.UTC normalises the YEAR correctly for that, unlike the day-of-month overflow this fixes
+  const lastDayOfTargetMonth = new Date(Date.UTC(year, targetMonth + 1, 0)).getUTCDate();
+  const day = Math.min(d.getUTCDate(), lastDayOfTargetMonth);
+  return new Date(Date.UTC(year, targetMonth, day, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds())).getTime();
 }
 
 // ---------- payload validation ----------
@@ -402,6 +416,14 @@ export async function currentPayloadContext(env: Env): Promise<PayloadContext> {
 // design's own numbers, not because they are the same knob.
 const PROPOSAL_RATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Check-then-act, the same shape and the same accepted window as
+// castBallot's own pre-check further down (docs/REVIEW-DEMOCRACY.md L8):
+// two concurrent POST /api/proposal from the same citizen can both pass
+// both SELECTs below before either's INSERT lands, so both proposals
+// open. Accepted at phase-0 scale, the same call register-gate.ts's
+// invite-code race and wallets.ts's concurrent-declare race already
+// make. Previously undocumented here specifically -- recorded now so the
+// next reader does not have to re-derive it.
 export async function assertProposalRateCaps(env: Env, citizenId: number, now: number): Promise<void> {
   const open = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE proposer_id = ? AND status = 'open'")
     .bind(citizenId)
@@ -549,6 +571,17 @@ export async function createProposal(
     throw e;
   }
 
+  // Runs after createPost has already committed and returned its id (the
+  // debate post's title embeds this proposal's own id, so the order
+  // cannot reverse). If THIS statement is what fails, the post exists
+  // and the proposal survives with post_id NULL until whatever failed
+  // here is retried -- castBallot's own gate above (M1) refuses any
+  // ballot against it meanwhile, so this is a visibility gap, not a
+  // safety one. Same shape as the logModeration divergence already
+  // recorded (docs/recon/DEMOCRACY-SURFACE.md, "Divergences observed"
+  // #2): a two-step commit whose second step cannot be rolled back into
+  // the first. No new risk (docs/REVIEW-DEMOCRACY.md L9); worth the
+  // comment so it is not mistaken for an oversight.
   await env.DB.prepare("UPDATE proposals SET post_id = ? WHERE id = ?").bind(postId, proposalId).run();
 
   return { proposal_id: proposalId, post_id: postId, kind, class: voteClass, closes_at: closesAt };
@@ -657,30 +690,43 @@ export async function castBallot(
 // (society.ts's citizenDirectory) with a real COUNT and has_more.
 export const PROPOSAL_PAGE = 200;
 
-export async function listProposals(env: Env, since = NaN) {
+// docs/REVIEW-DEMOCRACY.md L2: created_at alone is not a safe cursor --
+// two proposals sharing a millisecond across a page boundary would lose
+// one permanently (created_at > since excludes BOTH once either has been
+// seen). Reproduced at 201+ proposals with a genuine collision, so out of
+// phase-0 reach today, but the loss is silent and permanent, which is
+// worth closing regardless of how rarely it fires. sinceId is optional
+// and only takes effect alongside since: a caller that has not adopted it
+// yet runs the exact same query it always has (unchanged behaviour), and
+// one that walks both cursor fields the response now returns gets the
+// real fix -- (created_at, id) is a total order with no ties, since id is
+// a real primary key.
+export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
   const total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>())?.n ?? 0;
   const cols = `p.id, p.kind, p.title, p.status, p.proposer_id, c.handle AS proposer, p.post_id,
                 p.opened_at, p.closes_at, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at`;
-  const stmt = Number.isFinite(since)
-    ? env.DB.prepare(
-        `SELECT ${cols} FROM proposals p JOIN citizens c ON c.id = p.proposer_id
-         WHERE p.created_at > ? ORDER BY p.created_at ASC LIMIT ?`,
-      ).bind(since, PROPOSAL_PAGE)
-    : env.DB.prepare(
-        `SELECT ${cols} FROM proposals p JOIN citizens c ON c.id = p.proposer_id
-         ORDER BY p.created_at ASC LIMIT ?`,
-      ).bind(PROPOSAL_PAGE);
-  const { results } = await stmt.all<{ kind: ProposalKind; created_at: number }>();
+  const hasSince = Number.isFinite(since);
+  const hasSinceId = hasSince && Number.isFinite(sinceId);
+  const where = hasSinceId ? "WHERE p.created_at > ? OR (p.created_at = ? AND p.id > ?)" : hasSince ? "WHERE p.created_at > ?" : "";
+  const bindArgs = hasSinceId ? [since, since, sinceId] : hasSince ? [since] : [];
+  const stmt = env.DB
+    .prepare(
+      `SELECT ${cols} FROM proposals p JOIN citizens c ON c.id = p.proposer_id
+       ${where} ORDER BY p.created_at ASC, p.id ASC LIMIT ?`,
+    )
+    .bind(...bindArgs, PROPOSAL_PAGE);
+  const { results } = await stmt.all<{ kind: ProposalKind; created_at: number; id: number }>();
   const returned = results.length;
   const has_more = returned === PROPOSAL_PAGE;
   const proposals = results.map((p) => ({ ...p, class: classOf(p.kind) }));
+  const last = results[returned - 1];
   return {
     total,
     returned,
     page_size: PROPOSAL_PAGE,
     has_more,
-    ...(has_more ? { next_since: results[returned - 1].created_at } : {}),
-    note: "total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since> and keep going.",
+    ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
+    note: "total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
     proposals,
   };
 }

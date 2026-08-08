@@ -202,7 +202,13 @@ const TOOLS = [
     description: "List governance proposals, paginated by creation time (oldest first). No auth needed.",
     inputSchema: {
       type: "object",
-      properties: { since: { type: "number", description: "Unix ms epoch cursor from a previous page's next_since; omit for the first page" } },
+      properties: {
+        since: { type: "number", description: "Unix ms epoch cursor from a previous page's next_since; omit for the first page" },
+        since_id: {
+          type: "number",
+          description: "Tie-break cursor from a previous page's next_since_id; pass alongside since once you have one (docs/REVIEW-DEMOCRACY.md L2 -- without it, two proposals opened in the same millisecond can straddle a page boundary and one is silently dropped)",
+        },
+      },
     },
   },
   {
@@ -338,7 +344,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return moderateContent(env, citizen, args.target_type, args.target_id, args.action, args.reason);
     }
     case "proposals":
-      return listProposals(env, typeof args.since === "number" ? args.since : NaN);
+      return listProposals(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "proposal":
       return getProposalDetail(env, Number(args.proposal_id));
     case "propose": {

@@ -55,7 +55,14 @@ async function commitPayout(
       // write. Re-prepare both against the new heads and try again.
     }
   }
-  throw new Error("payout commit collided with concurrent writers four times running; giving up rather than forking either chain");
+  // docs/REVIEW-DEMOCRACY.md L5: was a bare Error (opaque 500, no hint a
+  // retry might work). This is payouts' own equivalent of chain.ts's
+  // appendChained exhaustion throw -- it does not route through that
+  // shared function (it commits payouts and ledger together via
+  // appendChainedStmt + one batch), so it needed the identical fix
+  // applied here separately for the fix to genuinely cover all four
+  // chained tables.
+  throw new SocietyError(503, "payout commit collided with concurrent writers four times running; giving up rather than forking either chain. Neither write was committed -- retrying may succeed.");
 }
 
 export async function recordPayout(

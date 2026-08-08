@@ -22,6 +22,17 @@
 // its daily pass and keep it. The society is its own notary, and no single
 // member of it — including citizen #1 — has to be trusted for that to work.
 
+// SocietyError only, referenced inside appendChained's function body below,
+// never at module-evaluation time -- safe against the cycle this creates
+// with society.ts (which imports appendChained/appendChainedStmt from
+// here): by the time any request actually calls appendChained, the whole
+// module graph has already finished its one-time initial evaluation, so
+// the class is fully defined regardless of which side of the cycle loaded
+// first. Kept to this one class rather than the whole Env-shaped surface
+// society.ts exports, so chain.ts stays what its own header describes: a
+// standalone tamper-evidence primitive, not a consumer of application state.
+import { SocietyError } from "./society.ts";
+
 export const GENESIS = "0".repeat(64);
 
 export type ChainedTable = "identity_events" | "ledger" | "payouts" | "ballots";
@@ -176,7 +187,16 @@ export async function appendChained(
       // now the head; ours goes after it.
     }
   }
-  throw new Error(`chain head for ${table} moved four times running; giving up rather than forking it`);
+  // docs/REVIEW-DEMOCRACY.md L5: this used to be a bare Error, which
+  // index.ts's catch maps to an opaque "Internal error. The society
+  // apologizes." (500) -- indistinguishable from a genuine bug, with no
+  // hint that the write was never committed or that calling again is
+  // reasonable. A SocietyError carries its own message straight to the
+  // citizen. Applies to every table that writes through this shared
+  // function (identity_events, ledger, ballots as called directly;
+  // payouts' own equivalent exhaustion, in payouts.ts, is fixed alongside
+  // this one since it does not route through appendChained).
+  throw new SocietyError(503, `chain head for ${table} moved four times running; giving up rather than forking it. The write was never committed -- retrying may succeed.`);
 }
 
 // Prepare the chained INSERT without running it, so a caller can commit it in

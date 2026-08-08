@@ -24,7 +24,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
-import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow } from "../src/governance.ts";
+import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow, listProposals, PROPOSAL_PAGE } from "../src/governance.ts";
 import { SocietyError, officialFacts, SETTING_KEY, DEFAULT_NAME, DEFAULT_DIVIDEND_PERCENT, DEFAULT_CONTROL_FLOOR_PERCENT, DEFAULT_SPLIT } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, type ChainRow } from "../src/chain.ts";
@@ -1007,6 +1007,145 @@ test("officialFacts: governance.open_proposals counts only status='open' proposa
 
     const facts = await officialFacts(testEnv(d1));
     assert.equal(facts.governance.open_proposals, 2);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- listProposals cursor (L2) ----------
+
+// docs/REVIEW-DEMOCRACY.md L2 red-proof, reproduced the same way the review
+// did: a real page-boundary collision, not a unit test of the WHERE clause
+// in isolation. 199 fillers with distinct created_at values, then two more
+// proposals sharing the exact next millisecond -- so the 200th and 201st
+// rows overall (PROPOSAL_PAGE = 200) are the colliding pair, landing
+// exactly on the page boundary the bug needs.
+test("listProposals: a page-boundary millisecond collision loses no row when the caller walks both cursor fields, and does not otherwise change the first page", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const baseTime = Date.UTC(2026, 0, 1);
+    const insertAt = d1.raw.prepare(
+      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, created_at) VALUES ('resolution', ?, 'body', ?, ?, ?, ?)",
+    );
+    for (let i = 0; i < 199; i++) {
+      const t = baseTime + i;
+      insertAt.run(`filler ${i}`, proposer, t, t + 7 * 86_400_000, t);
+    }
+    const collisionTime = baseTime + 199;
+    insertAt.run("boundary A", proposer, collisionTime, collisionTime + 7 * 86_400_000, collisionTime);
+    insertAt.run("boundary B", proposer, collisionTime, collisionTime + 7 * 86_400_000, collisionTime);
+
+    const env = testEnv(d1);
+
+    const page1 = await listProposals(env);
+    assert.equal(page1.total, 201);
+    assert.equal(page1.returned, PROPOSAL_PAGE);
+    assert.equal(page1.has_more, true);
+    assert.equal(page1.proposals[199].title, "boundary A", "the 200th row in (created_at, id) order is boundary A, the earlier-inserted of the tied pair");
+    assert.equal((page1 as { next_since_id?: number }).next_since_id, page1.proposals[199].id, "next_since_id must name boundary A's own row, not just its timestamp");
+
+    // The fix: a caller that walks both next_since and next_since_id sees
+    // boundary B on the very next page -- nothing lost.
+    const page2Fixed = await listProposals(env, (page1 as { next_since: number }).next_since, (page1 as { next_since_id: number }).next_since_id);
+    assert.equal(page2Fixed.returned, 1);
+    assert.equal(page2Fixed.proposals[0].title, "boundary B");
+    assert.equal(page2Fixed.has_more, false);
+
+    // The accepted, unchanged half: a caller that has not adopted since_id
+    // yet gets exactly the old query (created_at > since alone) -- boundary
+    // B, sharing the exact boundary timestamp, is still silently absent.
+    // This is not a new gap (docs/REVIEW-DEMOCRACY.md calls it "out of
+    // phase-0 reach"); asserted here so nobody mistakes the fix above for
+    // having removed it, and so a future change that accidentally forces
+    // the tie-break unconditionally (which would instead DUPLICATE
+    // boundary A on page 2, see governance.ts's own comment on why sinceId
+    // defaults to NaN, not 0) gets caught by this exact assertion moving.
+    const page2Unupgraded = await listProposals(env, (page1 as { next_since: number }).next_since);
+    assert.equal(page2Unupgraded.returned, 0, "an old-style caller without since_id sees the pre-existing, accepted limitation, not a new regression");
+  } finally {
+    d1.close();
+  }
+});
+
+test("listProposals: an ordinary page with no collision is unaffected by the (created_at, id) tie-break", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const a = insertProposal(d1, { kind: "resolution", proposer_id: proposer });
+    const b = insertProposal(d1, { kind: "resolution", proposer_id: proposer });
+    const env = testEnv(d1);
+    const page = await listProposals(env);
+    assert.equal(page.returned, 2);
+    assert.deepEqual(
+      page.proposals.map((p) => p.id),
+      [a, b],
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- chain append exhaustion (L5) ----------
+
+// Wraps a real D1Like so every INSERT into the named table fails with the
+// exact message shape a genuine SQLite/D1 UNIQUE violation carries
+// (verified against real node:sqlite behaviour in local-d1.ts's own header
+// before either was trusted), on every attempt -- forcing appendChained's
+// 4-attempt retry loop to exhaust for real, not simulate the exhaustion by
+// calling internals directly.
+function withAlwaysColliding(DB: LocalD1["DB"], table: string): LocalD1["DB"] {
+  const insertPattern = new RegExp(`^\\s*INSERT INTO ${table}\\b`, "i");
+  return {
+    prepare: (sql: string) => {
+      const real = DB.prepare(sql);
+      if (!insertPattern.test(sql)) return real;
+      return {
+        ...real,
+        bind: (...args: unknown[]) => {
+          const boundReal = real.bind(...args);
+          return {
+            ...boundReal,
+            async run() {
+              throw new Error(`UNIQUE constraint failed: ${table}.prev_hash`);
+            },
+          };
+        },
+      };
+    },
+    batch: (stmts) => DB.batch(stmts),
+  };
+}
+
+// docs/REVIEW-DEMOCRACY.md L5 red-proof, via castBallot (appendChained's
+// real, direct caller for the ballots chain -- one of the three tables
+// this shared function serves when called without a Stmt suffix; payouts'
+// own separate exhaustion throw, in payouts.ts, is not D1-testable here,
+// see that file's own header on why, and is verified by inspection
+// instead, recorded in docs/CHECKPOINT.md).
+test("castBallot: a ballots chain-head collision surviving all four retries throws a named, retryable SocietyError, not chain.ts's old bare Error (would have mapped to an opaque 500)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const voter = insertCitizen(d1);
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer });
+    const env = testEnv(d1);
+    env.DB = withAlwaysColliding(d1.DB, "ballots");
+
+    await assert.rejects(
+      () => castBallot(env, { id: voter, created_at: Date.now() }, proposalId, "yes"),
+      (e: unknown) => {
+        assert.ok(e instanceof SocietyError, `expected a SocietyError, got ${e instanceof Error ? e.constructor.name : typeof e}`);
+        const err = e as SocietyError;
+        assert.equal(err.status, 503, "503 (retryable), not a bare Error that index.ts would map to an opaque 500");
+        assert.match(err.message, /moved four times running/);
+        assert.match(err.message, /retrying may succeed/i);
+        return true;
+      },
+    );
+
+    const count = d1.raw.prepare("SELECT COUNT(*) AS n FROM ballots").get() as { n: number };
+    assert.equal(count.n, 0, "no partial ballot row survives an exhausted append");
   } finally {
     d1.close();
   }

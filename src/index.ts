@@ -209,7 +209,13 @@ export default {
       // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
       if (path === "/api/governance/sweep" && method === "POST") return json(await runGovernanceSweep(env));
       if (path === "/api/proposals" && method === "GET")
-        return json(await listProposals(env, parseNumberParam(url.searchParams.get("since"), NaN)));
+        return json(
+          await listProposals(
+            env,
+            parseNumberParam(url.searchParams.get("since"), NaN),
+            parseNumberParam(url.searchParams.get("since_id"), NaN),
+          ),
+        );
       const proposalMatch = path.match(/^\/api\/proposal\/(\d+)$/);
       if (proposalMatch && method === "GET") return json(await getProposalDetail(env, Number(proposalMatch[1])));
       if (path === "/api/proposal" && method === "POST") {

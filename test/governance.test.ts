@@ -547,14 +547,38 @@ test("monthsFromNow: 12 months lands on the same day next year", () => {
   assert.equal(monthsFromNow(mar3, 12), mar3NextYear);
 });
 
-test("monthsFromNow: a month-end source date can overflow into the following month (documented JS Date behaviour, not a governance rule)", () => {
-  // Jan 31 + 1 month: February has no 31st, so JS Date's setUTCMonth
-  // overflows into early March rather than clamping to Feb 28/29. Named
-  // and pinned here so this is a known, tested behaviour rather than a
-  // silent surprise the first time a dividend-uplift proposal happens to
-  // pass on the 31st of a month.
-  const jan31 = Date.UTC(2026, 0, 31);
-  const result = monthsFromNow(jan31, 1);
-  const d = new Date(result);
-  assert.equal(d.getUTCMonth(), 2, "overflows into March (month index 2), does not clamp to the end of February");
+// docs/REVIEW-DEMOCRACY.md L3 red-proof. This test used to pin the
+// opposite of what it now asserts: the naive `setUTCMonth` overflow was
+// once "documented JS Date behaviour, not a governance rule" -- Jan 31 + 1
+// month landing on 3 Mar, up to ~3 real days past what "one month" should
+// mean, always in the operator's favour on the money path (a dividend
+// uplift's own expiry). Fixed by clamping to the target month's real last
+// day instead of letting the overflow roll into the month after. These are
+// the review's own two reproductions, now asserting the corrected values.
+test("monthsFromNow: a month-end source date clamps to the target month's real last day, it does not overflow into the following month", () => {
+  const jan31 = Date.UTC(2026, 0, 31); // 2026 is not a leap year: Feb has 28 days
+  assert.equal(monthsFromNow(jan31, 1), Date.UTC(2026, 1, 28), "31 Jan + 1 month must clamp to 28 Feb, not overflow to 3 Mar");
+
+  const mar31 = Date.UTC(2026, 2, 31); // April has 30 days
+  assert.equal(monthsFromNow(mar31, 1), Date.UTC(2026, 3, 30), "31 Mar + 1 month must clamp to 30 Apr, not overflow to 1 May");
+});
+
+test("monthsFromNow: a leap-year February is itself the clamp target", () => {
+  const jan31LeapYear = Date.UTC(2028, 0, 31); // 2028 is a leap year: Feb has 29 days
+  assert.equal(monthsFromNow(jan31LeapYear, 1), Date.UTC(2028, 1, 29), "the leap day itself is a valid clamp target, not 28");
+});
+
+test("monthsFromNow: time-of-day survives the clamp unchanged, only the date moves", () => {
+  const jan31AtNoon = Date.UTC(2026, 0, 31, 12, 30, 45, 500);
+  const result = new Date(monthsFromNow(jan31AtNoon, 1));
+  assert.equal(result.getUTCDate(), 28);
+  assert.equal(result.getUTCHours(), 12);
+  assert.equal(result.getUTCMinutes(), 30);
+  assert.equal(result.getUTCSeconds(), 45);
+  assert.equal(result.getUTCMilliseconds(), 500);
+});
+
+test("monthsFromNow: a non-overflowing date is completely unaffected by the clamp", () => {
+  const jan15 = Date.UTC(2026, 0, 15);
+  assert.equal(monthsFromNow(jan15, 1), Date.UTC(2026, 1, 15));
 });

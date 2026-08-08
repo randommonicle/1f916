@@ -10,7 +10,10 @@
 // functions) is accepted manual-smoke coverage, per architect ruling 8 in
 // docs/CHECKPOINT.md's phase-0 economy-layer entries -- that precedent is
 // not reopened by this file; it exists for what test/governance-d1.test.ts
-// and test/governance-ballots-d1.test.ts specifically need.
+// specifically needs (docs/REVIEW-DEMOCRACY.md L7: this comment previously
+// also cited a test/governance-ballots-d1.test.ts, which was never a real
+// file -- governance-d1.test.ts is the one place ballots' own D1 coverage
+// actually lives).
 //
 // No new dependency: node:sqlite is a Node core module (stable enough for
 // this synchronous, in-memory, test-only use; package.json already
