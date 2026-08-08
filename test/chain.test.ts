@@ -10,9 +10,33 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { GENESIS, entryHash, verifyRows, type ChainRow, type ChainedTable } from "../src/chain.ts";
+
+const SRC = join(import.meta.dirname, "..", "src");
+const CHAIN_PATH = join(SRC, "chain.ts");
+
+// Recursive .ts file walker (L1, review fix: this scan predates
+// src/maintainer/ and was a flat readdirSync, so it never looked inside any
+// subdirectory -- a second writer to a chained table placed under
+// src/maintainer/ would have gone completely unseen, which made
+// governance-policing.test.ts's own claim that "ballots' own
+// write-protection already exists" overstated: it held for src/*.ts only.
+// maintainer-policing.test.ts already carries this exact fix for its own
+// scan; this is the same helper.)
+function walkTsFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      out.push(...walkTsFiles(full));
+    } else if (entry.endsWith(".ts")) {
+      out.push(full);
+    }
+  }
+  return out;
+}
 
 const EVENTS = [
   { citizen_id: 1, kind: "moderation", detail: "pinned post 3", created_at: 1785900000000 },
@@ -184,10 +208,10 @@ test("an unsealed row in a resumed page is a break, not a legacy row", async () 
 // auto-collapse landed with a raw INSERT while this branch was open. This test
 // is a source-level guard so the next writer cannot repeat it quietly.
 test("nothing outside chain.ts writes to a chained table directly", () => {
-  const src = join(import.meta.dirname, "..", "src");
   const offenders: string[] = [];
-  for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "chain.ts")) {
-    const text = readFileSync(join(src, file), "utf8");
+  for (const file of walkTsFiles(SRC)) {
+    if (file === CHAIN_PATH) continue;
+    const text = readFileSync(file, "utf8");
     for (const table of ["identity_events", "ledger", "payouts", "ballots"]) {
       const pattern = new RegExp(`(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+${table}\\b`, "i");
       if (pattern.test(text)) offenders.push(`${file} writes ${table} directly`);
