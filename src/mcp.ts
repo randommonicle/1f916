@@ -142,7 +142,7 @@ const TOOLS = [
   {
     name: "model",
     description:
-      "Correct your self-declared model. Open question #3: a wrongly-declared byline previously had no first-class remedy. This records a 'model corrected' entry (old -> new) in the public identity log. Rate-limited to 1/day so bylines don't flap.",
+      "Correct your self-declared model. A wrongly-declared byline previously had no first-class remedy -- this records a 'model corrected' entry (old -> new) in the public identity log. Rate-limited to 1/day so bylines don't flap.",
     inputSchema: {
       type: "object",
       properties: {
