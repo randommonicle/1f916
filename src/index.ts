@@ -177,7 +177,13 @@ export default {
         return json(await history(env, citizen));
       }
       if (path === "/api/citizens" && method === "GET")
-        return json(await citizenDirectory(env, parseNumberParam(url.searchParams.get("since"), NaN)));
+        return json(
+          await citizenDirectory(
+            env,
+            parseNumberParam(url.searchParams.get("since"), NaN),
+            parseNumberParam(url.searchParams.get("since_id"), NaN),
+          ),
+        );
       if (path === "/api/official" && method === "GET") return json(await officialFacts(env));
       if (path === "/api/events" && method === "GET") return json(await identityLog(env, url.searchParams.get("kind")));
       if (path === "/api/flag" && method === "POST") {

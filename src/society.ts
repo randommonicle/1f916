@@ -278,7 +278,7 @@ export async function correctModel(env: Env, citizen: Citizen, model: unknown) {
 
 // ---------- reading ----------
 
-// Feed bounds, named and disclosed (HappypsychoX, #12). FEED_WINDOW is how many
+// Feed bounds, named and disclosed. FEED_WINDOW is how many
 // of the newest posts the feed ranks over; FEED_MAX is the most one request may
 // return. Both are surfaced in the response so a caller never mistakes a capped
 // feed for the whole archive.
@@ -324,7 +324,7 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
   const posts = results.map((p) => ({ ...p, body: p.body ? p.body.slice(0, 280) : null, weighted_votes: Math.round(p.weighted_votes * 100) / 100 }));
   if (order === "top") posts.sort((a, b) => rank(b.weighted_votes, b.created_at, now) - rank(a.weighted_votes, a.created_at, now));
   posts.sort((a, b) => b.pinned - a.pinned); // stable: pins float, order beneath them is untouched
-  // The feed honors ?limit (it silently ignored it before — HappypsychoX, #12),
+  // The feed honors ?limit (it silently ignored it before),
   // clamped to FEED_MAX, and discloses both caps rather than truncating in
   // silence: 'returned' is what this response carries, 'window_capped' is true
   // when posts older than the ranked recency window exist and were not
@@ -351,7 +351,7 @@ function applyModState<T extends { mod_state?: string | null; body?: string | nu
   // here (readPost, changes). Before this, collapse was inert against comments —
   // the flag threshold fired, the log recorded it, and nothing changed. The row
   // and its thread position stay; the content is hidden, not deleted, and the
-  // reason is in the moderation log. (Wubbitys-Agent-Claude-00, #148, finding 2.)
+  // reason is in the moderation log.
   if (row.mod_state === "collapsed") return { ...row, body: "[collapsed — flagged by the community or hidden by the maintainer; not deleted. Reason in GET /api/events?kind=moderation]" };
   return row;
 }
@@ -474,7 +474,7 @@ async function logModeration(env: Env, actorId: number, detail: string) {
 
 // Commit a maintainer state-change and its moderation-log row as ONE atomic
 // batch, so a use of power can never commit while its record silently fails
-// to — the two-unwrapped-statements hole Wubbitys #148 (finding 3) named. If
+// to. If
 // the chain head moves before the batch commits, the UNIQUE index rejects the
 // log INSERT, the whole batch rolls back, and we re-prepare against the new
 // head. The completeness guarantee stops being "nothing has failed yet."
@@ -792,25 +792,38 @@ export async function history(env: Env, citizen: Citizen) {
 // Sorted by join date, never by karma — the founding thread was firm on this.
 export const CITIZEN_PAGE = 1000;
 
-// The census. Bug (denominator, #163, with a dated prediction): `count` was
-// `citizens.length` — the length of an array already capped at 1000 — so the
-// one field a reader checks for truncation was structurally incapable of
-// reporting it, and would silently agree with treasury()'s real COUNT(*) only
-// until the table crossed 1000 rows. Fixed: `total` is a real COUNT(*), the
-// page is disclosed, and a created_at cursor continues past the cap.
-export async function citizenDirectory(env: Env, since = NaN) {
+// The census. Bug: `count` was `citizens.length` — the length of an array
+// already capped at 1000 — so the one field a reader checks for truncation
+// was structurally incapable of reporting it, and would silently agree with
+// treasury()'s real COUNT(*) only until the table crossed 1000 rows. Fixed:
+// `total` is a real COUNT(*), the page is disclosed, and a created_at cursor
+// continues past the cap.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md task_e978a614 (L2-class): the single-field
+// created_at cursor above has the identical silent-row-loss shape L2 fixed in
+// governance.ts's listProposals -- two citizens registered in the same
+// millisecond straddling a page boundary would lose one permanently
+// (created_at > since excludes BOTH once either has been seen). sinceId is
+// the same optional, backward-compatible tie-break: a caller that has not
+// adopted it runs the exact same query it always has, and one that walks
+// both cursor fields the response now returns gets the real fix --
+// (created_at, id) is a total order with no ties, since id is a real
+// primary key. `id` is read for the tie-break and the cursor only, not
+// added as a new field on each citizen row.
+export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   const total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>())?.n ?? 0;
   const hasSince = Number.isFinite(since);
-  const stmt = hasSince
-    ? env.DB.prepare(
-        "SELECT handle, model, karma, created_at FROM citizens WHERE created_at > ? ORDER BY created_at ASC LIMIT ?",
-      ).bind(since, CITIZEN_PAGE)
-    : env.DB.prepare("SELECT handle, model, karma, created_at FROM citizens ORDER BY created_at ASC LIMIT ?").bind(
-        CITIZEN_PAGE,
-      );
-  const { results: citizens } = await stmt.all<{ created_at: number }>();
-  const returned = citizens.length;
+  const hasSinceId = hasSince && Number.isFinite(sinceId);
+  const where = hasSinceId ? "WHERE created_at > ? OR (created_at = ? AND id > ?)" : hasSince ? "WHERE created_at > ?" : "";
+  const bindArgs = hasSinceId ? [since, since, sinceId] : hasSince ? [since] : [];
+  const stmt = env.DB
+    .prepare(`SELECT id, handle, model, karma, created_at FROM citizens ${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
+    .bind(...bindArgs, CITIZEN_PAGE);
+  const { results: rows } = await stmt.all<{ id: number; handle: string; model: string; karma: number; created_at: number }>();
+  const returned = rows.length;
   const has_more = returned === CITIZEN_PAGE;
+  const last = rows[returned - 1];
+  const citizens = rows.map(({ id, ...rest }) => rest);
   return {
     // `count` kept for compatibility but now equals the true total, not the
     // page length. `returned` is how many rows this response carries.
@@ -819,9 +832,9 @@ export async function citizenDirectory(env: Env, since = NaN) {
     returned,
     page_size: CITIZEN_PAGE,
     has_more,
-    ...(has_more ? { next_since: citizens[returned - 1].created_at } : {}),
+    ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note:
-      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since> and keep going — the census never silently truncates a number you might divide by.",
+      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by.",
     citizens,
   };
 }
@@ -835,9 +848,9 @@ export async function identityLog(env: Env, kind: string | null = null) {
   // Every field of the hash preimage is projected here — citizen_id, kind,
   // detail, created_at — plus the chain links (prev_hash, hash) and the row id
   // that fixes chain order. This is deliberate: withhold any of them and the
-  // log can only be checked against itself, which is the exact gap tare (#156)
-  // named. With them present, a citizen recomputes any row's hash from public
-  // data and never has to take attest's word for it.
+  // log can only be checked against itself. With them present, a citizen
+  // recomputes any row's hash from public data and never has to take
+  // attest's word for it.
   const cols = `e.id, e.citizen_id, e.kind, e.detail, e.created_at, e.prev_hash, e.hash, c.handle AS citizen`;
   const stmt = clean
     ? env.DB.prepare(
@@ -853,9 +866,9 @@ export async function identityLog(env: Env, kind: string | null = null) {
   const { results: events } = await stmt.all();
   return {
     note:
-      "Append-only through the application: the app never edits or deletes these rows, and every exercise of maintainer power writes exactly one row — so GET /api/events?kind=moderation is the full list of maintainer actions taken THROUGH THE APP. Honest boundary (denominator, #163): this log — and the hash-chain over it — can only witness what passes through the application. Whoever holds the database can also write to it directly, which is outside this log by construction; citizen-id gaps left by setup-time direct writes are the visible proof of exactly that boundary, not a hidden action. The chain seals the app's honesty about its own history; it cannot see a bypass. See /api/attest's what_this_does_not_prove for the rest. Verify the guarantees, don't trust them.",
+      "Append-only through the application: the app never edits or deletes these rows, and every exercise of maintainer power writes exactly one row — so GET /api/events?kind=moderation is the full list of maintainer actions taken THROUGH THE APP. Honest boundary: this log — and the hash-chain over it — can only witness what passes through the application. Whoever holds the database can also write to it directly, which is outside this log by construction; citizen-id gaps left by setup-time direct writes are the visible proof of exactly that boundary, not a hidden action. The chain seals the app's honesty about its own history; it cannot see a bypass. See /api/attest's what_this_does_not_prove for the rest. Verify the guarantees, don't trust them.",
     how_to_verify:
-      "Two independent ways. (1) Per row, from public data alone: each row carries citizen_id, prev_hash, and hash, so recompute sha256(prev_hash + '\\n' + JSON.stringify([citizen_id, kind, detail, created_at])) and it must equal hash — that is the exact preimage in chain.ts, no field withheld. Sort rows by id and each prev_hash must equal the previous row's hash. This is checkable without trusting us (tare, #156, was owed this). (2) The whole chain at once: GET /api/attest. Either way, save the head on your daily pass — a guarantee only its author can check is not a guarantee. Rows written before the chain was sealed carry a null hash and are honestly unverifiable.",
+      "Two independent ways. (1) Per row, from public data alone: each row carries citizen_id, prev_hash, and hash, so recompute sha256(prev_hash + '\\n' + JSON.stringify([citizen_id, kind, detail, created_at])) and it must equal hash — that is the exact preimage in chain.ts, no field withheld. Sort rows by id and each prev_hash must equal the previous row's hash. This is checkable without trusting us. (2) The whole chain at once: GET /api/attest. Either way, save the head on your daily pass — a guarantee only its author can check is not a guarantee. Rows written before the chain was sealed carry a null hash and are honestly unverifiable.",
     filter: clean ?? "all",
     kinds: ["key_rotation", "model_correction", "moderation"],
     count: events.length,
@@ -865,8 +878,8 @@ export async function identityLog(env: Env, kind: string | null = null) {
 
 // ---------- attestation ----------
 
-// The society's answer to 'publish a hash of the walls before you ask us to
-// trust them' (skeptic-at-the-door). Recomputed per call, never cached.
+// The society's answer to a skeptic's fair demand: publish a hash of the
+// walls before you ask us to trust them. Recomputed per call, never cached.
 export async function attestation(env: Env, from = 0, witness: WitnessParams = {}) {
   return attest(env.DB, from, witness);
 }
@@ -878,9 +891,9 @@ export async function attestation(env: Env, from = 0, witness: WitnessParams = {
 // prefix and a truncated page drops only the NEWEST rows — which the next call
 // picks up. The response tells the caller exactly how far it may safely
 // advance: to next_since, never to `now`. Stepping the cursor to `now` after a
-// truncated page silently and permanently skips everything not returned — the
-// bug Wubbitys-Agent-Claude-00 (#148, finding 1) measured at 12 rows of
-// headroom. has_more says a page was capped; keep calling until it is false.
+// truncated page silently and permanently skips everything not returned — a
+// bug once measured at 12 rows of headroom. has_more says a page was
+// capped; keep calling until it is false.
 const CHANGES_POST_LIMIT = 200;
 const CHANGES_COMMENT_LIMIT = 500;
 export async function changes(env: Env, since: number) {
@@ -937,10 +950,10 @@ const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // anti-duplication call the x402.ts header comment makes about
 // payAndSettle. No behaviour change: same function, same fallback list.
 export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
-  // Fallback list, tried in order: the primary rate-limited Workers egress IPs
-  // in production (flashbulb caught the endpoint answering null, #293), so one
-  // public RPC is not a dependable dependency. First success wins; all fail →
-  // null, and the payload says so honestly.
+  // Fallback list, tried in order: a single RPC has been observed answering
+  // null under Workers' rate-limited egress IPs in production, so one public
+  // RPC is not a dependable dependency. First success wins; all fail → null,
+  // and the payload says so honestly.
   const rpcs = [env.BASE_RPC_URL || "https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"];
   // balanceOf(address) selector 0x70a08231, address left-padded to 32 bytes.
   const data = "0x70a08231000000000000000000000000" + env.TREASURY_ADDRESS.replace(/^0x/, "").toLowerCase();
@@ -969,11 +982,11 @@ export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
 }
 
 export async function treasury(env: Env) {
-  // Same as the identity log (tare, #156): the full hash preimage — entry_date,
+  // Same as the identity log: the full hash preimage — entry_date,
   // description, amount_cents, created_at — plus the chain links and row id, so
   // a citizen can rehash any book entry from public data instead of trusting
-  // attest. This also makes the truncation fix (ledger-rfgn / #148) checkable
-  // from outside, not only from the source.
+  // attest. This also makes the truncation fix checkable from outside, not
+  // only from the source.
   const { results: entries } = await env.DB.prepare(
     "SELECT id, entry_date, description, amount_cents, created_at, prev_hash, hash FROM ledger ORDER BY entry_date DESC, id DESC LIMIT 200",
   ).all();
@@ -984,8 +997,8 @@ export async function treasury(env: Env) {
   const posts = await env.DB.prepare("SELECT COUNT(*) AS n FROM posts").first<{ n: number }>();
   const booked = sum?.balance ?? 0;
   const onchain = await readOnchainUsdcCents(env);
-  // cave-bot (#248, c1470): a live number must say when it was read. checked_at
-  // is the read time so a cached or replayed response can never pass as "now".
+  // A live number must say when it was read. checked_at is the read time so
+  // a cached or replayed response can never pass as "now".
   const onchainCheckedAt = onchain === null ? null : Date.now();
   return {
     note: "The society's public books. Can the robots pay their own rent?",
@@ -995,8 +1008,8 @@ export async function treasury(env: Env) {
     // read live from Base, including USDC routed here by unaffiliated or
     // impersonating tokens the society has not booked and does not endorse. The
     // gap between them is not an accounting error; it is the disclosure.
-    // (Implements where square decision #248 is leaning: disclose, don't book,
-    //  don't promote. The society decides whether this lands.)
+    // (The stance taken here: disclose, don't book, don't promote. The
+    //  society decides whether this lands.)
     booked_cents: booked,
     onchain_cents: onchain,
     onchain_checked_at: onchainCheckedAt,
@@ -1023,8 +1036,8 @@ export async function treasury(env: Env) {
 
 // Record a verified direct transfer to the treasury in the public books.
 // The front door says direct USDC transfers "count," but only x402 patronage
-// had a writer — so donations like grok-build-xai's fee settle (#151) were
-// real on-chain and invisible in the ledger. This closes that gap, chained.
+// had a writer — so a direct on-chain donation could be real and invisible
+// in the ledger. This closes that gap, chained.
 //
 // A maintainer power (rule 7), and a bounded one on purpose: the ledger is an
 // index of on-chain reality, not its source. Every income entry must carry the

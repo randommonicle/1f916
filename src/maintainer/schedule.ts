@@ -5,7 +5,12 @@
 // precedent).
 //
 // Defaults ratified by Ben, 2026-08-07 evening (MAINTAINER-RUNTIME-DESIGN.md
-// S9): clerk daily 06:00 UTC, judgment Mondays 07:00 UTC.
+// S9): clerk daily 06:00 UTC, judgment Sundays 07:00 UTC. The cron string
+// below was written under the Unix day-of-week convention (1=Monday), but
+// Cloudflare parses day-of-week Quartz-style (1-7, 1=Sunday), so it has
+// always actually fired Sundays -- D-021 (DECISIONS.md), a docs-only
+// correction: nothing about the schedule itself changed, only what this
+// comment calls it.
 
 export const CLERK_CRON = "0 6 * * *";
 export const JUDGMENT_CRON = "0 7 * * 1";

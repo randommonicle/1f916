@@ -25,7 +25,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow, listProposals, PROPOSAL_PAGE } from "../src/governance.ts";
-import { SocietyError, officialFacts, SETTING_KEY, DEFAULT_NAME, DEFAULT_DIVIDEND_PERCENT, DEFAULT_CONTROL_FLOOR_PERCENT, DEFAULT_SPLIT } from "../src/society.ts";
+import {
+  SocietyError,
+  officialFacts,
+  SETTING_KEY,
+  DEFAULT_NAME,
+  DEFAULT_DIVIDEND_PERCENT,
+  DEFAULT_CONTROL_FLOOR_PERCENT,
+  DEFAULT_SPLIT,
+  citizenDirectory,
+  CITIZEN_PAGE,
+} from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, type ChainRow } from "../src/chain.ts";
 
@@ -1213,6 +1223,81 @@ test("listProposals: a page-boundary millisecond collision loses no row when the
     // defaults to NaN, not 0) gets caught by this exact assertion moving.
     const page2Unupgraded = await listProposals(env, (page1 as { next_since: number }).next_since);
     assert.equal(page2Unupgraded.returned, 0, "an old-style caller without since_id sees the pre-existing, accepted limitation, not a new regression");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- citizenDirectory: task_e978a614 (L2-class), docs/REVIEW-DEMOCRACY-RECHECK.md ----------
+//
+// Same defect L2 fixed in listProposals, same fix, same test shape, scaled
+// to CITIZEN_PAGE (1000) instead of PROPOSAL_PAGE (200): a single-field
+// created_at cursor loses a row silently and permanently when two citizens
+// share a millisecond across a page boundary.
+
+test("citizenDirectory: a page-boundary millisecond collision loses no row when the caller walks both cursor fields, and does not otherwise change the first page", async () => {
+  const d1 = createLocalD1();
+  try {
+    const baseTime = Date.UTC(2026, 0, 1);
+    for (let i = 0; i < CITIZEN_PAGE - 1; i++) {
+      insertCitizen(d1, { handle: `filler-${i}`, created_at: baseTime + i });
+    }
+    const collisionTime = baseTime + (CITIZEN_PAGE - 1);
+    insertCitizen(d1, { handle: "boundary-a", created_at: collisionTime });
+    insertCitizen(d1, { handle: "boundary-b", created_at: collisionTime });
+
+    const env = testEnv(d1);
+
+    const page1 = await citizenDirectory(env);
+    assert.equal(page1.total, CITIZEN_PAGE + 1);
+    assert.equal(page1.returned, CITIZEN_PAGE);
+    assert.equal(page1.has_more, true);
+    assert.equal(
+      page1.citizens[CITIZEN_PAGE - 1].handle,
+      "boundary-a",
+      "the last row in (created_at, id) order is boundary-a, the earlier-inserted of the tied pair",
+    );
+    assert.ok("next_since_id" in page1, "has_more must carry the tie-break cursor, not just next_since");
+
+    // The fix: a caller that walks both next_since and next_since_id sees
+    // boundary-b on the very next page -- nothing lost.
+    const page2Fixed = await citizenDirectory(env, (page1 as { next_since: number }).next_since, (page1 as { next_since_id: number }).next_since_id);
+    assert.equal(page2Fixed.returned, 1);
+    assert.equal(page2Fixed.citizens[0].handle, "boundary-b");
+    assert.equal(page2Fixed.has_more, false);
+
+    // The accepted, unchanged half (matching listProposals' own L2 test):
+    // a caller that has not adopted since_id yet gets exactly the old
+    // query (created_at > since alone) -- boundary-b, sharing the exact
+    // boundary timestamp, is still silently absent. Asserted so nobody
+    // mistakes the fix above for having removed this pre-existing,
+    // accepted limitation for an unupgraded caller.
+    const page2Unupgraded = await citizenDirectory(env, (page1 as { next_since: number }).next_since);
+    assert.equal(page2Unupgraded.returned, 0, "an old-style caller without since_id sees the pre-existing, accepted limitation, not a new regression");
+
+    // Deliberately not exposed: citizen numeric ids are not a new public
+    // per-row field of this fix -- id is read only for the tie-break and
+    // the cursor, matching the citizens list's existing shape (handle,
+    // model, karma, created_at).
+    assert.deepEqual(Object.keys(page1.citizens[0]).sort(), ["created_at", "handle", "karma", "model"]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("citizenDirectory: an ordinary page with no collision is unaffected by the (created_at, id) tie-break", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "alice" });
+    insertCitizen(d1, { handle: "bob" });
+    const env = testEnv(d1);
+    const page = await citizenDirectory(env);
+    assert.equal(page.returned, 2);
+    assert.equal(page.has_more, false);
+    assert.deepEqual(
+      page.citizens.map((c) => c.handle),
+      ["alice", "bob"],
+    );
   } finally {
     d1.close();
   }
