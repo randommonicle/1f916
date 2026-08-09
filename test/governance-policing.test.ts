@@ -73,9 +73,15 @@ function readSourceWithoutComments(path: string): string {
 // is the review's own suggested broadening: an optional leading quote
 // mark, an optional `schema.` prefix, an optional trailing quote mark, and
 // the missing verb forms.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md N2: the broadening above added
+// `(\s+OR\s+\w+)?` to INSERT but left UPDATE bare, so `UPDATE OR
+// REPLACE|IGNORE|ABORT|ROLLBACK|FAIL <table>` -- real, documented SQLite
+// conflict-resolution syntax, the exact symmetric case -- still bypassed
+// the scan. UPDATE gets the identical optional clause INSERT already has.
 function tableWritePattern(table: string): RegExp {
   return new RegExp(
-    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
+    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
     "i",
   );
 }
@@ -128,6 +134,9 @@ const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> 
   { text: "INSERT OR REPLACE INTO proposals (id) VALUES (1)", caught: true, note: "idiomatic upsert, not hypothetical" },
   { text: "REPLACE INTO governance_settings (key) VALUES ('x')", caught: true, note: "idiomatic upsert, not hypothetical" },
   { text: "INSERT OR IGNORE INTO governance_settings (key) VALUES ('x')", caught: true, note: "idiomatic upsert, not hypothetical" },
+  { text: "UPDATE OR REPLACE proposals SET status = 'x'", caught: true, note: "N2: UPDATE's own OR-conflict-resolution form, the exact symmetric case the INSERT broadening above did not cover" },
+  { text: "UPDATE OR IGNORE governance_settings SET value = 'x'", caught: true, note: "N2: idiomatic UPDATE OR IGNORE on a key-value table" },
+  { text: "UPDATE OR ABORT proposals SET status = 'x'", caught: true, note: "N2: UPDATE OR ABORT, real SQLite conflict-resolution syntax" },
   { text: "INSERT INTO \"governance_settings\" (key) VALUES ('x')", caught: true, note: "double-quoted table name" },
   {
     text: "const s=\"https://x\"; await db.prepare(\"UPDATE proposals SET status = 'x'\")",

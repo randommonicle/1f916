@@ -50,6 +50,14 @@ function walkTsFiles(dir: string): string[] {
 // first non-whitespace token is `//`; a trailing same-line comment is left
 // alone, which risks a false CAUGHT (fixable by rewording) but never a false
 // clean, the only direction that matters for a bypass guard.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md N2: `UPDATE OR REPLACE|IGNORE|ABORT
+// <table>` (real SQLite conflict-resolution syntax) still bypassed both
+// this scan and governance-policing.test.ts's, since only INSERT had
+// gained the optional `OR <verb>` clause. `tableWritePattern` below stays
+// string-identical to governance-policing.test.ts's own copy, per the
+// working agreement that keeps the two scans from drifting apart --
+// UPDATE now carries the same optional clause INSERT already had.
 function stripComments(text: string): string {
   const withoutBlocks = text.replace(/\/\*[\s\S]*?\*\//g, "");
   return withoutBlocks
@@ -64,7 +72,7 @@ function readSourceWithoutComments(path: string): string {
 
 function tableWritePattern(table: string): RegExp {
   return new RegExp(
-    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
+    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
     "i",
   );
 }
@@ -272,6 +280,9 @@ const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> 
   { text: "INSERT OR REPLACE INTO ledger (id) VALUES (1)", caught: true, note: "idiomatic upsert, not hypothetical" },
   { text: "REPLACE INTO payouts (id) VALUES (1)", caught: true, note: "bare REPLACE INTO" },
   { text: "INSERT OR IGNORE INTO ballots (id) VALUES (1)", caught: true, note: "INSERT OR IGNORE" },
+  { text: "UPDATE OR REPLACE ledger SET amount_cents = 1", caught: true, note: "N2: UPDATE's own OR-conflict-resolution form, the exact symmetric case the INSERT broadening did not cover" },
+  { text: "UPDATE OR IGNORE payouts SET amount_cents = 1", caught: true, note: "N2: idiomatic UPDATE OR IGNORE" },
+  { text: "UPDATE OR ABORT ballots SET choice = 'yes'", caught: true, note: "N2: UPDATE OR ABORT, real SQLite conflict-resolution syntax" },
   { text: "INSERT INTO \"identity_events\" (id) VALUES (1)", caught: true, note: "double-quoted table name" },
   {
     text: "const s=\"https://x\"; await db.prepare(\"UPDATE ledger SET amount_cents = 1\")",

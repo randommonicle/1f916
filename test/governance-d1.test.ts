@@ -902,6 +902,42 @@ test("runGovernanceSweep: a concurrent re-claim race on a stale 'tallying' propo
   }
 });
 
+// ---------- N5: stale-claim recovery is NULL-safe (docs/REVIEW-DEMOCRACY-RECHECK.md) ----------
+
+test("runGovernanceSweep: N5 -- a hand-staged 'tallying' row with a NULL tallied_at is recovered by the next sweep, not stranded forever", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    castYes(d1, proposalId, proposer, now - 500);
+
+    // The exact pathology N5 names: a row at status='tallying' with
+    // tallied_at left NULL. Not reachable through any deployed code path
+    // (both the claim UPDATE and the final status UPDATE always stamp
+    // tallied_at) -- a hand-staged out-of-band write, the same kind
+    // governance-policing.test.ts exists to forbid -- but H1's own
+    // reasoning was that no 'tallying' sub-state should be unreadable, so
+    // this is worth closing rather than leaving as a documented miss.
+    d1.raw.prepare("UPDATE proposals SET status = 'tallying', tallied_at = NULL WHERE id = ?").run(proposalId);
+
+    const env = testEnv(d1);
+    const sweep = await runGovernanceSweep(env, now);
+    assert.equal(sweep.due, 1, "a NULL tallied_at must not make the row invisible to the due query");
+    assert.equal(sweep.results[0].reclaimed, true);
+    assert.equal(sweep.results[0].outcome, "passed");
+    assert.deepEqual(sweep.stranded, []);
+
+    const row = await d1.DB.prepare("SELECT status, tallied_at FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; tallied_at: number }>();
+    assert.equal(row!.status, "passed");
+    assert.equal(row!.tallied_at, now, "recovered and re-stamped with this sweep's own claim time");
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- N1 + N6: the guarded chained append (docs/REVIEW-DEMOCRACY-RECHECK.md) ----------
 //
 // Intercepts the exact head-read SELECT appendChainedStmt/appendChainedGated

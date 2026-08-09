@@ -919,9 +919,19 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   // what lets a second stale check ever succeed again if this claimant
   // also stalls: the clock restarts on whoever holds the claim, not on
   // when the proposal first went stale.
+  // docs/REVIEW-DEMOCRACY-RECHECK.md N5: `tallied_at <= ?` alone is
+  // NULL-unsafe -- SQL comparisons against NULL are neither true nor
+  // false, they are unknown, so a row at 'tallying' with tallied_at IS
+  // NULL would never match either branch and sit stranded forever, no
+  // matter how much time passed. No deployed path can create that state
+  // (both this claim and the final status UPDATE below always stamp
+  // tallied_at), so it can only happen via a hand-written UPDATE -- the
+  // exact out-of-band write governance-policing.test.ts exists to
+  // forbid -- but H1's whole point was that no 'tallying' sub-state
+  // should be unrecoverable, so it is worth the two extra words.
   const claim = await env.DB.prepare(
     `UPDATE proposals SET status = 'tallying', tallied_at = ?
-     WHERE id = ? AND ((status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND tallied_at <= ?))`,
+     WHERE id = ? AND ((status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND (tallied_at IS NULL OR tallied_at <= ?)))`,
   )
     .bind(now, proposalId, now, now - STALE_CLAIM_MS)
     .run();
@@ -1021,8 +1031,13 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
 // so a caller reading the response can tell "just closed" from "was
 // stuck and just got recovered" without a second query.
 export async function runGovernanceSweep(env: Env, now = Date.now()) {
+  // N5 (see claimTallyAndExecuteOne's claim UPDATE above): the same
+  // NULL-unsafety, in the query that decides whether a stale row is even
+  // attempted in the first place. Kept identical to the claim UPDATE's
+  // own WHERE shape so "found as due" and "actually claimable" never
+  // disagree about which rows qualify.
   const { results: due } = await env.DB.prepare(
-    `SELECT id, status FROM proposals WHERE (status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND tallied_at <= ?)`,
+    `SELECT id, status FROM proposals WHERE (status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND (tallied_at IS NULL OR tallied_at <= ?))`,
   )
     .bind(now, now - STALE_CLAIM_MS)
     .all<{ id: number; status: string }>();

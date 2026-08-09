@@ -208,6 +208,25 @@ export default {
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
 
       // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
+      //
+      // Sweep rate cap: architect ruling, docs/BRIEF-HARDENING.md commit
+      // 3 -- deliberately NO cap this pass, subject to Ben's veto.
+      // Permissionless and unrate-limited by design (design doc §5 point
+      // 5: closing and tallying a proposal is deterministic code, not a
+      // privileged act), and the recheck's own N1 gave the sweep a second
+      // use as a race-widening lever -- but post-N1 (the guarded chained
+      // ballot append) the race it could widen is closed, so hammering
+      // this endpoint buys an attacker nothing. A no-work call costs one
+      // bounded SELECT, the same as any other public GET, all equally
+      // uncapped today; due-work is itself bounded by the proposal
+      // rate caps (assertProposalRateCaps: one open proposal per citizen,
+      // two per rolling week), so the worst case a hammered sweep can
+      // force is small and self-limiting. Primary defences named
+      // explicitly, not left implicit: N1's guard, and the
+      // proposal-creation rate caps. Revisit if D1 quota pressure ever
+      // actually shows up in the books (GET /treasury /
+      // /api/maintainer-runs) -- this is a judgement call against today's
+      // scale, not a claim that no volume could ever matter.
       if (path === "/api/governance/sweep" && method === "POST") return json(await runGovernanceSweep(env));
       if (path === "/api/proposals" && method === "GET")
         return json(
