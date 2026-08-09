@@ -474,10 +474,10 @@ async function logModeration(env: Env, actorId: number, detail: string) {
 
 // Commit a maintainer state-change and its moderation-log row as ONE atomic
 // batch, so a use of power can never commit while its record silently fails
-// to. If
-// the chain head moves before the batch commits, the UNIQUE index rejects the
-// log INSERT, the whole batch rolls back, and we re-prepare against the new
-// head. The completeness guarantee stops being "nothing has failed yet."
+// to. If the chain head moves before the batch commits, the UNIQUE index
+// rejects the log INSERT, the whole batch rolls back, and we re-prepare
+// against the new head. The completeness guarantee stops being "nothing has
+// failed yet."
 async function commitWithModLog(env: Env, stateStmt: D1PreparedStatement, actorId: number, detail: string) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const log = await appendChainedStmt(env.DB, "identity_events", {
