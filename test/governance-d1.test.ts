@@ -37,7 +37,7 @@ import {
   CITIZEN_PAGE,
 } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
-import { verifyRows, type ChainRow } from "../src/chain.ts";
+import { verifyRows, appendChained, type ChainRow } from "../src/chain.ts";
 
 function testEnv(d1: ReturnType<typeof createLocalD1>, registrationMode = "invite_only"): Env {
   return {
@@ -1023,7 +1023,7 @@ test("castBallot: N1 -- a ballot that loses the race against the sweep's claim i
   }
 });
 
-test("runGovernanceSweep: N6 -- a stalled claimant that resumes after a re-claimer has fully committed does not append a duplicate proposal_decided event", async () => {
+test("runGovernanceSweep: N6 -- a stalled claimant that resumes after a re-claimer has fully committed does not append a duplicate proposal_decided event, and honestly reports it committed nothing (F1, hardening-2)", async () => {
   const d1 = createLocalD1();
   try {
     const proposer = insertCitizen(d1);
@@ -1035,24 +1035,149 @@ test("runGovernanceSweep: N6 -- a stalled claimant that resumes after a re-claim
     // identity_events head (attempt 0, before it has written anything), a
     // full second sweep (B) runs to completion first -- a real re-claim,
     // real tally, real commit -- extending the chain past the head A just
-    // captured. A is then handed that stale, already-superseded head, so
-    // its own attempt-0 statement lands (pre-fix) against a chain that has
-    // moved on, exactly docs/REVIEW-DEMOCRACY-RECHECK.md N6's own
-    // reproduction ("its first batch fails on UNIQUE constraint failed:
-    // identity_events.prev_hash, and commitOutcome's own 4-attempt retry
-    // loop then re-reads the head and succeeds").
+    // captured. A is then handed that stale, already-superseded head.
+    //
+    // Comment corrected, hardening-2: this used to describe a UNIQUE
+    // collision and a retry ("its first batch fails on UNIQUE constraint
+    // failed... commitOutcome's own 4-attempt retry loop then re-reads the
+    // head and succeeds"), which was accurate before the chain-gate commit
+    // (a31a6b5) gave the log statement itself a `status = 'tallying'` gate.
+    // Today B's commit has already moved the proposal off 'tallying' by the
+    // time A's batch runs, so A's gated log statement inserts zero rows
+    // WITHOUT throwing -- the gate wins silently before any UNIQUE
+    // constraint is ever evaluated (society/docs/REVIEW-CHAINGATE-2026-08-09.md
+    // Q2a). Attempt 0 succeeds cleanly on a batch that wrote nothing, which
+    // is exactly F1: pre this commit, commitOutcome discarded that batch
+    // result and returned the phantom `{hash: log.hash}` regardless, and
+    // A's own stale (but here coincidentally correct) finalStatus rode that
+    // phantom straight out to the caller. Fixed: commitOutcome now checks
+    // the log statement's own `meta.changes` and returns "claimed_elsewhere"
+    // when it is 0, and claimTallyAndExecuteOne propagates that instead of
+    // its own precomputed status.
     const later = now + 16 * 60 * 1000; // comfortably past STALE_CLAIM_MS (15 min) from `now`, independent of real time
     const bEnv = testEnv(d1);
     const aEnv = { ...testEnv(d1), DB: withChainedHeadReadTriggering(d1.DB, "identity_events", () => runGovernanceSweep(bEnv, later)) };
 
     const aResult = await runGovernanceSweep(aEnv, now);
-    assert.equal(aResult.results[0].outcome, "passed", "A's own (stale) computation still resolves to a real outcome, even though nothing new was written for it");
+    assert.equal(
+      aResult.results[0].outcome,
+      "claimed_elsewhere",
+      "A's batch wrote nothing (B already committed) -- A must report that honestly, not its own precomputed status, even though here it happens to agree with B's",
+    );
 
     const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
-    assert.equal(events!.n, 1, "exactly one outcome event -- A's resumed retry must not append a second one for the same decision");
+    assert.equal(events!.n, 1, "exactly one outcome event -- A's resumed batch, gated identically to the state statements, wrote nothing");
 
     const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
     assert.equal(row!.status, "passed", "B's own commit is what persists; A's resumed batch was a clean no-op");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: F1 divergent-tally repro -- a stalled claimant whose stale computation would have been WRONG reports claimed_elsewhere, never its own or the real committer's outcome (hardening-2, docs/REVIEW-CHAINGATE-2026-08-09.md finding 1)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const voter2 = insertCitizen(d1);
+    insertCitizen(d1); // citizen #3: non-voting, contributes to the eligible census only
+    insertCitizen(d1); // citizen #4: non-voting, contributes to the eligible census only
+    const now = Date.now();
+    const closesAt = now - 1000;
+    // set_split: parameter class (quorum applies, unlike advisory), not
+    // founder-gated, machine-executable -- but payload stays null, so
+    // settingsStatementForExecution no-ops harmlessly on the "passed"
+    // branch (governance.ts:830) and this test can stay about the outcome
+    // string alone.
+    const proposalId = insertProposal(d1, { kind: "set_split", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: closesAt });
+    // cast=2. quorumThreshold(4)=2 (clears), CLASS_MIN_BALLOTS.parameter=2
+    // (clears), yes(2)>no(0) (clears margin) -- A's own stale computation,
+    // frozen the moment it reads the four-citizen census below, resolves to
+    // "passed" and (set_split being machine-executable) finalStatus
+    // "executed".
+    castYes(d1, proposalId, proposer, now - 500);
+    castYes(d1, proposalId, voter2, now - 500);
+
+    const later = now + 16 * 60 * 1000; // past STALE_CLAIM_MS, so B can reclaim
+    const bEnv = testEnv(d1);
+    const aEnv = {
+      ...testEnv(d1),
+      DB: withChainedHeadReadTriggering(d1.DB, "identity_events", async () => {
+        // A fifth citizen registers DURING A's stall -- invisible to A's
+        // own citizens read (already completed before this fires: A's
+        // eligible=4 was computed well before commitOutcome's own
+        // identity_events head-read), but fully visible to B's own,
+        // independent re-read a moment later. quorumThreshold(5)=3, and
+        // cast stays 2 -- the exact quorum-flip boundary the cross-agent
+        // review derived (exchange/REVIEW_chaingate-followups_2026-08-09.md
+        // round 1/2: "the first flip window is cast=2 with the census
+        // growing 4->5 mid-stall").
+        insertCitizen(d1);
+        await runGovernanceSweep(bEnv, later);
+      }),
+    };
+
+    const aResult = await runGovernanceSweep(aEnv, now);
+    assert.equal(
+      aResult.results[0].outcome,
+      "claimed_elsewhere",
+      "A's stale computation said executed (eligible=4); B actually committed failed (eligible=5) -- A must assert neither its own guess nor B's real answer, only that it did not commit",
+    );
+
+    const row = await d1.DB.prepare("SELECT status, eligible_count, tally_yes, tally_no FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; eligible_count: number; tally_yes: number; tally_no: number }>();
+    assert.equal(row!.status, "failed", "B's real committed outcome persists: quorum failed once the census grew to 5 mid-stall");
+    assert.equal(row!.eligible_count, 5, "the eligible count committed is B's own live read, not A's stale 4");
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one outcome event -- A's resumed batch wrote nothing, gate refused identically to the state statements");
+
+    const event = await d1.DB.prepare("SELECT detail FROM identity_events WHERE kind = 'proposal_decided'").first<{ detail: string }>();
+    assert.match(event!.detail, /failed/, "the one recorded event names B's real outcome");
+    assert.doesNotMatch(event!.detail, /executed/, "A's phantom 'executed' verdict must never reach the permanent record");
+  } finally {
+    d1.close();
+  }
+});
+
+test("commitOutcome: F6 -- a retried outcome commit's identity_events.created_at equals the same batch's proposals.tallied_at, not a fresh clock read taken mid-retry (hardening-2)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    // Deliberately far from real Date.now(): if the pre-fix code's
+    // `created_at: Date.now()` ever ran inside commitOutcome's loop, the
+    // mismatch below would be measured in YEARS, not milliseconds, so this
+    // red-proof cannot pass by timing coincidence the way a real-clock
+    // `now` might.
+    const now = Date.UTC(2030, 0, 1);
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    castYes(d1, proposalId, proposer, now - 500);
+
+    // A genuine chain-head race, unrelated to this proposal's own gate
+    // (nothing here touches proposalId's status, so the gate stays
+    // satisfied throughout and the retry is forced by a real UNIQUE
+    // collision, not a gate refusal): an unrelated identity_events append
+    // (a citizen's own key rotation, say) lands in the gap between
+    // commitOutcome's head read and its write. appendChained is chain.ts's
+    // own real writer, so the competing row is validly sealed, and the
+    // resulting collision on identity_events' real prev_hash index is the
+    // genuine article, not simulated.
+    const raceEnv = {
+      ...testEnv(d1),
+      DB: withChainedHeadReadTriggering(d1.DB, "identity_events", () =>
+        appendChained(d1.DB, "identity_events", { citizen_id: proposer, kind: "key_rotation", detail: "unrelated race writer", created_at: now }),
+      ),
+    };
+
+    const result = await runGovernanceSweep(raceEnv, now);
+    assert.equal(result.results[0].outcome, "passed", "the race resolves via a real retry, not a gate refusal -- a genuinely committed outcome, not claimed_elsewhere");
+
+    const row = await d1.DB.prepare("SELECT tallied_at FROM proposals WHERE id = ?").bind(proposalId).first<{ tallied_at: number }>();
+    const event = await d1.DB.prepare("SELECT created_at FROM identity_events WHERE kind = 'proposal_decided' AND citizen_id = ?").bind(proposer).first<{ created_at: number }>();
+    assert.ok(event, "the outcome event must exist");
+    assert.equal(event!.created_at, now, "created_at must be the sweep's own `now`, not a fresh clock read taken during the retry");
+    assert.equal(event!.created_at, row!.tallied_at, "the log entry and the proposal row committed in the same batch must carry the identical timestamp");
   } finally {
     d1.close();
   }

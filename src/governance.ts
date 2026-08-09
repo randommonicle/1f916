@@ -865,7 +865,29 @@ function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Re
 // the batch is conditional on the same fact, so a resumed claimant's whole
 // batch no-ops cleanly: no throw, no partial write, nothing to distinguish
 // from an ordinary successful commit from the caller's point of view.
-async function commitOutcome(env: Env, proposalId: number, stateStmts: D1PreparedStatement[], actorId: number, detail: string): Promise<{ hash: string }> {
+// F1/F2 (docs/REVIEW-CHAINGATE-2026-08-09.md, hardening-2): the log
+// statement carries the identical `status = 'tallying'` gate stateStmts
+// already do, so the log statement's OWN batch result is a reliable
+// witness for whether this batch actually wrote anything at all -- a
+// resumed stale claimant, whose batch lands after a second claimant has
+// already re-claimed and fully committed, no-ops the log statement exactly
+// as it no-ops stateStmts (same gate, same proposalId, one D1 batch is one
+// transaction so every statement in it sees the identical proposals row).
+// Pre-fix this function returned `{ hash: log.hash }` unconditionally --
+// naming a row that, in that exact case, was never written (F2's phantom
+// hash) -- and its only caller trusted that return to mean "I committed",
+// publishing its own stale, possibly-wrong finalStatus as if it had (F1).
+// Returning "claimed_elsewhere" instead means a caller can never assert an
+// outcome it did not actually commit, and there is no longer any `{hash}`
+// value this function could hand back for a row that does not exist.
+async function commitOutcome(
+  env: Env,
+  proposalId: number,
+  stateStmts: D1PreparedStatement[],
+  actorId: number,
+  detail: string,
+  now: number,
+): Promise<{ hash: string } | "claimed_elsewhere"> {
   const gate: ChainGate = { sql: "SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying'", args: [proposalId] };
   for (let attempt = 0; attempt < 4; attempt++) {
     const log = await appendChainedStmt(
@@ -875,7 +897,16 @@ async function commitOutcome(env: Env, proposalId: number, stateStmts: D1Prepare
         citizen_id: actorId,
         kind: "proposal_decided",
         detail,
-        created_at: Date.now(),
+        // F6: the caller's own `now` -- the exact value stateStmts already
+        // stamp onto tallied_at in this identical batch -- not a fresh
+        // Date.now() read on every attempt (which could disagree with
+        // tallied_at by however long the retry took, inside one supposedly
+        // atomic outcome). Safe under retry: appendChainedStmt builds the
+        // hash and the row from the same object, and a UNIQUE retry here
+        // only ever collides on identity_events' own prev_hash/hash, never
+        // on created_at, so holding created_at fixed across attempts
+        // cannot cause a loop.
+        created_at: now,
       },
       gate,
     );
@@ -887,7 +918,15 @@ async function commitOutcome(env: Env, proposalId: number, stateStmts: D1Prepare
       // statement sees an earlier one's effects. The settings upsert (when
       // present) is already ordered ahead of the status UPDATE for the
       // identical reason; the log entry now follows the same rule.
-      await env.DB.batch([log.stmt, ...stateStmts]);
+      const [logRes] = await env.DB.batch([log.stmt, ...stateStmts]);
+      if (logRes.meta.changes === 0) {
+        // The gate refused: some other claimant already moved this
+        // proposal off 'tallying' between our claim and this batch.
+        // Nothing in this batch was written -- stateStmts share the
+        // identical gate, so they no-opped in lockstep with the log
+        // statement, not just it alone.
+        return "claimed_elsewhere";
+      }
       return { hash: log.hash };
     } catch (e) {
       if (!String(e).includes("UNIQUE")) throw e;
@@ -1030,7 +1069,13 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   );
 
   const detail = `proposal ${proposalId} (${proposal.kind}) ${finalStatus}: yes=${yes} no=${no} abstain=${abstain} eligible=${eligible}`;
-  await commitOutcome(env, proposalId, stateStmts, proposal.proposer_id, detail);
+  const outcome = await commitOutcome(env, proposalId, stateStmts, proposal.proposer_id, detail, now);
+  // F1: a resumed stale claimant whose batch just no-opped (see
+  // commitOutcome above) must report that honestly -- never its own
+  // precomputed finalStatus, which was frozen against a citizens/eligible
+  // snapshot that may since have diverged from whatever the actual
+  // committer saw.
+  if (outcome === "claimed_elsewhere") return "claimed_elsewhere";
 
   return finalStatus;
 }
