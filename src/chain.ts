@@ -259,6 +259,48 @@ export async function appendChainedStmt(
 // immediate refusal (docs/REVIEW-DEMOCRACY-RECHECK.md N1) instead of either
 // silently committing (the bug) or burning four attempts on a no that will
 // not change.
+// F4 (docs/REVIEW-CHAINGATE-2026-08-09.md, hardening-2). SQLite/D1 name a
+// UNIQUE violation's own failing COLUMN(S) in the error text, never the
+// index's name -- "UNIQUE constraint failed: <table>.<col>[, <table>.<col>
+// ...]" -- confirmed directly against real node:sqlite (the engine
+// test/helpers/local-d1.ts runs on, and the same engine D1 is built on):
+// a composite-index violation lists every column of the failing index,
+// comma-separated. Every chained table's prev_hash and hash each sit
+// behind their own single-column UNIQUE index (schema.sql), so a
+// violation naming exactly one of those two columns is always a
+// chain-head race -- two writers read the same head, one loses, retrying
+// against the new head is the correct, already-designed response. A
+// violation naming any OTHER column set is a genuine content collision on
+// the row's OWN data: retrying is pointless, since nothing about attempt
+// N+1 changes the row's own field values (only prev_hash/hash, recomputed
+// fresh off the current head each attempt, per appendChainedStmt above).
+// The one such collision that exists on any chained table today is
+// ballots' idx_ballots_proposal_citizen (one ballot per citizen per
+// proposal, schema.sql) -- recognised explicitly, by exact column-set
+// match, rather than inferred from "not chain-head": a hypothetical
+// future chained table's own future content constraint must fall to
+// "unrecognised" (the existing retry-then-503 behaviour, the safe
+// default) rather than being silently mis-filed as a duplicate vote.
+type UniqueViolationKind = "chain_head" | "duplicate_vote" | "unrecognised";
+
+function classifyUniqueViolation(table: ChainedTable, message: string): UniqueViolationKind {
+  if (message.includes(`UNIQUE constraint failed: ${table}.prev_hash`) || message.includes(`UNIQUE constraint failed: ${table}.hash`)) {
+    return "chain_head";
+  }
+  if (table === "ballots" && message.includes("UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id")) {
+    return "duplicate_vote";
+  }
+  return "unrecognised";
+}
+
+// F4/F5's shared wording: governance.ts's own pre-check (the common,
+// sequential case) and this function's own race-caught duplicate (the
+// narrow concurrent case the pre-check cannot close) are two different
+// code paths refusing the identical fact -- exported so both name it in
+// the same words, not two authors' independent phrasing of the same
+// sentence.
+export const ALREADY_VOTED_MESSAGE = "You have already cast a ballot on this proposal. Ballots are final once cast.";
+
 export async function appendChainedGated(
   db: D1Database,
   table: ChainedTable,
@@ -271,9 +313,20 @@ export async function appendChainedGated(
     try {
       result = await built.stmt.run();
     } catch (e) {
-      if (!String(e).includes("UNIQUE")) throw e;
-      // Someone else appended between our read and our write. Their entry
-      // is now the head; ours goes after it — re-prepare and try again.
+      const message = String(e);
+      if (!message.includes("UNIQUE")) throw e;
+      if (classifyUniqueViolation(table, message) === "duplicate_vote") {
+        // Not a race at all: retrying recomputes prev_hash/hash off a
+        // fresh head, but proposal_id/citizen_id come from the caller's
+        // own `row` and never change between attempts, so a retry can
+        // only ever fail the identical way. Immediate, honest refusal
+        // instead of four wasted round trips ending in a misleading 503.
+        throw new SocietyError(409, ALREADY_VOTED_MESSAGE);
+      }
+      // "chain_head" (someone else appended between our read and our
+      // write; their entry is now the head, ours goes after it) and
+      // "unrecognised" (a UNIQUE this function has not been taught to
+      // distinguish -- the safe default) both retry identically to before.
       continue;
     }
     // F3 (docs/REVIEW-CHAINGATE-2026-08-09.md, hardening-2): fail closed.

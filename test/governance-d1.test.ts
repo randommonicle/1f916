@@ -158,6 +158,104 @@ test("castBallot: a second ballot from the same citizen on the same proposal is 
   }
 });
 
+test("castBallot: F4 -- a same-citizen double-vote that races past the pre-check is refused with 409 'already voted', not four wasted retries ending in a false 503 (hardening-2, docs/REVIEW-CHAINGATE-2026-08-09.md finding 4)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open" });
+    const citizenId = insertCitizen(d1);
+    const env = testEnv(d1);
+    const citizen = { id: citizenId, created_at: Date.now() };
+
+    // A competing ballot for the SAME (proposal, citizen) pair lands
+    // between castBallot's own pre-check (which sees nothing yet, since
+    // neither write has landed) and this call's actual INSERT --
+    // appendChained is chain.ts's own real writer, so the competing row
+    // is validly sealed and the resulting collision on ballots' real
+    // idx_ballots_proposal_citizen index is the genuine article, not
+    // simulated. Verified directly against real node:sqlite before
+    // trusting this design (scratch probe, not committed): when a single
+    // INSERT would violate both idx_ballots_prev AND
+    // idx_ballots_proposal_citizen at once, SQLite reports only
+    // "UNIQUE constraint failed: ballots.prev_hash" -- classified
+    // chain_head, so this specific race retries ONCE (attempt 0) before
+    // attempt 1's fresh head-read makes the prev_hash collision impossible
+    // and the remaining proposal_id+citizen_id collision reports alone,
+    // unambiguously classified duplicate_vote. Either way the final,
+    // observable outcome is the same: a 409, never a 503, and never four
+    // attempts exhausted -- which is what this test asserts, not the
+    // internal attempt count.
+    const raceEnv = {
+      ...env,
+      DB: withChainedHeadReadTriggering(d1.DB, "ballots", () =>
+        appendChained(d1.DB, "ballots", { proposal_id: proposalId, citizen_id: citizenId, choice: "no", cast_at: Date.now() }),
+      ),
+    };
+
+    await assert.rejects(
+      () => castBallot(raceEnv, citizen, proposalId, "yes"),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /already cast/i.test(e.message),
+    );
+
+    const { results } = await d1.DB.prepare("SELECT choice FROM ballots WHERE proposal_id = ? AND citizen_id = ?")
+      .bind(proposalId, citizenId)
+      .all<{ choice: string }>();
+    assert.equal(results.length, 1, "exactly one ballot landed -- the race loser's own attempt never wrote a second row");
+    assert.equal(results[0].choice, "no", "the ballot that actually raced in first is the one that persists");
+  } finally {
+    d1.close();
+  }
+});
+
+test("castBallot: F5 -- when the sweep's gate refusal overlaps a ballot that ALSO already landed for this citizen, the 409 names both facts (hardening-2, docs/REVIEW-CHAINGATE-2026-08-09.md finding 5)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const closesAt = now + 3_600_000; // stays "open" by clock alone; only the sweep's own claim closes it
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: closesAt });
+    // Filler vote so the tally has something to disagree with -- the
+    // actual pass/fail outcome is irrelevant to this test, only that the
+    // sweep closes the proposal (moves it off 'open').
+    const filler = insertCitizen(d1);
+    castNo(d1, proposalId, filler, now - 2000);
+
+    const voter = insertCitizen(d1);
+    const voterCitizen = { id: voter, created_at: now - 30 * 86_400_000 };
+    const sweepEnv = testEnv(d1);
+    const sweepNow = closesAt + 1000; // due the instant the sweep runs
+
+    // Between this call's own pre-check (sees nothing yet) and its
+    // INSERT, TWO things land in sequence: this SAME citizen's ballot
+    // from some other already-in-flight request (appendChained, a validly
+    // sealed row -- standing in for "the citizen's own earlier concurrent
+    // attempt won the race"), then the sweep claims and closes the
+    // proposal. By the time this call's own INSERT attempts to run, both
+    // are true: the gate refuses (status no longer 'open') AND this
+    // citizen already holds a ballot row -- docs/REVIEW-CHAINGATE-2026-08-09.md's
+    // own framing of F5 exactly ("a citizen double-votes concurrently
+    // exactly as the sweep runs and closes the proposal").
+    const raceEnv = {
+      ...testEnv(d1),
+      DB: withChainedHeadReadTriggering(d1.DB, "ballots", async () => {
+        await appendChained(d1.DB, "ballots", { proposal_id: proposalId, citizen_id: voter, choice: "yes", cast_at: now - 100 });
+        await runGovernanceSweep(sweepEnv, sweepNow);
+      }),
+    };
+
+    await assert.rejects(
+      () => castBallot(raceEnv, voterCitizen, proposalId, "yes"),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /no longer open/.test(e.message) && /already cast/i.test(e.message),
+    );
+
+    const { results } = await d1.DB.prepare("SELECT choice FROM ballots WHERE proposal_id = ? AND citizen_id = ?")
+      .bind(proposalId, voter)
+      .all<{ choice: string }>();
+    assert.equal(results.length, 1, "only the ballot that actually landed during the race persists -- the refused call wrote nothing");
+  } finally {
+    d1.close();
+  }
+});
+
 test("castBallot: two different citizens racing to vote on the same proposal both succeed, and the resulting chain is valid with neither vote lost (the two-writer append race, design doc §13 item 3)", async () => {
   const d1 = createLocalD1();
   try {

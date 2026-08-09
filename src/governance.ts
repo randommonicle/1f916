@@ -11,7 +11,7 @@
 // reads or branches on citizen #1's special identifier, and
 // test/governance.test.ts polices that directly, not just by inspection.
 
-import { appendChainedStmt, appendChainedGated, type ChainGate } from "./chain.ts";
+import { appendChainedStmt, appendChainedGated, ALREADY_VOTED_MESSAGE, type ChainGate } from "./chain.ts";
 import {
   type Env,
   SocietyError,
@@ -665,15 +665,12 @@ export async function castBallot(
   // exhaustion error, which exists for a chain-head race, not a
   // (proposal_id, citizen_id) collision. A narrow window remains where two
   // concurrent requests from the SAME citizen both pass this check before
-  // either INSERTs -- accepted at phase-0 scale, the same call register-
-  // gate.ts's invite-code race and wallets.ts's concurrent-declare race
-  // already make. The UNIQUE index still makes the double row impossible
-  // either way; only the error shape differs in that narrow window.
-  const existing = await env.DB.prepare("SELECT id FROM ballots WHERE proposal_id = ? AND citizen_id = ?")
-    .bind(proposalId, citizen.id)
-    .first();
-  if (existing) {
-    throw new SocietyError(409, "You have already cast a ballot on this proposal. Ballots are final once cast.");
+  // either INSERTs -- appendChainedGated's own UNIQUE-family classifier
+  // (chain.ts, F4/hardening-2) closes that window with the identical 409,
+  // zero wasted retries, rather than the four-attempt exhaustion this
+  // pre-check alone once left as the fallback.
+  if (await hasExistingBallot(env, proposalId, citizen.id)) {
+    throw new SocietyError(409, ALREADY_VOTED_MESSAGE);
   }
 
   // Guarded, not a plain appendChained (docs/REVIEW-DEMOCRACY-RECHECK.md
@@ -697,13 +694,36 @@ export async function castBallot(
     { sql: "SELECT 1 FROM proposals WHERE id = ? AND status = 'open'", args: [proposalId] },
   );
   if (sealed === null) {
+    // F5 (docs/REVIEW-CHAINGATE-2026-08-09.md, hardening-2): the gate can
+    // refuse for a citizen who ALSO already holds a ballot on this
+    // proposal -- a double-vote landing concurrently with the sweep's own
+    // claim, where the WHERE EXISTS (status='open') gate is evaluated
+    // before the UNIQUE index ever would be (chain.ts's own commentary on
+    // appendChainedStmt: the gate wins silently, no insert is attempted,
+    // so no constraint is evaluated). Pre-fix, the message named only the
+    // closing, never the double vote -- accurate about the outcome, wrong
+    // about the (also true) cause. One SELECT, on this refusal path only:
+    // the common case (proposal genuinely just closed, no prior ballot)
+    // pays nothing extra.
+    const alreadyVoted = await hasExistingBallot(env, proposalId, citizen.id);
     throw new SocietyError(
       409,
-      `proposal ${proposalId} is no longer open for balloting: it was claimed for tallying while this ballot was in flight. Not recorded -- the tally already ran without it.`,
+      `proposal ${proposalId} is no longer open for balloting: it was claimed for tallying while this ballot was in flight. Not recorded -- the tally already ran without it.${
+        alreadyVoted ? " You had also already cast a ballot on this proposal; only your original ballot counts." : ""
+      }`,
     );
   }
 
   return { proposal_id: proposalId, choice, chain_head: sealed.hash };
+}
+
+// Shared by castBallot's pre-check (the common, sequential case) and its
+// post-refusal check (F5, hardening-2: the gate-refused case where the
+// citizen ALSO already voted) -- one SQL string, not two independently
+// typed copies that could drift.
+async function hasExistingBallot(env: Env, proposalId: number, citizenId: number): Promise<boolean> {
+  const existing = await env.DB.prepare("SELECT id FROM ballots WHERE proposal_id = ? AND citizen_id = ?").bind(proposalId, citizenId).first();
+  return existing != null;
 }
 
 // GET /api/proposals: public list, paginated in the citizens-census style
