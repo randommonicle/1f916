@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { GENESIS, entryHash, verifyRows, type ChainRow, type ChainedTable } from "../src/chain.ts";
+import { GENESIS, entryHash, verifyRows, appendChainedGated, type ChainRow, type ChainedTable } from "../src/chain.ts";
 
 const SRC = join(import.meta.dirname, "..", "src");
 const CHAIN_PATH = join(SRC, "chain.ts");
@@ -427,4 +427,46 @@ test("hashes match an independent implementation of the spec", async () => {
   // Non-ASCII must be hashed as raw UTF-8, not escaped.
   const unicode = await build("identity_events", [{ citizen_id: 1, kind: "moderation", detail: "pinned 🤖", created_at: 1 }]);
   assert.equal(unicode[0].hash, "07dd6fe1ecba7f151e7fefdc8df511469ef12f777cfd7554c91febc9feb6f68e");
+});
+
+// ---------- appendChainedGated (hardening-2) ----------
+//
+// A minimal D1Database-shaped stand-in, deliberately NOT test/helpers/local-d1.ts's
+// real-SQLite harness: real D1 (and real node:sqlite) always reports a
+// well-formed `changes: number` -- the scenario F3 guards against is a
+// hypothetical DEPARTURE from that promise, which only a spied/hand-built
+// result can produce on demand. `prepare` returns the same object for
+// every call regardless of the SQL text (this test never inspects SQL, it
+// only controls what .run() reports back), matching how a "spy" test
+// double is meant to work: minimal, and honest about testing one thing.
+function spiedDb(runResult: unknown): D1Database {
+  const stmt = {
+    bind: (..._args: unknown[]) => stmt,
+    first: async <T>(): Promise<T | null> => null,
+    all: async <T>(): Promise<{ results: T[] }> => ({ results: [] }),
+    run: async (): Promise<D1Response> => runResult as D1Response,
+  };
+  return { prepare: (_sql: string) => stmt } as unknown as D1Database;
+}
+
+test("appendChainedGated: F3 fail-closed -- a D1 result whose meta lacks `changes` is treated as a refusal, never a written row's hash (hardening-2, docs/REVIEW-CHAINGATE-2026-08-09.md finding 3)", async () => {
+  // `changes` absent entirely -- the ambient D1Meta type promises it is
+  // always present (`changes: number`, required), but that is the type's
+  // promise, not a runtime guarantee this function should stake a
+  // citizen's write on.
+  const db = spiedDb({ meta: {} });
+  const sealed = await appendChainedGated(db, "ballots", { proposal_id: 1, citizen_id: 1, choice: "yes", cast_at: 1 }, { sql: "SELECT 1", args: [] });
+  assert.equal(sealed, null, "an absent `changes` must fail closed (refusal), never be read as a nonzero/successful write");
+});
+
+test("appendChainedGated: a genuine single-row write (changes: 1) still succeeds -- the fail-closed change does not also refuse the real success case", async () => {
+  const db = spiedDb({ meta: { changes: 1 } });
+  const sealed = await appendChainedGated(db, "ballots", { proposal_id: 1, citizen_id: 1, choice: "yes", cast_at: 1 }, { sql: "SELECT 1", args: [] });
+  assert.notEqual(sealed, null, "changes: 1 is the one value that unambiguously means the row was written -- must still succeed");
+});
+
+test("appendChainedGated: a gate refusal (changes: 0) still returns null, unchanged by the fail-closed rewrite", async () => {
+  const db = spiedDb({ meta: { changes: 0 } });
+  const sealed = await appendChainedGated(db, "ballots", { proposal_id: 1, citizen_id: 1, choice: "yes", cast_at: 1 }, { sql: "SELECT 1", args: [] });
+  assert.equal(sealed, null, "changes: 0 (the ordinary gate-refused case) must still refuse exactly as before");
 });

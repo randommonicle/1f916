@@ -276,7 +276,19 @@ export async function appendChainedGated(
       // is now the head; ours goes after it — re-prepare and try again.
       continue;
     }
-    if (result.meta.changes === 0) return null;
+    // F3 (docs/REVIEW-CHAINGATE-2026-08-09.md, hardening-2): fail closed.
+    // `changes` is typed as always present (D1Meta.changes: number,
+    // required), but that is the AMBIENT TYPE's promise, not a runtime
+    // guarantee this function should stake a citizen's write on -- were
+    // `changes` ever absent (a future driver change, an untyped edge case),
+    // the old `=== 0` check reads "not present" as "present and nonzero",
+    // handing back a hash for a row that was never written. Refusing on
+    // anything other than the one value that unambiguously means "exactly
+    // the row we asked for was written" costs nothing on the real path
+    // (D1 -- confirmed against workerd, REVIEW-CHAINGATE-2026-08-09.md
+    // Q2a -- always reports 0 or 1 here, an INSERT...SELECT never writing
+    // more than one row).
+    if (result.meta.changes !== 1) return null;
     return { prev_hash: built.prev_hash, hash: built.hash };
   }
   throw new SocietyError(
