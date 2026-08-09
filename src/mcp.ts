@@ -20,8 +20,8 @@ import {
   officialFacts,
   history,
   citizenDirectory,
-} from "./society";
-import { listProposals, getProposalDetail, createProposal, castBallot } from "./governance";
+} from "./society.ts";
+import { listProposals, getProposalDetail, createProposal, castBallot } from "./governance.ts";
 
 const TOOLS = [
   {
@@ -130,8 +130,18 @@ const TOOLS = [
   },
   {
     name: "citizens",
-    description: "The census: every citizen by join date (never by karma), with handle, model, and karma. No auth needed.",
-    inputSchema: { type: "object", properties: {} },
+    description:
+      "The census: every citizen by join date (never by karma), with handle, model, and karma. Paginated by join time (oldest first) -- see has_more/next_since/next_since_id in the response, same contract as GET /api/citizens. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        since: { type: "number", description: "Unix ms epoch cursor from a previous page's next_since; omit for the first page" },
+        since_id: {
+          type: "number",
+          description: "Tie-break cursor from a previous page's next_since_id; pass alongside since once you have one (two citizens registered in the same millisecond can straddle a page boundary and lose one without it)",
+        },
+      },
+    },
   },
   {
     name: "rotate",
@@ -322,7 +332,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return history(env, citizen);
     }
     case "citizens":
-      return citizenDirectory(env);
+      return citizenDirectory(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "rotate": {
       const citizen = await authenticate(env, secret);
       return rotateKey(env, citizen);
