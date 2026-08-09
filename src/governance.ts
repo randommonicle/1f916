@@ -11,7 +11,7 @@
 // reads or branches on citizen #1's special identifier, and
 // test/governance.test.ts polices that directly, not just by inspection.
 
-import { appendChained, appendChainedStmt } from "./chain.ts";
+import { appendChainedStmt, appendChainedGated, type ChainGate } from "./chain.ts";
 import {
   type Env,
   SocietyError,
@@ -676,12 +676,32 @@ export async function castBallot(
     throw new SocietyError(409, "You have already cast a ballot on this proposal. Ballots are final once cast.");
   }
 
-  const sealed = await appendChained(env.DB, "ballots", {
-    proposal_id: proposalId,
-    citizen_id: citizen.id,
-    choice,
-    cast_at: now,
-  });
+  // Guarded, not a plain appendChained (docs/REVIEW-DEMOCRACY-RECHECK.md
+  // N1, reproduced): the status/window check above reads the proposal
+  // once, but appending is still ~3 more D1 round trips away (isFounder,
+  // the existing-ballot check, the head read inside the append itself),
+  // and POST /api/governance/sweep is permissionless and unrate-limited --
+  // it can claim and fully tally this proposal inside that gap. An
+  // unguarded append would still land on the chain, published and handed
+  // a chain_head, yet excluded from the tally that already ran: three
+  // ballots against a tally of two, an internally impossible public
+  // record. The insert is conditioned on the proposal still being 'open'
+  // at the moment it actually executes, the same WHERE EXISTS shape
+  // upsertSettingStmt below already proves -- a guard refusal (outcome
+  // null) is reported as an honest refusal, never a silently orphaned
+  // ballot.
+  const sealed = await appendChainedGated(
+    env.DB,
+    "ballots",
+    { proposal_id: proposalId, citizen_id: citizen.id, choice, cast_at: now },
+    { sql: "SELECT 1 FROM proposals WHERE id = ? AND status = 'open'", args: [proposalId] },
+  );
+  if (sealed === null) {
+    throw new SocietyError(
+      409,
+      `proposal ${proposalId} is no longer open for balloting: it was claimed for tallying while this ballot was in flight. Not recorded -- the tally already ran without it.`,
+    );
+  }
 
   return { proposal_id: proposalId, choice, chain_head: sealed.hash };
 }
@@ -832,16 +852,42 @@ function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Re
 // Atomic: the outcome event and whatever state change goes with it commit
 // together or not at all -- the commitWithModLog precedent (society.ts),
 // generalised to N state statements instead of exactly one.
-async function commitOutcome(env: Env, stateStmts: D1PreparedStatement[], actorId: number, detail: string): Promise<{ hash: string }> {
+//
+// The chained log statement carries the identical `status = 'tallying'`
+// gate the state statements already do (docs/REVIEW-DEMOCRACY-RECHECK.md
+// N6): a stalled claimant that resumes after a second claimant has already
+// re-claimed and fully committed can still reach this function with a
+// stateStmts batch built from stale data. Pre-fix, its own retry (forced by
+// a genuine UNIQUE collision against the second claimant's already-written
+// row) would land the log entry unconditionally even though the state
+// writes correctly no-op -- a duplicate proposal_decided event on a chain
+// whose entire value is being auditable. With the gate, every statement in
+// the batch is conditional on the same fact, so a resumed claimant's whole
+// batch no-ops cleanly: no throw, no partial write, nothing to distinguish
+// from an ordinary successful commit from the caller's point of view.
+async function commitOutcome(env: Env, proposalId: number, stateStmts: D1PreparedStatement[], actorId: number, detail: string): Promise<{ hash: string }> {
+  const gate: ChainGate = { sql: "SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying'", args: [proposalId] };
   for (let attempt = 0; attempt < 4; attempt++) {
-    const log = await appendChainedStmt(env.DB, "identity_events", {
-      citizen_id: actorId,
-      kind: "proposal_decided",
-      detail,
-      created_at: Date.now(),
-    });
+    const log = await appendChainedStmt(
+      env.DB,
+      "identity_events",
+      {
+        citizen_id: actorId,
+        kind: "proposal_decided",
+        detail,
+        created_at: Date.now(),
+      },
+      gate,
+    );
     try {
-      await env.DB.batch([...stateStmts, log.stmt]);
+      // log.stmt first: it reads proposals only inside its own gate,
+      // never writes it, so it must run before stateStmts' own final
+      // status UPDATE flips status off 'tallying' -- statements in one
+      // batch execute in order, inside one transaction, so a later
+      // statement sees an earlier one's effects. The settings upsert (when
+      // present) is already ordered ahead of the status UPDATE for the
+      // identical reason; the log entry now follows the same rule.
+      await env.DB.batch([log.stmt, ...stateStmts]);
       return { hash: log.hash };
     } catch (e) {
       if (!String(e).includes("UNIQUE")) throw e;
@@ -957,7 +1003,7 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   );
 
   const detail = `proposal ${proposalId} (${proposal.kind}) ${finalStatus}: yes=${yes} no=${no} abstain=${abstain} eligible=${eligible}`;
-  await commitOutcome(env, stateStmts, proposal.proposer_id, detail);
+  await commitOutcome(env, proposalId, stateStmts, proposal.proposer_id, detail);
 
   return finalStatus;
 }

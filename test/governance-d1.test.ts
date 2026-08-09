@@ -418,6 +418,10 @@ function castYes(d1: ReturnType<typeof createLocalD1>, proposalId: number, citiz
   d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'yes', ?)").run(proposalId, citizenId, castAt);
 }
 
+function castNo(d1: ReturnType<typeof createLocalD1>, proposalId: number, citizenId: number, castAt: number) {
+  d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'no', ?)").run(proposalId, citizenId, castAt);
+}
+
 // docs/REVIEW-DEMOCRACY.md H1's reproduction, real, not simulated: wraps
 // a real D1Like so its first `failCount` calls to .batch() throw exactly
 // the review's own transient error message, then delegate to the real
@@ -893,6 +897,116 @@ test("runGovernanceSweep: a concurrent re-claim race on a stale 'tallying' propo
 
     const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
     assert.equal(row!.status, "passed");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- N1 + N6: the guarded chained append (docs/REVIEW-DEMOCRACY-RECHECK.md) ----------
+//
+// Intercepts the exact head-read SELECT appendChainedStmt/appendChainedGated
+// issue for `table` (chain.ts: "SELECT hash FROM <table> WHERE hash IS NOT
+// NULL ORDER BY id DESC LIMIT 1") and, the first time it runs, captures its
+// real result BEFORE running `duringRead` to completion, then hands the
+// caller the value read a moment "before" -- a deterministic reproduction
+// of "a concurrent process ran to completion in the gap between this
+// caller's own read and its write", the exact window N1 and N6 both name,
+// without depending on Promise.all's actual microtask scheduling the way
+// the H1 races above do. Fires once; a retry attempt (a second call for the
+// same table) passes straight through to the real statement.
+function withChainedHeadReadTriggering(DB: LocalD1["DB"], table: string, duringRead: () => Promise<unknown>): LocalD1["DB"] {
+  const headSql = `SELECT hash FROM ${table} WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1`;
+  let fired = false;
+  return {
+    prepare: (sql: string) => {
+      const real = DB.prepare(sql);
+      if (fired || sql !== headSql) return real;
+      return {
+        ...real,
+        async first<T>(): Promise<T | null> {
+          const captured = await real.first<T>();
+          fired = true;
+          await duringRead();
+          return captured;
+        },
+      };
+    },
+    batch: (stmts) => DB.batch(stmts),
+  };
+}
+
+test("castBallot: N1 -- a ballot that loses the race against the sweep's claim is refused with 409, never landed on the chain unrecorded by the tally", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    // An hour out in real terms, so castBallot's own Date.now() window
+    // check always sees this proposal as still open, regardless of how
+    // long the test itself takes to execute.
+    const closesAt = now + 3_600_000;
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: closesAt });
+    const noVoter1 = insertCitizen(d1);
+    const noVoter2 = insertCitizen(d1);
+    castNo(d1, proposalId, noVoter1, now - 2000);
+    castNo(d1, proposalId, noVoter2, now - 2000);
+
+    const thirdVoter = insertCitizen(d1);
+    const sweepEnv = testEnv(d1);
+    // The sweep's own `now` is independent of real time -- past closesAt,
+    // so it considers the proposal due the instant it runs, inside the
+    // window between this ballot's own status read and its chained
+    // append, the exact interleave the recheck reproduced.
+    const sweepNow = closesAt + 1000;
+    const raceEnv = { ...testEnv(d1), DB: withChainedHeadReadTriggering(d1.DB, "ballots", () => runGovernanceSweep(sweepEnv, sweepNow)) };
+
+    await assert.rejects(
+      () => castBallot(raceEnv, { id: thirdVoter, created_at: now - 30 * 86_400_000 }, proposalId, "yes"),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /no longer open/.test(e.message),
+    );
+
+    const tallyRow = await d1.DB.prepare("SELECT status, tally_yes, tally_no FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; tally_yes: number; tally_no: number }>();
+    assert.equal(tallyRow!.status, "failed", "the sweep tallied the two no votes before this ballot ever landed");
+    assert.equal(tallyRow!.tally_no, 2);
+
+    const ballotCount = await d1.DB.prepare("SELECT COUNT(*) AS n FROM ballots WHERE proposal_id = ?").bind(proposalId).first<{ n: number }>();
+    assert.equal(ballotCount!.n, 2, "the refused third ballot never landed -- public ballots equal the recorded tally, not three against a tally of two");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runGovernanceSweep: N6 -- a stalled claimant that resumes after a re-claimer has fully committed does not append a duplicate proposal_decided event", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    castYes(d1, proposalId, proposer, now - 500);
+
+    // A's own env: the FIRST time A's commitOutcome reads the
+    // identity_events head (attempt 0, before it has written anything), a
+    // full second sweep (B) runs to completion first -- a real re-claim,
+    // real tally, real commit -- extending the chain past the head A just
+    // captured. A is then handed that stale, already-superseded head, so
+    // its own attempt-0 statement lands (pre-fix) against a chain that has
+    // moved on, exactly docs/REVIEW-DEMOCRACY-RECHECK.md N6's own
+    // reproduction ("its first batch fails on UNIQUE constraint failed:
+    // identity_events.prev_hash, and commitOutcome's own 4-attempt retry
+    // loop then re-reads the head and succeeds").
+    const later = now + 16 * 60 * 1000; // comfortably past STALE_CLAIM_MS (15 min) from `now`, independent of real time
+    const bEnv = testEnv(d1);
+    const aEnv = { ...testEnv(d1), DB: withChainedHeadReadTriggering(d1.DB, "identity_events", () => runGovernanceSweep(bEnv, later)) };
+
+    const aResult = await runGovernanceSweep(aEnv, now);
+    assert.equal(aResult.results[0].outcome, "passed", "A's own (stale) computation still resolves to a real outcome, even though nothing new was written for it");
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one outcome event -- A's resumed retry must not append a second one for the same decision");
+
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "passed", "B's own commit is what persists; A's resumed batch was a clean no-op");
   } finally {
     d1.close();
   }

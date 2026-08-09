@@ -199,24 +199,90 @@ export async function appendChained(
   throw new SocietyError(503, `chain head for ${table} moved four times running; giving up rather than forking it. The write was never committed -- retrying may succeed.`);
 }
 
+// A caller-supplied guard for appendChainedStmt: a boolean subquery body
+// handed to WHERE EXISTS (...) verbatim, e.g. "SELECT 1 FROM proposals
+// WHERE id = ? AND status = 'open'". chain.ts has no knowledge of what a
+// "proposal" is or what "open" means — the caller owns the SQL and its own
+// bind args (appended in the same batch after the row's own values), and
+// this stays what appendChainedStmt already is: a mechanical row-in,
+// statement-out builder, not a consumer of application state.
+export interface ChainGate {
+  sql: string;
+  args: readonly unknown[];
+}
+
 // Prepare the chained INSERT without running it, so a caller can commit it in
 // the same D1 batch as the state-change it records — making the pair atomic.
 // Reads the head to compute prev/hash; if the head moves before the batch
 // commits, the UNIQUE index rejects it and the caller re-prepares and retries.
+//
+// With `gate`, the INSERT becomes INSERT ... SELECT ... WHERE EXISTS
+// (gate.sql) instead of a plain VALUES — the same shape governance.ts's own
+// upsertSettingStmt already uses to make a write conditional on another
+// row's state at the moment the statement actually executes, not at the
+// moment the caller read it (docs/REVIEW-DEMOCRACY-RECHECK.md N1/N6: the
+// gap between the two is exactly where an unguarded append could land on a
+// chain a concurrent process had already moved past). Omitting `gate`
+// reproduces the unconditional VALUES form byte for byte — every existing
+// caller (payouts.ts, society.ts, this file's own commitOutcome caller)
+// passes none and is unaffected.
 export async function appendChainedStmt(
   db: D1Database,
   table: ChainedTable,
   row: ChainRow,
+  gate?: ChainGate,
 ): Promise<{ stmt: D1PreparedStatement; prev_hash: string; hash: string }> {
   const cols = PAYLOAD[table];
   const placeholders = cols.map(() => "?").join(", ");
   const head = await db.prepare(`SELECT hash FROM ${table} WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1`).first<{ hash: string }>();
   const prev = head?.hash ?? GENESIS;
   const hash = await entryHash(table, prev, row);
-  const stmt = db
-    .prepare(`INSERT INTO ${table} (${cols.join(", ")}, prev_hash, hash) VALUES (${placeholders}, ?, ?)`)
-    .bind(...cols.map((field) => row[field] ?? null), prev, hash);
+  const values = cols.map((field) => row[field] ?? null);
+  const stmt = gate
+    ? db
+        .prepare(`INSERT INTO ${table} (${cols.join(", ")}, prev_hash, hash) SELECT ${placeholders}, ?, ? WHERE EXISTS (${gate.sql})`)
+        .bind(...values, prev, hash, ...gate.args)
+    : db
+        .prepare(`INSERT INTO ${table} (${cols.join(", ")}, prev_hash, hash) VALUES (${placeholders}, ?, ?)`)
+        .bind(...values, prev, hash);
   return { stmt, prev_hash: prev, hash };
+}
+
+// A single chained append, run immediately (not batched with anything else),
+// conditional on `gate` still holding at the moment the statement executes.
+// Same fork-avoidance retry as appendChained (a UNIQUE hit means someone
+// else appended between our read and our write — re-prepare against the
+// fresh head and try again), but a gate refusal is a different thing
+// entirely: the row was never in a race for the chain's head, it was
+// refused permission to be written at all, and retrying would only refuse
+// again. Returns null for that case so the caller can give an honest,
+// immediate refusal (docs/REVIEW-DEMOCRACY-RECHECK.md N1) instead of either
+// silently committing (the bug) or burning four attempts on a no that will
+// not change.
+export async function appendChainedGated(
+  db: D1Database,
+  table: ChainedTable,
+  row: ChainRow,
+  gate: ChainGate,
+): Promise<{ prev_hash: string; hash: string } | null> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const built = await appendChainedStmt(db, table, row, gate);
+    let result: D1Response;
+    try {
+      result = await built.stmt.run();
+    } catch (e) {
+      if (!String(e).includes("UNIQUE")) throw e;
+      // Someone else appended between our read and our write. Their entry
+      // is now the head; ours goes after it — re-prepare and try again.
+      continue;
+    }
+    if (result.meta.changes === 0) return null;
+    return { prev_hash: built.prev_hash, hash: built.hash };
+  }
+  throw new SocietyError(
+    503,
+    `chain head for ${table} moved four times running; giving up rather than forking it. The write was never committed -- retrying may succeed.`,
+  );
 }
 
 // How many rows one /api/attest call will verify. A bound is necessary — a
