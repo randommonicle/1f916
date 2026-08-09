@@ -40,24 +40,59 @@ function walkTsFiles(dir: string): string[] {
 // governance.ts policing test tripped on its OWN header comment, which
 // named the very identifier it was checking the absence of, in prose).
 //
-// M2, review fix: the block-comment strip stays a whole-text regex (that
-// part was never in question), but the old single-line strip was
-// `.replace(/\/\/.*$/gm, "")` -- a regex that cannot tell a `//` comment
-// from a `//` inside a string literal. src/society.ts and all of
-// src/doc.ts are full of `https://` URLs, so a real offending statement
-// sharing a line with one was invisible to the scan (review's candidate
-// 11). Line-wise now: a line is blanked only when its first non-whitespace
-// token is `//`, i.e. the whole line is a comment. A trailing same-line
-// comment (`code(); // UPDATE proposals in prose`) is deliberately left
-// alone -- that direction risks a false CAUGHT (annoying, fixed by
-// rewording the comment, exactly as this file's own header once had to
-// be), never a false clean, which is the direction that matters for a
-// guard whose job is catching a bypass.
+// M2, review fix: the old single-line strip was `.replace(/\/\/.*$/gm,
+// "")` -- a regex that cannot tell a `//` comment from a `//` inside a
+// string literal. src/society.ts and all of src/doc.ts are full of
+// `https://` URLs, so a real offending statement sharing a line with one
+// was invisible to the scan (review's candidate 11). Line-wise now: a
+// line is blanked only when its first non-whitespace token is `//`, i.e.
+// the whole line is a comment. A trailing same-line comment (`code(); //
+// UPDATE proposals in prose`) is deliberately left alone -- that
+// direction risks a false CAUGHT (annoying, fixed by rewording the
+// comment, exactly as this file's own header once had to be), never a
+// false clean, which is the direction that matters for a guard whose job
+// is catching a bypass.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md N3: the block-comment half used to be
+// a single whole-text regex, `/\*[\s\S]*?\*\//g` -- M2's own fix note
+// called this half "never in question", but it has the IDENTICAL defect
+// the old `//`-strip did, one level down: `/\*[\s\S]*?\*\//g` cannot tell
+// a real `/*` comment opener from one sitting inside a string literal
+// (e.g. `const o = "/*";`), so a genuine offending write between a
+// string containing "/*" and a later string containing "*/" was invisible
+// to the scan, exactly the shape the old `//`-vs-`https://` blind spot
+// took. Fixed with the same conservative, line-wise bar the `//` rule
+// already uses: a block comment is recognised only when `/*` is a line's
+// own first non-whitespace token (never mid-line, so a `/*` sitting
+// inside a string on an ordinary code line is never mistaken for a
+// comment opener), tracked across lines with one boolean so a comment
+// spanning several lines is still fully blanked, and whatever follows a
+// closing `*/` on its own line is kept, not assumed empty, so a rare
+// "*/ real code" line is never silently hidden. Verified directly against
+// every real file in src/ before trusting it, not just reasoned about: the
+// old whole-text regex and this line-wise version agree on every existing
+// scan result across the whole tree, and the only two real block comments
+// in this codebase (index.ts, x402.ts, both single-line and
+// self-contained) still strip identically.
 function stripComments(text: string): string {
-  const withoutBlocks = text.replace(/\/\*[\s\S]*?\*\//g, "");
-  return withoutBlocks
+  let inBlockComment = false;
+  return text
     .split("\n")
-    .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+    .map((rawLine) => {
+      let line = rawLine;
+      if (inBlockComment) {
+        const closeAt = line.indexOf("*/");
+        if (closeAt === -1) return "";
+        inBlockComment = false;
+        line = line.slice(closeAt + 2);
+      }
+      const trimmed = line.replace(/^\s*/, "");
+      if (trimmed.startsWith("/*")) {
+        if (trimmed.indexOf("*/", 2) === -1) inBlockComment = true;
+        return "";
+      }
+      return /^\s*\/\//.test(line) ? "" : line;
+    })
     .join("\n");
 }
 
@@ -79,9 +114,16 @@ function readSourceWithoutComments(path: string): string {
 // REPLACE|IGNORE|ABORT|ROLLBACK|FAIL <table>` -- real, documented SQLite
 // conflict-resolution syntax, the exact symmetric case -- still bypassed
 // the scan. UPDATE gets the identical optional clause INSERT already has.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md N4: the schema prefix only allowed a
+// BARE `\w+.` form, so `"main"."proposals"` -- schema AND table each
+// separately quoted -- bypassed the scan too (the old pattern could take
+// one leading quote OR a bare schema prefix, never both). The schema
+// group now permits the identical optional-quote wrapping the table name
+// itself already has, independently on each side of the dot.
 function tableWritePattern(table: string): RegExp {
   return new RegExp(
-    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
+    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+(?:(?:"|\\[|\`)?\\w+(?:"|\\]|\`)?\\.)?(?:"|\\[|\`)?${table}(?:"|\\]|\`)?\\b`,
     "i",
   );
 }
@@ -117,14 +159,16 @@ test("governance.ts itself does write both proposals and governance_settings (th
   assert.match(text, /INSERT\s+INTO\s+governance_settings/i);
 });
 
-// M2 red-proof. These are the review's own eleven candidate writers,
-// reproduced verbatim (docs/REVIEW-DEMOCRACY.md, "M2"), re-run against the
-// fixed pattern and comment-stripper as a standing regression: if a future
-// edit narrows either back down, this is what goes red. Ten of eleven must
-// be CAUGHT; the eleventh (a table name built from a runtime variable) is
-// not literal text in the source at all, so no static scan -- this one or
-// any other -- can see it. That is an accepted, documented residual, not a
-// gap in this fix; it is asserted below rather than silently dropped.
+// M2 red-proof. The review's own eleven candidate writers
+// (docs/REVIEW-DEMOCRACY.md, "M2"), plus the N2/N4/N3 candidates the
+// recheck (docs/REVIEW-DEMOCRACY-RECHECK.md) added later -- sixteen
+// total now, re-run against the fixed pattern and comment-stripper as a
+// standing regression: if a future edit narrows either back down, this
+// is what goes red. Fifteen of sixteen must be CAUGHT; the one runtime-
+// variable candidate is not literal text in the source at all, so no
+// static scan -- this one or any other -- can see it. That is an
+// accepted, documented residual, not a gap in this fix; it is asserted
+// below rather than silently dropped.
 const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> = [
   { text: "UPDATE proposals SET status = 'x'", caught: true, note: "the control" },
   { text: "UPDATE \"proposals\" SET status = 'x'", caught: true, note: "double-quoted table name" },
@@ -137,6 +181,7 @@ const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> 
   { text: "UPDATE OR REPLACE proposals SET status = 'x'", caught: true, note: "N2: UPDATE's own OR-conflict-resolution form, the exact symmetric case the INSERT broadening above did not cover" },
   { text: "UPDATE OR IGNORE governance_settings SET value = 'x'", caught: true, note: "N2: idiomatic UPDATE OR IGNORE on a key-value table" },
   { text: "UPDATE OR ABORT proposals SET status = 'x'", caught: true, note: "N2: UPDATE OR ABORT, real SQLite conflict-resolution syntax" },
+  { text: "UPDATE \"main\".\"proposals\" SET status = 'x'", caught: true, note: "N4: schema AND table each separately quoted -- the old pattern allowed one leading quote OR a bare schema prefix, never both" },
   { text: "INSERT INTO \"governance_settings\" (key) VALUES ('x')", caught: true, note: "double-quoted table name" },
   {
     text: "const s=\"https://x\"; await db.prepare(\"UPDATE proposals SET status = 'x'\")",
@@ -148,9 +193,14 @@ const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> 
     caught: false,
     note: "known residual (review M2): the table name is a runtime value, not literal text in the source -- no static scan can see it",
   },
+  {
+    text: `const o = "/*"; await db.prepare("UPDATE proposals SET status=1").run(); const c = "*/";`,
+    caught: true,
+    note: "N3: /* and */ sitting inside string literals, not real comment delimiters -- the old whole-text block-comment regex treated everything between them as a comment and hid the real UPDATE; this line never starts with /* as its own first token, so the line-wise stripper leaves it untouched",
+  },
 ];
 
-test("the broadened pattern and line-wise comment-stripper catch the review's eleven bypass candidates (M2 red-proof)", () => {
+test("the broadened pattern and line-wise comment-stripper catch all sixteen bypass candidates (M2 + N2/N3/N4 red-proof)", () => {
   const missed = BYPASS_CANDIDATES.filter((c) => !c.caught);
   assert.equal(
     missed.length,

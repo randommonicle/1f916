@@ -991,6 +991,23 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   // refuse. The row is left exactly as the claim above left it
   // (status='tallying'), which is what makes it eligible for stale-claim
   // recovery rather than requiring a second, bespoke recovery path.
+  //
+  // docs/REVIEW-DEMOCRACY-RECHECK.md N7: the shape that recovery takes for
+  // THIS outcome specifically, worth the operator knowing in advance. A
+  // proposal that hits this belt is not resolved by stale-claim recovery,
+  // it is perpetually RE-CLAIMED by it: every sweep past STALE_CLAIM_MS
+  // reclaims the row, re-runs this exact check, re-violates, and re-stamps
+  // tallied_at -- forever, with no expiry and no escalation. That is the
+  // designed trade this belt makes on purpose (a wrong outcome would be
+  // worse than an unterminating retry), and it is loud, not silent: every
+  // sweep response names the row in both `results` (as this proposal's own
+  // outcome) and `stranded`, so the condition is visible on every single
+  // call, not something that has to be specifically queried for. It is not
+  // reachable through any real path this arc could construct post-freeze
+  // (isFounder is immutable, created_at is never updated, nothing deletes
+  // citizens) -- documented so a future reader who does see it fire knows
+  // this is the designed refusal working as intended, not a new bug on top
+  // of the one it caught.
   if (result.cast > eligible) {
     return "invariant_violation";
   }

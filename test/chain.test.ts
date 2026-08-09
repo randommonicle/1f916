@@ -58,11 +58,47 @@ function walkTsFiles(dir: string): string[] {
 // string-identical to governance-policing.test.ts's own copy, per the
 // working agreement that keeps the two scans from drifting apart --
 // UPDATE now carries the same optional clause INSERT already had.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md N4: the schema prefix only allowed a
+// bare `\w+.` form, so `"main"."ledger"` -- schema AND table each
+// separately quoted -- bypassed both scans too. The schema group now
+// permits the identical optional-quote wrapping the table name itself
+// already has, independently on each side of the dot.
+//
+// docs/REVIEW-DEMOCRACY-RECHECK.md N3: `stripComments` below stays
+// string-identical to governance-policing.test.ts's own copy (same
+// working agreement N2/N4 already follow). The block-comment half used
+// to be a single whole-text regex with the identical string-literal
+// blindness the old `//`-strip had one level down -- `/\*[\s\S]*?\*\//g`
+// cannot tell a real `/*` from one sitting inside a string, so
+// `const o = "/*"; UPDATE ledger ...; const c = "*/";` would have hidden
+// the real write between the two quoted delimiters. Fixed with the same
+// conservative, line-wise bar the `//` rule already uses: a block
+// comment is recognised only when `/*` is a line's own first token,
+// tracked across lines with one boolean, and whatever follows a closing
+// `*/` on its own line is kept rather than assumed empty. Verified
+// directly against every real file in src/: the old whole-text regex and
+// this line-wise version agree on every existing scan result across the
+// whole tree.
 function stripComments(text: string): string {
-  const withoutBlocks = text.replace(/\/\*[\s\S]*?\*\//g, "");
-  return withoutBlocks
+  let inBlockComment = false;
+  return text
     .split("\n")
-    .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+    .map((rawLine) => {
+      let line = rawLine;
+      if (inBlockComment) {
+        const closeAt = line.indexOf("*/");
+        if (closeAt === -1) return "";
+        inBlockComment = false;
+        line = line.slice(closeAt + 2);
+      }
+      const trimmed = line.replace(/^\s*/, "");
+      if (trimmed.startsWith("/*")) {
+        if (trimmed.indexOf("*/", 2) === -1) inBlockComment = true;
+        return "";
+      }
+      return /^\s*\/\//.test(line) ? "" : line;
+    })
     .join("\n");
 }
 
@@ -72,7 +108,7 @@ function readSourceWithoutComments(path: string): string {
 
 function tableWritePattern(table: string): RegExp {
   return new RegExp(
-    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+(?:"|\\[|\`)?(?:\\w+\\.)?${table}(?:"|\\]|\`)?\\b`,
+    `(INSERT(\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+(?:(?:"|\\[|\`)?\\w+(?:"|\\]|\`)?\\.)?(?:"|\\[|\`)?${table}(?:"|\\]|\`)?\\b`,
     "i",
   );
 }
@@ -265,12 +301,14 @@ test("nothing outside chain.ts writes to a chained table directly", () => {
 });
 
 // M2-parity red-proof for the broadened pattern and line-wise comment-stripper
-// above, mirroring test/governance-policing.test.ts's own eleven-candidate red
-// proof but retargeted at the four chained tables. The four SQLite-specific
-// spellings, the comment-adjacent-`https://` blind spot, and the one accepted
-// residual (a table name built from a runtime variable, which no static scan
-// can see) all apply identically here. If a future edit narrows either the
-// pattern or the stripper back down, this is what goes red.
+// above, mirroring test/governance-policing.test.ts's own sixteen-candidate
+// red proof but retargeted at the four chained tables. The four SQLite-specific
+// spellings, the comment-adjacent-`https://` blind spot, the N2 UPDATE-OR
+// forms, the N4 doubly-quoted schema.table form, the N3 string-literal
+// block-comment case, and the one accepted residual (a table name built from
+// a runtime variable, which no static scan can see) all apply identically
+// here. If a future edit narrows either the pattern or the stripper back
+// down, this is what goes red.
 const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> = [
   { text: "UPDATE ledger SET amount_cents = 1", caught: true, note: "the control" },
   { text: "UPDATE \"ledger\" SET amount_cents = 1", caught: true, note: "double-quoted table name" },
@@ -283,6 +321,7 @@ const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> 
   { text: "UPDATE OR REPLACE ledger SET amount_cents = 1", caught: true, note: "N2: UPDATE's own OR-conflict-resolution form, the exact symmetric case the INSERT broadening did not cover" },
   { text: "UPDATE OR IGNORE payouts SET amount_cents = 1", caught: true, note: "N2: idiomatic UPDATE OR IGNORE" },
   { text: "UPDATE OR ABORT ballots SET choice = 'yes'", caught: true, note: "N2: UPDATE OR ABORT, real SQLite conflict-resolution syntax" },
+  { text: "UPDATE \"main\".\"ledger\" SET amount_cents = 1", caught: true, note: "N4: schema AND table each separately quoted -- the old pattern allowed one leading quote OR a bare schema prefix, never both" },
   { text: "INSERT INTO \"identity_events\" (id) VALUES (1)", caught: true, note: "double-quoted table name" },
   {
     text: "const s=\"https://x\"; await db.prepare(\"UPDATE ledger SET amount_cents = 1\")",
@@ -293,6 +332,11 @@ const BYPASS_CANDIDATES: Array<{ text: string; caught: boolean; note: string }> 
     text: "const T='ledger'; const q = \"UPDATE ${T} SET amount_cents = 1\";",
     caught: false,
     note: "known residual: the table name is a runtime value, not literal text in the source -- no static scan can see it",
+  },
+  {
+    text: `const o = "/*"; await db.prepare("UPDATE ledger SET amount_cents=1").run(); const c = "*/";`,
+    caught: true,
+    note: "N3: /* and */ sitting inside string literals, not real comment delimiters -- the old whole-text block-comment regex treated everything between them as a comment and hid the real UPDATE; this line never starts with /* as its own first token, so the line-wise stripper leaves it untouched",
   },
 ];
 
