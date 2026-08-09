@@ -24,6 +24,7 @@ function baseFacts(overrides: Partial<FrontDoorFacts> = {}): FrontDoorFacts {
     nameRatified: false,
     controlFloorPercent: 51,
     split: { prize: 4, bounty: 3 },
+    dividendPercent: 2,
     ...overrides,
   };
 }
@@ -142,6 +143,33 @@ test("frontDoor interpolates a re-split prize:bounty ratio -- a passed set_split
   const resplit = normalize(frontDoor(ORIGIN, baseFacts({ split: { prize: 6, bounty: 1 } })));
   assert.ok(resplit.includes("split 6:1 by default"));
   assert.doesNotMatch(resplit, /split 4:3 by default/);
+});
+
+// docs/REVIEW-DEMOCRACY-RECHECK.md M4 residue: dividendPercent was the one
+// governance_settings-backed value the original M4 fix (commit D) left
+// out -- named only control_floor_percent and split, so a passed
+// set_dividend_uplift executed into governance_settings while the door
+// went on publishing the deployed default at both places it states the
+// PRESENT dividend, on the same page as a sentence promising the door
+// updates on a passed vote.
+test("frontDoor interpolates the dividend percent -- a passed set_dividend_uplift vote must not leave the door still stating 2% as the present dividend", () => {
+  const stillDefault = normalize(frontDoor(ORIGIN, baseFacts({ dividendPercent: 2 })));
+  assert.ok(stillDefault.includes("operator dividend: 2% of gross inflows"));
+  assert.ok(stillDefault.includes("dividend is a flat 2% of the"));
+
+  const uplifted = normalize(frontDoor(ORIGIN, baseFacts({ dividendPercent: 15 })));
+  assert.ok(uplifted.includes("operator dividend: 15% of gross inflows"), "the first present-dividend sentence must reflect the uplift");
+  assert.ok(uplifted.includes("dividend is a flat 15% of the"), "the second present-dividend sentence must reflect the uplift too -- this is row 2 of M4's own evidence table, the one the original fix under-covered");
+  assert.doesNotMatch(uplifted, /operator dividend: 2% of gross inflows/);
+  assert.doesNotMatch(uplifted, /dividend is a flat 2% of the/);
+
+  // The permanent constitutional floor ("it never falls below 2%") is a
+  // different fact from the present rate and must stay the literal
+  // deployed-default text regardless of an active uplift -- DEFAULT_
+  // DIVIDEND_PERCENT (society.ts) is what this sentence describes, not
+  // governance_settings' current value, and interpolating it too would
+  // wrongly imply the floor itself moves with a temporary uplift.
+  assert.ok(uplifted.includes("never falls below 2%"), "the floor sentence must not be touched by the current-rate interpolation");
 });
 
 // ---------- M5: the chain-hash count (docs/REVIEW-DEMOCRACY.md) ----------

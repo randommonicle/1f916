@@ -96,6 +96,7 @@ export default {
             nameRatified: facts.governance.name_source === "governance_settings",
             controlFloorPercent: facts.control_floor_percent,
             split: facts.split,
+            dividendPercent: facts.dividend_percent,
           }),
         );
       }
