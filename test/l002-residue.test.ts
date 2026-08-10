@@ -114,6 +114,19 @@ function escapeRegExp(s: string): string {
 // filesystem so the red-proof below can exercise it against hand-written
 // fixtures, not only real files on disk, exactly mirroring how
 // verifyRows (chain.ts) is tested apart from any real D1 database.
+//
+// LEXICAL, by declared boundary (review closeout Fix 2,
+// docs/BRIEF-HARDENING-2-REVIEW-FIXES.md): this scanner lower-cases raw
+// source text and matches contiguous patterns. It does not parse
+// TypeScript, resolve string concatenation or interpolation, or follow
+// runtime data flow -- a served string assembled from split tokens
+// ("Open question " + "#3") is OUTSIDE its guarantee, documented by the
+// boundary test at the bottom of this file rather than papered over.
+// FORWARD(L002-AST): if a fifth L-002 instance ever defeats the
+// contiguous-source gate, design an AST-backed static-string pass (the
+// TypeScript development dependency is already present), retaining this
+// raw-source pass for comments; that fixture and this guarantee move
+// together.
 function scanForResidue(file: string, text: string): Hit[] {
   const hits: Hit[] = [];
   const lower = text.toLowerCase();
@@ -193,7 +206,7 @@ function isAllowlisted(hit: Hit): boolean {
   return ALLOWLIST.some((a) => hit.file.endsWith(a.file) && hit.match.includes(a.match));
 }
 
-test("L-002 gate: no src/ module carries the known upstream-residue tell patterns outside the explicit allowlist (I-008, docs/BRIEF-HARDENING-2.md commit 5)", () => {
+test("L-002 gate: no src/ module carries the known CONTIGUOUS RAW-SOURCE upstream-residue tell patterns outside the explicit allowlist (I-008, docs/BRIEF-HARDENING-2.md commit 5; boundary narrowed by the review closeout, Fix 2)", () => {
   const offenders: Hit[] = [];
   for (const file of walkTsFiles(SRC)) {
     const text = readFileSync(file, "utf8");
@@ -204,7 +217,7 @@ test("L-002 gate: no src/ module carries the known upstream-residue tell pattern
   assert.deepEqual(
     offenders,
     [],
-    "Upstream residue found outside the allowlist. Restate the substance and drop the upstream numbering/handle/incident language (LESSONS_LEARNED.md L-002's remedy shape), or, if this is a genuine false positive, add a reviewed ALLOWLIST entry here naming exactly why.",
+    "Upstream residue found outside the allowlist. Restate the substance and drop the upstream numbering/handle/incident language (LESSONS_LEARNED.md L-002's remedy shape), or, if this is a genuine false positive, add a reviewed ALLOWLIST entry here naming exactly why. (Scope honesty: this gate matches contiguous raw source only -- it cannot see strings assembled by concatenation or interpolation. FORWARD(L002-AST).)",
   );
 });
 
@@ -311,4 +324,35 @@ test("L-002 gate: the scanner and allowlist correctly classify every known real 
     const isCaught = hits.length > 0;
     assert.equal(isCaught, candidate.caught, `expected ${candidate.caught ? "CAUGHT" : "NOT CAUGHT"} for [${candidate.note}]: ${candidate.text}`);
   }
+});
+
+test("L-002 scanner boundary: split source tokens are outside the contiguous raw-source guarantee", () => {
+  // The converged external review's second finding (Codex, Gemini-confirmed,
+  // docs/BRIEF-HARDENING-2-REVIEW-FIXES.md Fix 2): a served string assembled
+  // by concatenation evades a lexical scanner. This fixture DOCUMENTS that
+  // limit as a declared boundary, not protection against served residue --
+  // the committed corpus is clean and the gate's guarantee is now stated as
+  // contiguous-raw-source only. FORWARD(L002-AST): if an AST-backed
+  // static-string pass ever lands, this fixture flips to caught and the
+  // guarantee widens with it; the two move together by design.
+  const contiguous = 'const description = "Correct your model. Open question #3: a wrongly-declared byline had no remedy.";';
+  const split = 'const description = "Correct your model. Open question " + "#3" + ": a wrongly-declared byline had no remedy.";';
+
+  // Control first: the identical sentence as contiguous raw source IS
+  // caught -- proving the scanner sees this phrase at all, so the split
+  // case's escape below measures the boundary, not a dead scanner.
+  assert.ok(
+    scanForResidue("mcp.ts", contiguous).filter((h) => !isAllowlisted(h)).length > 0,
+    "control failed: the contiguous form of the fixture must be caught, or this boundary test is measuring nothing",
+  );
+
+  // The boundary: the same sentence split across concatenated tokens is
+  // NOT caught. If this assertion ever fails, the scanner has grown past
+  // its declared lexical boundary -- update the gate's stated guarantee,
+  // this fixture, and FORWARD(L002-AST) together.
+  assert.equal(
+    scanForResidue("mcp.ts", split).filter((h) => !isAllowlisted(h)).length,
+    0,
+    "the split-token form is outside the contiguous raw-source guarantee by declaration; if the scanner now catches it, move the guarantee and this fixture together",
+  );
 });
