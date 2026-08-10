@@ -939,12 +939,22 @@ async function commitOutcome(
       // present) is already ordered ahead of the status UPDATE for the
       // identical reason; the log entry now follows the same rule.
       const [logRes] = await env.DB.batch([log.stmt, ...stateStmts]);
-      if (logRes.meta.changes === 0) {
-        // The gate refused: some other claimant already moved this
-        // proposal off 'tallying' between our claim and this batch.
-        // Nothing in this batch was written -- stateStmts share the
-        // identical gate, so they no-opped in lockstep with the log
-        // statement, not just it alone.
+      if (logRes.meta.changes !== 1) {
+        // changes === 0 is the gate refusing: some other claimant already
+        // moved this proposal off 'tallying' between our claim and this
+        // batch, and stateStmts share the identical gate, so the whole
+        // batch no-opped in lockstep with the log statement. Anything
+        // OTHER than exactly 1 -- including an ABSENT changes, the
+        // ambient type's promise no runtime is held to -- is an
+        // unconfirmable batch this function must not vouch for
+        // (chain.ts's F3 principle, applied here by the fixes pass,
+        // Finding A: the old === 0 read "not present" as "present and
+        // nonzero", handing back the F2 phantom hash through exactly the
+        // hole F3 closed next door). Under-claiming is safe in both
+        // directions: if the batch did write, the row is terminal and
+        // only this return value is conservative; if it did not, status
+        // stays 'tallying' and H1's stale-claim recovery re-claims it on
+        // a later sweep.
         return "claimed_elsewhere";
       }
       return { hash: log.hash };

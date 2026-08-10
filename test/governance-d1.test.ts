@@ -581,6 +581,56 @@ test("runGovernanceSweep: an advisory proposal that passes lands as 'passed' wit
   }
 });
 
+// Finding A of the fixes-pass diff review
+// (exchange/REVIEW_hardening2-fixespass_2026-08-10.md): commitOutcome's own
+// batch guard must fail CLOSED on an absent `changes`, exactly as
+// appendChainedGated learned to in the same wave (chain.ts, F3). Wraps the
+// real batch so its results' meta lack `changes` -- the write itself still
+// happens underneath (real SQLite), only the REPORT is degraded, which is
+// the precise scenario guarded against: a driver that stops reporting, not
+// a write that stops writing. prepare() passes straight through, so the
+// claim UPDATE and every read are untouched.
+function withChangesStrippedBatch(DB: LocalD1["DB"]): LocalD1["DB"] {
+  return {
+    prepare: (sql: string) => DB.prepare(sql),
+    async batch<T = unknown>(stmts: Parameters<LocalD1["DB"]["batch"]>[0]): Promise<T[]> {
+      const results = (await DB.batch(stmts)) as Array<{ meta?: Record<string, unknown> }>;
+      return results.map((r) => ({ ...r, meta: Object.fromEntries(Object.entries(r.meta ?? {}).filter(([k]) => k !== "changes")) })) as T[];
+    },
+  };
+}
+
+test("runGovernanceSweep: an outcome batch whose meta lacks `changes` is reported claimed_elsewhere, never asserted as a committed status (fail-closed, fixes-pass Finding A)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const voter = insertCitizen(d1);
+    castYes(d1, proposalId, voter, now - 2000);
+
+    const env = { ...testEnv(d1), DB: withChangesStrippedBatch(d1.DB) };
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.due, 1);
+    assert.equal(
+      result.results[0].outcome,
+      "claimed_elsewhere",
+      "an unconfirmable batch must be under-reported, never asserted as the claimant's own precomputed status",
+    );
+
+    // The under-claim is the REPORT only: the batch committed underneath
+    // (real SQLite wrote it; only `changes` went unreported), so the
+    // proposal is terminal and the decided event sealed -- no strand,
+    // nothing left for H1's stale-claim recovery to pick up.
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "passed", "the batch really committed; only its report was degraded");
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one sealed outcome event");
+  } finally {
+    d1.close();
+  }
+});
+
 test("runGovernanceSweep: a proposal that fails quorum lands as 'failed', no settings write", async () => {
   const d1 = createLocalD1();
   try {
