@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { GENESIS, entryHash, verifyRows, appendChainedGated, type ChainRow, type ChainedTable } from "../src/chain.ts";
+import { SocietyError } from "../src/society.ts";
 
 const SRC = join(import.meta.dirname, "..", "src");
 const CHAIN_PATH = join(SRC, "chain.ts");
@@ -469,4 +470,95 @@ test("appendChainedGated: a gate refusal (changes: 0) still returns null, unchan
   const db = spiedDb({ meta: { changes: 0 } });
   const sealed = await appendChainedGated(db, "ballots", { proposal_id: 1, citizen_id: 1, choice: "yes", cast_at: 1 }, { sql: "SELECT 1", args: [] });
   assert.equal(sealed, null, "changes: 0 (the ordinary gate-refused case) must still refuse exactly as before");
+});
+
+// ---------- classifyUniqueViolation exactness (hardening-2 fixes pass) ----------
+//
+// The converged external review (exchange/REVIEW_hardening2-codex_2026-08-09.md,
+// docs/BRIEF-HARDENING-2-REVIEW-FIXES.md Fix 1) caught the classifier's
+// comment promising an exact column-set match while its implementation used
+// an unbounded substring check: a future UNIQUE whose column list merely
+// BEGINS with ballots.proposal_id, ballots.citizen_id would have been
+// mis-filed as a duplicate ballot and 409'd instead of taking the safe
+// unrecognised retry/503 path. These tests pin the exact-parse contract.
+// Like spiedDb above, but scripted per attempt: each entry is either an
+// error message for run() to throw, or a D1Response for it to return, and
+// the call count is observable -- the classifier's whole point is which
+// errors are worth spending retries on.
+function scriptedDb(script: Array<string | { meta: { changes?: number } }>): { db: D1Database; calls: () => number } {
+  let n = 0;
+  const stmt = {
+    bind: (..._args: unknown[]) => stmt,
+    first: async <T>(): Promise<T | null> => null,
+    all: async <T>(): Promise<{ results: T[] }> => ({ results: [] }),
+    run: async (): Promise<D1Response> => {
+      const step = script[n++];
+      if (typeof step === "string") throw new Error(step);
+      return step as D1Response;
+    },
+  };
+  return { db: { prepare: (_sql: string) => stmt } as unknown as D1Database, calls: () => n };
+}
+
+const BALLOT_ROW: ChainRow = { proposal_id: 1, citizen_id: 1, choice: "yes", cast_at: 1 };
+const GATE = { sql: "SELECT 1", args: [] as const };
+
+test("appendChainedGated: exact ballot UNIQUE remains an immediate 409 without a retry", async () => {
+  const { db, calls } = scriptedDb(["UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id"]);
+  await assert.rejects(
+    () => appendChainedGated(db, "ballots", BALLOT_ROW, GATE),
+    (e: unknown) => e instanceof SocietyError && e.status === 409 && /already cast/i.test(e.message),
+    "the exact two-column ballots list is the recognised duplicate vote: immediate honest 409",
+  );
+  assert.equal(calls(), 1, "a recognised duplicate vote must not burn a single retry");
+});
+
+test("appendChainedGated: a ballot UNIQUE superset is unrecognised and never becomes an already-voted 409", async () => {
+  // A hypothetical future three-column UNIQUE that merely STARTS with the
+  // duplicate-vote pair. Substring matching mis-files this as a duplicate
+  // ballot; the exact-parse contract must leave it unrecognised (retry then
+  // 503, the safe default that guesses nothing).
+  const superset = "UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id, ballots.choice";
+  const { db, calls } = scriptedDb([superset, superset, superset, superset]);
+  await assert.rejects(
+    () => appendChainedGated(db, "ballots", BALLOT_ROW, GATE),
+    (e: unknown) => e instanceof SocietyError && e.status === 503 && !/already cast/i.test(e.message),
+    "a superset column list is NOT a duplicate vote and must exhaust as unrecognised",
+  );
+  assert.equal(calls(), 4, "unrecognised UNIQUEs keep the full retry-then-503 default");
+
+  // Reordered columns are equally unrecognised: the match is exact AND ordered.
+  const reordered = "UNIQUE constraint failed: ballots.citizen_id, ballots.proposal_id";
+  const second = scriptedDb([reordered, reordered, reordered, reordered]);
+  await assert.rejects(
+    () => appendChainedGated(second.db, "ballots", BALLOT_ROW, GATE),
+    (e: unknown) => e instanceof SocietyError && e.status === 503 && !/already cast/i.test(e.message),
+    "a reordered column list is not the recognised duplicate-vote shape",
+  );
+  assert.equal(second.calls(), 4);
+});
+
+test("appendChainedGated: trailing driver diagnostics do not change an exact ballot column list", async () => {
+  // The real column list, wrapped in the kind of prefix/suffix noise a
+  // driver layer can add. The parser must find the list and stop at its
+  // end -- trailing diagnostics must not turn an exact match into a miss.
+  const { db, calls } = scriptedDb(["D1_ERROR: UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id: SQLITE_CONSTRAINT"]);
+  await assert.rejects(
+    () => appendChainedGated(db, "ballots", BALLOT_ROW, GATE),
+    (e: unknown) => e instanceof SocietyError && e.status === 409 && /already cast/i.test(e.message),
+    "diagnostic wrapping around the exact list must still classify as the duplicate vote",
+  );
+  assert.equal(calls(), 1, "still zero retries once the exact list is recognised");
+});
+
+test("appendChainedGated: exact prev_hash and hash collisions retain the chain-head retry path", async () => {
+  const viaPrev = scriptedDb(["UNIQUE constraint failed: ballots.prev_hash", { meta: { changes: 1 } }]);
+  const sealedPrev = await appendChainedGated(viaPrev.db, "ballots", BALLOT_ROW, GATE);
+  assert.notEqual(sealedPrev, null, "a prev_hash collision is a chain-head race: retry against the fresh head, then succeed");
+  assert.equal(viaPrev.calls(), 2, "exactly one retry after the chain-head collision");
+
+  const viaHash = scriptedDb(["UNIQUE constraint failed: ballots.hash", { meta: { changes: 1 } }]);
+  const sealedHash = await appendChainedGated(viaHash.db, "ballots", BALLOT_ROW, GATE);
+  assert.notEqual(sealedHash, null, "a hash collision takes the same chain-head retry path");
+  assert.equal(viaHash.calls(), 2);
 });

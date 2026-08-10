@@ -283,11 +283,33 @@ export async function appendChainedStmt(
 // default) rather than being silently mis-filed as a duplicate vote.
 type UniqueViolationKind = "chain_head" | "duplicate_vote" | "unrecognised";
 
+// Exact-parse, not substring (fixes pass, docs/BRIEF-HARDENING-2-REVIEW-FIXES.md
+// Fix 1, from the converged external review): extract the qualified column
+// list that follows the SQLite marker -- one or more comma-separated
+// table.column identifiers, stopping before any trailing diagnostic text --
+// and compare the WHOLE ordered list. A substring check here mis-files any
+// future constraint whose column list merely begins with the duplicate-vote
+// pair, turning the safe unrecognised retry/503 path into a wrong
+// already-voted 409. Only whitespace around commas is normalised; prefix,
+// superset, reordered, or otherwise unknown lists all stay "unrecognised".
+const UNIQUE_MARKER = "UNIQUE constraint failed: ";
+const COLUMN_LIST = /^([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)*)/;
+
+function parseUniqueColumns(message: string): string[] | null {
+  const at = message.indexOf(UNIQUE_MARKER);
+  if (at === -1) return null;
+  const m = message.slice(at + UNIQUE_MARKER.length).match(COLUMN_LIST);
+  if (!m) return null;
+  return m[1].split(",").map((s) => s.trim());
+}
+
 function classifyUniqueViolation(table: ChainedTable, message: string): UniqueViolationKind {
-  if (message.includes(`UNIQUE constraint failed: ${table}.prev_hash`) || message.includes(`UNIQUE constraint failed: ${table}.hash`)) {
+  const cols = parseUniqueColumns(message);
+  if (cols === null) return "unrecognised";
+  if (cols.length === 1 && (cols[0] === `${table}.prev_hash` || cols[0] === `${table}.hash`)) {
     return "chain_head";
   }
-  if (table === "ballots" && message.includes("UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id")) {
+  if (table === "ballots" && cols.length === 2 && cols[0] === "ballots.proposal_id" && cols[1] === "ballots.citizen_id") {
     return "duplicate_vote";
   }
   return "unrecognised";
