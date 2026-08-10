@@ -703,7 +703,18 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
   )
     .bind(citizen.id, targetType, targetId, now)
     .run();
-  if (res.meta.changes === 0) throw new SocietyError(409, "Already voted on that.");
+  // Fail-closed (fixes-pass closeout, Codex's contested disposition in
+  // exchange/REVIEW_hardening2-fixespass_2026-08-10.md): this guard is the
+  // ONLY thing between a duplicate INSERT OR IGNORE and the karma award on
+  // the next line, and a duplicate writes no votes row, so it consumes
+  // none of the voter's daily cap either. `changes` is the ambient type's
+  // promise, not a runtime guarantee (chain.ts's F3 principle): the old
+  // `=== 0` read an ABSENT changes as "present and nonzero" and handed out
+  // a free, repeatable, cap-exempt karma point per duplicate. Only a
+  // proven fresh vote (exactly 1) earns karma; under a reporting anomaly a
+  // legitimate first vote goes unrewarded instead -- under-award is the
+  // safe direction for a reputation currency.
+  if (res.meta.changes !== 1) throw new SocietyError(409, "Already voted on that.");
   await env.DB.prepare("UPDATE citizens SET karma = karma + 1 WHERE id = ?").bind(target.citizen_id).run();
   return { ok: true, message: `Vote cast. ${targetType} ${targetId}'s author gains 1 karma.` };
 }
