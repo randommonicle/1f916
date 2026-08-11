@@ -35,7 +35,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import { runJudgmentWake, executeJudgmentDecisions, reconcileApprovedQueue, encodeFlagReviewDecision } from "../src/maintainer/judgment.ts";
-import { moderateContent, type Env } from "../src/society.ts";
+import { moderateContent, flagContent, type Env } from "../src/society.ts";
 import type { QueueRow, JudgmentDecision } from "../src/maintainer/judgment.ts";
 
 // ---------- local fixture helpers (this file's own, per society-votes-d1.test.ts's precedent -- no edits to the shared test/helpers/local-d1.ts) ----------
@@ -584,10 +584,28 @@ test("false-decode: a pre-encoding free-text decided_reason that mimics the acti
 
     assert.equal(getPost(d1, postId).mod_state, null, "no action a judge never machine-recorded via mq1 is ever executed");
     assert.equal(countModerationEvents(d1), 0, "no artifact is fabricated from prose alone");
-    assert.equal(result.actioned, 0, "an undecodable row is never counted as actioned");
-    assert.notEqual(result.error, null, "an undecodable row is loud, not silently guessed at");
+    // D-018 gate, F-3 ruling (a), artifact ABSENT: no real moderation
+    // exists anywhere for this target, so this is genuinely unrecoverable,
+    // not merely undecodable -- reported ONCE (this pass) and re-stamped
+    // so the report does not repeat every wake forever (gate reproduction
+    // F1, "completed-pre-deploy-row-errors-every-wake"). Re-stamping IS
+    // now the completed job for this pass, same counting convention as a
+    // supersede.
+    assert.equal(result.actioned, 1, "the retirement re-stamp is the completed job");
+    assert.notEqual(result.error, null, "reported once, loud, not silently guessed at");
     assert.match(result.error ?? "", new RegExp(String(queueId)), "the error names the row it happened on");
-    assert.equal(getQueueRow(d1, queueId).status, "approved", "left alone for manual review, per L-003 -- never guessed, never silently dropped");
+    const row = getQueueRow(d1, queueId);
+    assert.equal(row.status, "rejected", "re-stamped so this exit becomes real instead of a standing weekly repetition");
+    assert.equal(row.decided_reason, "unrecoverable: no machine-readable action; left for the operator");
+
+    // F-1/F-2 door probes named "three passes must yield the error/report
+    // at most once, then silence" -- prove it, not just the first pass.
+    const second = await reconcileApprovedQueue(env, maintainer);
+    assert.equal(second.actioned, 0, "already rejected -- excluded from selection now, nothing left to retire");
+    assert.equal(second.error, null, "the report does not repeat on the second pass");
+    const third = await reconcileApprovedQueue(env, maintainer);
+    assert.equal(third.actioned, 0);
+    assert.equal(third.error, null, "still silent on the third pass");
   } finally {
     d1.close();
   }
@@ -600,7 +618,7 @@ test("false-decode: the dead bare '<action>: <reason>' shape (this file's own pr
     const authorId = insertCitizen(d1, { handle: "author" });
     const postId = insertPost(d1, authorId, { mod_state: null });
     const runId = insertMaintainerRunRow(d1);
-    insertQueueRow(d1, runId, {
+    const queueId = insertQueueRow(d1, runId, {
       kind: "flag_review",
       target_type: "post",
       target_id: postId,
@@ -614,6 +632,13 @@ test("false-decode: the dead bare '<action>: <reason>' shape (this file's own pr
 
     assert.equal(getPost(d1, postId).mod_state, null, "the dead bare-prefix shape decodes to null -- nothing executes");
     assert.notEqual(result.error, null, "left loud for manual review, same as any other undecodable row");
+    // D-018 gate, F-3 ruling (a), artifact ABSENT (no artifact exists for
+    // this target either): re-stamped rejected, same as the mimicking-prose
+    // case above, so this stops being re-reported every wake too.
+    assert.equal(result.actioned, 1);
+    const row = getQueueRow(d1, queueId);
+    assert.equal(row.status, "rejected");
+    assert.equal(row.decided_reason, "unrecoverable: no machine-readable action; left for the operator");
   } finally {
     d1.close();
   }
@@ -674,6 +699,379 @@ test("no-key wake still surfaces a reconciliation error: a poisoned row is loud 
     assert.equal(run.skipped_reason, "no api key");
     assert.notEqual(run.error, null, "a reconciliation error reaches the run row even when the model half never runs");
     assert.match(run.error ?? "", new RegExp(String(poisonedId)), "the error names the poisoned row");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- D-018 GATE FIXES PASS (docs/REVIEW-WAKE-RECONCILIATION-GATE-2026-08-11.md):
+// a fresh Opus adversarial gate on `9214511` + `c35dfbd`, found NOT
+// DEPLOYABLE (two HIGH findings, F-1/F-2, plus F-3/F-7 among the
+// strongly-recommended items). Each finding's own red-proof, permanent
+// regression tests from here on. ----------
+
+// ---------- F-1 / F-5: the artifact marker is anchored to the START of
+// detail, not merely word-bounded before the verb (judgment.ts's
+// moderationArtifactsForTarget). The gate's own fix table: every real
+// moderateContent shape still matches; flagContent's auto-collapse
+// ("auto-collapsed post N: ...") and a reason quoting another target's id
+// no longer do; "post 42" vs "post 429" still doesn't. ----------
+
+test("F-1: a real community-flag auto-collapse never masks a stranded approved remove (real flagContent path, five distinct citizens, gate D1 reproduction)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+      decided_at: Date.now() - 10_000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    // Five DISTINCT citizens flag the same post through the REAL public
+    // flagContent path -- society.ts's own FLAG_COLLAPSE_THRESHOLD (5)
+    // fires the auto-collapse for real, writing its own genuine
+    // identity_events row ("auto-collapsed post <id>: reached 5 community
+    // flags"), not a planted string -- driving the exact path the gate's
+    // own D1 probe used rather than trusting a fixture.
+    for (let i = 0; i < 5; i++) {
+      const flaggerId = insertCitizen(d1, { handle: `flagger-${i}` });
+      await flagContent(env, { id: flaggerId, handle: `flagger-${i}`, model: "test-model", karma: 0, created_at: 0, last_seen_at: 0 }, "post", postId, "spam");
+    }
+    assert.equal(getPost(d1, postId).mod_state, "collapsed", "test setup invariant: the real auto-collapse fired");
+
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, postId).mod_state, "removed", "the judge's approved remove executes -- an auto-collapse must never read as a superseding decision");
+    assert.equal(result.actioned, 1, "the replay is the completed job");
+    assert.equal(result.error, null, "no supersede, no error -- the auto-collapse is simply not this row's own artifact");
+    assert.equal(getQueueRow(d1, queueId).status, "approved", "a successful replay leaves the row exactly as before, same as any other 'none' outcome");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F-5: a moderation reason that quotes another target's id inside its own text never forges that target's artifact (gate D3, verbatim reproduction)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const strandedPostId = insertPost(d1, authorId, { mod_state: null }); // "post 1" in the gate's own numbering
+    const otherPostId = insertPost(d1, authorId, { mod_state: null }); // "post 2"
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: strandedPostId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+      decided_at: Date.now() - 10_000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    // A real, unrelated moderation on a DIFFERENT post, whose own reason
+    // text happens to name the stranded post's id right after the word
+    // "removed" -- the gate's own D3 reproduction, verbatim shape.
+    await moderateContent(env, maintainer, "post", otherPostId, "remove", `duplicate of removed post ${strandedPostId} spam`);
+    assert.equal(countModerationEvents(d1), 1, "test setup invariant: exactly the one real moderation exists so far");
+
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, strandedPostId).mod_state, "removed", "the stranded approval must still execute -- a reason-embedded id on a DIFFERENT target is not this target's own artifact");
+    assert.equal(countModerationEvents(d1), 2, "a real, new moderation event lands for the stranded post -- the old bug silently skipped this and left the count at 1");
+    assert.equal(result.actioned, 1, "the replay is counted");
+    assert.equal(result.error, null);
+    assert.equal(getQueueRow(d1, queueId).status, "approved", "a successful replay leaves the row exactly as before");
+  } finally {
+    d1.close();
+  }
+});
+
+test("boundary control: a target id that is a numeric prefix of another target's id is never confused with it (non-regression check for the F-1/F-5 anchoring fix)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const strandedPostId = insertPost(d1, authorId, { mod_state: null });
+    assert.equal(strandedPostId, 1, "test setup invariant");
+    for (let i = 0; i < 8; i++) insertPost(d1, authorId); // ids 2..9, filler
+    const otherPostId = insertPost(d1, authorId, { mod_state: null });
+    assert.equal(otherPostId, 10, "test setup invariant: id 10 textually contains id 1 as a prefix");
+
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: strandedPostId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+      decided_at: Date.now() - 10_000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    await moderateContent(env, maintainer, "post", otherPostId, "remove", "unrelated spam on a different post");
+
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, strandedPostId).mod_state, "removed", "post 1's own stranded approval executes -- 'removed post 10' must never be read as post 1's artifact");
+    assert.equal(result.actioned, 1);
+    assert.equal(getQueueRow(d1, queueId).status, "approved");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F-2: fetchReconcilableApprovedRows orders decided_at DESC
+// (newest first), not ASC, so an older stranded row's replay can never be
+// mistaken for "a later decision" by a newer row processed afterward. ----------
+
+test("F-2: within one pass, the newer decision executes and the older one is correctly superseded, not the reverse (gate G1, verbatim reproduction)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const olderQueueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam (first review)",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("collapse", "borderline, collapse it"),
+      decided_at: now - 14 * 24 * 60 * 60 * 1000,
+    });
+    const newerQueueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam (escalated)",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam on re-review"),
+      decided_at: now - 7 * 24 * 60 * 60 * 1000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, postId).mod_state, "removed", "the society's most recent judgment (remove) must win, not the week-older collapse");
+    assert.equal(result.actioned, 2, "the newer row replays for real, the older row is correctly superseded -- both are completed work");
+    assert.equal(result.error, null);
+
+    const newerRow = getQueueRow(d1, newerQueueId);
+    assert.equal(newerRow.status, "approved", "the newer decision actually executed -- a successful replay leaves the row as-is, same as any other 'none' outcome");
+
+    const olderRow = getQueueRow(d1, olderQueueId);
+    assert.equal(olderRow.status, "rejected", "the older decision is correctly recognised as superseded");
+    assert.equal(
+      olderRow.decided_reason,
+      "superseded: a later remove decision executed after this approval was stranded",
+      "the reason correctly names remove (the real later decision), not collapse asserting the opposite of what happened",
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("F-2 control: two stranded decisions with the SAME verb on one target behave correctly regardless of processing order (gate G2)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const olderQueueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam (first review)",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+      decided_at: now - 14 * 24 * 60 * 60 * 1000,
+    });
+    const newerQueueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam (re-reported)",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam, re-reported"),
+      decided_at: now - 7 * 24 * 60 * 60 * 1000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, postId).mod_state, "removed", "the target ends up removed either way -- both rows agree on the action");
+    assert.equal(countModerationEvents(d1), 1, "only ONE real remove event -- the second row's replay is an idempotent skip against the first's own artifact, not a duplicate action");
+    assert.equal(result.actioned, 1, "exactly one row does the real work; the other is a silent exact-match skip, not a second execution");
+
+    const statuses = [getQueueRow(d1, olderQueueId).status, getQueueRow(d1, newerQueueId).status].sort();
+    assert.deepEqual(statuses, ["approved", "approved"], "neither row is ever rejected -- an exact-match agreement is never a supersede, whichever one happens to replay first");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F-3: the selection SQL excludes flag_review rows with no
+// post/comment target (ruling b), and a row whose decided_reason fails to
+// decode is now split into two named exits by whether its target already
+// carries a real artifact (ruling a). ----------
+
+test("F-3 ruling (a), artifact PRESENT: a pre-encoding row whose target already carries a real moderation artifact is retired silently, not reported (D-018 gate)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: "confirmed spam, take it down", // ordinary pre-mq1 prose, decodes to null
+      decided_at: Date.now() - 10_000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    // The act really did happen, through a route this test does not need
+    // to name -- its own real artifact exists in the public log, dated
+    // after decided_at, for this exact target.
+    await moderateContent(env, maintainer, "post", postId, "remove", "confirmed spam, take it down");
+
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(result.actioned, 1, "retiring the row is the completed job");
+    assert.equal(result.error, null, "PRESENT is silent -- the public record already carries the true outcome, retiring the row is bookkeeping, not news");
+    const row = getQueueRow(d1, queueId);
+    assert.equal(row.status, "rejected");
+    assert.equal(row.decided_reason, "completed pre-encoding: confirmed spam, take it down", "the old reason is preserved after the prefix, not discarded");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F-3 ruling (b): an approved flag_review with no post/comment target is never selected by reconciliation at all -- terminal by design, not stranded (gate F2, clean-approval-poisons-every-later-run-row)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: null,
+      target_id: null,
+      note: "a similarly-named citizen registered",
+      status: "approved",
+      decided_reason: "the flag is well founded", // plain: resolveExecution's own execute:null claim reason, unprefixed
+      decided_at: Date.now() - 10_000,
+    });
+    const before = getQueueRow(d1, queueId);
+
+    const env = { DB: d1.DB } as unknown as Env;
+    const first = await reconcileApprovedQueue(env, maintainer);
+    const second = await reconcileApprovedQueue(env, maintainer);
+    const third = await reconcileApprovedQueue(env, maintainer);
+
+    for (const result of [first, second, third]) {
+      assert.equal(result.actioned, 0, "never selected, so never actioned");
+      assert.equal(result.error, null, "never selected, so never reported -- the old bug reported this identically on every pass forever");
+    }
+    assert.deepEqual(getQueueRow(d1, queueId), before, "completely untouched across three passes, not merely unreported");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F-7: stampQueueRow's boolean is honoured at every
+// reconciliation re-stamp, so items_actioned cannot over-count a claim
+// that did not really land. ----------
+
+// Simulates the conditional UPDATE's own WHERE clause excluding the row
+// (as if something else already changed it) -- a synthetic stand-in,
+// since no real code path in this repo can naturally produce it today
+// (every reconciliation re-stamp uses requirePending: false, so the real
+// WHERE is bare `id = ?`, which cannot fail to match a row this same loop
+// just read moments earlier). Proves the CALLER respects the boolean,
+// independent of whether today's code can ever actually trigger it --
+// same idiom as withQueueUpdateMetaStripped above, reporting a clean
+// zero-changes result instead of a corrupted/missing meta.
+function withQueueUpdateAlwaysReportsZeroChanges(DB: LocalD1["DB"]): LocalD1["DB"] {
+  return {
+    prepare: (sql: string) => {
+      const real = DB.prepare(sql);
+      if (!/UPDATE\s+maintainer_queue/i.test(sql)) return real;
+      return {
+        bind: () => ({
+          run: async () => ({ meta: { changes: 0, last_row_id: 0 } }),
+        }),
+      } as unknown as ReturnType<LocalD1["DB"]["prepare"]>;
+    },
+    batch: (stmts) => DB.batch(stmts),
+  };
+}
+
+test("F-7: the supersede re-stamp counts actioned only if stampQueueRow's UPDATE actually changed a row", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+    });
+
+    const realEnv = { DB: d1.DB } as unknown as Env;
+    // A real later restore, so this row's own artifact check lands on the
+    // SUPERSEDE branch specifically.
+    await moderateContent(realEnv, maintainer, "post", postId, "restore", "restored after appeal");
+
+    const wrappedEnv = { DB: withQueueUpdateAlwaysReportsZeroChanges(d1.DB) } as unknown as Env;
+    const result = await reconcileApprovedQueue(wrappedEnv, maintainer);
+
+    assert.equal(result.actioned, 0, "the UPDATE reported zero rows changed -- must not be counted, even though this is the supersede branch");
+    assert.equal(getQueueRow(d1, queueId).status, "approved", "consistent with the reported zero -- nothing really changed either");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F-7: the bulletin deny-check re-stamp counts actioned only if stampQueueRow's UPDATE actually changed a row", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "bulletin_draft",
+      note: "Claim your reward\nSign here to continue",
+      status: "approved",
+      decided_reason: "looked fine to the judge",
+    });
+
+    const wrappedEnv = { DB: withQueueUpdateAlwaysReportsZeroChanges(d1.DB) } as unknown as Env;
+    const result = await reconcileApprovedQueue(wrappedEnv, maintainer);
+
+    assert.equal(result.actioned, 0, "the UPDATE reported zero rows changed -- must not be counted, even on the deny-check branch");
+    assert.equal(getQueueRow(d1, queueId).status, "approved", "consistent with the reported zero -- nothing really changed either");
+    assert.equal(countPosts(d1), 0, "never posts regardless -- the deny-check itself still holds");
   } finally {
     d1.close();
   }

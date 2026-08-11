@@ -625,9 +625,38 @@ interface ReconcileRow {
 // construction (design doc S10.1/S10.3: observational only), excluded
 // here by the query itself, never merely by the loop below skipping an
 // unhandled kind.
+//
+// D-018 gate (docs/REVIEW-WAKE-RECONCILIATION-GATE-2026-08-11.md), F-3
+// ruling (b): a flag_review row with no post/comment target and target_id
+// is ALSO excluded here, not merely selected-then-skipped below --
+// resolveExecution's own flag_review branch requires a truthy target_type
+// and a non-null target_id to produce a "moderate" execution; without one
+// it falls through to `execute: null`, a normal, successful, TERMINAL
+// approval (S10.1/S10.3's same observational-only shape, reached by
+// accident for this one kind -- clerk.ts's parseClerkItems accepts
+// target_type 'citizen' or null for ANY kind, flag_review included). That
+// row is not stranded; there is nothing for reconciliation to finish.
+// Before this exclusion, such a row was selected every wake, failed to
+// decode (its decided_reason is plain unprefixed text -- the claim path
+// only encodes mq1| for an actual "moderate" execution), and reported the
+// same "no recoverable action" error forever (gate reproduction F2,
+// "clean-approval-poisons-every-later-run-row").
+//
+// F-2 ruling: ordered `decided_at DESC` (newest decision replays first),
+// not ASC. Under ASC, the OLDEST stranded row on a target replayed
+// first, and its own freshly-written identity_events row (timestamped
+// `now`) fell inside every LATER-decided row's own `created_at >=
+// decided_at` artifact window on the same target -- so a genuinely OLDER
+// decision's replay could read as "a later decision" to a NEWER row
+// processed afterward, terminally rejecting the society's most recent
+// judgment in favour of a stale one and stamping a reason asserting the
+// opposite of what happened (gate reproduction G1). Processing
+// newest-decided-first means an older row, when its turn comes, sees the
+// newer row's own artifact for what it actually is: a later decision by
+// decided_at, correctly named as such.
 async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> {
   const { results } = await env.DB.prepare(
-    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') ORDER BY decided_at ASC",
+    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') AND (kind != 'flag_review' OR (target_type IN ('post', 'comment') AND target_id IS NOT NULL)) ORDER BY decided_at DESC",
   ).all<ReconcileRow>();
   return results;
 }
@@ -647,27 +676,35 @@ async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> 
 // target's mod_state UPDATE (society.ts's commitWithModLog batches
 // both) -- so the identity_events row IS the artifact; checking for it
 // also proves the mod_state write landed, without needing a second,
-// separate check. detail is exactly one of three shapes, moderateContent's
-// own construction: "removed <type> <id>: <reason>", "collapsed <type>
-// <id>: <reason>", "restored <type> <id> to visible" -- matched here on
-// the verb-plus-word-bounded-target shape, not merely "<type> <id>": a
-// bulletin post ALSO writes a kind='moderation' row (createPost's own
-// logModeration call, "bulletin post <id> (cap-exempt, auto-pinned)"),
-// and a bare "<type> <id>" marker would false-positive match THAT log
-// entry whenever a bulletin's own post id happens to coincide with some
-// OTHER row's flagged target id -- found exactly this way, by a failing
-// idempotency test, not reasoned out in advance. \b still does its job
-// against "post 42" vs "post 429" (a plain LIKE '%post 42%' would not).
+// separate check.
+//
+// D-018 gate (docs/REVIEW-WAKE-RECONCILIATION-GATE-2026-08-11.md), F-1 +
+// F-5: detail is NOT exactly one of moderateContent's three shapes, and
+// this function's own former comment claiming so was the bug's premise.
+// logModeration is called from four other sites too: createPost's
+// bulletin path ("bulletin post <id> (cap-exempt, auto-pinned)"),
+// setPinned ("pinned"/"unpinned post <id>"), and flagContent's own
+// auto-collapse (society.ts:533, "auto-collapsed <type> <id>: reached <n>
+// community flags") -- and moderateContent's OWN reason argument is
+// caller-controlled free text embedded straight into detail
+// (society.ts:576), so a reason naming another target's id can forge
+// THAT target's marker too (F-5: "removed post 2: duplicate of removed
+// post 1 spam" forges an artifact for post 1). A `\b` word boundary
+// before the verb caught neither: `\bcollapsed post 42\b` matches inside
+// "auto-collapsed post 42..." (a boundary exists between "-" and "c"),
+// and matches inside reason text anywhere it appears, not only at the
+// start of detail. Anchored to the START of detail (`^`) instead:
+// moderateContent is the ONLY writer whose detail ever begins with a bare
+// collapsed/removed/restored verb at position 0 -- "auto-collapsed"
+// begins with "auto-", "bulletin post"/"pinned post" begin with their own
+// words, and a reason-embedded id is never at position 0 of ITS OWN row's
+// detail (the real verb for THAT row is). `\b` after the id is kept:
+// still does its job against "post 42" vs "post 429" (a plain LIKE
+// '%post 42%' would not, and neither would a bare `^verb type id` with no
+// trailing boundary).
 // decided_at is the time boundary (docs/BRIEF-WAKE-RECONCILIATION.md) --
 // an EARLIER moderation of the same target (before this decision was
 // even made) must never read as this decision's own artifact.
-//
-// Scans the whole result set once: an EXACT match anywhere in the
-// window wins outright (the artifact this row's own action would have
-// left exists -- idempotent skip, regardless of what else also
-// happened); failing that, the FIRST differing verb encountered
-// (ascending by created_at, so the earliest thing that overtook the
-// stranded approval) names the supersession. No match at all is NONE.
 type FlagReviewArtifactState = { state: "match" } | { state: "different"; laterAction: "collapse" | "remove" | "restore" } | { state: "none" };
 
 const VERB_TO_ACTION: Record<"collapsed" | "removed" | "restored", "collapse" | "remove" | "restore"> = {
@@ -676,6 +713,39 @@ const VERB_TO_ACTION: Record<"collapsed" | "removed" | "restored", "collapse" | 
   restored: "restore",
 };
 
+// Shared by flagReviewArtifactState (needs to know WHICH action, if any,
+// matches this row's own decoded one) and anyModerationArtifactExists
+// below (F-3 ruling a: needs only to know THAT some real moderation
+// artifact exists for the target, any of the three verbs -- decoding
+// already failed, so there is no specific action left to compare
+// against). Returns every matched action in the window, chronological
+// (ascending created_at) -- same order and same anchored marker as
+// before this split.
+async function moderationArtifactsForTarget(
+  env: Env,
+  targetType: "post" | "comment",
+  targetId: number,
+  sinceTs: number,
+): Promise<Array<"collapse" | "remove" | "restore">> {
+  const { results } = await env.DB.prepare("SELECT detail FROM identity_events WHERE citizen_id = ? AND kind = 'moderation' AND created_at >= ? ORDER BY created_at ASC")
+    .bind(MAINTAINER_ID, sinceTs)
+    .all<{ detail: string | null }>();
+  const marker = new RegExp(`^(collapsed|removed|restored) ${targetType} ${targetId}\\b`);
+  const actions: Array<"collapse" | "remove" | "restore"> = [];
+  for (const r of results) {
+    if (r.detail == null) continue;
+    const m = marker.exec(r.detail);
+    if (m) actions.push(VERB_TO_ACTION[m[1] as "collapsed" | "removed" | "restored"]);
+  }
+  return actions;
+}
+
+// Scans the whole window once: an EXACT match anywhere wins outright (the
+// artifact this row's own action would have left exists -- idempotent
+// skip, regardless of what else also happened); failing that, the FIRST
+// differing verb encountered (chronological, so the earliest thing that
+// overtook the stranded approval) names the supersession. No match at
+// all is NONE.
 async function flagReviewArtifactState(
   env: Env,
   targetType: "post" | "comment",
@@ -683,20 +753,24 @@ async function flagReviewArtifactState(
   decodedAction: "collapse" | "remove" | "restore",
   decidedAt: number,
 ): Promise<FlagReviewArtifactState> {
-  const { results } = await env.DB.prepare("SELECT detail FROM identity_events WHERE citizen_id = ? AND kind = 'moderation' AND created_at >= ? ORDER BY created_at ASC")
-    .bind(MAINTAINER_ID, decidedAt)
-    .all<{ detail: string | null }>();
-  const marker = new RegExp(`\\b(collapsed|removed|restored) ${targetType} ${targetId}\\b`);
+  const actions = await moderationArtifactsForTarget(env, targetType, targetId, decidedAt);
   let firstDifferent: "collapse" | "remove" | "restore" | null = null;
-  for (const r of results) {
-    if (r.detail == null) continue;
-    const m = marker.exec(r.detail);
-    if (!m) continue;
-    const action = VERB_TO_ACTION[m[1] as "collapsed" | "removed" | "restored"];
+  for (const action of actions) {
     if (action === decodedAction) return { state: "match" };
     if (firstDifferent === null) firstDifferent = action;
   }
   return firstDifferent ? { state: "different", laterAction: firstDifferent } : { state: "none" };
+}
+
+// F-3 ruling (a): whether ANY real moderation artifact exists for a
+// target since a given timestamp, verb-agnostic -- used only once a
+// row's decided_reason has already failed to decode
+// (decodeFlagReviewDecision returned null), so there is no specific
+// action to check for exactness against, only the question of whether
+// the act already happened by SOME route before this file's own mq1
+// encoding existed to record which one.
+async function anyModerationArtifactExists(env: Env, targetType: "post" | "comment", targetId: number, sinceTs: number): Promise<boolean> {
+  return (await moderationArtifactsForTarget(env, targetType, targetId, sinceTs)).length > 0;
 }
 
 // D1-touching. The artifact a completed bulletin_draft approval leaves:
@@ -764,10 +838,17 @@ async function bulletinArtifactExists(env: Env, title: string, body: string, dec
 // UPDATE already carries the equivalent residual risk for the same
 // reason (L2's own comment on stampQueueRow above).
 //
-// A row that fails reconciliation (a throw, or an unrecoverable decoded
-// action) logs into the returned error and is left for the next wake --
-// one poisoned row must never starve the office, so a per-row try/catch
-// keeps the loop going rather than letting one throw abort the rest.
+// D-018 gate fixes pass (docs/REVIEW-WAKE-RECONCILIATION-GATE-2026-08-11.md):
+// row SELECTION (which rows reach this loop at all) and ORDERING (what
+// order they arrive in) both changed -- see fetchReconcilableApprovedRows's
+// own comment for the F-2/F-3(b) reasoning rather than repeating it here.
+// A row whose decided_reason fails to decode is no longer one exit but
+// two -- see the flag_review branch below and F-3(a).
+//
+// A row that fails reconciliation (a throw) logs into the returned error
+// and is left for the next wake -- one poisoned row must never starve the
+// office, so a per-row try/catch keeps the loop going rather than letting
+// one throw abort the rest.
 export async function reconcileApprovedQueue(
   env: Env,
   maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
@@ -796,22 +877,55 @@ export async function reconcileApprovedQueue(
       if (row.kind === "flag_review") {
         const targetType = row.target_type === "post" || row.target_type === "comment" ? row.target_type : null;
         if (!targetType || row.target_id == null) {
-          // Structurally should not happen: resolveExecution only ever
-          // produces a moderate execution for a real post/comment
-          // target, so an approved flag_review reaching here without
-          // one means something upstream is already broken.
+          // Structurally should not happen any more: F-3 ruling (b)
+          // excludes exactly this shape at the SQL level now
+          // (fetchReconcilableApprovedRows above), since a flag_review
+          // approval with no post/comment target is resolveExecution's
+          // own `execute: null` path -- a normal, terminal approval, not
+          // a stranded one (gate reproduction F2,
+          // "clean-approval-poisons-every-later-run-row"). Kept as a
+          // defensive backstop should that exclusion ever narrow, not
+          // the primary door any more.
           errors.push(`queue row ${row.id}: approved flag_review has no valid post/comment target (target_type=${row.target_type}, target_id=${row.target_id})`);
           continue;
         }
         const decoded = decodeFlagReviewDecision(row.decided_reason);
         if (!decoded) {
-          // Unrecoverable: a pre-this-commit row (decided before the
-          // mq1 encoding existed, or before this file's own dead
-          // predecessor bare-prefix shape existed), or a decided_reason
-          // that never got the prefix for some other reason. Never guess
-          // an action -- L-003 names this exit: flagged, left at
-          // 'approved', visible in the run log, for a human to look at.
-          errors.push(`queue row ${row.id}: approved flag_review has no recoverable action in decided_reason; left for manual review`);
+          // F-3 ruling (a): a decided_reason that fails to decode is one
+          // of two real cases, distinguished by checking -- verb-agnostic,
+          // since no specific action survives a failed decode to compare
+          // against -- whether the target already carries a real
+          // moderation artifact since decided_at.
+          const artifactExists = await anyModerationArtifactExists(env, targetType, row.target_id, row.decided_at);
+          if (artifactExists) {
+            // PRESENT: the act already happened -- this row was decided
+            // and executed before the mq1 encoding existed to record
+            // which action, so its plain-text decided_reason was never
+            // going to decode. The public record (identity_events)
+            // already carries the true outcome, so retiring the row here
+            // is bookkeeping, not news -- silent on the run row (console
+            // log only, no error). SILENT still means RE-STAMPED, though:
+            // leaving it at 'approved' un-re-stamped would mean it keeps
+            // being selected and re-checked every wake forever, silence
+            // or not.
+            console.log(JSON.stringify({ level: "info", event: "judgment_reconcile_retired_pre_encoding", queue_id: row.id }));
+            const stamped = await stampQueueRow(env, row.id, "rejected", `completed pre-encoding: ${row.decided_reason ?? ""}`, { requirePending: false });
+            if (stamped) actioned++;
+          } else {
+            // ABSENT: no artifact exists anywhere for this target -- there
+            // is truly no machine-readable record of what the judge
+            // decided, and no amount of future waiting produces one.
+            // L-003 (never invent an artifact that is not there) forbids
+            // guessing the action, but does not require re-announcing the
+            // same unresolvable fact every week (gate reproduction F1,
+            // "completed-pre-deploy-row-errors-every-wake"): reported
+            // ONCE here, then re-stamped so the row stops being selected
+            // -- the exit becomes real instead of a standing weekly
+            // repetition.
+            errors.push(`queue row ${row.id}: approved flag_review has no recoverable action in decided_reason; left for manual review`);
+            const stamped = await stampQueueRow(env, row.id, "rejected", "unrecoverable: no machine-readable action; left for the operator", { requirePending: false });
+            if (stamped) actioned++;
+          }
           continue;
         }
         const artifact = await flagReviewArtifactState(env, targetType, row.target_id, decoded.action, row.decided_at);
@@ -831,8 +945,23 @@ export async function reconcileApprovedQueue(
           // rejected, fetchReconcilableApprovedRows's own
           // status = 'approved' filter excludes it forever -- it can
           // never be re-selected or re-superseded by a later wake.
-          await stampQueueRow(env, row.id, "rejected", `superseded: a later ${artifact.laterAction} decision executed after this approval was stranded`, { requirePending: false });
-          actioned++;
+          //
+          // FORWARD(supersede-public-event), N-2: this writes only to
+          // maintainer_queue, never to identity_events, so a disposal of
+          // a stranded judgment currently leaves no public trace anywhere
+          // -- acceptable while the row is internal working paper, but it
+          // is what makes a wrongly-superseded row (F-1/F-2, before their
+          // own fixes above) invisibly wrong rather than merely wrong. A
+          // public identity_events entry, and a first-class 'superseded'
+          // status rather than overloading 'rejected', are deferred to
+          // the next maintainer_queue rebuild (docs/BRIEF-FIRST-LAWS.md's
+          // build wave already rebuilds this table for other reasons --
+          // this rides along there rather than reopening an
+          // already-scoped migration for this alone).
+          // F-7: stampQueueRow's boolean is honoured, not assumed -- count
+          // actioned only if the re-stamp actually changed a row.
+          const stamped = await stampQueueRow(env, row.id, "rejected", `superseded: a later ${artifact.laterAction} decision executed after this approval was stranded`, { requirePending: false });
+          if (stamped) actioned++;
           continue;
         }
         // state === "none": nothing has happened to this target since
@@ -847,8 +976,9 @@ export async function reconcileApprovedQueue(
           // row to rejected with the honest stamp, never posts. The row
           // is 'approved' now, not 'pending' -- requirePending: false,
           // same as the primary path's own execution-failure re-stamp.
-          await stampQueueRow(env, row.id, "rejected", `deny-check: ${denyReason}`, { requirePending: false });
-          actioned++;
+          // F-7: boolean honoured, same discipline as the supersede site.
+          const stamped = await stampQueueRow(env, row.id, "rejected", `deny-check: ${denyReason}`, { requirePending: false });
+          if (stamped) actioned++;
           continue;
         }
         const exists = await bulletinArtifactExists(env, title, body, row.decided_at);
@@ -857,6 +987,19 @@ export async function reconcileApprovedQueue(
         actioned++;
       }
     } catch (e) {
+      // F-8: ACCEPTED-AS-IS (D-018 gate, LOW). A row that throws here --
+      // e.g. moderateContent/createPost failing on a genuinely bad target
+      // -- is left at 'approved' and retried next wake, forever, with no
+      // terminal exit the way the primary executor's own catch re-stamps
+      // 'rejected' on a confirmed execution failure. Deliberate trade, not
+      // an oversight: this catch cannot always tell a TRANSIENT failure (a
+      // flaky D1 write worth retrying) from a PERMANENT one (a target that
+      // will never succeed), and retrying forever is the safe default for
+      // the former -- a real terminal disposition for the latter needs a
+      // place to record WHY it gave up that is not "guess and re-stamp
+      // rejected" on a bare catch. That arrives with the next
+      // maintainer_queue rebuild (docs/BRIEF-FIRST-LAWS.md), alongside
+      // N-2's public supersede event above, not here.
       errors.push(`queue row ${row.id} (${row.kind}): ${e instanceof Error ? e.message : String(e)}`);
     }
   }

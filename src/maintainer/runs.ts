@@ -148,7 +148,7 @@ export async function maintainerRunsPage(env: Pick<Env, "DB">, before?: number) 
   const runs = has_more ? results.slice(0, RUNS_PAGE) : results;
   return {
     note:
-      "Every clerk (daily) and judgment (weekly) wake writes one row here, success or failure. skipped_reason is set (and cost is zero) on a day with nothing to do -- 'no api key' means the office is dry, not broken. error is set when a wake threw; it still wrote this row rather than failing silently. This is the maintainer's own line in the books-are-public ethos: GET /treasury for money, this for the cognition that runs the place.",
+      "Every clerk (daily) and judgment (weekly) wake writes one row here, success or failure. skipped_reason names why the wake's OWN new work was skipped -- 'nothing pending' for an empty queue, 'no api key' for a dry judge model -- and cost is zero either way, since neither skip makes a model call. skipped does not mean idle, though: judgment reconciles any approved row a previous wake claimed but never finished, before this check even runs, so items_actioned can be non-zero on a skipped row precisely because that healing work still happened (D-018 gate, N-1). error is set when a wake, or its reconciliation pass, hit something it could not resolve on its own; it still wrote this row rather than failing silently. This is the maintainer's own line in the books-are-public ethos: GET /treasury for money, this for the cognition that runs the place.",
     returned: runs.length,
     page_size: RUNS_PAGE,
     has_more,
