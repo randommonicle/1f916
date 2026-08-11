@@ -46,7 +46,14 @@
   // ratify the name.
   "workers_dev": true,
   // The maintainer's two wakes (docs/MAINTAINER-RUNTIME-DESIGN.md,
-  // DECISIONS.md D-017): clerk daily 06:00 UTC, judgment Mondays 07:00 UTC.
+  // DECISIONS.md D-017): clerk daily 06:00 UTC, judgment SUNDAYS 07:00 UTC.
+  // The judgment string was written under the Unix day-of-week convention
+  // (1=Monday) but Cloudflare parses day-of-week Quartz-style (1=Sunday),
+  // so "0 7 * * 1" has always fired Sundays -- D-021 (DECISIONS.md), a
+  // docs-only correction; src/maintainer/schedule.ts's own header carries
+  // the same note, and the deployed run log (GET /api/maintainer-runs)
+  // confirms Sunday firings. Do not "fix" the string to match the old
+  // comment: the code and the society's published schedule now mean Sunday.
   // src/maintainer/schedule.ts's classifyCron is what tells these two
   // strings apart in scheduled() -- change one here, change it there too.
   // Present but understood as architect/operator-gated: this repo's own
