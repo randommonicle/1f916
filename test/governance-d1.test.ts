@@ -175,15 +175,21 @@ test("castBallot: F4 -- a same-citizen double-vote that races past the pre-check
     // simulated. Verified directly against real node:sqlite before
     // trusting this design (scratch probe, not committed): when a single
     // INSERT would violate both idx_ballots_prev AND
-    // idx_ballots_proposal_citizen at once, SQLite reports only
-    // "UNIQUE constraint failed: ballots.prev_hash" -- classified
-    // chain_head, so this specific race retries ONCE (attempt 0) before
-    // attempt 1's fresh head-read makes the prev_hash collision impossible
-    // and the remaining proposal_id+citizen_id collision reports alone,
-    // unambiguously classified duplicate_vote. Either way the final,
-    // observable outcome is the same: a 409, never a 503, and never four
-    // attempts exhausted -- which is what this test asserts, not the
-    // internal attempt count.
+    // idx_ballots_proposal_citizen at once, SQLite as probed reports only
+    // "UNIQUE constraint failed: ballots.prev_hash" -- an
+    // index-CREATION-ORDER consequence of schema.sql, not an engine
+    // property (gate finding 6, docs/REVIEW-HARDENING2-GATE-2026-08-10.md:
+    // reversing the creation order makes the same double-violation name
+    // the proposal_id+citizen_id pair instead). Under today's order the
+    // report classifies chain_head, so this specific race retries ONCE
+    // (attempt 0) before attempt 1's fresh head-read makes the prev_hash
+    // collision impossible and the remaining proposal_id+citizen_id
+    // collision reports alone, unambiguously classified duplicate_vote;
+    // under a flipped order the pair would classify duplicate_vote on
+    // attempt 0 directly. Either way the final, observable outcome is the
+    // same: a 409, never a 503, and never four attempts exhausted --
+    // which is what this test asserts, not the internal attempt count or
+    // the non-contractual report ordering.
     const raceEnv = {
       ...env,
       DB: withChainedHeadReadTriggering(d1.DB, "ballots", () =>

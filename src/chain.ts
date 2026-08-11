@@ -281,6 +281,17 @@ export async function appendChainedStmt(
 // future chained table's own future content constraint must fall to
 // "unrecognised" (the existing retry-then-503 behaviour, the safe
 // default) rather than being silently mis-filed as a duplicate vote.
+// One fact deliberately NOT relied on (gate finding 6,
+// docs/REVIEW-HARDENING2-GATE-2026-08-10.md): when a single INSERT
+// violates two UNIQUE indexes at once, which one SQLite NAMES is a
+// consequence of index-creation order in schema.sql (probed both orders
+// directly, sqlite 3.51.3), not a property of the engine. Today's order
+// resolves a ballots double-violation to prev_hash (chain_head, one
+// retry, then the duplicate reports alone); a flipped order would name
+// the (proposal_id, citizen_id) pair immediately. Both routes reach the
+// identical correct 409, because duplicate_vote only fires when that
+// pair genuinely collides -- so the ordering is an observation about the
+// current schema, never a contract this classifier depends on.
 type UniqueViolationKind = "chain_head" | "duplicate_vote" | "unrecognised";
 
 // Exact-parse, not substring (fixes pass, docs/BRIEF-HARDENING-2-REVIEW-FIXES.md
@@ -292,11 +303,29 @@ type UniqueViolationKind = "chain_head" | "duplicate_vote" | "unrecognised";
 // pair, turning the safe unrecognised retry/503 path into a wrong
 // already-voted 409. Only whitespace around commas is normalised; prefix,
 // superset, reordered, or otherwise unknown lists all stay "unrecognised".
+//
+// Two latent-parser hardenings from the gate's finding 5
+// (docs/REVIEW-HARDENING2-GATE-2026-08-10.md), neither reachable on the
+// present schema or SQL (SQLite always fully qualifies every element, and
+// no user data can reach these messages) but each Fix 1's own defect
+// shape re-opened by one degree: the list match is ANCHORED -- after the
+// last qualified element the message must end or continue with something
+// that is not an identifier character, dot, comma, or whitespace (real
+// messages continue ': SQLITE_CONSTRAINT...') -- so a list whose extra
+// trailing element is merely UNqualified ('..., oops') can no longer
+// truncate down to a recognised pair; and the LAST marker occurrence is
+// parsed, not the first, so a marker echoed inside quoted diagnostic data
+// ahead of the real one ('near "UNIQUE constraint failed: ..." : syntax
+// error; real: ...') classifies by the real trailing report. Both
+// mis-parses fell to the wrong side (a false already-voted 409 for what
+// was really a chain-head race); both now fall to "unrecognised" or the
+// real report, the safe directions.
 const UNIQUE_MARKER = "UNIQUE constraint failed: ";
-const COLUMN_LIST = /^([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)*)/;
+const COLUMN_LIST =
+  /^([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)*)(?=$|[^A-Za-z0-9_.,\s])/;
 
 function parseUniqueColumns(message: string): string[] | null {
-  const at = message.indexOf(UNIQUE_MARKER);
+  const at = message.lastIndexOf(UNIQUE_MARKER);
   if (at === -1) return null;
   const m = message.slice(at + UNIQUE_MARKER.length).match(COLUMN_LIST);
   if (!m) return null;

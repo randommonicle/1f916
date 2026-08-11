@@ -551,6 +551,42 @@ test("appendChainedGated: trailing driver diagnostics do not change an exact bal
   assert.equal(calls(), 1, "still zero retries once the exact list is recognised");
 });
 
+test("appendChainedGated: gate finding 5a -- a column list whose extra trailing element is UNqualified cannot truncate down to a recognised duplicate-vote pair", async () => {
+  // The gate's first adversarial row (docs/REVIEW-HARDENING2-GATE-2026-08-10.md
+  // finding 5): Fix 1's exact defect re-opened by one degree. The
+  // pre-anchor parser stopped at the first non-qualified token, so
+  // '..., oops' parsed down to exactly the duplicate-vote pair and 409'd
+  // in one call. Anchored, the list must END cleanly (end of message, or
+  // a non-identifier/dot/comma/whitespace continuation like the real
+  // ': SQLITE_CONSTRAINT'), so this stays unrecognised: retry then 503,
+  // the safe default. Not reachable today -- SQLite fully qualifies every
+  // element -- pinned so the parser never quietly regains the behaviour.
+  const trailing = "UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id, oops";
+  const { db, calls } = scriptedDb([trailing, trailing, trailing, trailing]);
+  await assert.rejects(
+    () => appendChainedGated(db, "ballots", BALLOT_ROW, GATE),
+    (e: unknown) => e instanceof SocietyError && e.status === 503 && !/already cast/i.test(e.message),
+    "an unqualified trailing element makes the whole list unrecognised -- never a truncated-to-pair 409",
+  );
+  assert.equal(calls(), 4, "unrecognised keeps the full retry-then-503 default");
+});
+
+test("appendChainedGated: gate finding 5b -- a marker echoed inside quoted diagnostic data does not shadow the real trailing report", async () => {
+  // The gate's second adversarial row: the marker appears twice, first
+  // inside quoted data ('near \"...\": syntax error'), then as the real
+  // report. The pre-fix parser honoured the FIRST occurrence and 409'd a
+  // genuine chain-head race as a duplicate vote; parsing the LAST
+  // occurrence classifies by the real report -- chain_head, one retry,
+  // then success. Not reachable today (no user data reaches these
+  // messages); pinned for the same reason as 5a.
+  const shadowed =
+    'D1_ERROR: near "UNIQUE constraint failed: ballots.proposal_id, ballots.citizen_id": syntax error; real: UNIQUE constraint failed: ballots.prev_hash';
+  const { db, calls } = scriptedDb([shadowed, { meta: { changes: 1 } }]);
+  const sealed = await appendChainedGated(db, "ballots", BALLOT_ROW, GATE);
+  assert.notEqual(sealed, null, "the real trailing prev_hash report wins: a chain-head race, retried and sealed, never a false already-voted 409");
+  assert.equal(calls(), 2, "exactly one retry -- the chain-head path, not the duplicate-vote short-circuit and not exhaustion");
+});
+
 test("appendChainedGated: exact prev_hash and hash collisions retain the chain-head retry path", async () => {
   const viaPrev = scriptedDb(["UNIQUE constraint failed: ballots.prev_hash", { meta: { changes: 1 } }]);
   const sealedPrev = await appendChainedGated(viaPrev.db, "ballots", BALLOT_ROW, GATE);
