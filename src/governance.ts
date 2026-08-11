@@ -830,14 +830,19 @@ const MACHINE_EXECUTABLE_KINDS: readonly ProposalKind[] = ["set_name", "set_divi
 // upsert path included. Paired with the same guard the final status
 // UPDATE already carried since commit 4 (`AND status = 'tallying'`),
 // both statements in the execution batch are now conditional, not just
-// one of the two.
+// one of the two. `AND tallied_at = ?` binds the claimant's own claim
+// stamp (the `now` this function already receives -- the same value the
+// claim UPDATE wrote), completing F1's sibling-window fix (gate finding
+// 1, see commitOutcome): all three gated statements in the outcome batch
+// must ask the identical question, or a resumed stale claimant whose log
+// and status statements no-op could still land this settings write alone.
 function upsertSettingStmt(env: Env, key: string, value: string, expiresAt: number | null, proposalId: number, now: number) {
   return env.DB.prepare(
     `INSERT INTO governance_settings (key, value, expires_at, proposal_id, updated_at)
      SELECT ?, ?, ?, ?, ?
-     WHERE EXISTS (SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying')
+     WHERE EXISTS (SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying' AND tallied_at = ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at, proposal_id = excluded.proposal_id, updated_at = excluded.updated_at`,
-  ).bind(key, value, expiresAt, proposalId, now, proposalId);
+  ).bind(key, value, expiresAt, proposalId, now, proposalId, now);
 }
 
 // The governance_settings write for a passed machine-executable kind's
@@ -900,6 +905,23 @@ function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Re
 // Returning "claimed_elsewhere" instead means a caller can never assert an
 // outcome it did not actually commit, and there is no longer any `{hash}`
 // value this function could hand back for a row that does not exist.
+// Gate closes F1's sibling window (docs/REVIEW-HARDENING2-GATE-2026-08-10.md
+// finding 1): `status = 'tallying'` alone cannot distinguish "still
+// tallying under MY claim" from "still tallying under someone else's
+// re-claim" -- a resumed stale claimant racing a re-claimer that had not
+// yet committed would pass a status-only gate and seal its stale tally
+// into the permanent chain. The claim UPDATE stamps tallied_at with the
+// claimant's own `now` (the exact value threaded down to this function),
+// so binding `AND tallied_at = ?` makes the gate provably ours: a
+// re-claim restamps tallied_at (re-claims are >= STALE_CLAIM_MS apart, so
+// the stamps can never coincide), and the resumed claimant's whole batch
+// no-ops through the claimed_elsewhere path that already exists. The
+// identical stamp is bound into ALL the batch's gated statements -- this
+// gate, upsertSettingStmt's WHERE EXISTS, and the final status UPDATE --
+// because the lockstep property everything below leans on ("every
+// statement in the batch is conditional on the same fact") only holds if
+// every gate asks the same question; stamping two of the three would let
+// a stale settings write land alone.
 async function commitOutcome(
   env: Env,
   proposalId: number,
@@ -908,7 +930,7 @@ async function commitOutcome(
   detail: string,
   now: number,
 ): Promise<{ hash: string } | "claimed_elsewhere"> {
-  const gate: ChainGate = { sql: "SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying'", args: [proposalId] };
+  const gate: ChainGate = { sql: "SELECT 1 FROM proposals WHERE id = ? AND status = 'tallying' AND tallied_at = ?", args: [proposalId, now] };
   for (let attempt = 0; attempt < 4; attempt++) {
     const log = await appendChainedStmt(
       env.DB,
@@ -1090,12 +1112,16 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
     const settingStmt = settingsStatementForExecution(env, proposal.kind, parsedPayload, proposalId, now);
     if (settingStmt) stateStmts.push(settingStmt);
   }
+  // `AND tallied_at = ?` (this claimant's own claim stamp): the third of
+  // the outcome batch's three gated statements, kept in lockstep with
+  // commitOutcome's chain gate and upsertSettingStmt's WHERE EXISTS --
+  // F1's sibling-window fix (gate finding 1), see commitOutcome's comment.
   stateStmts.push(
     env.DB
       .prepare(
-        "UPDATE proposals SET status = ?, tally_yes = ?, tally_no = ?, tally_abstain = ?, eligible_count = ?, tallied_at = ? WHERE id = ? AND status = 'tallying'",
+        "UPDATE proposals SET status = ?, tally_yes = ?, tally_no = ?, tally_abstain = ?, eligible_count = ?, tallied_at = ? WHERE id = ? AND status = 'tallying' AND tallied_at = ?",
       )
-      .bind(finalStatus, yes, no, abstain, eligible, now, proposalId),
+      .bind(finalStatus, yes, no, abstain, eligible, now, proposalId, now),
   );
 
   const detail = `proposal ${proposalId} (${proposal.kind}) ${finalStatus}: yes=${yes} no=${no} abstain=${abstain} eligible=${eligible}`;

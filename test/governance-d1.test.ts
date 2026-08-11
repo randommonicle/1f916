@@ -1289,6 +1289,92 @@ test("runGovernanceSweep: F1 divergent-tally repro -- a stalled claimant whose s
   }
 });
 
+test("runGovernanceSweep: gate finding 1 -- a resumed stale claimant that wins the race against a MID-FLIGHT re-claimer (claimed but not yet committed) no-ops its whole batch, never sealing its stale tally (docs/REVIEW-HARDENING2-GATE-2026-08-10.md)", async () => {
+  const d1 = createLocalD1();
+  try {
+    // F1's sibling window, distinct from the two F1 tests above: there B
+    // ran TO COMPLETION during A's stall, so A's status-only gate failed
+    // on status having moved off 'tallying'. Here B has only RE-CLAIMED
+    // (status stays 'tallying', tallied_at restamped) when A resumes --
+    // the exact case the gate reviewer reproduced, where a status-only
+    // gate PASSES under B's claim and A commits a stale tally to the
+    // permanent chain. The fix binds the claimant's own claim stamp
+    // (tallied_at) into all three gated statements, so A's resumed batch
+    // no-ops in lockstep and B's eventual commit is the only one.
+    const proposer = insertCitizen(d1);
+    const voter2 = insertCitizen(d1);
+    insertCitizen(d1); // census filler
+    insertCitizen(d1); // census filler -- 4 citizens at A's read
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "set_split", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    // A real payload, unlike the F1 divergent test above: the settings
+    // upsert must be IN A's batch, because the lockstep property is the
+    // point -- a fix that stamped only the chain gate and the status
+    // UPDATE would let A's stale settings write land alone.
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ prize: 80, bounty: 20 }), proposalId);
+    // cast=2 against census 4: quorum ceil(4/2)=2 clears, parameter min 2
+    // clears, yes 2 > no 0 -- A's stale computation resolves to "passed"
+    // and, set_split being machine-executable, "executed".
+    castYes(d1, proposalId, proposer, now - 500);
+    castYes(d1, proposalId, voter2, now - 500);
+
+    const later = now + 16 * 60 * 1000; // past STALE_CLAIM_MS, so B's re-claim UPDATE matches
+    const aEnv = {
+      ...testEnv(d1),
+      DB: withChainedHeadReadTriggering(d1.DB, "identity_events", async () => {
+        // During A's stall: the census grows to 5 (flipping the real
+        // quorum to 3 > cast 2, so the eventually-correct outcome is
+        // "failed"), and B re-claims with the REAL claim UPDATE's own
+        // SQL -- then B stalls too, mid-flight, having committed nothing.
+        insertCitizen(d1);
+        const reclaim = await d1.DB.prepare(
+          `UPDATE proposals SET status = 'tallying', tallied_at = ?
+           WHERE id = ? AND ((status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND (tallied_at IS NULL OR tallied_at <= ?)))`,
+        )
+          .bind(later, proposalId, later, later - 15 * 60 * 1000)
+          .run();
+        assert.equal(reclaim.meta.changes, 1, "fixture sanity: B's re-claim must actually restamp A's stale claim");
+      }),
+    };
+
+    const aResult = await runGovernanceSweep(aEnv, now);
+    assert.equal(
+      aResult.results[0].outcome,
+      "claimed_elsewhere",
+      "A resumed under B's live claim -- its stale 'executed' verdict (eligible=4) must never commit, report, or seal",
+    );
+    assert.deepEqual(aResult.stranded, [proposalId], "the proposal is honestly reported stranded: still 'tallying' under B's mid-flight claim");
+
+    const row = await d1.DB.prepare("SELECT status, tallied_at, eligible_count FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; tallied_at: number; eligible_count: number | null }>();
+    assert.equal(row!.status, "tallying", "B still holds the claim; A's resumed status UPDATE no-opped");
+    assert.equal(row!.tallied_at, later, "B's claim stamp survives untouched -- A's batch could not restamp it");
+    assert.equal(row!.eligible_count, null, "A's stale census never landed");
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 0, "no outcome event: A's gated log statement no-opped in lockstep with the state statements");
+    const setting = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings").first<{ n: number }>();
+    assert.equal(setting!.n, 0, "the lockstep assertion itself: A's stale settings upsert must not land alone");
+
+    // B's claim eventually goes stale in turn; a later sweep re-claims and
+    // commits the REAL outcome against the grown census.
+    const evenLater = later + 16 * 60 * 1000;
+    const finalSweep = await runGovernanceSweep(testEnv(d1), evenLater);
+    assert.equal(finalSweep.results[0].outcome, "failed", "the committed outcome is the fresh census's own: quorum 3 > cast 2");
+    const finalRow = await d1.DB.prepare("SELECT status, eligible_count FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; eligible_count: number }>();
+    assert.equal(finalRow!.status, "failed");
+    assert.equal(finalRow!.eligible_count, 5, "the committed census is the live 5, never A's stale 4");
+    const finalEvents = await d1.DB.prepare("SELECT detail FROM identity_events WHERE kind = 'proposal_decided'").all<{ detail: string }>();
+    assert.equal(finalEvents.results.length, 1, "exactly one sealed outcome event across the whole race");
+    assert.match(finalEvents.results[0].detail, /failed/);
+    assert.doesNotMatch(finalEvents.results[0].detail, /executed/, "A's stale verdict appears nowhere in the permanent record");
+  } finally {
+    d1.close();
+  }
+});
+
 test("commitOutcome: F6 -- a retried outcome commit's identity_events.created_at equals the same batch's proposals.tallied_at, not a fresh clock read taken mid-retry (hardening-2)", async () => {
   const d1 = createLocalD1();
   try {
