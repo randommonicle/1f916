@@ -403,16 +403,23 @@ test("bulletinDenyCheck: a raw 40-hex wallet address is refused", () => {
 });
 
 // ---------- encodeFlagReviewDecision / decodeFlagReviewDecision: wake-start reconciliation's only way to recover a stranded flag_review's action ----------
+//
+// mq1 namespace (fixes pass, exchange/REVIEW_wake-reconciliation_2026-08-11.md
+// CLAUDE round 2): replaces the bare "<action>: <reason>" prefix this
+// file's own immediate predecessor commit used, LOCAL and never deployed,
+// so no legacy support for it -- Codex's round-1 pre-gate review proved
+// the bare shape decodes (and EXECUTES) ordinary pre-encoding prose that
+// merely happens to start with an action word.
 
-test("encodeFlagReviewDecision/decodeFlagReviewDecision round-trip for all three actions", () => {
+test("encodeFlagReviewDecision/decodeFlagReviewDecision round-trip for all three actions (mq1 namespace)", () => {
   for (const action of ["collapse", "remove", "restore"] as const) {
     const encoded = encodeFlagReviewDecision(action, "confirmed spam, take it down");
-    assert.equal(encoded, `${action}: confirmed spam, take it down`);
+    assert.equal(encoded, `mq1|${action}|confirmed spam, take it down`);
     assert.deepEqual(decodeFlagReviewDecision(encoded), { action, reason: "confirmed spam, take it down" });
   }
 });
 
-test("decodeFlagReviewDecision returns null for a decided_reason with no recognised action prefix (a pre-this-commit row) -- never guesses", () => {
+test("decodeFlagReviewDecision returns null for ordinary free text with no mq1 namespace (every pre-this-commit row) -- never guesses", () => {
   assert.equal(decodeFlagReviewDecision("confirmed spam, take it down"), null);
   assert.equal(decodeFlagReviewDecision("looked fine to the judge"), null);
 });
@@ -422,15 +429,35 @@ test("decodeFlagReviewDecision returns null for null and empty decided_reason", 
   assert.equal(decodeFlagReviewDecision(""), null);
 });
 
-test("decodeFlagReviewDecision rejects a word that merely starts with a valid action but is not one (no false match on a prefix)", () => {
-  assert.equal(decodeFlagReviewDecision("collapsed: already done, nothing to do"), null);
-  assert.equal(decodeFlagReviewDecision("removedly: not a real action"), null);
+test("decodeFlagReviewDecision refuses the dead bare '<action>: <reason>' shape entirely -- 9214511 never deployed, no legacy support (fixes-pass ruling 2)", () => {
+  assert.equal(decodeFlagReviewDecision("remove: confirmed spam"), null);
+  assert.equal(decodeFlagReviewDecision("collapse: borderline, needs review"), null);
+  assert.equal(decodeFlagReviewDecision("restore: restored after appeal"), null);
 });
 
-test("encodeFlagReviewDecision preserves a reason containing a colon (the split is anchored on the FIRST colon only)", () => {
-  const encoded = encodeFlagReviewDecision("remove", "spam: contains a promo link");
-  assert.equal(encoded, "remove: spam: contains a promo link");
-  assert.deepEqual(decodeFlagReviewDecision(encoded), { action: "remove", reason: "spam: contains a promo link" });
+test("decodeFlagReviewDecision refuses ordinary prose that mimics the action-prefix shape (Codex round-1 Ask 1.2 reproduction, verbatim)", () => {
+  assert.equal(decodeFlagReviewDecision("collapse: prose written before action encoding existed"), null);
+  assert.equal(decodeFlagReviewDecision("removed: already actioned by a human, FYI"), null);
+});
+
+test("decodeFlagReviewDecision rejects a verb that merely starts with a valid action but is not one (no false match on a prefix)", () => {
+  assert.equal(decodeFlagReviewDecision("mq1|collapsed|already done, nothing to do"), null);
+  assert.equal(decodeFlagReviewDecision("mq1|removedly|not a real action"), null);
+});
+
+test("decodeFlagReviewDecision refuses anything not EXACTLY the mq1 namespace, anchored at the very start", () => {
+  assert.equal(decodeFlagReviewDecision("mq2|remove|wrong version tag"), null);
+  assert.equal(decodeFlagReviewDecision("MQ1|remove|wrong case"), null);
+  assert.equal(decodeFlagReviewDecision("xmq1|remove|not anchored at the start"), null);
+  assert.equal(decodeFlagReviewDecision(" mq1|remove|leading whitespace"), null);
+  assert.equal(decodeFlagReviewDecision("mq1remove|missing the first pipe"), null);
+  assert.equal(decodeFlagReviewDecision("mq1|removeconfirmed spam"), null); // missing the second pipe entirely
+});
+
+test("encodeFlagReviewDecision preserves a reason containing its own colons or pipes -- only the namespace's own two pipes are structural", () => {
+  const encoded = encodeFlagReviewDecision("remove", "spam: contains a promo link | reported twice");
+  assert.equal(encoded, "mq1|remove|spam: contains a promo link | reported twice");
+  assert.deepEqual(decodeFlagReviewDecision(encoded), { action: "remove", reason: "spam: contains a promo link | reported twice" });
 });
 
 test("bulletinDenyCheck: an ordinary bulletin still passes after the additions", () => {

@@ -35,7 +35,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import { runJudgmentWake, executeJudgmentDecisions, reconcileApprovedQueue, encodeFlagReviewDecision } from "../src/maintainer/judgment.ts";
-import type { Env } from "../src/society.ts";
+import { moderateContent, type Env } from "../src/society.ts";
 import type { QueueRow, JudgmentDecision } from "../src/maintainer/judgment.ts";
 
 // ---------- local fixture helpers (this file's own, per society-votes-d1.test.ts's precedent -- no edits to the shared test/helpers/local-d1.ts) ----------
@@ -471,6 +471,208 @@ test("poisoned row: a reconciliation error does not prevent runJudgmentWake from
     const run = latestRun(d1);
     assert.equal(run.skipped_reason, "nothing pending", "the wake reached and correctly reported the pending-queue state, not an early bail-out");
     assert.notEqual(run.error, null, "the reconciliation failure still reaches the run row");
+    assert.match(run.error ?? "", new RegExp(String(poisonedId)), "the error names the poisoned row");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- FIXES PASS (exchange/REVIEW_wake-reconciliation_2026-08-11.md
+// CLAUDE round 2, amending the round-1 ratification): the external
+// pre-gate review reproduced three blockers against 9214511 -- these
+// tests are each blocker's own red-proof, permanent regression tests
+// from here on. ----------
+
+// ---------- 1.1 FALSE-SKIP / SUPERSEDED ----------
+
+test("superseded: a later, different decision on the same target is never silently masked, and the stale approval is never blindly replayed (Codex round 1, later-restore-masks-stranded-remove, verbatim reproduction)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    // A LATER, legitimate, unrelated decision restores the same post --
+    // executed for real through the same executor the primary path uses,
+    // producing a genuine identity_events artifact after decided_at.
+    await moderateContent(env, maintainer, "post", postId, "restore", "restored after appeal, the flag was mistaken");
+
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, postId).mod_state, null, "the stranded remove never executes -- the later restore is not silently overwritten");
+    assert.equal(result.actioned, 1, "the supersede re-stamp is itself the completed job, same counting convention as an executed action");
+    assert.equal(result.error, null, "supersession is a named, counted exit, not an error");
+    const row = getQueueRow(d1, queueId);
+    assert.equal(row.status, "rejected", "re-stamped rejected -- the only terminal status the CHECK constraint offers without a migration");
+    assert.equal(row.decided_reason, "superseded: a later restore decision executed after this approval was stranded");
+
+    // "the superseded row must never be re-selected in later wakes" --
+    // prove it, not just assert the immediate state.
+    const second = await reconcileApprovedQueue(env, maintainer);
+    assert.equal(second.actioned, 0, "a 'rejected' row is excluded by fetchReconcilableApprovedRows's own status='approved' filter -- never reprocessed");
+    assert.equal(countModerationEvents(d1), 1, "still exactly the one restore event -- no duplicate action, no phantom remove");
+    assert.equal(getQueueRow(d1, queueId).status, "rejected", "status is stable across a second pass, not reverted or reprocessed");
+  } finally {
+    d1.close();
+  }
+});
+
+test("an exact-action artifact anywhere in the window wins over an earlier different-action event -- idempotent skip, not a supersede", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    // A different action lands first (an interim collapse)...
+    await moderateContent(env, maintainer, "post", postId, "collapse", "interim collapse pending review");
+    // ...then the SAME exact action this row decided also lands for real,
+    // through a route this test does not need to name.
+    await moderateContent(env, maintainer, "post", postId, "remove", "confirmed after review");
+
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(result.actioned, 0, "the exact artifact already exists -- idempotent skip, not a re-execution and not a supersede");
+    assert.equal(getQueueRow(d1, queueId).status, "approved", "an idempotent skip leaves the row exactly as it was, unlike a supersede");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- 1.2 FALSE-DECODE ----------
+
+test("false-decode: a pre-encoding free-text decided_reason that mimics the action-prefix shape is never executed (Codex round 1 Ask 1.2, verbatim reproduction)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      // Codex's exact probe text: ordinary prose written before action
+      // encoding existed, which happens to begin with a real action word.
+      decided_reason: "collapse: prose written before action encoding existed",
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, postId).mod_state, null, "no action a judge never machine-recorded via mq1 is ever executed");
+    assert.equal(countModerationEvents(d1), 0, "no artifact is fabricated from prose alone");
+    assert.equal(result.actioned, 0, "an undecodable row is never counted as actioned");
+    assert.notEqual(result.error, null, "an undecodable row is loud, not silently guessed at");
+    assert.match(result.error ?? "", new RegExp(String(queueId)), "the error names the row it happened on");
+    assert.equal(getQueueRow(d1, queueId).status, "approved", "left alone for manual review, per L-003 -- never guessed, never silently dropped");
+  } finally {
+    d1.close();
+  }
+});
+
+test("false-decode: the dead bare '<action>: <reason>' shape (this file's own predecessor commit, never deployed) is likewise never executed", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: "remove: confirmed spam", // the OLD bare encoding, 9214511 -- dead, no legacy support
+    });
+
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(getPost(d1, postId).mod_state, null, "the dead bare-prefix shape decodes to null -- nothing executes");
+    assert.notEqual(result.error, null, "left loud for manual review, same as any other undecodable row");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- NO-KEY BYPASS ----------
+
+test("no-key wake still runs reconciliation: a dry ANTHROPIC_API_KEY must not skip healing a stranded approved row (Codex round 1, no-key-bypasses-reconciliation, verbatim reproduction)", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const runId = insertMaintainerRunRow(d1);
+    insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+    });
+
+    const env = { DB: d1.DB } as unknown as Env; // ANTHROPIC_API_KEY intentionally absent
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    await runJudgmentWake(env);
+
+    const post = getPost(d1, postId);
+    const run = latestRun(d1);
+    assert.equal(post.mod_state, "removed", "reconciliation heals the stranded row even with no API key -- replay needs no model call");
+    assert.equal(countModerationEvents(d1), 1);
+    assert.equal(run.skipped_reason, "no api key", "the skip reason still names the model half honestly");
+    assert.equal(run.items_actioned, 1, "the no-key run row carries reconciliation's results exactly as a keyed wake's does");
+    assert.equal(run.error, null);
+  } finally {
+    d1.close();
+  }
+});
+
+test("no-key wake still surfaces a reconciliation error: a poisoned row is loud even with no API key, matching a keyed wake exactly", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const poisonedId = insertQueueRow(d1, runId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: 999_999, // no such post
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+    });
+
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY
+    await runJudgmentWake(env);
+
+    const run = latestRun(d1);
+    assert.equal(run.skipped_reason, "no api key");
+    assert.notEqual(run.error, null, "a reconciliation error reaches the run row even when the model half never runs");
     assert.match(run.error ?? "", new RegExp(String(poisonedId)), "the error names the poisoned row");
   } finally {
     d1.close();

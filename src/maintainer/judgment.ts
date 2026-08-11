@@ -266,17 +266,45 @@ export function resolveExecution(item: QueueRow, decision: JudgmentDecision): Re
 // across src/ and mcp.ts), so this is a values-only change to an
 // existing column's content for one kind, not a schema change.
 //
-// A row approved before this commit shipped decodes to null (no
-// recognised prefix) -- wake-start reconciliation treats that as
-// unrecoverable, logs it, and leaves the row alone rather than guessing
-// an action, per L-003 (never invent an artifact that is not there).
+// mq1 (fixes pass, exchange/REVIEW_wake-reconciliation_2026-08-11.md
+// CLAUDE round 2, amending the original ratification): the FIRST shape
+// built for this (a bare "<action>: <reason>" prefix, this file's own
+// immediate predecessor commit -- LOCAL, never deployed, so no live row
+// has ever carried it) was wrong in principle, not just in the small.
+// Codex's round-1 pre-gate review (Ask 1.2) seeded an ordinary,
+// PRE-encoding free-text decided_reason that happened to begin
+// "collapse: " and proved the bare decoder matched it and EXECUTED an
+// action no judge ever machine-recorded. A natural-language prefix can
+// never be made safe against natural language sharing its own shape --
+// the fix is a namespace ordinary prose cannot produce by accident, not
+// a cleverer regex over the same idea. "mq1" is exactly that: a short,
+// inert, versioned tag ("maintainer_queue encoding, version 1"), anchored
+// at the very start of decided_reason, that no clerk-drafted note or
+// judge-written reason has any reason to begin with.
+//
+// A row whose decided_reason does not begin with the exact namespace --
+// every row decided before this shape existed, every row from the dead
+// bare-prefix shape, and any ordinary prose, mimicking or not -- decodes
+// to null. Wake-start reconciliation treats that as unrecoverable, logs
+// it, and leaves the row alone rather than guessing an action, per L-003
+// (never invent an artifact that is not there).
 export function encodeFlagReviewDecision(action: "collapse" | "remove" | "restore", reason: string): string {
-  return `${action}: ${reason}`;
+  return `mq1|${action}|${reason}`;
 }
 
+// Anchored to the FULL namespace ("^mq1\|<verb>\|"), not merely to a
+// recognised verb -- refuses the dead bare "<action>: <reason>" shape,
+// refuses ordinary prose that happens to start with an action word
+// ("collapse: ...", "remove: ...", "restore: ..." -- Codex's exact
+// reproduction), and refuses anything not starting with EXACTLY one of
+// the three verbs between the namespace's two pipes (wrong case, wrong
+// version tag, not anchored at the very start, a verb that merely
+// shares a prefix with a real one). The reason capture is greedy and
+// unanchored past the second pipe, so a reason containing its own colons
+// or pipes still round-trips whole.
 export function decodeFlagReviewDecision(decidedReason: string | null): { action: "collapse" | "remove" | "restore"; reason: string } | null {
   if (!decidedReason) return null;
-  const m = /^(collapse|remove|restore): ([\s\S]*)$/.exec(decidedReason);
+  const m = /^mq1\|(collapse|remove|restore)\|([\s\S]*)$/.exec(decidedReason);
   return m ? { action: m[1] as "collapse" | "remove" | "restore", reason: m[2] } : null;
 }
 
@@ -604,7 +632,16 @@ async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> 
   return results;
 }
 
-// D1-touching. The artifact a completed flag_review approval leaves:
+// D1-touching. What the identity_events log says has happened to a
+// flag_review's target since it was decided -- MATCH (the row's own
+// decoded action already landed: idempotent, nothing to do), DIFFERENT
+// (a later, DIFFERENT moderation action landed on the SAME target after
+// this row was decided -- Codex round-1 pre-gate review,
+// "later-restore-masks-stranded-remove": blindly replaying the stale
+// action now would silently overwrite a decision that has already
+// overtaken it), or NONE (nothing has happened to this target since --
+// replay as normal).
+//
 // moderateContent's commitWithModLog writes ONE identity_events row
 // (kind 'moderation', citizen_id the maintainer) atomically with the
 // target's mod_state UPDATE (society.ts's commitWithModLog batches
@@ -624,12 +661,42 @@ async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> 
 // decided_at is the time boundary (docs/BRIEF-WAKE-RECONCILIATION.md) --
 // an EARLIER moderation of the same target (before this decision was
 // even made) must never read as this decision's own artifact.
-async function flagReviewArtifactExists(env: Env, targetType: "post" | "comment", targetId: number, decidedAt: number): Promise<boolean> {
+//
+// Scans the whole result set once: an EXACT match anywhere in the
+// window wins outright (the artifact this row's own action would have
+// left exists -- idempotent skip, regardless of what else also
+// happened); failing that, the FIRST differing verb encountered
+// (ascending by created_at, so the earliest thing that overtook the
+// stranded approval) names the supersession. No match at all is NONE.
+type FlagReviewArtifactState = { state: "match" } | { state: "different"; laterAction: "collapse" | "remove" | "restore" } | { state: "none" };
+
+const VERB_TO_ACTION: Record<"collapsed" | "removed" | "restored", "collapse" | "remove" | "restore"> = {
+  collapsed: "collapse",
+  removed: "remove",
+  restored: "restore",
+};
+
+async function flagReviewArtifactState(
+  env: Env,
+  targetType: "post" | "comment",
+  targetId: number,
+  decodedAction: "collapse" | "remove" | "restore",
+  decidedAt: number,
+): Promise<FlagReviewArtifactState> {
   const { results } = await env.DB.prepare("SELECT detail FROM identity_events WHERE citizen_id = ? AND kind = 'moderation' AND created_at >= ? ORDER BY created_at ASC")
     .bind(MAINTAINER_ID, decidedAt)
     .all<{ detail: string | null }>();
-  const marker = new RegExp(`\\b(?:collapsed|removed|restored) ${targetType} ${targetId}\\b`);
-  return results.some((r) => r.detail != null && marker.test(r.detail));
+  const marker = new RegExp(`\\b(collapsed|removed|restored) ${targetType} ${targetId}\\b`);
+  let firstDifferent: "collapse" | "remove" | "restore" | null = null;
+  for (const r of results) {
+    if (r.detail == null) continue;
+    const m = marker.exec(r.detail);
+    if (!m) continue;
+    const action = VERB_TO_ACTION[m[1] as "collapsed" | "removed" | "restored"];
+    if (action === decodedAction) return { state: "match" };
+    if (firstDifferent === null) firstDifferent = action;
+  }
+  return firstDifferent ? { state: "different", laterAction: firstDifferent } : { state: "none" };
 }
 
 // D1-touching. The artifact a completed bulletin_draft approval leaves:
@@ -652,19 +719,28 @@ async function bulletinArtifactExists(env: Env, title: string, body: string, dec
 // D1-touching, exported for direct D1-harness testing (test/maintainer-judgment-d1.test.ts).
 //
 // Called at the start of every wake, BEFORE the new pending batch is
-// ever fetched (see runJudgmentWake below): finds every 'approved'
-// flag_review/bulletin_draft row whose execution artifact does not
-// exist yet, and drives it to completion through the SAME executors the
-// primary path uses -- healing the claim-then-die window a crash, or
-// the meta anomaly stampQueueRow's own comment describes, can leave
-// (HANDOVER Addendum 16; exchange/REVIEW_hardening2-fixespass_2026-08-10.md
-// CODEX round 3, CLAUDE round 4).
+// ever fetched AND before the ANTHROPIC_API_KEY gate (fixes pass,
+// exchange/REVIEW_wake-reconciliation_2026-08-11.md CLAUDE round 2,
+// "no-key-bypasses-reconciliation": this whole replay path is DB-only,
+// so a dry key must never silently skip it -- see runJudgmentWake below):
+// finds every 'approved' flag_review/bulletin_draft row whose execution
+// artifact does not exist yet, and drives it to completion through the
+// SAME executors the primary path uses -- healing the claim-then-die
+// window a crash, or the meta anomaly stampQueueRow's own comment
+// describes, can leave (HANDOVER Addendum 16;
+// exchange/REVIEW_hardening2-fixespass_2026-08-10.md CODEX round 3,
+// CLAUDE round 4).
 //
-// Idempotency: each row's own artifact-absence check is re-run here,
-// the same check the primary path's own "is there anything to do"
-// implicitly is -- an artifact already present is skipped silently, so
+// Idempotency: each row's own artifact check is re-run here, the same
+// check the primary path's own "is there anything to do" implicitly is
+// -- an EXACT-action artifact already present is skipped silently, so
 // running this twice (or twice concurrently) on the SAME already-done
-// row is a no-op both times.
+// row is a no-op both times. A DIFFERENT-action artifact is a distinct,
+// named exit, not an idempotency case: see flagReviewArtifactState and
+// the supersede re-stamp below (fixes pass, same source,
+// "later-restore-masks-stranded-remove") -- a stranded approval a later,
+// different decision has already overtaken is re-stamped rejected, once,
+// rather than either replayed blindly or silently masked forever.
 //
 // Residual concurrency window, disclosed rather than closed: the
 // artifact-absence check and the eventual write (moderateContent's
@@ -730,15 +806,37 @@ export async function reconcileApprovedQueue(
         const decoded = decodeFlagReviewDecision(row.decided_reason);
         if (!decoded) {
           // Unrecoverable: a pre-this-commit row (decided before the
-          // encoding existed), or a decided_reason that never got the
-          // prefix for some other reason. Never guess an action --
-          // L-003 names this exit: flagged, left at 'approved', visible
-          // in the run log, for a human to look at.
+          // mq1 encoding existed, or before this file's own dead
+          // predecessor bare-prefix shape existed), or a decided_reason
+          // that never got the prefix for some other reason. Never guess
+          // an action -- L-003 names this exit: flagged, left at
+          // 'approved', visible in the run log, for a human to look at.
           errors.push(`queue row ${row.id}: approved flag_review has no recoverable action in decided_reason; left for manual review`);
           continue;
         }
-        const exists = await flagReviewArtifactExists(env, targetType, row.target_id, row.decided_at);
-        if (exists) continue; // already executed; idempotent skip
+        const artifact = await flagReviewArtifactState(env, targetType, row.target_id, decoded.action, row.decided_at);
+        if (artifact.state === "match") continue; // already executed; idempotent skip
+        if (artifact.state === "different") {
+          // SUPERSEDED (Codex round-1 pre-gate review,
+          // "later-restore-masks-stranded-remove"): a later, DIFFERENT
+          // decision already landed on this same target after this
+          // approval was stranded. Blindly replaying the stale action now
+          // would silently overwrite a decision that has already
+          // overtaken it -- so this row is re-stamped rejected instead,
+          // the only terminal status the CHECK constraint offers without
+          // a migration, semantically honest as "the office declines to
+          // execute a stale approval a later decision overtook".
+          // requirePending: false, matching every other reconciliation
+          // re-stamp: the row is 'approved' now, not 'pending'. Once
+          // rejected, fetchReconcilableApprovedRows's own
+          // status = 'approved' filter excludes it forever -- it can
+          // never be re-selected or re-superseded by a later wake.
+          await stampQueueRow(env, row.id, "rejected", `superseded: a later ${artifact.laterAction} decision executed after this approval was stranded`, { requirePending: false });
+          actioned++;
+          continue;
+        }
+        // state === "none": nothing has happened to this target since
+        // the approval was stranded -- replay the recorded decision.
         await moderateContent(env, maintainerCitizen, targetType, row.target_id, decoded.action, decoded.reason);
         actioned++;
       } else if (row.kind === "bulletin_draft") {
@@ -785,18 +883,14 @@ export async function reconcileApprovedQueue(
 export async function runJudgmentWake(env: Env): Promise<void> {
   const startedAt = Date.now();
 
-  if (!env.ANTHROPIC_API_KEY) {
-    // "a dry key means visible sleep, never an error page" -- the build brief, verbatim.
-    await insertMaintainerRun(env, { kind: "judgment", startedAt, finishedAt: Date.now(), skippedReason: "no api key", overflowDropped: 0 });
-    return;
-  }
-
-  // L8: read once per wake. Moved ahead of the pendingAtStart gate below
-  // (was "only reached once there is genuinely something to act on") --
-  // wake-start reconciliation (part b) means a week with nothing NEW
-  // pending can still have an approved-but-unexecuted row from a
+  // L8: read once per wake, DB-only. Runs BEFORE the API-key gate below
+  // (fixes pass, exchange/REVIEW_wake-reconciliation_2026-08-11.md CLAUDE
+  // round 2, "no-key-bypasses-reconciliation") -- wake-start reconciliation
+  // (part b) means a week with nothing NEW pending and no
+  // ANTHROPIC_API_KEY can still have an approved-but-unexecuted row from a
   // previous wake's claim-then-die window, and healing it needs the same
-  // citizen record moderateContent/createPost always have needed.
+  // citizen record moderateContent/createPost always have needed, with no
+  // model call anywhere in the replay path.
   let maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>;
   try {
     maintainerCitizen = await loadMaintainerCitizen(env);
@@ -814,12 +908,31 @@ export async function runJudgmentWake(env: Env): Promise<void> {
   let runError: string | null = null;
 
   // (b) Wake-start reconciliation, BEFORE the new pending batch is ever
-  // fetched: heal any approved queue row a previous wake claimed but
-  // never finished executing (see reconcileApprovedQueue's own header).
-  // A poisoned row there logs into runError and is left for next time --
-  // it must never stop the pending batch below from running.
+  // fetched AND before the API-key gate immediately below: heal any
+  // approved queue row a previous wake claimed but never finished
+  // executing (see reconcileApprovedQueue's own header). A poisoned row
+  // there logs into runError and is left for next time -- it must never
+  // stop the pending batch below from running, and (this fix) it must
+  // never be silently skipped just because the key is dry.
   const reconciliation = await reconcileApprovedQueue(env, maintainerCitizen);
   if (reconciliation.error) runError = appendError(runError, reconciliation.error);
+
+  if (!env.ANTHROPIC_API_KEY) {
+    // "a dry key means visible sleep, never an error page" -- the build
+    // brief, verbatim -- now scoped to only the model half: reconciliation
+    // above already ran (DB-only, no model call), so this run row carries
+    // its results (actioned count, error) exactly as a keyed wake's does.
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      skippedReason: "no api key",
+      itemsActioned: reconciliation.actioned,
+      overflowDropped: 0,
+      error: runError ?? undefined,
+    });
+    return;
+  }
 
   let pendingAtStart: number;
   try {
