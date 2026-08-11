@@ -32,7 +32,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const SRC = join(import.meta.dirname, "..", "src");
 
@@ -104,10 +104,21 @@ interface Hit {
   file: string;
   pattern: string;
   match: string;
+  // The full source line the match sits on (gate finding 2,
+  // docs/REVIEW-HARDENING2-GATE-2026-08-10.md): allowlist entries are
+  // scoped to their own line's context, not the whole file, so a fifth
+  // instance planted elsewhere in an allowlisted FILE still fails the gate.
+  line: string;
 }
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function lineAt(text: string, index: number): string {
+  const start = text.lastIndexOf("\n", index - 1) + 1;
+  const end = text.indexOf("\n", index);
+  return text.slice(start, end === -1 ? text.length : end);
 }
 
 // The scanning core, pure -- text in, hits out. Kept free of the
@@ -132,20 +143,20 @@ function scanForResidue(file: string, text: string): Hit[] {
   const lower = text.toLowerCase();
 
   for (const m of text.matchAll(/#[0-9]{2,}\b/g)) {
-    hits.push({ file, pattern: "issue/PR numeric citation (#NN+)", match: m[0] });
+    hits.push({ file, pattern: "issue/PR numeric citation (#NN+)", match: m[0], line: lineAt(text, m.index) });
   }
 
   for (const handle of UPSTREAM_HANDLES) {
     const re = new RegExp(`\\b${escapeRegExp(handle)}\\b`, "gi");
     for (const m of text.matchAll(re)) {
-      hits.push({ file, pattern: "known upstream handle", match: m[0] });
+      hits.push({ file, pattern: "known upstream handle", match: m[0], line: lineAt(text, m.index) });
     }
   }
 
   for (const phrase of CITATION_PHRASES) {
     let idx = lower.indexOf(phrase);
     while (idx !== -1) {
-      hits.push({ file, pattern: "bare citation phrase", match: text.slice(idx, idx + phrase.length) });
+      hits.push({ file, pattern: "bare citation phrase", match: text.slice(idx, idx + phrase.length), line: lineAt(text, idx) });
       idx = lower.indexOf(phrase, idx + 1);
     }
   }
@@ -153,13 +164,13 @@ function scanForResidue(file: string, text: string): Hit[] {
   for (const phrase of INCIDENT_PHRASES) {
     let idx = lower.indexOf(phrase);
     while (idx !== -1) {
-      hits.push({ file, pattern: "known upstream incident phrase", match: text.slice(idx, idx + phrase.length) });
+      hits.push({ file, pattern: "known upstream incident phrase", match: text.slice(idx, idx + phrase.length), line: lineAt(text, idx) });
       idx = lower.indexOf(phrase, idx + 1);
     }
   }
 
   for (const m of text.matchAll(/1f916-ai/g)) {
-    hits.push({ file, pattern: "upstream org repo reference", match: m[0] });
+    hits.push({ file, pattern: "upstream org repo reference", match: m[0], line: lineAt(text, m.index) });
   }
 
   return hits;
@@ -168,7 +179,8 @@ function scanForResidue(file: string, text: string): Hit[] {
 // Explicit allowlist, from the exchange's own adjudication
 // (exchange/REVIEW_chaingate-followups_2026-08-09.md round 2) plus
 // docs/BRIEF-HARDENING-2.md commit 5's own named entries. Matched by
-// (file basename, exact matched substring), never by line number: a
+// (exact file basename, matched substring, line context), never by line
+// number: a
 // line-number allowlist would either silently stop protecting the right
 // line the moment the file is edited, or silently start exempting
 // whatever unrelated line drifted into that slot -- both are the exact
@@ -189,21 +201,41 @@ function scanForResidue(file: string, text: string): Hit[] {
 // Claude's own behaviour), so including them as tell-patterns would make
 // the gate too noisy to trust, exactly the failure mode a "sweep
 // everything" grep can get away with once but a standing gate cannot.
-const ALLOWLIST: Array<{ file: string; match: string }> = [
+// Narrowed by the gate's finding 2 (docs/REVIEW-HARDENING2-GATE-2026-08-10.md):
+// the previous shape -- `hit.file.endsWith(a.file)` with no line context --
+// exempted an entry's token ANYWHERE in the named file (a fifth instance
+// planted elsewhere in doc.ts passed silently, reproduced by the gate
+// reviewer), and `endsWith` let any future file whose basename merely ends
+// in "doc.ts" (src/apidoc.ts) inherit the exemption. Now: the basename must
+// match EXACTLY, and the matched hit's own source LINE must carry the
+// entry's declared context phrase -- the attribution wording itself for
+// doc.ts, the example-string framing for governance.ts. Honest boundary,
+// stated rather than papered over: line context is still lexical, so
+// residue deliberately planted on a line that also fakes the context
+// phrase would pass; what this closes is the reproduced silent-inheritance
+// class, not adversarial in-repo authorship, which no source scan
+// withstands (the committer is the trust boundary, per the gate's own
+// framing of what a standing control can and cannot promise).
+const ALLOWLIST: Array<{ file: string; match: string; lineContains: string }> = [
   // doc.ts's ON THE SOURCE section: deliberate, honest lineage
   // attribution ("forked from the original ... with thanks") -- the
-  // opposite of the L-002 defect, not an instance of it.
-  { file: "doc.ts", match: "1f916-ai" },
+  // opposite of the L-002 defect, not an instance of it. Scoped to the
+  // attribution line itself, not the whole served front door.
+  { file: "doc.ts", match: "1f916-ai", lineContains: "with thanks" },
   // governance.ts's PROPOSAL_TITLE_MAX comment: a hypothetical example
   // proposal id inside a title-length calculation, not a citation of
   // anything -- docs/BRIEF-HARDENING-2.md commit 5's own named
   // "governance.ts:446-class dismissed sites" (re-derived directly,
-  // not assumed: still exactly line 446 as of this commit).
-  { file: "governance.ts", match: "#999999" },
+  // not assumed: still exactly line 446 as of this commit). The context
+  // phrase is the length-calculation framing on the match's OWN line --
+  // the comment wraps mid-"Proposal #999999", a wrap the tightened gate
+  // itself surfaced on its first run, so the phrase before the wrap
+  // cannot be the anchor.
+  { file: "governance.ts", match: "#999999", lineContains: '#999999: " is 19 chars' },
 ];
 
 function isAllowlisted(hit: Hit): boolean {
-  return ALLOWLIST.some((a) => hit.file.endsWith(a.file) && hit.match.includes(a.match));
+  return ALLOWLIST.some((a) => basename(hit.file) === a.file && hit.match.includes(a.match) && hit.line.includes(a.lineContains));
 }
 
 test("L-002 gate: no src/ module carries the known CONTIGUOUS RAW-SOURCE upstream-residue tell patterns outside the explicit allowlist (I-008, docs/BRIEF-HARDENING-2.md commit 5; boundary narrowed by the review closeout, Fix 2)", () => {
@@ -284,6 +316,22 @@ const RESIDUE_CANDIDATES: Array<{ text: string; file: string; caught: boolean; n
     file: "society.ts",
     caught: true,
     note: "the upstream-org marker on a file OTHER than doc.ts, so the allowlist (scoped to doc.ts specifically) does not apply -- isolates the 1f916-ai check and proves the allowlist is file-scoped, not blanket",
+  },
+  // Gate finding 2's own two reproductions (docs/REVIEW-HARDENING2-GATE-2026-08-10.md),
+  // planted as standing fixtures exactly as the four real instances were:
+  // each isolates ONE of the two allowlist-narrowing changes, so neither
+  // can silently regress without the other noticing.
+  {
+    text: "// Incident numbering in this deployment follows the 1f916-ai tracker.",
+    file: "doc.ts",
+    caught: true,
+    note: "the gate reviewer's verbatim doc.ts plant -- allowlisted FILE, but the line lacks the attribution phrase, so the entry no longer covers it (isolates lineContains; pre-fix this passed 3/3 green)",
+  },
+  {
+    text: "forked from the original at https://github.com/1f916-ai/1f916 with thanks",
+    file: "apidoc.ts",
+    caught: true,
+    note: "the genuine attribution wording, but in a file whose basename merely ENDS in doc.ts -- exact-basename comparison refuses the inheritance endsWith allowed (isolates the basename change; pre-fix a src/apidoc.ts carrying this passed silently)",
   },
   // False positives this gate must NOT flag.
   {
