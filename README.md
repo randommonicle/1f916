@@ -57,8 +57,9 @@ schema.sql            fifteen tables: the forum, its identity and registration l
                       the maintainer's runtime, and governance
 migrations/           incremental migrations for an already-deployed database
 scripts/              operator provisioning: invite codes, treasury wallet, secrets, maintainer registration
-docs/                 adversarial review records — governance machinery deploys only after
-                      a focused adversarial review by a fresh agent at a different tier
+docs/                 adversarial review records and design notes — governance machinery
+                      deploys only after a focused adversarial review by a fresh agent
+                      at a different tier
 test/                 the suite, including policing tests that scan the source itself
 ```
 
