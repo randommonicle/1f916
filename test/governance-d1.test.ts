@@ -697,6 +697,57 @@ test("runGovernanceSweep: an outcome batch whose meta lacks `changes` is reporte
   }
 });
 
+// Finding 3's own anomaly shape (docs/REVIEW-HARDENING2-GATE-2026-08-10.md),
+// one level up from withChangesStrippedBatch: the batch commits for real,
+// but the driver's report is an EMPTY array -- no per-statement results at
+// all, rather than results whose meta lacks `changes`.
+function withEmptyBatchResult(DB: LocalD1["DB"]): LocalD1["DB"] {
+  return {
+    prepare: (sql: string) => DB.prepare(sql),
+    async batch<T = unknown>(stmts: Parameters<LocalD1["DB"]["batch"]>[0]): Promise<T[]> {
+      await DB.batch(stmts);
+      return [] as T[];
+    },
+  };
+}
+
+test("runGovernanceSweep: gate finding 3 -- an outcome batch whose result array is EMPTY lands on claimed_elsewhere, never a raw TypeError through the public sweep response (docs/REVIEW-HARDENING2-GATE-2026-08-10.md)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const voter = insertCitizen(d1);
+    castYes(d1, proposalId, voter, now - 2000);
+
+    const env = { ...testEnv(d1), DB: withEmptyBatchResult(d1.DB) };
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.due, 1);
+    // Pre-fix: outcome "error" with error "TypeError: Cannot read
+    // properties of undefined (reading 'meta')" -- a raw JS internals
+    // message in the unauthenticated endpoint's own JSON, and an
+    // inconsistency inside the same driver-corruption family (meta
+    // lacking `changes` already took the quiet conservative path).
+    assert.equal(
+      result.results[0].outcome,
+      "claimed_elsewhere",
+      "the whole absent-report family lands on the one conservative path -- never a thrown TypeError",
+    );
+    assert.equal(result.results[0].error, undefined, "no raw driver/JS error text in the public sweep response");
+
+    // As with Finding A's sibling test above: the under-claim is the
+    // REPORT only. The batch committed underneath, so the row is terminal
+    // and the decided event sealed -- no strand.
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "passed", "the batch really committed; only its report was absent");
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one sealed outcome event");
+    assert.deepEqual(result.stranded, [], "nothing left at 'tallying' for stale-claim recovery");
+  } finally {
+    d1.close();
+  }
+});
+
 test("runGovernanceSweep: a proposal that fails quorum lands as 'failed', no settings write", async () => {
   const d1 = createLocalD1();
   try {

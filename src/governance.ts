@@ -978,7 +978,15 @@ async function commitOutcome(
       // present) is already ordered ahead of the status UPDATE for the
       // identical reason; the log entry now follows the same rule.
       const [logRes] = await env.DB.batch([log.stmt, ...stateStmts]);
-      if (logRes.meta.changes !== 1) {
+      // Optional chaining is load-bearing (gate finding 3,
+      // docs/REVIEW-HARDENING2-GATE-2026-08-10.md): a driver returning an
+      // EMPTY results array -- the sibling of Finding A's absent-changes
+      // shape, one level up -- previously threw a raw TypeError HERE,
+      // after the batch had already committed, and that unsanitised
+      // message rode the sweep's public catch out of the unauthenticated
+      // POST /api/governance/sweep. Landing it on claimed_elsewhere puts
+      // the whole absent-report family on the one conservative path.
+      if (logRes?.meta?.changes !== 1) {
         // changes === 0 is the gate refusing: some other claimant already
         // moved this proposal off 'tallying' between our claim and this
         // batch, and stateStmts share the identical gate, so the whole
