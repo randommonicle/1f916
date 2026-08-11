@@ -256,6 +256,72 @@ test("castBallot: F5 -- when the sweep's gate refusal overlaps a ballot that ALS
   }
 });
 
+// The F3 driver anomaly, at the single-statement layer this time (the
+// batch-layer sibling is withChangesStrippedBatch below): the ballots
+// INSERT really executes against real SQLite, but its run() report comes
+// back with `changes` absent -- a driver that stops reporting, not a
+// write that stops writing. appendChainedGated then fails closed
+// (returns null, chain.ts F3) even though the row landed.
+function withChangesStrippedRun(DB: LocalD1["DB"], table: string): LocalD1["DB"] {
+  const insertPattern = new RegExp(`^\\s*INSERT INTO ${table}\\b`, "i");
+  const strip = (meta: Record<string, unknown>) => Object.fromEntries(Object.entries(meta).filter(([k]) => k !== "changes"));
+  return {
+    prepare: (sql: string) => {
+      const real = DB.prepare(sql);
+      if (!insertPattern.test(sql)) return real;
+      const wrapRun = (stmt: ReturnType<LocalD1["DB"]["prepare"]>) => ({
+        ...stmt,
+        bind: (...args: unknown[]) => wrapRun(stmt.bind(...args)),
+        async run() {
+          const result = (await stmt.run()) as { meta: Record<string, unknown> };
+          return { ...result, meta: strip(result.meta) } as never;
+        },
+      });
+      return wrapRun(real);
+    },
+    batch: (stmts) => DB.batch(stmts),
+  };
+}
+
+test("castBallot: gate finding 4 -- when the F3 anomaly makes the gate refuse a ballot that actually landed, the 409 does not cite this call's own write as an 'already cast' prior ballot (docs/REVIEW-HARDENING2-GATE-2026-08-10.md)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now + 3_600_000 });
+    const voter = insertCitizen(d1);
+
+    const env = { ...testEnv(d1), DB: withChangesStrippedRun(d1.DB, "ballots") };
+    await assert.rejects(
+      () => castBallot(env, { id: voter, created_at: now - 30 * 86_400_000 }, proposalId, "yes"),
+      (e: unknown) => {
+        assert.ok(e instanceof SocietyError && e.status === 409);
+        const err = e as SocietyError;
+        // Pre-fix, this message carried three false statements at once
+        // (the gate record's own reproduction): the proposal is open, the
+        // ballot WAS recorded, and the "already cast" clause cited the
+        // row this very call just wrote. The clause is the one F5 exists
+        // to make accurate, so it must not fire on the call's own write;
+        // the closure sentence's own inaccuracy under this anomaly is a
+        // separate, adjudicated non-change (gate finding 3's disposition:
+        // fail-closed reporting under a lying driver is the accepted
+        // conservative posture).
+        assert.doesNotMatch(err.message, /already cast/i, "the call's own write must never be served back as a prior ballot");
+        return true;
+      },
+    );
+
+    const { results } = await d1.DB.prepare("SELECT choice FROM ballots WHERE proposal_id = ? AND citizen_id = ?")
+      .bind(proposalId, voter)
+      .all<{ choice: string }>();
+    assert.equal(results.length, 1, "fixture sanity: the write really did land underneath the degraded report");
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "open", "fixture sanity: the proposal never left 'open' -- the refusal came from the degraded report, not a real closure");
+  } finally {
+    d1.close();
+  }
+});
+
 test("castBallot: two different citizens racing to vote on the same proposal both succeed, and the resulting chain is valid with neither vote lost (the two-writer append race, design doc §13 item 3)", async () => {
   const d1 = createLocalD1();
   try {

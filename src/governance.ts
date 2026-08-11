@@ -669,7 +669,7 @@ export async function castBallot(
   // (chain.ts, F4/hardening-2) closes that window with the identical 409,
   // zero wasted retries, rather than the four-attempt exhaustion this
   // pre-check alone once left as the fallback.
-  if (await hasExistingBallot(env, proposalId, citizen.id)) {
+  if ((await hasExistingBallot(env, proposalId, citizen.id)) != null) {
     throw new SocietyError(409, ALREADY_VOTED_MESSAGE);
   }
 
@@ -705,11 +705,22 @@ export async function castBallot(
     // about the (also true) cause. One SELECT, on this refusal path only:
     // the common case (proposal genuinely just closed, no prior ballot)
     // pays nothing extra.
-    const alreadyVoted = await hasExistingBallot(env, proposalId, citizen.id);
+    // Gate finding 4 (docs/REVIEW-HARDENING2-GATE-2026-08-10.md): under
+    // the F3 driver anomaly (`changes` absent while the write proceeds
+    // underneath), the gate's null can coexist with a ballot row this
+    // very call just wrote -- and the pre-fix clause then told the
+    // citizen they had "already cast a ballot", citing the call's own
+    // write as its own precedent. The row's cast stamp tells the cases
+    // apart: only a ballot cast at a DIFFERENT millisecond than this
+    // call's own `now` is genuinely prior. (A true prior ballot sharing
+    // the exact millisecond merely drops the clause -- conservative, the
+    // closure sentence stands either way.)
+    const prior = await hasExistingBallot(env, proposalId, citizen.id);
+    const genuinelyPrior = prior != null && prior.cast_at !== now;
     throw new SocietyError(
       409,
       `proposal ${proposalId} is no longer open for balloting: it was claimed for tallying while this ballot was in flight. Not recorded -- the tally already ran without it.${
-        alreadyVoted ? " You had also already cast a ballot on this proposal; only your original ballot counts." : ""
+        genuinelyPrior ? " You had also already cast a ballot on this proposal; only your original ballot counts." : ""
       }`,
     );
   }
@@ -720,10 +731,16 @@ export async function castBallot(
 // Shared by castBallot's pre-check (the common, sequential case) and its
 // post-refusal check (F5, hardening-2: the gate-refused case where the
 // citizen ALSO already voted) -- one SQL string, not two independently
-// typed copies that could drift.
-async function hasExistingBallot(env: Env, proposalId: number, citizenId: number): Promise<boolean> {
-  const existing = await env.DB.prepare("SELECT id FROM ballots WHERE proposal_id = ? AND citizen_id = ?").bind(proposalId, citizenId).first();
-  return existing != null;
+// typed copies that could drift. Returns the ballot's own cast_at, not a
+// bare boolean (gate finding 4, docs/REVIEW-HARDENING2-GATE-2026-08-10.md):
+// the post-refusal caller needs to distinguish a genuinely PRIOR ballot
+// from the row this very call just wrote under a driver-report anomaly,
+// and the cast stamp is what tells them apart.
+async function hasExistingBallot(env: Env, proposalId: number, citizenId: number): Promise<{ cast_at: number } | null> {
+  const existing = await env.DB.prepare("SELECT cast_at FROM ballots WHERE proposal_id = ? AND citizen_id = ?")
+    .bind(proposalId, citizenId)
+    .first<{ cast_at: number }>();
+  return existing;
 }
 
 // GET /api/proposals: public list, paginated in the citizens-census style
