@@ -1,9 +1,11 @@
 // Tests for the judge's pure logic: bulletin splitting, decision parsing
-// (the executor's own allowlist against a real batch), and the batch-loop
-// arithmetic (M3/M4). No network, no D1 -- fetchPendingQueueBatch/
-// countPendingQueue/stampQueueRow/runJudgmentWake itself are accepted as
-// manual/local-D1 coverage only, same acceptance as the rest of this
-// repo's D1-touching functions.
+// (the executor's own allowlist against a real batch), the batch-loop
+// arithmetic (M3/M4), and the flag-review decision encoding wake-start
+// reconciliation depends on. No network, no D1 here -- fetchPendingQueueBatch/
+// countPendingQueue/stampQueueRow are accepted as manual/local-D1
+// coverage only, same acceptance as the rest of this repo's D1-touching
+// functions; runJudgmentWake/executeJudgmentDecisions/reconcileApprovedQueue
+// DO have real local-D1 coverage now, in test/maintainer-judgment-d1.test.ts.
 //
 // Run: npm test
 
@@ -21,6 +23,8 @@ import {
   computeOverflowDropped,
   buildJudgmentPrompt,
   shapeTargetContent,
+  encodeFlagReviewDecision,
+  decodeFlagReviewDecision,
   type QueueRow,
   type JudgmentDecision,
 } from "../src/maintainer/judgment.ts";
@@ -396,6 +400,37 @@ test("bulletinDenyCheck: secret-harvesting shapes are refused (Opus re-review it
 
 test("bulletinDenyCheck: a raw 40-hex wallet address is refused", () => {
   assert.notEqual(bulletinDenyCheck("Note", "pay 0xD9E17995352EF13F9Ba467e2F36C7614A45e7011 directly"), null);
+});
+
+// ---------- encodeFlagReviewDecision / decodeFlagReviewDecision: wake-start reconciliation's only way to recover a stranded flag_review's action ----------
+
+test("encodeFlagReviewDecision/decodeFlagReviewDecision round-trip for all three actions", () => {
+  for (const action of ["collapse", "remove", "restore"] as const) {
+    const encoded = encodeFlagReviewDecision(action, "confirmed spam, take it down");
+    assert.equal(encoded, `${action}: confirmed spam, take it down`);
+    assert.deepEqual(decodeFlagReviewDecision(encoded), { action, reason: "confirmed spam, take it down" });
+  }
+});
+
+test("decodeFlagReviewDecision returns null for a decided_reason with no recognised action prefix (a pre-this-commit row) -- never guesses", () => {
+  assert.equal(decodeFlagReviewDecision("confirmed spam, take it down"), null);
+  assert.equal(decodeFlagReviewDecision("looked fine to the judge"), null);
+});
+
+test("decodeFlagReviewDecision returns null for null and empty decided_reason", () => {
+  assert.equal(decodeFlagReviewDecision(null), null);
+  assert.equal(decodeFlagReviewDecision(""), null);
+});
+
+test("decodeFlagReviewDecision rejects a word that merely starts with a valid action but is not one (no false match on a prefix)", () => {
+  assert.equal(decodeFlagReviewDecision("collapsed: already done, nothing to do"), null);
+  assert.equal(decodeFlagReviewDecision("removedly: not a real action"), null);
+});
+
+test("encodeFlagReviewDecision preserves a reason containing a colon (the split is anchored on the FIRST colon only)", () => {
+  const encoded = encodeFlagReviewDecision("remove", "spam: contains a promo link");
+  assert.equal(encoded, "remove: spam: contains a promo link");
+  assert.deepEqual(decodeFlagReviewDecision(encoded), { action: "remove", reason: "spam: contains a promo link" });
 });
 
 test("bulletinDenyCheck: an ordinary bulletin still passes after the additions", () => {

@@ -246,6 +246,51 @@ export function resolveExecution(item: QueueRow, decision: JudgmentDecision): Re
   return { status: "approved", reason: decision.reason, execute: null };
 }
 
+// ---------- pure: recovering a stranded flag_review's action (wake-start reconciliation) ----------
+
+// maintainer_queue has no column for the judge's decided action
+// (collapse/remove/restore) -- only status/decided_at/decided_reason
+// (free text) survive the claim stamp, and this commit adds no column
+// (docs/BRIEF-WAKE-RECONCILIATION.md, hard rule: no migration). Without
+// SOME persisted trace, a flag_review approval that a wake claimed but
+// never got to execute (a crash, or the meta anomaly stampQueueRow's own
+// comment describes) cannot be driven to completion later -- the action
+// is gone the moment the process is. So an approved flag_review's
+// decided_reason now carries its action as a machine-parseable prefix,
+// written by the SAME claim call that already writes decided_reason
+// (see executeJudgmentDecisions below). This is DELIBERATELY decoupled
+// from the human-readable reason moderateContent passes into the public
+// identity_events detail -- that stays exactly decision.reason,
+// unprefixed, never touched by this encoding. decided_reason itself is
+// not exposed on any public route (grepped `FROM maintainer_queue`
+// across src/ and mcp.ts), so this is a values-only change to an
+// existing column's content for one kind, not a schema change.
+//
+// A row approved before this commit shipped decodes to null (no
+// recognised prefix) -- wake-start reconciliation treats that as
+// unrecoverable, logs it, and leaves the row alone rather than guessing
+// an action, per L-003 (never invent an artifact that is not there).
+export function encodeFlagReviewDecision(action: "collapse" | "remove" | "restore", reason: string): string {
+  return `${action}: ${reason}`;
+}
+
+export function decodeFlagReviewDecision(decidedReason: string | null): { action: "collapse" | "remove" | "restore"; reason: string } | null {
+  if (!decidedReason) return null;
+  const m = /^(collapse|remove|restore): ([\s\S]*)$/.exec(decidedReason);
+  return m ? { action: m[1] as "collapse" | "remove" | "restore", reason: m[2] } : null;
+}
+
+// ---------- pure: run-error accumulation (loud catch, part a) ----------
+
+// "append to it if something else already wrote it -- one message per
+// failure mode" (docs/BRIEF-WAKE-RECONCILIATION.md). Used everywhere
+// runJudgmentWake sets its own runError, not only the new call site,
+// so an earlier failure (wake-start reconciliation, an earlier batch)
+// is never silently replaced by a later one in the same run row.
+function appendError(existing: string | null, addition: string): string {
+  return existing ? `${existing}; ${addition}` : addition;
+}
+
 // ---------- pure: prompt building ----------
 
 export const JUDGMENT_SYSTEM_PROMPT = `You are the judge of Commonhold, a public forum for AI agents. You run once a week. Your job is to review the queue the daily clerk drafted and decide, for each item, whether to approve or reject it. You do not act directly -- your decisions are executed by code afterward, through the same paths the maintainer's own moderation and posting tools already use.
@@ -439,13 +484,14 @@ async function stampQueueRow(env: Env, id: number, status: "approved" | "rejecte
 // maintainer's own name. Claiming first closes that window: the
 // conditional UPDATE is atomic, so at most one of two concurrent
 // attempts can ever see `claimed === true` for the same row.
-async function executeJudgmentDecisions(
+export async function executeJudgmentDecisions(
   env: Env,
   maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
   batchMap: Map<number, QueueRow>,
   decisions: JudgmentDecision[],
-): Promise<number> {
+): Promise<{ actioned: number; error: string | null }> {
   let actioned = 0;
+  const errors: string[] = [];
   for (const d of decisions) {
     const item = batchMap.get(d.queue_id)!;
     // H2: resolved BEFORE any claim or execution -- a deny-check hit on
@@ -455,11 +501,29 @@ async function executeJudgmentDecisions(
     // special case to get wrong.
     const resolved = resolveExecution(item, d);
 
+    // Wake-start reconciliation (reconcileApprovedQueue below) needs to
+    // recover WHICH action a claimed-but-never-executed flag_review
+    // approval decided; see encodeFlagReviewDecision's own header for
+    // why this is a prefix on decided_reason rather than a new column.
+    // moderateContent's own reason argument below stays resolved.reason,
+    // unprefixed -- only the claim's OWN stamp gets the encoded form.
+    const claimReason = resolved.execute?.kind === "moderate" ? encodeFlagReviewDecision(resolved.execute.action, resolved.reason) : resolved.reason;
+
     let claimed: boolean;
     try {
-      claimed = await stampQueueRow(env, d.queue_id, resolved.status, resolved.reason);
+      claimed = await stampQueueRow(env, d.queue_id, resolved.status, claimReason);
     } catch (e) {
+      // stampQueueRow's own UPDATE may have already committed before
+      // this throw (the meta anomaly
+      // exchange/REVIEW_hardening2-fixespass_2026-08-10.md CODEX round 3
+      // / CLAUDE round 4 traced: res.meta.changes dereferenced AFTER a
+      // successful UPDATE) -- this row's true status is unknown to US
+      // now, but wake-start reconciliation picks up any row this left at
+      // 'approved' with no artifact on the next wake. Control flow
+      // unchanged (continue); loudness is the change (part a): this must
+      // reach the run row's error field, not only a console log.
       console.log(JSON.stringify({ level: "error", event: "judgment_stamp_failed", queue_id: d.queue_id, message: String(e) }));
+      errors.push(`queue row ${d.queue_id}: claim failed after its UPDATE may have already committed: ${e instanceof Error ? e.message : String(e)}`);
       continue; // never claimed, never executed, never counted here
     }
     if (!claimed) continue; // lost the race to another process; that process counts it, not this one
@@ -493,12 +557,213 @@ async function executeJudgmentDecisions(
       try {
         await stampQueueRow(env, d.queue_id, "rejected", failureReason, { requirePending: false });
         actioned++;
+        // Deliberately NOT pushed into errors: this row already carries
+        // its own honest, public explanation in decided_reason -- the
+        // row IS the message. Loudness here would double-report the
+        // same event rather than surface a NEW one (one message per
+        // failure mode).
       } catch (stampError) {
+        // Even the honest re-stamp failed: the row is truly stuck at
+        // 'approved' now, with an execution failure nobody wrote down
+        // anywhere public. This IS a new failure mode -- loud (part a).
         console.log(JSON.stringify({ level: "error", event: "judgment_stamp_failed", queue_id: d.queue_id, message: String(stampError) }));
+        errors.push(`queue row ${d.queue_id}: execution failed AND the honest re-stamp also failed: ${stampError instanceof Error ? stampError.message : String(stampError)}`);
       }
     }
   }
-  return actioned;
+  return { actioned, error: errors.length > 0 ? errors.join("; ") : null };
+}
+
+// ---------- wake-start reconciliation (part b) ----------
+
+// The shape fetchReconcilableApprovedRows reads back -- a subset of
+// QueueRow's columns (no target_content/target_mod_state: those are
+// computed fresh for the JUDGE's prompt, not stored, and reconciliation
+// never re-judges, only re-executes an already-recorded decision) plus
+// decided_at/decided_reason, which QueueRow itself never carries.
+interface ReconcileRow {
+  id: number;
+  kind: QueueKind;
+  target_type: "post" | "comment" | "citizen" | null;
+  target_id: number | null;
+  note: string;
+  decided_at: number | null;
+  decided_reason: string | null;
+}
+
+// D1-touching. Only the two kinds whose approval executes anything
+// (resolveExecution's flag_review and bulletin_draft branches) --
+// bookkeeping_note/registration_check are terminal at 'approved' by
+// construction (design doc S10.1/S10.3: observational only), excluded
+// here by the query itself, never merely by the loop below skipping an
+// unhandled kind.
+async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') ORDER BY decided_at ASC",
+  ).all<ReconcileRow>();
+  return results;
+}
+
+// D1-touching. The artifact a completed flag_review approval leaves:
+// moderateContent's commitWithModLog writes ONE identity_events row
+// (kind 'moderation', citizen_id the maintainer) atomically with the
+// target's mod_state UPDATE (society.ts's commitWithModLog batches
+// both) -- so the identity_events row IS the artifact; checking for it
+// also proves the mod_state write landed, without needing a second,
+// separate check. detail is exactly one of three shapes, moderateContent's
+// own construction: "removed <type> <id>: <reason>", "collapsed <type>
+// <id>: <reason>", "restored <type> <id> to visible" -- matched here on
+// the verb-plus-word-bounded-target shape, not merely "<type> <id>": a
+// bulletin post ALSO writes a kind='moderation' row (createPost's own
+// logModeration call, "bulletin post <id> (cap-exempt, auto-pinned)"),
+// and a bare "<type> <id>" marker would false-positive match THAT log
+// entry whenever a bulletin's own post id happens to coincide with some
+// OTHER row's flagged target id -- found exactly this way, by a failing
+// idempotency test, not reasoned out in advance. \b still does its job
+// against "post 42" vs "post 429" (a plain LIKE '%post 42%' would not).
+// decided_at is the time boundary (docs/BRIEF-WAKE-RECONCILIATION.md) --
+// an EARLIER moderation of the same target (before this decision was
+// even made) must never read as this decision's own artifact.
+async function flagReviewArtifactExists(env: Env, targetType: "post" | "comment", targetId: number, decidedAt: number): Promise<boolean> {
+  const { results } = await env.DB.prepare("SELECT detail FROM identity_events WHERE citizen_id = ? AND kind = 'moderation' AND created_at >= ? ORDER BY created_at ASC")
+    .bind(MAINTAINER_ID, decidedAt)
+    .all<{ detail: string | null }>();
+  const marker = new RegExp(`\\b(?:collapsed|removed|restored) ${targetType} ${targetId}\\b`);
+  return results.some((r) => r.detail != null && marker.test(r.detail));
+}
+
+// D1-touching. The artifact a completed bulletin_draft approval leaves:
+// the maintainer's own post, title+body exactly as splitBulletinDraft
+// resolves them (createPost stores title.trim() -- already trimmed by
+// splitBulletinDraft -- and body as given, always a string for a
+// bulletin). Matches on the resolved text directly rather than
+// recomputing createPost's own dupe_hash: a different question
+// (createPost's hash answers "is this near-identical to anything
+// recent", a ROLLING window; this answers "did THIS queue row's draft
+// already get posted since ITS OWN decided_at") deserves its own query,
+// not a second place computing the same hash for a different purpose.
+async function bulletinArtifactExists(env: Env, title: string, body: string, decidedAt: number): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT id FROM posts WHERE citizen_id = ? AND title = ? AND body = ? AND created_at >= ? LIMIT 1")
+    .bind(MAINTAINER_ID, title, body, decidedAt)
+    .first();
+  return !!row;
+}
+
+// D1-touching, exported for direct D1-harness testing (test/maintainer-judgment-d1.test.ts).
+//
+// Called at the start of every wake, BEFORE the new pending batch is
+// ever fetched (see runJudgmentWake below): finds every 'approved'
+// flag_review/bulletin_draft row whose execution artifact does not
+// exist yet, and drives it to completion through the SAME executors the
+// primary path uses -- healing the claim-then-die window a crash, or
+// the meta anomaly stampQueueRow's own comment describes, can leave
+// (HANDOVER Addendum 16; exchange/REVIEW_hardening2-fixespass_2026-08-10.md
+// CODEX round 3, CLAUDE round 4).
+//
+// Idempotency: each row's own artifact-absence check is re-run here,
+// the same check the primary path's own "is there anything to do"
+// implicitly is -- an artifact already present is skipped silently, so
+// running this twice (or twice concurrently) on the SAME already-done
+// row is a no-op both times.
+//
+// Residual concurrency window, disclosed rather than closed: the
+// artifact-absence check and the eventual write (moderateContent's
+// mod_state UPDATE + identity_events INSERT, or createPost's own INSERT)
+// are not one atomic step -- two judgment invocations racing on the SAME
+// approved row could both see "no artifact" and both execute.
+// runJudgmentWake is called from exactly one place, scheduled()'s
+// dispatch on JUDGMENT_CRON (src/index.ts, schedule.ts) -- no HTTP route
+// or duty-officer path calls it -- so the only realistic trigger for an
+// overlap is a platform-level retry landing while a very slow prior
+// invocation is still running, not routine concurrent use. The worst
+// case on that rare overlap is bounded, not unsafe: a duplicate
+// identity_events log line for a flag_review whose mod_state UPDATE is
+// itself idempotent (unconditional `SET mod_state = ?`; the second
+// write matches the first), or, for a bulletin, createPost's own
+// pre-existing dupe_hash guard (the same one the primary path already
+// relies on, which the ordinary window this reconciliation runs in
+// almost always still covers) refusing the second INSERT. No new lock
+// is added for this: a schema-backed one is out of this commit's
+// no-migration constraint, and the primary claim path's own conditional
+// UPDATE already carries the equivalent residual risk for the same
+// reason (L2's own comment on stampQueueRow above).
+//
+// A row that fails reconciliation (a throw, or an unrecoverable decoded
+// action) logs into the returned error and is left for the next wake --
+// one poisoned row must never starve the office, so a per-row try/catch
+// keeps the loop going rather than letting one throw abort the rest.
+export async function reconcileApprovedQueue(
+  env: Env,
+  maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
+): Promise<{ actioned: number; error: string | null }> {
+  let rows: ReconcileRow[];
+  try {
+    rows = await fetchReconcilableApprovedRows(env);
+  } catch (e) {
+    return { actioned: 0, error: `wake-start reconciliation failed while reading approved queue rows: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  let actioned = 0;
+  const errors: string[] = [];
+
+  for (const row of rows) {
+    try {
+      if (row.decided_at == null) {
+        // Should not happen: stampQueueRow always sets decided_at
+        // alongside status in the same UPDATE, and this query only ever
+        // selects status = 'approved'. Loud, not silent -- and left
+        // alone rather than guessing a time boundary in either direction.
+        errors.push(`queue row ${row.id}: approved with no decided_at (should not happen); left for manual review`);
+        continue;
+      }
+
+      if (row.kind === "flag_review") {
+        const targetType = row.target_type === "post" || row.target_type === "comment" ? row.target_type : null;
+        if (!targetType || row.target_id == null) {
+          // Structurally should not happen: resolveExecution only ever
+          // produces a moderate execution for a real post/comment
+          // target, so an approved flag_review reaching here without
+          // one means something upstream is already broken.
+          errors.push(`queue row ${row.id}: approved flag_review has no valid post/comment target (target_type=${row.target_type}, target_id=${row.target_id})`);
+          continue;
+        }
+        const decoded = decodeFlagReviewDecision(row.decided_reason);
+        if (!decoded) {
+          // Unrecoverable: a pre-this-commit row (decided before the
+          // encoding existed), or a decided_reason that never got the
+          // prefix for some other reason. Never guess an action --
+          // L-003 names this exit: flagged, left at 'approved', visible
+          // in the run log, for a human to look at.
+          errors.push(`queue row ${row.id}: approved flag_review has no recoverable action in decided_reason; left for manual review`);
+          continue;
+        }
+        const exists = await flagReviewArtifactExists(env, targetType, row.target_id, row.decided_at);
+        if (exists) continue; // already executed; idempotent skip
+        await moderateContent(env, maintainerCitizen, targetType, row.target_id, decoded.action, decoded.reason);
+        actioned++;
+      } else if (row.kind === "bulletin_draft") {
+        const { title, body } = splitBulletinDraft(row.note);
+        const denyReason = bulletinDenyCheck(title, body);
+        if (denyReason) {
+          // Matches the primary path exactly (H2): a deny hit flips the
+          // row to rejected with the honest stamp, never posts. The row
+          // is 'approved' now, not 'pending' -- requirePending: false,
+          // same as the primary path's own execution-failure re-stamp.
+          await stampQueueRow(env, row.id, "rejected", `deny-check: ${denyReason}`, { requirePending: false });
+          actioned++;
+          continue;
+        }
+        const exists = await bulletinArtifactExists(env, title, body, row.decided_at);
+        if (exists) continue; // already posted; idempotent skip
+        await createPost(env, maintainerCitizen, title, body, null, true);
+        actioned++;
+      }
+    } catch (e) {
+      errors.push(`queue row ${row.id} (${row.kind}): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  return { actioned, error: errors.length > 0 ? errors.join("; ") : null };
 }
 
 // ---------- the wake itself ----------
@@ -512,7 +777,11 @@ async function executeJudgmentDecisions(
 // itemsActioned accumulate across every batch into the ONE runs row this
 // wake writes. overflow_dropped is the true remaining backlog
 // (computeOverflowDropped), not the old single-batch LIMIT+1
-// approximation.
+// approximation -- computed from the BATCH LOOP's own actioned count
+// only (batchItemsActioned), never the reconciled count below: overflow
+// is specifically about the pending cohort pendingAtStart measured, and
+// a reconciled row was never part of it (reconcileApprovedQueue selects
+// status = 'approved', never 'pending').
 export async function runJudgmentWake(env: Env): Promise<void> {
   const startedAt = Date.now();
 
@@ -522,37 +791,12 @@ export async function runJudgmentWake(env: Env): Promise<void> {
     return;
   }
 
-  let pendingAtStart: number;
-  try {
-    pendingAtStart = await countPendingQueue(env);
-  } catch (e) {
-    await insertMaintainerRun(env, {
-      kind: "judgment",
-      startedAt,
-      finishedAt: Date.now(),
-      overflowDropped: 0,
-      error: `failed while counting the pending queue: ${e instanceof Error ? e.message : String(e)}`,
-    });
-    return;
-  }
-
-  if (pendingAtStart === 0) {
-    await insertMaintainerRun(env, {
-      kind: "judgment",
-      startedAt,
-      finishedAt: Date.now(),
-      skippedReason: "nothing pending",
-      tokensIn: 0,
-      tokensOut: 0,
-      costEstimateCents: 0,
-      itemsActioned: 0,
-      overflowDropped: 0,
-    });
-    return;
-  }
-
-  // L8: read once per wake, not a skip-day cost -- only reached once
-  // there is genuinely something to act on.
+  // L8: read once per wake. Moved ahead of the pendingAtStart gate below
+  // (was "only reached once there is genuinely something to act on") --
+  // wake-start reconciliation (part b) means a week with nothing NEW
+  // pending can still have an approved-but-unexecuted row from a
+  // previous wake's claim-then-die window, and healing it needs the same
+  // citizen record moderateContent/createPost always have needed.
   let maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>;
   try {
     maintainerCitizen = await loadMaintainerCitizen(env);
@@ -567,19 +811,60 @@ export async function runJudgmentWake(env: Env): Promise<void> {
     return;
   }
 
+  let runError: string | null = null;
+
+  // (b) Wake-start reconciliation, BEFORE the new pending batch is ever
+  // fetched: heal any approved queue row a previous wake claimed but
+  // never finished executing (see reconcileApprovedQueue's own header).
+  // A poisoned row there logs into runError and is left for next time --
+  // it must never stop the pending batch below from running.
+  const reconciliation = await reconcileApprovedQueue(env, maintainerCitizen);
+  if (reconciliation.error) runError = appendError(runError, reconciliation.error);
+
+  let pendingAtStart: number;
+  try {
+    pendingAtStart = await countPendingQueue(env);
+  } catch (e) {
+    runError = appendError(runError, `failed while counting the pending queue: ${e instanceof Error ? e.message : String(e)}`);
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      itemsActioned: reconciliation.actioned,
+      overflowDropped: 0,
+      error: runError,
+    });
+    return;
+  }
+
+  if (pendingAtStart === 0) {
+    await insertMaintainerRun(env, {
+      kind: "judgment",
+      startedAt,
+      finishedAt: Date.now(),
+      skippedReason: "nothing pending",
+      tokensIn: 0,
+      tokensOut: 0,
+      costEstimateCents: 0,
+      itemsActioned: reconciliation.actioned,
+      overflowDropped: 0,
+      error: runError ?? undefined,
+    });
+    return;
+  }
+
   let tokensIn = 0;
   let tokensOut = 0;
   let costEstimateCents = 0;
-  let itemsActioned = 0;
+  let batchItemsActioned = 0;
   let batchesRun = 0;
-  let runError: string | null = null;
 
   while (true) {
     let batchRows: QueueRow[];
     try {
       batchRows = await fetchPendingQueueBatch(env, JUDGMENT_QUEUE_CAP);
     } catch (e) {
-      runError = `failed while reading batch ${batchesRun + 1} of the queue: ${e instanceof Error ? e.message : String(e)}`;
+      runError = appendError(runError, `failed while reading batch ${batchesRun + 1} of the queue: ${e instanceof Error ? e.message : String(e)}`);
       break;
     }
     batchesRun++;
@@ -593,7 +878,7 @@ export async function runJudgmentWake(env: Env): Promise<void> {
     costEstimateCents += estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens);
 
     if (!result.ok) {
-      runError = `model call failed on batch ${batchesRun} (stop_reason: ${result.stopReason}): ${result.error}`;
+      runError = appendError(runError, `model call failed on batch ${batchesRun} (stop_reason: ${result.stopReason}): ${result.error}`);
       break;
     }
 
@@ -601,16 +886,19 @@ export async function runJudgmentWake(env: Env): Promise<void> {
     try {
       decisions = parseJudgmentDecisions(result.text, batchMap);
     } catch (e) {
-      runError = `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason}, batch ${batchesRun})`;
+      runError = appendError(runError, `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason}, batch ${batchesRun})`);
       break;
     }
 
-    itemsActioned += await executeJudgmentDecisions(env, maintainerCitizen, batchMap, decisions);
+    const executed = await executeJudgmentDecisions(env, maintainerCitizen, batchMap, decisions);
+    batchItemsActioned += executed.actioned;
+    if (executed.error) runError = appendError(runError, executed.error);
 
     if (!shouldFetchNextBatch(batchRows.length, batchesRun, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_BATCHES)) break;
   }
 
-  const overflowDropped = computeOverflowDropped(pendingAtStart, itemsActioned);
+  const overflowDropped = computeOverflowDropped(pendingAtStart, batchItemsActioned);
+  const itemsActioned = reconciliation.actioned + batchItemsActioned;
   try {
     await insertMaintainerRun(env, {
       kind: "judgment",
