@@ -958,7 +958,7 @@ test("F-3 ruling (a), artifact PRESENT: a pre-encoding row whose target already 
     assert.equal(result.error, null, "PRESENT is silent -- the public record already carries the true outcome, retiring the row is bookkeeping, not news");
     const row = getQueueRow(d1, queueId);
     assert.equal(row.status, "rejected");
-    assert.equal(row.decided_reason, "completed pre-encoding: confirmed spam, take it down", "the old reason is preserved after the prefix, not discarded");
+    assert.equal(row.decided_reason, "retired pre-encoding (artifact present): confirmed spam, take it down", "the old reason is preserved after the prefix, not discarded");
   } finally {
     d1.close();
   }

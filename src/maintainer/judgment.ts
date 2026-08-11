@@ -826,13 +826,22 @@ async function bulletinArtifactExists(env: Env, title: string, body: string, dec
 // or duty-officer path calls it -- so the only realistic trigger for an
 // overlap is a platform-level retry landing while a very slow prior
 // invocation is still running, not routine concurrent use. The worst
-// case on that rare overlap is bounded, not unsafe: a duplicate
-// identity_events log line for a flag_review whose mod_state UPDATE is
-// itself idempotent (unconditional `SET mod_state = ?`; the second
-// write matches the first), or, for a bulletin, createPost's own
+// case on that rare overlap (re-stated per the D-018 gate's F-6 -- the
+// original analysis predated the supersede branch): for SAME-verb rows,
+// a duplicate identity_events log line for a flag_review whose mod_state
+// UPDATE is itself idempotent (unconditional `SET mod_state = ?`; the
+// second write matches the first), or, for a bulletin, createPost's own
 // pre-existing dupe_hash guard (the same one the primary path already
 // relies on, which the ordinary window this reconciliation runs in
-// almost always still covers) refusing the second INSERT. No new lock
+// almost always still covers) refusing the second INSERT. For
+// DIFFERENT-verb rows on one target, an overlapping invocation's fresh
+// replay event could additionally be read by the other invocation as a
+// superseding artifact and terminally re-stamp a row that was merely
+// in-flight -- unrecoverable rather than duplicated. That heavier worst
+// case is accepted on the same verified ground as the lighter one: the
+// single weekly cron invocation path above means the overlap cannot
+// occur on the schedule, only on a platform retry against a >minutes
+// hang, and the D-018 gate's F-6 ruled the disposition stands. No new lock
 // is added for this: a schema-backed one is out of this commit's
 // no-migration constraint, and the primary claim path's own conditional
 // UPDATE already carries the equivalent residual risk for the same
@@ -898,18 +907,21 @@ export async function reconcileApprovedQueue(
           // moderation artifact since decided_at.
           const artifactExists = await anyModerationArtifactExists(env, targetType, row.target_id, row.decided_at);
           if (artifactExists) {
-            // PRESENT: the act already happened -- this row was decided
-            // and executed before the mq1 encoding existed to record
-            // which action, so its plain-text decided_reason was never
-            // going to decode. The public record (identity_events)
-            // already carries the true outcome, so retiring the row here
-            // is bookkeeping, not news -- silent on the run row (console
-            // log only, no error). SILENT still means RE-STAMPED, though:
-            // leaving it at 'approved' un-re-stamped would mean it keeps
-            // being selected and re-checked every wake forever, silence
-            // or not.
+            // PRESENT: SOME moderation act touched this target after the
+            // row was decided -- possibly this row's own pre-mq1
+            // execution, possibly a different later decision (the
+            // re-gate's R-1: with no decodable action there is no way to
+            // tell which, so the stamp below claims retirement, not
+            // completion). Either way no code could replay this row
+            // correctly, the original prose reason is preserved after the
+            // prefix, and the public record (identity_events) carries
+            // whatever truly happened -- so retiring it is bookkeeping,
+            // silent on the run row (console log only, no error). SILENT
+            // still means RE-STAMPED, though: leaving it at 'approved'
+            // un-re-stamped would mean it keeps being selected and
+            // re-checked every wake forever, silence or not.
             console.log(JSON.stringify({ level: "info", event: "judgment_reconcile_retired_pre_encoding", queue_id: row.id }));
-            const stamped = await stampQueueRow(env, row.id, "rejected", `completed pre-encoding: ${row.decided_reason ?? ""}`, { requirePending: false });
+            const stamped = await stampQueueRow(env, row.id, "rejected", `retired pre-encoding (artifact present): ${row.decided_reason ?? ""}`, { requirePending: false });
             if (stamped) actioned++;
           } else {
             // ABSENT: no artifact exists anywhere for this target -- there
