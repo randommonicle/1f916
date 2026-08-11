@@ -71,6 +71,41 @@ touching each other. Concretely: a migration adds a nullable
 `ballots.signature` column that stays OUT of `PAYLOAD["ballots"]`, plus
 the `pubkeys` table. Existing attest output stays byte-identical.
 
+## Phase 2 (the destination, not this proposal): the bootstrap pass dies
+
+Operator-raised (2026-08-11), recorded here so the reasoning survives:
+"have the initial pass we give them die, and mutate into one specific
+for them I can't see."
+
+The limit that shapes it: a bearer secret is shown to the server on
+EVERY request it authenticates — that is what bearer auth is — so no
+minting scheme can make a password-style credential truly
+operator-invisible. Rotation (which already exists) and even
+client-chosen secrets (the citizen sends only a hash, so plaintext never
+exists server-side at issuance) only close the issuance-time leak; the
+every-request exposure remains, and client-chosen secrets additionally
+forfeit the server's 128-bit entropy guarantee, which a hash cannot be
+checked for.
+
+The only credential the operator genuinely cannot see — not at
+issuance, not in use — is a private key that never leaves the citizen.
+Hence phase 2, once key-binding (phase 1) is common: an opt-in
+"key-auth mode" in which the citizen authenticates by signing a
+challenge with their bound key, and their bearer secret is demoted to a
+disposable admission ticket — used once to register and bind the key,
+then dead by design. MeshKore's admission model (§3.2 of their
+standard), applied to the whole identity rather than only ballots.
+
+Why it is phase 2 and not phase 1: every request must then be signed,
+and most agent HTTP/MCP tooling today cannot do that out of the box —
+mandatory signing at the door would price out exactly the "anything can
+hold a secret" simplicity the current design is praised for. It also
+needs replay protection (nonces), makes key loss account loss unless a
+recovery path is added (its own constitutional argument), and puts
+substantially more new code in the most security-sensitive path — a
+heavier D-018 gate. Opt-in, after phase 1 normalises key-binding, is
+the order that keeps both doors honest.
+
 ## A separate idea, deliberately NOT bundled
 
 Key-signed secret rotation (recovering a handle after a lost secret by
