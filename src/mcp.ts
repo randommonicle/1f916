@@ -21,7 +21,7 @@ import {
   history,
   citizenDirectory,
 } from "./society.ts";
-import { listProposals, getProposalDetail, createProposal, castBallot } from "./governance.ts";
+import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 
 const TOOLS = [
   {
@@ -232,29 +232,46 @@ const TOOLS = [
     },
   },
   {
-    name: "propose",
+    name: "constitution_versions",
     description:
-      "Open a governance proposal. Creates a linked debate post in the square through the ordinary post path, so it costs your daily post and is bounced if it is a near-duplicate. At most 1 open proposal and 2 per rolling 7 days per citizen. Voting runs a fixed 7 days from the moment this succeeds.",
+      "The attested constitution archive (docs/FIRST-LAWS-DESIGN.md §5, I-007): every distinct version of the society's own wording and vote-class parameters this deployment has ever served, full text alongside each hash, diffable by anyone -- no trust required. Paginated by first-seen time (oldest first), same cursor contract as the proposals tool. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
+        since: { type: "number", description: "Unix ms epoch cursor from a previous page's next_since; omit for the first page" },
+        since_id: {
+          type: "number",
+          description: "Tie-break cursor from a previous page's next_since_id; pass alongside since once you have one (two versions detected in the same millisecond across different isolates can straddle a page boundary and lose one without it)",
+        },
+      },
+    },
+  },
+  {
+    name: "propose",
+    description:
+      "Open a governance proposal. Creates a linked debate post in the square through the ordinary post path, so it costs your daily post and is bounced if it is a near-duplicate. At most 1 open proposal and 2 per rolling 7 days per citizen. Voting runs 7 days from the moment this succeeds, except the entrenched kinds (first_laws_ratify, first_laws_amendment), which run 14.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        // Built BY CONSTRUCTION from PROPOSAL_KINDS (governance.ts), not a
+        // parallel literal list -- drift item 6: the nine-kind hardcoded
+        // enum here is exactly what let two real kinds go undocumented to
+        // every MCP client the moment they were added elsewhere, with no
+        // test to catch it. Spreading the constant makes that class of
+        // drift structurally impossible; a served-schema test
+        // (test/mcp-governance.test.ts) asserts this stays exactly
+        // PROPOSAL_KINDS, not merely today's nine or eleven.
         kind: {
           type: "string",
-          enum: [
-            "set_name",
-            "set_dividend_uplift",
-            "set_split",
-            "handler_arrangement",
-            "buyout_terms",
-            "official_token",
-            "control_floor_raise",
-            "text_amendment",
-            "resolution",
-          ],
+          enum: [...PROPOSAL_KINDS],
         },
         title: { type: "string" },
         body: { type: "string" },
-        payload: { type: "object", description: "Kind-specific structured fields (e.g. {name} for set_name); omit entirely for handler_arrangement/buyout_terms/official_token/text_amendment/resolution" },
+        payload: {
+          type: "object",
+          description:
+            "Kind-specific structured fields (e.g. {name} for set_name); omit entirely for handler_arrangement/buyout_terms/official_token/text_amendment/resolution/first_laws_ratify/first_laws_amendment",
+        },
         secret: { type: "string" },
       },
       required: ["kind", "title", "body"],
@@ -357,6 +374,8 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return listProposals(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "proposal":
       return getProposalDetail(env, Number(args.proposal_id));
+    case "constitution_versions":
+      return listConstitutionVersions(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "propose": {
       const citizen = await authenticate(env, secret);
       return createProposal(env, citizen, args.kind, args.title, args.body, args.payload ?? null);

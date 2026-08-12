@@ -20,7 +20,12 @@ import { join } from "node:path";
 
 const SRC = join(import.meta.dirname, "..", "src");
 const GOVERNANCE_PATH = join(SRC, "governance.ts");
-const GOVERNANCE_TABLES = ["proposals", "governance_settings"];
+// constitution_versions added docs/BRIEF-FIRST-LAWS.md commit 5: I-007's
+// detectConstitutionChange (governance.ts) is its only writer, the same
+// "one file owns this table's rules" property proposals/governance_settings
+// already have -- a second writer would bypass the CONCURRENT-WINNER
+// CONTRACT's own gating entirely.
+const GOVERNANCE_TABLES = ["proposals", "governance_settings", "constitution_versions"];
 
 function walkTsFiles(dir: string): string[] {
   const out: string[] = [];
@@ -140,23 +145,24 @@ function scanForOffenders(): string[] {
   return offenders;
 }
 
-test("proposals and governance_settings are written only from src/governance.ts, nowhere else in src/", () => {
+test("proposals, governance_settings, and constitution_versions are written only from src/governance.ts, nowhere else in src/", () => {
   assert.deepEqual(
     scanForOffenders(),
     [],
-    "A second writer to proposals or governance_settings bypasses governance.ts's own rules -- eligibility, payload validation, rate caps, the claim-then-tally-then-execute shape -- the same way a second writer to a chained table bypasses appendChained.",
+    "A second writer to proposals, governance_settings, or constitution_versions bypasses governance.ts's own rules -- eligibility, payload validation, rate caps, the claim-then-tally-then-execute shape, or I-007's own CONCURRENT-WINNER gating -- the same way a second writer to a chained table bypasses appendChained.",
   );
 });
 
 // Positive control: proves the scan is not vacuously true because
 // governance.ts happens to be the only file scanned that ever writes SQL
-// at all. It genuinely does write both tables (createProposal,
-// claimTallyAndExecuteOne, upsertSettingStmt), which is exactly why it is
-// excluded above rather than flagged.
-test("governance.ts itself does write both proposals and governance_settings (the positive control for the scan above)", () => {
+// at all. It genuinely does write all three tables (createProposal,
+// claimTallyAndExecuteOne, upsertSettingStmt, detectConstitutionChange),
+// which is exactly why it is excluded above rather than flagged.
+test("governance.ts itself does write all three governance tables (the positive control for the scan above)", () => {
   const text = readSourceWithoutComments(GOVERNANCE_PATH);
   assert.match(text, /INSERT\s+INTO\s+proposals/i);
   assert.match(text, /INSERT\s+INTO\s+governance_settings/i);
+  assert.match(text, /INSERT\s+INTO\s+constitution_versions/i);
 });
 
 // M2 red-proof. The review's own eleven candidate writers

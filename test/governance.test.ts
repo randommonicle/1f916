@@ -868,3 +868,61 @@ test("the hashing mechanism itself is sensitive to content -- a one-character di
   const paramsB = await sha256Hex(JSON.stringify({ classes: [{ class: "entrenched", min_ballots: 5 }] }));
   assert.notEqual(paramsA, paramsB);
 });
+
+// ---------- policing: the [G1-1] honest-mistake guard (D-025's own figures, consolidated) ----------
+//
+// docs/BRIEF-FIRST-LAWS.md commit 5: "an invariant test asserting the
+// deployed entrenched parameters equal D-025's figures exactly ... assert
+// on the same exported constants the serialisation hashes." Every one of
+// these facts is already covered individually elsewhere in this file (the
+// quorum/floor table, the 3N passage edges, the window test, the tenure
+// test) -- this test exists as its OWN, single, explicitly-labelled place
+// a reviewer can check D-025's eight parameters against the deployed
+// reality at a glance, not to re-derive coverage those tests already
+// provide. A hostile deploy that edited an entrenched figure AND this
+// test together would still defeat it (design doc §3's own honesty: "the
+// build-time invariant test remains ... a guard against honest mistakes,
+// not hostile operators") -- what catches THAT is the attested
+// parameters_hash a citizen can independently recompute, not this test.
+test("[G1-1] invariant: the deployed entrenched parameters equal D-025's eight ratified figures exactly", () => {
+  // D-025 q1: passes when yes >= 3*no AND yes > 0 (75% integer form).
+  assert.equal(tally("entrenched", 3, 1, 0, 1).status, "passed", "3:1 must pass (exactly 75%)");
+  assert.equal(tally("entrenched", 2, 1, 1, 1).status, "failed", "2:1 must fail (below 75%)");
+  // D-025 q2/[G1-4]: minimum ballots cast 4.
+  assert.equal(CLASS_MIN_BALLOTS.entrenched, 4);
+  // D-025 q3: quorum cast >= ceil(2*eligible/3).
+  assert.equal(entrenchedQuorumThreshold(3), 2);
+  assert.equal(entrenchedQuorumThreshold(6), 4);
+  assert.equal(entrenchedQuorumThreshold(9), 6);
+  // D-025 q4: voting window 14 days (the other classes keep 7).
+  assert.equal(ENTRENCHED_VOTE_WINDOW_MS, 14 * 24 * 60 * 60 * 1000);
+  assert.equal(voteWindowMs("entrenched"), ENTRENCHED_VOTE_WINDOW_MS);
+  // Tenure gate: 14 days, same as constitutional, waived while invite_only
+  // (TENURE_DAYS itself is module-private, so this asserts the EFFECTIVE
+  // figure through assertEligible, the only way any caller ever observes
+  // it -- the same boundary-testing idiom the dedicated tenure test above
+  // already uses).
+  const opened = 100 * 86_400_000;
+  assert.doesNotThrow(() =>
+    assertEligible(
+      baseInput({ registrationMode: "open", voteClass: "entrenched", kind: "first_laws_ratify", citizenCreatedAt: opened - 14 * 86_400_000, proposalOpenedAt: opened }),
+    ),
+  );
+  assert.throws(
+    () =>
+      assertEligible(
+        baseInput({
+          registrationMode: "open",
+          voteClass: "entrenched",
+          kind: "first_laws_ratify",
+          citizenCreatedAt: opened - 14 * 86_400_000 + 1,
+          proposalOpenedAt: opened,
+        }),
+      ),
+    isForbidden,
+  );
+  // Both entrenched kinds actually carry this class (the parameters mean
+  // nothing if the wrong kinds are attached to them).
+  assert.equal(classOf("first_laws_ratify"), "entrenched");
+  assert.equal(classOf("first_laws_amendment"), "entrenched");
+});
