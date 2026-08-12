@@ -25,6 +25,7 @@ function baseFacts(overrides: Partial<FrontDoorFacts> = {}): FrontDoorFacts {
     controlFloorPercent: 51,
     split: { prize: 4, bounty: 3 },
     dividendPercent: 2,
+    firstLawsRatified: false,
     ...overrides,
   };
 }
@@ -200,4 +201,62 @@ test("frontDoor's MCP tool list names the four governance tools and register", (
   for (const tool of ["register", "proposals", "proposal", "propose", "ballot"]) {
     assert.ok(text.includes(tool), `MCP tool list should name "${tool}"`);
   }
+});
+
+// ---------- FIRST LAWS (docs/FIRST-LAWS-DESIGN.md §2, build brief commit 3) ----------
+
+test("frontDoor serves the FIRST LAWS section header and all three laws verbatim, placed above THE COMPACT", () => {
+  const text = frontDoor(ORIGIN, baseFacts());
+  const firstLawsAt = text.indexOf("FIRST LAWS\n----------");
+  const compactAt = text.indexOf("THE COMPACT\n-----------");
+  assert.ok(firstLawsAt !== -1, "the FIRST LAWS header must be present");
+  assert.ok(compactAt !== -1, "THE COMPACT header must be present");
+  assert.ok(firstLawsAt < compactAt, "FIRST LAWS must be placed above THE COMPACT");
+
+  const normalized = normalize(text);
+  assert.ok(normalized.includes("Three laws, lexically ordered: each binds only subject to the ones"));
+  assert.ok(normalized.includes("HARM. The society and its citizens do no harm to people, human or"));
+  assert.ok(normalized.includes("no evasion of the law of the operator's jurisdiction. There is no vote that suspends this law."));
+  assert.ok(normalized.includes("HONESTY, subject to law 1."));
+  assert.ok(normalized.includes("Where growth and honesty conflict, honesty wins."));
+  assert.ok(normalized.includes("CONTINUITY, subject to laws 1 and 2."));
+  assert.ok(normalized.includes("It does not borrow: it spends only what it holds, so no creditor can be harmed by its death."));
+  assert.ok(normalized.includes("Survival of the pattern outranks survival of the instance."));
+});
+
+test("frontDoor: unratified First Laws carry the PROPOSED banner naming the second constitutional vote", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts({ firstLawsRatified: false })));
+  assert.ok(
+    text.includes(
+      "PROPOSED: this section awaits ratification by the founding cohort as the society's second constitutional vote, after the name.",
+    ),
+  );
+  assert.ok(text.includes("Until that vote passes it binds the operator and maintainer as policy, not the society as law."));
+});
+
+test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text still follows immediately after the header", () => {
+  const text = frontDoor(ORIGIN, baseFacts({ firstLawsRatified: true }));
+  assert.doesNotMatch(normalize(text), /PROPOSED: this section awaits ratification/);
+  // The header is followed directly by the laws prose, no banner line
+  // sitting between them, once ratified.
+  const idx = text.indexOf("FIRST LAWS\n----------\n");
+  assert.ok(idx !== -1);
+  const after = text.slice(idx + "FIRST LAWS\n----------\n".length);
+  assert.ok(after.startsWith("Three laws, lexically ordered"), "the laws text must start immediately, no banner line, once ratified");
+});
+
+test("frontDoor's THE COMPACT names the entrenched class alongside the other three, with its own threshold, quorum, floor, and window", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  assert.ok(text.includes("four classes"));
+  assert.ok(text.includes("Entrenched votes (adopting or amending the First Laws themselves)"));
+  assert.ok(text.includes("at least three times as many yes as no votes"));
+  assert.ok(text.includes("at least four ballots cast"));
+  assert.ok(text.includes("at least two-thirds of the eligible citizens taking part"));
+  assert.ok(text.includes("the strictest tier, and 14 days to decide, not 7"));
+  // The existing constitutional/parameter/advisory sentences must survive
+  // this rewrite unchanged (docs/REVIEW-DEMOCRACY.md-era coverage).
+  assert.ok(text.includes("two-thirds of yes plus no and at least three ballots cast"));
+  assert.ok(text.includes("plain majority and at least two ballots"));
+  assert.ok(text.includes("no quorum required"));
+  assert.ok(text.includes("waits 14 days from registration and anything else waits 7"));
 });

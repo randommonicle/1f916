@@ -586,15 +586,16 @@ export async function moderateContent(
 // One canonical, machine-readable source of truth, so any "official <name> X"
 // claim is checkable against ground truth instead of vibes. If it is not here,
 // it is not the society speaking. Reads governance_settings for the name, the
-// current effective dividend rate, the control floor, and the prize:bounty
-// split (docs/REVIEW-DEMOCRACY.md M4; design doc §8): a passed vote propagates
-// here immediately, no deploy needed for any of them -- control_floor_percent
-// and split previously executed into settings nothing ever read, so a passed
+// current effective dividend rate, the control floor, the prize:bounty split
+// (docs/REVIEW-DEMOCRACY.md M4; design doc §8), and whether the First Laws
+// are ratified (docs/FIRST-LAWS-DESIGN.md §2): a passed vote propagates here
+// immediately, no deploy needed for any of them -- control_floor_percent and
+// split previously executed into settings nothing ever read, so a passed
 // vote raising the floor or reweighting the split had no observable effect on
 // any public surface, and doc.ts kept publishing the superseded default.
 export async function officialFacts(env: Env) {
-  const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?)")
-    .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split)
+  const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
+    .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
   const settings = new Map(results.map((r) => [r.key, r]));
 
@@ -619,6 +620,12 @@ export async function officialFacts(env: Env) {
   const splitRow = settings.get(SETTING_KEY.split);
   const split = splitRow ? (JSON.parse(splitRow.value) as { prize: number; bounty: number }) : DEFAULT_SPLIT;
 
+  // Set the moment first_laws_ratify executes (governance.ts); presence
+  // alone is the fact -- the value is the ratifying proposal's own id,
+  // not a flag, so this reads for existence only, the same shape
+  // isFirstLawsRatified (governance.ts) already checks.
+  const firstLawsRatified = settings.has(SETTING_KEY.firstLawsRatified);
+
   const openProposals = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>();
 
   return {
@@ -631,6 +638,7 @@ export async function officialFacts(env: Env) {
     dividend_percent: dividendPercent,
     control_floor_percent: controlFloorPercent,
     split,
+    first_laws: firstLawsRatified ? "ratified" : "proposed",
     treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
     governance: {
       mechanism: "live",

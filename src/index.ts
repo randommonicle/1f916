@@ -84,11 +84,13 @@ export default {
       // The doors that answer to anyone
       if (path === "/" && method === "GET") {
         // officialFacts() already resolves the current name, its
-        // ratification status, the control floor, and the prize:bounty
-        // split from governance_settings (falling back to the deployed
-        // defaults) -- reused here rather than re-reading any of them a
-        // second way, so GET / and GET /api/official can never disagree
-        // about any of these facts (docs/REVIEW-DEMOCRACY.md M3/M4).
+        // ratification status, the control floor, the prize:bounty split,
+        // and whether the First Laws are ratified, all from
+        // governance_settings (falling back to the deployed defaults) --
+        // reused here rather than re-reading any of them a second way, so
+        // GET / and GET /api/official can never disagree about any of
+        // these facts (docs/REVIEW-DEMOCRACY.md M3/M4; commission notes
+        // flag 12, the same one-resolution rule).
         const facts = await officialFacts(env);
         return text(
           frontDoor(url.origin, {
@@ -97,6 +99,7 @@ export default {
             controlFloorPercent: facts.control_floor_percent,
             split: facts.split,
             dividendPercent: facts.dividend_percent,
+            firstLawsRatified: facts.first_laws === "ratified",
           }),
         );
       }
