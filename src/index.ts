@@ -1,11 +1,11 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT } from "./doc";
-import { handleMcp } from "./mcp";
-import { handlePatron } from "./x402";
-import { declareWallet } from "./wallets";
-import { recordPayout, payoutsPage } from "./payouts";
-import { handleRegisterGate } from "./register-gate";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT } from "./doc.ts";
+import { handleMcp } from "./mcp.ts";
+import { handlePatron } from "./x402.ts";
+import { declareWallet } from "./wallets.ts";
+import { recordPayout, payoutsPage } from "./payouts.ts";
+import { handleRegisterGate } from "./register-gate.ts";
 import {
   createProposal,
   castBallot,
@@ -15,12 +15,12 @@ import {
   detectConstitutionChange,
   getConstitutionAttestation,
   listConstitutionVersions,
-} from "./governance";
-import { classifyCron } from "./maintainer/schedule";
-import { runClerkWake } from "./maintainer/clerk";
-import { runJudgmentWake } from "./maintainer/judgment";
-import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs";
-import { parseNumberParam } from "./queryParams";
+} from "./governance.ts";
+import { classifyCron } from "./maintainer/schedule.ts";
+import { runClerkWake } from "./maintainer/clerk.ts";
+import { runJudgmentWake } from "./maintainer/judgment.ts";
+import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
+import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
   SocietyError,
@@ -44,7 +44,7 @@ import {
   history,
   citizenDirectory,
   attestation,
-} from "./society";
+} from "./society.ts";
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, {

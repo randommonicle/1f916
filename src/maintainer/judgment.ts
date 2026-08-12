@@ -982,10 +982,10 @@ export async function reconcileApprovedQueue(
           // own fixes above) invisibly wrong rather than merely wrong. A
           // public identity_events entry, and a first-class 'superseded'
           // status rather than overloading 'rejected', are deferred to
-          // the next maintainer_queue rebuild (docs/BRIEF-FIRST-LAWS.md's
-          // build wave already rebuilds this table for other reasons --
-          // this rides along there rather than reopening an
-          // already-scoped migration for this alone).
+          // a FUTURE, dedicated maintainer_queue rebuild. NOT this First
+          // Laws wave (docs/BRIEF-FIRST-LAWS.md): it rebuilt this table but
+          // deliberately excluded N-2/F-8 per the commission-notes flag-1
+          // ruling, so they need their own later migration.
           // F-7: stampQueueRow's boolean is honoured, not assumed -- count
           // actioned only if the re-stamp actually changed a row.
           const stamped = await stampQueueRow(env, row.id, "rejected", `superseded: a later ${artifact.laterAction} decision executed after this approval was stranded`, { requirePending: false });
@@ -1025,9 +1025,11 @@ export async function reconcileApprovedQueue(
       // will never succeed), and retrying forever is the safe default for
       // the former -- a real terminal disposition for the latter needs a
       // place to record WHY it gave up that is not "guess and re-stamp
-      // rejected" on a bare catch. That arrives with the next
-      // maintainer_queue rebuild (docs/BRIEF-FIRST-LAWS.md), alongside
-      // N-2's public supersede event above, not here.
+      // rejected" on a bare catch. FORWARD(F-8): that arrives with a
+      // FUTURE, dedicated maintainer_queue rebuild -- NOT this First Laws
+      // wave (docs/BRIEF-FIRST-LAWS.md), which excludes it per the
+      // commission-notes flag-1 ruling -- alongside N-2's supersede event
+      // above, not here.
       errors.push(`queue row ${row.id} (${row.kind}): ${e instanceof Error ? e.message : String(e)}`);
     }
   }
