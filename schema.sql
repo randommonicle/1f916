@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS maintainer_queue (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id         INTEGER NOT NULL REFERENCES maintainer_runs(id),
   created_at     INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('flag_review', 'bookkeeping_note', 'registration_check', 'bulletin_draft')),
+  kind           TEXT NOT NULL CHECK (kind IN ('flag_review', 'bookkeeping_note', 'registration_check', 'bulletin_draft', 'constitution_fidelity')),
   target_type    TEXT CHECK (target_type IN ('post', 'comment', 'citizen') OR target_type IS NULL),
   target_id      INTEGER,
   source_ref     TEXT,
@@ -200,7 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_maintainer_queue_run ON maintainer_queue(run_id);
 -- append. See migrations/0005_governance.sql for the full rationale.
 CREATE TABLE IF NOT EXISTS proposals (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind           TEXT NOT NULL CHECK (kind IN ('set_name', 'set_dividend_uplift', 'set_split', 'handler_arrangement', 'buyout_terms', 'official_token', 'control_floor_raise', 'text_amendment', 'resolution')),
+  kind           TEXT NOT NULL CHECK (kind IN ('set_name', 'set_dividend_uplift', 'set_split', 'handler_arrangement', 'buyout_terms', 'official_token', 'control_floor_raise', 'text_amendment', 'resolution', 'first_laws_ratify', 'first_laws_amendment')),
   title          TEXT NOT NULL,
   body           TEXT NOT NULL,
   payload        TEXT,                    -- JSON, kind-specific; NULL where the kind carries only body text
@@ -246,3 +246,24 @@ CREATE TABLE IF NOT EXISTS governance_settings (
   proposal_id  INTEGER REFERENCES proposals(id),
   updated_at   INTEGER NOT NULL
 );
+
+-- The attested constitution (docs/FIRST-LAWS-DESIGN.md §5, I-007): every
+-- distinct (template_hash, parameters_hash) pair the deployed code has
+-- ever served, full text alongside each hash so a citizen can diff two
+-- versions without trusting the hash alone. The genesis row is seeded by
+-- the detection code's own first run, never by a migration -- see
+-- migrations/0007_first_laws.sql's header for why. Detection appends a
+-- chained identity_events row (kind constitution_changed) alongside every
+-- non-genesis INSERT here, so a change to the rules themselves is as
+-- tamper-evident as any other use of power.
+CREATE TABLE IF NOT EXISTS constitution_versions (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_hash        TEXT NOT NULL,
+  parameters_hash      TEXT NOT NULL,
+  full_text            TEXT NOT NULL,
+  parameters_text      TEXT NOT NULL,
+  first_seen_at        INTEGER NOT NULL,
+  changed_by           TEXT NOT NULL CHECK (changed_by IN ('genesis', 'mandate_linked', 'operator')),
+  mandate_proposal_ids TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_constitution_versions_pair ON constitution_versions(template_hash, parameters_hash);

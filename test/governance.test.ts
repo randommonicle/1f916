@@ -25,9 +25,11 @@ import {
   assertEligible,
   countEligible,
   monthsFromNow,
+  DB_QUEUE_KINDS,
   type ProposalKind,
   type EligibilityInput,
 } from "../src/governance.ts";
+import { ALLOWED_QUEUE_KINDS } from "../src/maintainer/clerk.ts";
 import { SocietyError } from "../src/society.ts";
 
 const isBadRequest = (e: unknown) => e instanceof SocietyError && e.status === 400;
@@ -101,6 +103,60 @@ test("PROPOSAL_KINDS matches the CHECK constraint in migrations/0005_governance.
     .sort();
   const inCode = [...PROPOSAL_KINDS].sort();
   assert.deepEqual(inMigration, inCode);
+});
+
+// ---------- First Laws, commit 1(c): the DB-side parity pair ----------
+//
+// migrations/0007_first_laws.sql widens proposals.kind to eleven values
+// and maintainer_queue.kind to five, and schema.sql's own rollup carries
+// both widened CHECKs too -- but PROPOSAL_KINDS itself does not grow until
+// commit 2, so the three-way equality the brief eventually wants
+// (PROPOSAL_KINDS == 0007 == schema.sql) cannot be green yet without
+// commit 2's own governance.ts change landing early out of sequence. What
+// CAN and must be green at commit 1 is the DB-side pair alone (the
+// migration and the rollup agreeing with EACH OTHER), plus the queue-kind
+// three-way (which has no app-side "PROPOSAL_KINDS" equivalent gating it --
+// DB_QUEUE_KINDS is introduced in this same commit). The PROPOSAL_KINDS
+// leg is completed in commit 2, with its own red recorded there.
+
+function extractKindCheck(sql: string, createTableAnchor: string): string[] {
+  const re = new RegExp(`CREATE TABLE ${createTableAnchor}[\\s\\S]*?kind\\s+TEXT NOT NULL CHECK \\(kind IN \\(([^)]+)\\)\\)`);
+  const match = sql.match(re);
+  assert.ok(match, `could not find a kind CHECK constraint anchored at "CREATE TABLE ${createTableAnchor}"`);
+  return match![1]
+    .split(",")
+    .map((s) => s.trim().replace(/^'|'$/g, ""))
+    .sort();
+}
+
+test("First Laws commit 1: 0007's rebuilt proposals CHECK matches schema.sql's proposals CHECK exactly (the DB-side half of the parity pair; PROPOSAL_KINDS itself joins in commit 2)", () => {
+  const migration = readFileSync(join(import.meta.dirname, "..", "migrations", "0007_first_laws.sql"), "utf8");
+  const schema = readFileSync(join(import.meta.dirname, "..", "schema.sql"), "utf8");
+  const inMigration = extractKindCheck(migration, "proposals_new \\(");
+  const inSchema = extractKindCheck(schema, "IF NOT EXISTS proposals \\(");
+  assert.deepEqual(inMigration, inSchema);
+  assert.equal(inMigration.length, 11, "the nine existing kinds plus first_laws_ratify and first_laws_amendment");
+});
+
+test("First Laws commit 1: 0007's rebuilt maintainer_queue CHECK, schema.sql's maintainer_queue CHECK, and the new DB_QUEUE_KINDS superset all agree exactly", () => {
+  const migration = readFileSync(join(import.meta.dirname, "..", "migrations", "0007_first_laws.sql"), "utf8");
+  const schema = readFileSync(join(import.meta.dirname, "..", "schema.sql"), "utf8");
+  const inMigration = extractKindCheck(migration, "maintainer_queue_new \\(");
+  const inSchema = extractKindCheck(schema, "IF NOT EXISTS maintainer_queue \\(");
+  const inCode = [...DB_QUEUE_KINDS].sort();
+  assert.deepEqual(inMigration, inSchema);
+  assert.deepEqual(inMigration, inCode);
+  assert.equal(inMigration.length, 5, "the four existing queue kinds plus constitution_fidelity");
+});
+
+test("First Laws commit 1: clerk.ts's ALLOWED_QUEUE_KINDS (the drafting cage) is a STRICT subset of DB_QUEUE_KINDS (the DB's closed list) -- the clerk may never draft a kind the DB itself would refuse, and the DB holds one kind (constitution_fidelity) the clerk may never draft", () => {
+  const allowed = new Set<string>(ALLOWED_QUEUE_KINDS);
+  const dbKinds = new Set<string>(DB_QUEUE_KINDS);
+  for (const k of allowed) {
+    assert.ok(dbKinds.has(k), `${k} is clerk-allowed but missing from DB_QUEUE_KINDS`);
+  }
+  assert.ok(dbKinds.size > allowed.size, "DB_QUEUE_KINDS must be a STRICT superset, not merely equal to ALLOWED_QUEUE_KINDS");
+  assert.deepEqual([...dbKinds].filter((k) => !allowed.has(k)), ["constitution_fidelity"], "constitution_fidelity must be the exact, sole, extra kind");
 });
 
 // ---------- policing: the maintainer is not special-cased ----------

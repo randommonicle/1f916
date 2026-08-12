@@ -92,6 +92,22 @@ export function classOf(kind: ProposalKind): VoteClass {
   return KIND_CLASS[kind];
 }
 
+// ---------- maintainer_queue.kind (I-007 wake-side reconciliation) ----------
+//
+// The maintainer_queue.kind CHECK's own closed list (migrations/0007's
+// rebuilt maintainer_queue, mirrored at schema.sql) -- a STRICT superset
+// of clerk.ts's own ALLOWED_QUEUE_KINDS (the clerk's drafting cage,
+// deliberately narrower: the clerk may never draft a constitution_fidelity
+// item -- only wake-side reconciliation inserts one, bound to the wake's
+// own run_id). Independently listed here, not spread from clerk.ts's own
+// constant: this file must never import FROM src/maintainer/ (clerk.ts and
+// judgment.ts both import the shared constitution-detection machinery FROM
+// this file, so the reverse edge would be a cycle). test/governance.test.ts
+// asserts the strict-subset relationship directly -- that test, not a
+// shared import, is what keeps the two lists from drifting apart.
+export const DB_QUEUE_KINDS = ["flag_review", "bookkeeping_note", "registration_check", "bulletin_draft", "constitution_fidelity"] as const;
+export type DbQueueKind = (typeof DB_QUEUE_KINDS)[number];
+
 // Fixed phase-0 voting window (design doc §5 point 3): 7 days, no
 // proposer-chosen windows. 168 hours exactly.
 export const VOTE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
