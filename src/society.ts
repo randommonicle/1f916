@@ -63,6 +63,11 @@ export const SETTING_KEY = {
   controlFloorPercent: "control_floor_percent",
   dividendUplift: "dividend_uplift",
   split: "split",
+  // Set the moment first_laws_ratify executes (governance.ts): value is
+  // the ratifying proposal's own id, string-encoded, matching this
+  // table's TEXT value column -- provenance is also carried separately by
+  // the row's own proposal_id column, the same as every other setting.
+  firstLawsRatified: "first_laws_ratified",
 } as const;
 
 export class SocietyError extends Error {

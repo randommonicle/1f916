@@ -44,7 +44,7 @@ test("the proposals module is present (precondition for the honesty-paragraph cl
   assert.equal(typeof governance.createProposal, "function");
   assert.equal(typeof governance.castBallot, "function");
   assert.equal(typeof governance.runGovernanceSweep, "function");
-  assert.equal(governance.PROPOSAL_KINDS.length, 9);
+  assert.equal(governance.PROPOSAL_KINDS.length, 11, "the original nine plus first_laws_ratify and first_laws_amendment");
 });
 
 test("frontDoor no longer claims the voting mechanism does not exist", () => {

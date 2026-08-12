@@ -24,7 +24,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
-import { isFounderCitizen, isFoundingRatified, castBallot, createProposal, runGovernanceSweep, monthsFromNow, listProposals, PROPOSAL_PAGE } from "../src/governance.ts";
+import {
+  isFounderCitizen,
+  isFoundingRatified,
+  assertFirstLawsCreationGates,
+  castBallot,
+  createProposal,
+  runGovernanceSweep,
+  monthsFromNow,
+  listProposals,
+  PROPOSAL_PAGE,
+  PROPOSAL_KINDS,
+} from "../src/governance.ts";
 import {
   SocietyError,
   officialFacts,
@@ -125,6 +136,121 @@ test("isFoundingRatified: independent per kind -- a passed set_name does not rat
     insertProposal(d1, { kind: "set_name", status: "passed" });
     assert.equal(await isFoundingRatified(env, "set_name"), true);
     assert.equal(await isFoundingRatified(env, "text_amendment"), false);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- assertFirstLawsCreationGates (docs/FIRST-LAWS-DESIGN.md §7) ----------
+
+test("assertFirstLawsCreationGates: first_laws_ratify refuses until a set_name proposal has reached a decision (passed OR failed both count -- deciding the name at all is the gate, not the outcome)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    await assert.rejects(
+      () => assertFirstLawsCreationGates(env, "first_laws_ratify"),
+      (e: unknown) => e instanceof SocietyError && e.status === 403 && /decide the name first/.test(e.message),
+    );
+
+    // A FAILED set_name still counts -- the cohort decided, they just said no.
+    insertProposal(d1, { kind: "set_name", status: "failed" });
+    await assert.doesNotReject(() => assertFirstLawsCreationGates(env, "first_laws_ratify"));
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertFirstLawsCreationGates: an open (not yet decided) set_name proposal does not satisfy the gate", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    insertProposal(d1, { kind: "set_name", status: "open" });
+    await assert.rejects(
+      () => assertFirstLawsCreationGates(env, "first_laws_ratify"),
+      (e: unknown) => e instanceof SocietyError && e.status === 403,
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertFirstLawsCreationGates: first_laws_ratify refuses once the laws are already ratified -- nothing left to ratify", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    insertProposal(d1, { kind: "set_name", status: "passed" });
+    d1.raw.prepare("INSERT INTO governance_settings (key, value, updated_at) VALUES (?, ?, ?)").run(SETTING_KEY.firstLawsRatified, "1", Date.now());
+    await assert.rejects(
+      () => assertFirstLawsCreationGates(env, "first_laws_ratify"),
+      (e: unknown) => e instanceof SocietyError && e.status === 400 && /already ratified/.test(e.message),
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertFirstLawsCreationGates: first_laws_amendment refuses until the laws are ratified, then allows once they are", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    await assert.rejects(
+      () => assertFirstLawsCreationGates(env, "first_laws_amendment"),
+      (e: unknown) => e instanceof SocietyError && e.status === 403 && /nothing yet to amend/.test(e.message),
+    );
+    d1.raw.prepare("INSERT INTO governance_settings (key, value, updated_at) VALUES (?, ?, ?)").run(SETTING_KEY.firstLawsRatified, "1", Date.now());
+    await assert.doesNotReject(() => assertFirstLawsCreationGates(env, "first_laws_amendment"));
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertFirstLawsCreationGates: every other kind is a no-op, gated or not", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    for (const kind of PROPOSAL_KINDS.filter((k) => k !== "first_laws_ratify" && k !== "first_laws_amendment")) {
+      await assert.doesNotReject(() => assertFirstLawsCreationGates(env, kind), `${kind} must never be touched by this gate`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("createProposal: first_laws_ratify is refused end to end (not just via the isolated gate function) until a set_name proposal has decided", async () => {
+  const d1 = createLocalD1();
+  try {
+    const citizenId = insertCitizen(d1, { handle: "proposer-fl" });
+    const citizen = { id: citizenId, handle: "proposer-fl", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
+    const env = testEnv(d1);
+    await assert.rejects(
+      () => createProposal(env, citizen, "first_laws_ratify", "Ratify the First Laws", "Adopt the First Laws as drafted.", null),
+      (e: unknown) => e instanceof SocietyError && e.status === 403,
+    );
+
+    const before = await d1.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>();
+    insertProposal(d1, { kind: "set_name", status: "passed" });
+    const result = await createProposal(env, citizen, "first_laws_ratify", "Ratify the First Laws", "Adopt the First Laws as drafted.", null);
+    assert.equal(result.kind, "first_laws_ratify");
+    assert.equal(result.class, "entrenched");
+    const after = await d1.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>();
+    assert.equal(after!.n, before!.n + 2, "the gate's refusal left no row; the set_name fixture plus the successful proposal account for the growth");
+  } finally {
+    d1.close();
+  }
+});
+
+test("createProposal: a text_amendment body targeting the FIRST LAWS section is refused end to end, directing to first_laws_amendment", async () => {
+  const d1 = createLocalD1();
+  try {
+    const citizenId = insertCitizen(d1, { handle: "disguiser" });
+    const citizen = { id: citizenId, handle: "disguiser", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
+    const env = testEnv(d1);
+    await assert.rejects(
+      () => createProposal(env, citizen, "text_amendment", "Sneak an edit", "Reword the FIRST LAWS section, rule 1 specifically.", null),
+      (e: unknown) => e instanceof SocietyError && e.status === 400 && /first_laws_amendment instead/.test(e.message),
+    );
+    const count = await d1.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>();
+    assert.equal(count!.n, 0, "the refused attempt left no proposal row behind");
   } finally {
     d1.close();
   }
@@ -992,6 +1118,45 @@ test("runGovernanceSweep: a passed set_dividend_uplift executes with a calendar-
   }
 });
 
+// docs/BRIEF-FIRST-LAWS.md drift item 5: settingsStatementForExecution's
+// original payload-null guard ran BEFORE the per-kind switch, so any
+// payload-less machine-executable kind would have short-circuited to null
+// there -- and first_laws_ratify carries NO payload at all (its value IS
+// the proposal id). Pre-fix this would flip status to 'executed' while
+// writing NO settings row whatsoever, the exact silent-corruption shape
+// this test exists to catch.
+test("runGovernanceSweep: a passed first_laws_ratify with a NULL payload still writes governance_settings.first_laws_ratified -- the payload-null guard is restructured, not bypassed by inventing a fake payload [drift item 5]", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: now - 1000 });
+    // entrenched: floor 4, quorum ceil(2*4/3)=3 at eligible=4 -- all four
+    // citizens (proposer + 3 voters) vote yes, cast=4 clears both and
+    // 4>=3*0 && 4>0.
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    for (const c of [proposer, ...voters]) castYes(d1, proposalId, c, now - 500);
+
+    const env = testEnv(d1);
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "executed");
+
+    const proposalRow = await d1.DB.prepare("SELECT payload FROM proposals WHERE id = ?").bind(proposalId).first<{ payload: string | null }>();
+    assert.equal(proposalRow!.payload, null, "fixture sanity: this proposal genuinely carries no payload");
+
+    const setting = await d1.DB.prepare("SELECT value, proposal_id FROM governance_settings WHERE key = 'first_laws_ratified'")
+      .first<{ value: string; proposal_id: number }>();
+    assert.ok(
+      setting,
+      "governance_settings must carry the ratifying proposal's own id -- pre-fix, the guard's own `if (!payload) return null` would have short-circuited here and status would have flipped to 'executed' with NO settings row at all",
+    );
+    assert.equal(setting!.value, String(proposalId));
+    assert.equal(setting!.proposal_id, proposalId, "provenance: which proposal set this value");
+  } finally {
+    d1.close();
+  }
+});
+
 test("runGovernanceSweep: idempotency -- a second call after everything is processed finds nothing due and writes nothing further", async () => {
   const d1 = createLocalD1();
   try {
@@ -1400,6 +1565,76 @@ test("runGovernanceSweep: F1 divergent-tally repro -- a stalled claimant whose s
       .first<{ status: string; eligible_count: number; tally_yes: number; tally_no: number }>();
     assert.equal(row!.status, "failed", "B's real committed outcome persists: quorum failed once the census grew to 5 mid-stall");
     assert.equal(row!.eligible_count, 5, "the eligible count committed is B's own live read, not A's stale 4");
+
+    const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(events!.n, 1, "exactly one outcome event -- A's resumed batch wrote nothing, gate refused identically to the state statements");
+
+    const event = await d1.DB.prepare("SELECT detail FROM identity_events WHERE kind = 'proposal_decided'").first<{ detail: string }>();
+    assert.match(event!.detail, /failed/, "the one recorded event names B's real outcome");
+    assert.doesNotMatch(event!.detail, /executed/, "A's phantom 'executed' verdict must never reach the permanent record");
+  } finally {
+    d1.close();
+  }
+});
+
+// docs/BRIEF-FIRST-LAWS.md commit 2's own required red proof, re-running
+// the F1 divergent-tally shape immediately above for the NEW entrenched
+// kind and its NEW settings key specifically: "a resumed stale claimant's
+// batch must leave first_laws_ratified unwritten" (the exchange's Ask-2
+// red case). Proves upsertSettingStmt's own `AND tallied_at = ?` claimant
+// binding (commit `6a1c6e9`) protects the first_laws_ratify write exactly
+// as it already protects set_name/set_split/set_dividend_uplift -- no
+// special-casing was needed, but nothing proved that before this test.
+test("runGovernanceSweep: the stale-claimant partial-commit case for first_laws_ratify -- a resumed stale claimant's batch must leave governance_settings.first_laws_ratified unwritten when the real committer's outcome differs (the exchange's Ask-2 red case, re-run for the entrenched kind)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    const now = Date.now();
+    const closesAt = now - 1000;
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: closesAt });
+    // cast=4 (all four citizens vote yes). A's own stale read of the
+    // census (eligible=4, entrenchedQuorumThreshold=ceil(8/3)=3, floor=4)
+    // resolves "passed" -> (first_laws_ratify being machine-executable)
+    // "executed", and would write governance_settings.first_laws_ratified.
+    for (const c of [proposer, ...voters]) castYes(d1, proposalId, c, now - 500);
+
+    const later = now + 16 * 60 * 1000; // past STALE_CLAIM_MS, so B can reclaim
+    const bEnv = testEnv(d1);
+    const aEnv = {
+      ...testEnv(d1),
+      DB: withChainedHeadReadTriggering(d1.DB, "identity_events", async () => {
+        // Three more citizens register during A's stall -- invisible to
+        // A's own already-completed census read, fully visible to B's
+        // independent re-read a moment later. eligible 4 -> 7 moves the
+        // entrenched quorum from ceil(8/3)=3 to ceil(14/3)=5, which the
+        // unchanged cast=4 no longer clears -- B's real tally fails.
+        insertCitizen(d1);
+        insertCitizen(d1);
+        insertCitizen(d1);
+        await runGovernanceSweep(bEnv, later);
+      }),
+    };
+
+    const aResult = await runGovernanceSweep(aEnv, now);
+    assert.equal(
+      aResult.results[0].outcome,
+      "claimed_elsewhere",
+      "A's stale computation said executed (eligible=4); B actually committed failed (eligible=7, quorum no longer clears) -- A must assert neither its own guess nor B's real answer, only that it did not commit",
+    );
+
+    const row = await d1.DB.prepare("SELECT status, eligible_count FROM proposals WHERE id = ?")
+      .bind(proposalId)
+      .first<{ status: string; eligible_count: number }>();
+    assert.equal(row!.status, "failed", "B's real committed outcome persists: quorum failed once the census grew to 7 mid-stall");
+    assert.equal(row!.eligible_count, 7, "the eligible count committed is B's own live read, not A's stale 4");
+
+    const setting = await d1.DB.prepare("SELECT value FROM governance_settings WHERE key = 'first_laws_ratified'").first();
+    assert.equal(
+      setting,
+      null,
+      "the setting must stay unwritten -- A's resumed batch, gated identically to the state statements via the shared tallied_at claimant stamp, wrote nothing, and B's real outcome (failed) never executes at all",
+    );
 
     const events = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
     assert.equal(events!.n, 1, "exactly one outcome event -- A's resumed batch wrote nothing, gate refused identically to the state statements");

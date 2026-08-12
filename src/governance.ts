@@ -40,13 +40,18 @@ export type ProposalKind =
   | "official_token"
   | "control_floor_raise"
   | "text_amendment"
-  | "resolution";
+  | "resolution"
+  | "first_laws_ratify"
+  | "first_laws_amendment";
 
-// The closed list, in the same order as migrations/0005_governance.sql's
-// CHECK constraint on proposals.kind. test/governance.test.ts asserts the
-// two stay identical, so the DB backstop and the application allowlist
-// cannot drift apart the way GET /api/events's kinds list already has
-// (DEMOCRACY-SURFACE.md §8 gotcha 10).
+// The closed list, in the same order as migrations/0007_first_laws.sql's
+// rebuilt CHECK constraint on proposals.kind (superseding
+// migrations/0005_governance.sql's original nine, mirrored the same way at
+// schema.sql). test/governance.test.ts asserts all three stay identical, so
+// the DB backstop and the application allowlist cannot drift apart the way
+// GET /api/events's kinds list already has (DEMOCRACY-SURFACE.md §8 gotcha
+// 10). The two First Laws kinds are appended at the end, not sorted in --
+// matching how migration 0007 itself appends them to the CHECK constraint.
 export const PROPOSAL_KINDS: readonly ProposalKind[] = [
   "set_name",
   "set_dividend_uplift",
@@ -57,6 +62,8 @@ export const PROPOSAL_KINDS: readonly ProposalKind[] = [
   "control_floor_raise",
   "text_amendment",
   "resolution",
+  "first_laws_ratify",
+  "first_laws_amendment",
 ];
 
 export function isProposalKind(x: unknown): x is ProposalKind {
@@ -69,13 +76,17 @@ export function isChoice(x: unknown): x is Choice {
   return x === "yes" || x === "no" || x === "abstain";
 }
 
-export type VoteClass = "constitutional" | "parameter" | "advisory";
+export type VoteClass = "constitutional" | "parameter" | "advisory" | "entrenched";
 
 // Class is derived from kind, never stored as a second column (design doc
 // §3): one map, so the two cannot drift. handler_arrangement and
 // buyout_terms sit at constitutional tier because both create or transfer
 // standing claims on the society's money; set_dividend_uplift is parameter
-// tier because it is bounded, time-limited, and reversible by expiry.
+// tier because it is bounded, time-limited, and reversible by expiry. The
+// two First Laws kinds sit at entrenched -- a fourth tier above
+// constitutional (docs/FIRST-LAWS-DESIGN.md §3): adopting or amending the
+// laws themselves needs a stricter margin and quorum than an ordinary
+// constitutional vote, D-025.
 export const KIND_CLASS: Record<ProposalKind, VoteClass> = {
   set_name: "constitutional",
   text_amendment: "constitutional",
@@ -86,6 +97,8 @@ export const KIND_CLASS: Record<ProposalKind, VoteClass> = {
   set_dividend_uplift: "parameter",
   set_split: "parameter",
   resolution: "advisory",
+  first_laws_ratify: "entrenched",
+  first_laws_amendment: "entrenched",
 };
 
 export function classOf(kind: ProposalKind): VoteClass {
@@ -108,16 +121,31 @@ export function classOf(kind: ProposalKind): VoteClass {
 export const DB_QUEUE_KINDS = ["flag_review", "bookkeeping_note", "registration_check", "bulletin_draft", "constitution_fidelity"] as const;
 export type DbQueueKind = (typeof DB_QUEUE_KINDS)[number];
 
-// Fixed phase-0 voting window (design doc §5 point 3): 7 days, no
-// proposer-chosen windows. 168 hours exactly.
+// Fixed phase-0 voting window (design doc §5 point 3): 7 days for every
+// class except entrenched, no proposer-chosen windows. 168 hours exactly.
 export const VOTE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
+// The entrenched class alone opens for 14 days (D-025 q4: "every
+// once-daily runner sees it ~13 times"). Kept as its own constant rather
+// than reshaping VOTE_WINDOW_MS into a per-class record -- every existing
+// caller/test that reads VOTE_WINDOW_MS keeps meaning exactly "the
+// non-entrenched window", unchanged.
+export const ENTRENCHED_VOTE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+export function voteWindowMs(voteClass: VoteClass): number {
+  return voteClass === "entrenched" ? ENTRENCHED_VOTE_WINDOW_MS : VOTE_WINDOW_MS;
+}
+
 // Minimum ballots cast before a class can pass at all (design doc §3's
-// table). Abstain counts toward this floor -- presence, not consent.
+// table; entrenched per D-025 q2/[G1-4]: 4, not 5 -- the Gemini debate
+// round proved a floor of 5 is a 100%-participation trap at census 5, one
+// lost key blocking ratification indefinitely). Abstain counts toward this
+// floor -- presence, not consent.
 export const CLASS_MIN_BALLOTS: Record<VoteClass, number> = {
   constitutional: 3,
   parameter: 2,
   advisory: 1,
+  entrenched: 4,
 };
 
 // ---------- tally arithmetic ----------
@@ -128,6 +156,16 @@ export const CLASS_MIN_BALLOTS: Record<VoteClass, number> = {
 // division only, no floats near a constitutional boundary.
 export function quorumThreshold(eligible: number): number {
   return Math.ceil(eligible / 2);
+}
+
+// ceil(2E/3), the quorum threshold for the entrenched class alone (D-025
+// q3) -- the ladder's top rung, stricter than constitutional/parameter's
+// ceil(E/2). Exposed on its own for the identical reason quorumThreshold
+// is: directly testable arithmetic, no float near a constitutional
+// boundary. Crosses above the entrenched floor (4) at E=7 -- below that,
+// the floor is what actually binds.
+export function entrenchedQuorumThreshold(eligible: number): number {
+  return Math.ceil((2 * eligible) / 3);
 }
 
 export type TallyStatus = "passed" | "failed";
@@ -143,22 +181,26 @@ export interface TallyResult {
 }
 
 // Design doc §6, exact text: quorum first, then the class floor, then the
-// class's own pass rule. Constitutional passes iff Y >= 2*N AND Y > 0 (the
-// integer form of Y/(Y+N) >= 2/3, so no float sits near a constitutional
-// boundary; the explicit Y>0 clause exists so an all-abstain ballot that
-// clears quorum/floor on presence alone cannot pass on 0 >= 0). Parameter
-// and advisory pass iff Y > N, which already implies Y > 0 whenever it
-// passes, so no separate clause is needed there.
+// class's own pass rule. Entrenched passes iff Y >= 3*N AND Y > 0 (D-025
+// q1: the integer form of Y/(Y+N) >= 75%). Constitutional passes iff Y >=
+// 2*N AND Y > 0 (the integer form of Y/(Y+N) >= 2/3, so no float sits near
+// a constitutional boundary; the explicit Y>0 clause on both exists so an
+// all-abstain ballot that clears quorum/floor on presence alone cannot
+// pass on 0 >= 0). Parameter and advisory pass iff Y > N, which already
+// implies Y > 0 whenever it passes, so no separate clause is needed there.
 export function tally(voteClass: VoteClass, yes: number, no: number, abstain: number, eligible: number): TallyResult {
   const cast = yes + no + abstain;
 
-  if (voteClass !== "advisory" && cast < quorumThreshold(eligible)) {
-    return { status: "failed", cast, reason: "quorum" };
+  if (voteClass !== "advisory") {
+    const threshold = voteClass === "entrenched" ? entrenchedQuorumThreshold(eligible) : quorumThreshold(eligible);
+    if (cast < threshold) {
+      return { status: "failed", cast, reason: "quorum" };
+    }
   }
   if (cast < CLASS_MIN_BALLOTS[voteClass]) {
     return { status: "failed", cast, reason: "floor" };
   }
-  const passed = voteClass === "constitutional" ? yes >= 2 * no && yes > 0 : yes > no;
+  const passed = voteClass === "entrenched" ? yes >= 3 * no && yes > 0 : voteClass === "constitutional" ? yes >= 2 * no && yes > 0 : yes > no;
   return passed ? { status: "passed", cast } : { status: "failed", cast, reason: "margin" };
 }
 
@@ -221,6 +263,8 @@ export function validatePayload(kind: ProposalKind, payload: unknown, ctx: Paylo
     case "official_token":
     case "text_amendment":
     case "resolution":
+    case "first_laws_ratify":
+    case "first_laws_amendment":
       if (payload != null) {
         throw new SocietyError(400, `${kind} carries no structured payload -- put the proposal's substance in body, not payload.`);
       }
@@ -280,6 +324,30 @@ export function validatePayload(kind: ProposalKind, payload: unknown, ctx: Paylo
   }
 }
 
+// The FIRST LAWS section heading, matched literally (docs/FIRST-LAWS-DESIGN.md
+// §3: "a body that targets the FIRST LAWS section must use
+// first_laws_amendment ... detection is honest-best-effort on free text --
+// the section heading's literal", and the constitution states the rule in
+// prose so a disguised amendment is void ab initio regardless). A
+// hardcoded literal, not imported from doc.ts: this validation lands in
+// commit 2, before doc.ts's own FIRST LAWS section exists (commit 3) --
+// test/doc.test.ts polices that the two stay in agreement once both do.
+const FIRST_LAWS_HEADING = "FIRST LAWS";
+
+// Pure. text_amendment is the general amendment path for the rest of the
+// constitution; a body that targets the First Laws section specifically
+// must go through first_laws_amendment instead, whose entrenched
+// threshold this refusal exists to make impossible to route around by
+// simply picking the lower-threshold kind. Best-effort by design (design
+// doc §4): free text can always be disguised, so this is a courtesy
+// refusal at creation, not the mechanism that actually holds -- §5's
+// archive plus the judgment wake's fidelity review are what that is.
+export function refusesDisguisedFirstLawsAmendment(kind: ProposalKind, body: string): string | null {
+  if (kind !== "text_amendment") return null;
+  if (!body.includes(FIRST_LAWS_HEADING)) return null;
+  return "text_amendment may not target the FIRST LAWS section -- propose a first_laws_amendment instead (it carries the entrenched threshold the laws require).";
+}
+
 // ---------- eligibility ----------
 //
 // Shared by both propose and ballot gates (design doc §4's opening line, "a
@@ -303,6 +371,7 @@ const TENURE_DAYS: Record<VoteClass, number> = {
   constitutional: 14,
   parameter: 7,
   advisory: 7,
+  entrenched: 14, // same as constitutional, ruled at brief time (D-025)
 };
 const DAY_MS = 86_400_000;
 
@@ -409,6 +478,64 @@ export async function isFoundingRatified(env: Env, kind: ProposalKind): Promise<
   return row != null;
 }
 
+// ---------- First Laws creation gates (D1-touching) ----------
+//
+// Two sequencing rules docs/FIRST-LAWS-DESIGN.md §7 states in prose,
+// enforced here so an unconstitutional proposal cannot even open (the
+// same "structural, not merely arithmetical" idiom control_floor_raise's
+// may-only-rise check already uses). Neither is expressible inside
+// validatePayload (pure, no D1 access) -- both need a fresh read of
+// proposal/settings state createProposal already has env for.
+
+// At least one set_name proposal must have reached a TERMINAL status
+// (passed, failed, OR executed -- deciding the name at all counts; a kept
+// name is still a decided name) before first_laws_ratify may even open.
+// Deliberately distinct from isFoundingRatified above (which only counts
+// passed/executed): this gate is about the cohort having VOTED on the
+// name, not about which way the vote went.
+async function hasDecidedProposalOfKind(env: Env, kind: ProposalKind): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT id FROM proposals WHERE kind = ? AND status IN ('passed', 'failed', 'executed') LIMIT 1")
+    .bind(kind)
+    .first();
+  return row != null;
+}
+
+// Whether first_laws_ratify has already passed -- governance_settings key
+// first_laws_ratified is set the moment it executes (settingsStatementForExecution
+// below). D1-touching, so this lives here rather than in PayloadContext
+// (read once per createProposal call regardless of kind; this is a
+// First-Laws-specific extra read, only made for these two kinds).
+async function isFirstLawsRatified(env: Env): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(SETTING_KEY.firstLawsRatified).first();
+  return row != null;
+}
+
+// docs/FIRST-LAWS-DESIGN.md §7: first_laws_ratify refuses to open until
+// (a) the cohort has actually decided the name (passed or failed both
+// count) and (b) the laws are not ALREADY ratified (nothing left to
+// ratify). first_laws_amendment refuses to open until the laws exist to
+// amend. Neither check applies to any other kind -- a no-op for them.
+export async function assertFirstLawsCreationGates(env: Env, kind: ProposalKind): Promise<void> {
+  if (kind === "first_laws_ratify") {
+    if (!(await hasDecidedProposalOfKind(env, "set_name"))) {
+      throw new SocietyError(
+        403,
+        "first_laws_ratify cannot open until a set_name proposal has reached a decision (passed or failed) -- the cohort must decide the name first.",
+      );
+    }
+    if (await isFirstLawsRatified(env)) {
+      throw new SocietyError(400, "the First Laws are already ratified -- nothing left to ratify. Propose a first_laws_amendment instead.");
+    }
+  } else if (kind === "first_laws_amendment") {
+    if (!(await isFirstLawsRatified(env))) {
+      throw new SocietyError(
+        403,
+        "first_laws_amendment cannot open until the First Laws are ratified -- there is nothing yet to amend. Propose first_laws_ratify first.",
+      );
+    }
+  }
+}
+
 // ---------- proposal and ballot orchestration (D1-touching) ----------
 
 // Reads the current effective name and control floor from
@@ -506,10 +633,14 @@ export async function createProposal(
   const title = titleInput.trim();
   const body = bodyInput.trim();
 
+  const disguisedReason = refusesDisguisedFirstLawsAmendment(kind, body);
+  if (disguisedReason) throw new SocietyError(400, disguisedReason);
+
   const now = Date.now();
 
   const ctx = await currentPayloadContext(env);
   const validatedPayload = validatePayload(kind, payloadInput, ctx);
+  await assertFirstLawsCreationGates(env, kind);
 
   const isFounder = await isFounderCitizen(env, citizen.id);
   const foundingRatified = kind === "set_name" || kind === "text_amendment" ? await isFoundingRatified(env, kind) : true;
@@ -526,7 +657,7 @@ export async function createProposal(
 
   await assertProposalRateCaps(env, citizen.id, now);
 
-  const closesAt = now + VOTE_WINDOW_MS;
+  const closesAt = now + voteWindowMs(voteClass);
   const payloadText = validatedPayload === null ? null : JSON.stringify(validatedPayload);
 
   // Frozen at open, per docs/REVIEW-DEMOCRACY.md H2/M6 (migration 0006):
@@ -850,7 +981,7 @@ export async function getProposalDetail(env: Env, proposalId: number) {
 // UPDATE actually changed a row proceeds past this point for that
 // proposal; the other sees changes:0 and moves on.
 
-const MACHINE_EXECUTABLE_KINDS: readonly ProposalKind[] = ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise"];
+const MACHINE_EXECUTABLE_KINDS: readonly ProposalKind[] = ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise", "first_laws_ratify"];
 
 // docs/REVIEW-DEMOCRACY.md H1's belt: a re-claim (below) can, in the
 // narrow window it exists for, race a still-live-but-slow original
@@ -882,9 +1013,20 @@ function upsertSettingStmt(env: Env, key: string, value: string, expiresAt: numb
 // payload -- one statement, added to the same atomic batch as the
 // proposal status update and the chained outcome event (§8). Mandate
 // kinds (handler_arrangement, buyout_terms, official_token,
-// text_amendment, resolution) never reach here; they set status passed
-// with no settings write at all -- "their force is the public record" (§8).
+// text_amendment, resolution, first_laws_amendment) never reach here; they
+// set status passed with no settings write at all -- "their force is the
+// public record" (§8).
 function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Record<string, unknown> | null, proposalId: number, now: number) {
+  // first_laws_ratify carries NO payload at all (docs/FIRST-LAWS-DESIGN.md
+  // §7: its value IS the proposal id, not a structured field) -- checked
+  // BEFORE the payload guard below, which would otherwise treat it as
+  // "nothing to write" and silently flip the proposal to 'executed' with
+  // no settings row at all [drift item 5]. Every OTHER machine-executable
+  // kind still needs its own real payload, so this must not become a
+  // blanket bypass of the guard.
+  if (kind === "first_laws_ratify") {
+    return upsertSettingStmt(env, SETTING_KEY.firstLawsRatified, String(proposalId), null, proposalId, now);
+  }
   if (!payload) return null;
   switch (kind) {
     case "set_name":

@@ -16,12 +16,16 @@ import {
   KIND_CLASS,
   classOf,
   VOTE_WINDOW_MS,
+  ENTRENCHED_VOTE_WINDOW_MS,
+  voteWindowMs,
   CLASS_MIN_BALLOTS,
   DEFAULT_NAME,
   DEFAULT_CONTROL_FLOOR_PERCENT,
   quorumThreshold,
+  entrenchedQuorumThreshold,
   tally,
   validatePayload,
+  refusesDisguisedFirstLawsAmendment,
   assertEligible,
   countEligible,
   monthsFromNow,
@@ -37,7 +41,7 @@ const isForbidden = (e: unknown) => e instanceof SocietyError && e.status === 40
 
 // ---------- vote classes ----------
 
-test("every one of the 9 proposal kinds has exactly the class design doc §3 names", () => {
+test("every one of the 11 proposal kinds has exactly the class design doc §3 / First Laws §3 names", () => {
   const expected: Record<ProposalKind, string> = {
     set_name: "constitutional",
     text_amendment: "constitutional",
@@ -48,12 +52,14 @@ test("every one of the 9 proposal kinds has exactly the class design doc §3 nam
     set_dividend_uplift: "parameter",
     set_split: "parameter",
     resolution: "advisory",
+    first_laws_ratify: "entrenched",
+    first_laws_amendment: "entrenched",
   };
   for (const kind of PROPOSAL_KINDS) {
     assert.equal(classOf(kind), expected[kind], `${kind} should be ${expected[kind]}`);
   }
-  assert.equal(PROPOSAL_KINDS.length, 9);
-  assert.equal(Object.keys(KIND_CLASS).length, 9);
+  assert.equal(PROPOSAL_KINDS.length, 11, "the original nine plus first_laws_ratify and first_laws_amendment");
+  assert.equal(Object.keys(KIND_CLASS).length, 11);
 });
 
 test("isProposalKind accepts every closed-list kind and rejects anything else", () => {
@@ -78,8 +84,17 @@ test("VOTE_WINDOW_MS is exactly 7 days (168 hours)", () => {
   assert.equal(VOTE_WINDOW_MS, 604_800_000);
 });
 
-test("CLASS_MIN_BALLOTS matches design doc §3's table (3/2/1)", () => {
-  assert.deepEqual(CLASS_MIN_BALLOTS, { constitutional: 3, parameter: 2, advisory: 1 });
+test("ENTRENCHED_VOTE_WINDOW_MS is exactly 14 days (double the standard window, D-025 q4), and voteWindowMs branches by class", () => {
+  assert.equal(ENTRENCHED_VOTE_WINDOW_MS, 14 * 24 * 60 * 60 * 1000);
+  assert.equal(ENTRENCHED_VOTE_WINDOW_MS, 1_209_600_000);
+  assert.equal(voteWindowMs("entrenched"), ENTRENCHED_VOTE_WINDOW_MS);
+  for (const voteClass of ["constitutional", "parameter", "advisory"] as const) {
+    assert.equal(voteWindowMs(voteClass), VOTE_WINDOW_MS, `${voteClass} should use the standard 7-day window, unchanged`);
+  }
+});
+
+test("CLASS_MIN_BALLOTS matches design doc §3's table (3/2/1) plus D-025's entrenched floor of 4", () => {
+  assert.deepEqual(CLASS_MIN_BALLOTS, { constitutional: 3, parameter: 2, advisory: 1, entrenched: 4 });
 });
 
 test("defaults match doc.ts's published starting values", () => {
@@ -87,37 +102,20 @@ test("defaults match doc.ts's published starting values", () => {
   assert.equal(DEFAULT_CONTROL_FLOOR_PERCENT, 51);
 });
 
-// Drift guard: the application's closed kind list and the migration's CHECK
-// constraint must name exactly the same 9 kinds, or the DB backstop and the
-// app allowlist silently diverge -- the exact failure mode
-// DEMOCRACY-SURFACE.md §8 gotcha 10 already found once in this codebase
-// (GET /api/events's stale kinds list).
-test("PROPOSAL_KINDS matches the CHECK constraint in migrations/0005_governance.sql exactly", () => {
-  const migrationPath = join(import.meta.dirname, "..", "migrations", "0005_governance.sql");
-  const text = readFileSync(migrationPath, "utf8");
-  const match = text.match(/CREATE TABLE IF NOT EXISTS proposals[\s\S]*?kind\s+TEXT NOT NULL CHECK \(kind IN \(([^)]+)\)\)/);
-  assert.ok(match, "could not find the proposals.kind CHECK constraint in the migration file");
-  const inMigration = match[1]
-    .split(",")
-    .map((s) => s.trim().replace(/^'|'$/g, ""))
-    .sort();
-  const inCode = [...PROPOSAL_KINDS].sort();
-  assert.deepEqual(inMigration, inCode);
-});
-
-// ---------- First Laws, commit 1(c): the DB-side parity pair ----------
+// ---------- First Laws: the DB-side/app-side parity trio ----------
 //
 // migrations/0007_first_laws.sql widens proposals.kind to eleven values
 // and maintainer_queue.kind to five, and schema.sql's own rollup carries
-// both widened CHECKs too -- but PROPOSAL_KINDS itself does not grow until
-// commit 2, so the three-way equality the brief eventually wants
-// (PROPOSAL_KINDS == 0007 == schema.sql) cannot be green yet without
-// commit 2's own governance.ts change landing early out of sequence. What
-// CAN and must be green at commit 1 is the DB-side pair alone (the
-// migration and the rollup agreeing with EACH OTHER), plus the queue-kind
-// three-way (which has no app-side "PROPOSAL_KINDS" equivalent gating it --
-// DB_QUEUE_KINDS is introduced in this same commit). The PROPOSAL_KINDS
-// leg is completed in commit 2, with its own red recorded there.
+// both widened CHECKs too. Commission notes flag 3's own sequencing: the
+// full three-way (PROPOSAL_KINDS == 0007 == schema.sql) could not be green
+// at commit 1, since PROPOSAL_KINDS itself did not grow until commit 2 --
+// this supersedes the commit-1-only DB-side pair (the migration and the
+// rollup agreeing with each other, with no app-side leg) and the old test
+// pinned against migrations/0005_governance.sql, both now folded into the
+// one complete assertion below. Growing PROPOSAL_KINDS in commit 2 without
+// yet updating this test is the recorded red (commission flag 3): the old
+// migrations/0005-scoped comparison still only knew nine kinds, so
+// PROPOSAL_KINDS's own eleven immediately failed it.
 
 function extractKindCheck(sql: string, createTableAnchor: string): string[] {
   const re = new RegExp(`CREATE TABLE ${createTableAnchor}[\\s\\S]*?kind\\s+TEXT NOT NULL CHECK \\(kind IN \\(([^)]+)\\)\\)`);
@@ -129,13 +127,21 @@ function extractKindCheck(sql: string, createTableAnchor: string): string[] {
     .sort();
 }
 
-test("First Laws commit 1: 0007's rebuilt proposals CHECK matches schema.sql's proposals CHECK exactly (the DB-side half of the parity pair; PROPOSAL_KINDS itself joins in commit 2)", () => {
+// Drift guard: the application's closed kind list, migration 0007's
+// rebuilt CHECK, and schema.sql's own rollup CHECK must all name exactly
+// the same eleven kinds, or the DB backstop and the app allowlist silently
+// diverge -- the exact failure mode DEMOCRACY-SURFACE.md §8 gotcha 10
+// already found once in this codebase (GET /api/events's stale kinds
+// list).
+test("PROPOSAL_KINDS matches 0007's rebuilt proposals CHECK and schema.sql's rollup CHECK, all three exactly", () => {
   const migration = readFileSync(join(import.meta.dirname, "..", "migrations", "0007_first_laws.sql"), "utf8");
   const schema = readFileSync(join(import.meta.dirname, "..", "schema.sql"), "utf8");
   const inMigration = extractKindCheck(migration, "proposals_new \\(");
   const inSchema = extractKindCheck(schema, "IF NOT EXISTS proposals \\(");
+  const inCode = [...PROPOSAL_KINDS].sort();
   assert.deepEqual(inMigration, inSchema);
-  assert.equal(inMigration.length, 11, "the nine existing kinds plus first_laws_ratify and first_laws_amendment");
+  assert.deepEqual(inMigration, inCode);
+  assert.equal(inCode.length, 11, "the nine original kinds plus first_laws_ratify and first_laws_amendment");
 });
 
 test("First Laws commit 1: 0007's rebuilt maintainer_queue CHECK, schema.sql's maintainer_queue CHECK, and the new DB_QUEUE_KINDS superset all agree exactly", () => {
@@ -286,6 +292,74 @@ test("tally: abstain counts toward quorum and floor, never toward passage", () =
   assert.equal(failingMarginWithAbstains.status, "failed");
 });
 
+// ---------- entrenched class (First Laws, D-025) ----------
+
+test("entrenchedQuorumThreshold is ceil(2E/3)", () => {
+  const cases: [number, number][] = [
+    [4, 3],
+    [5, 4],
+    [6, 4],
+    [7, 5],
+    [8, 6],
+    [9, 6],
+    [10, 7],
+  ];
+  for (const [eligible, expected] of cases) {
+    assert.equal(entrenchedQuorumThreshold(eligible), expected, `eligible=${eligible}`);
+  }
+});
+
+// design doc §3's own crossover point (D-025 q2/q3, [G1-4]): the
+// entrenched floor is 4, so below E=7 the floor is what actually binds
+// (quorum clears first); at and above E=7 quorum overtakes it. Each row
+// below is all-yes (no/abstain=0) so only quorum/floor are under test, the
+// same isolation the existing constitutional quorum/floor tests use.
+test("tally: entrenched quorum/floor interplay across E=4..10, the floor-4/quorum crossover at E=7 (D-025 q2/q3, [G1-4])", () => {
+  // E=4: quorum=3, floor=4 -- floor is the higher bar.
+  assert.deepEqual(tally("entrenched", 2, 0, 0, 4), { status: "failed", cast: 2, reason: "quorum" }); // cast=2 < quorum(3)
+  assert.deepEqual(tally("entrenched", 3, 0, 0, 4), { status: "failed", cast: 3, reason: "floor" }); // cast=3 clears quorum(3), fails floor(4)
+  assert.equal(tally("entrenched", 4, 0, 0, 4).status, "passed"); // cast=4 clears both, 4>=3*0 && 4>0
+
+  // E=5: quorum=4, floor=4 -- exactly equal.
+  assert.deepEqual(tally("entrenched", 3, 0, 0, 5), { status: "failed", cast: 3, reason: "quorum" });
+  assert.equal(tally("entrenched", 4, 0, 0, 5).status, "passed");
+
+  // E=6: quorum=4, floor=4 -- still equal.
+  assert.deepEqual(tally("entrenched", 3, 0, 0, 6), { status: "failed", cast: 3, reason: "quorum" });
+  assert.equal(tally("entrenched", 4, 0, 0, 6).status, "passed");
+
+  // E=7: quorum=5, floor=4 -- quorum now the higher bar, the named crossover.
+  assert.deepEqual(tally("entrenched", 4, 0, 0, 7), { status: "failed", cast: 4, reason: "quorum" }); // cast=4 clears floor(4), fails quorum(5)
+  assert.equal(tally("entrenched", 5, 0, 0, 7).status, "passed");
+
+  // E=8: quorum=6.
+  assert.deepEqual(tally("entrenched", 5, 0, 0, 8), { status: "failed", cast: 5, reason: "quorum" });
+  assert.equal(tally("entrenched", 6, 0, 0, 8).status, "passed");
+
+  // E=9: quorum=6.
+  assert.deepEqual(tally("entrenched", 5, 0, 0, 9), { status: "failed", cast: 5, reason: "quorum" });
+  assert.equal(tally("entrenched", 6, 0, 0, 9).status, "passed");
+
+  // E=10: quorum=7.
+  assert.deepEqual(tally("entrenched", 6, 0, 0, 10), { status: "failed", cast: 6, reason: "quorum" });
+  assert.equal(tally("entrenched", 7, 0, 0, 10).status, "passed");
+});
+
+test("tally: entrenched 3N passage threshold, exact boundary both sides (D-025 q1, 75% integer form)", () => {
+  // eligible=1 keeps quorum out of the way (entrenchedQuorumThreshold(1)=1,
+  // always cleared); abstains pad cast to clear the floor(4) in every row
+  // so only the Y>=3N rule is under test -- the failing rows assert
+  // reason:"margin" specifically, proving they fail on the ratio and not
+  // on floor/quorum (mirrors the constitutional 2/3 test's own idiom).
+  assert.equal(tally("entrenched", 3, 1, 0, 1).status, "passed"); // 3 >= 3*1 exactly, cast=4 (floor already met, no padding needed)
+  const oneShort = tally("entrenched", 2, 1, 1, 1); // 2 < 3*1, cast padded to 4 with one abstain
+  assert.equal(oneShort.status, "failed");
+  assert.equal(oneShort.reason, "margin");
+  const allAbstain = tally("entrenched", 0, 0, 4, 1); // cast=4 clears floor/quorum; 0>=3*0 but 0 is not >0 (the explicit Y>0 clause)
+  assert.equal(allAbstain.status, "failed");
+  assert.equal(allAbstain.reason, "margin");
+});
+
 // ---------- validatePayload ----------
 
 const ctx = { currentName: "Commonhold", currentControlFloorPercent: 51 };
@@ -362,12 +436,35 @@ test("validatePayload: control_floor_raise's refusal below 51 quotes the constit
   }
 });
 
-test("validatePayload: the five {body only} kinds accept a null/absent payload and reject a structured one", () => {
-  const bodyOnly: ProposalKind[] = ["handler_arrangement", "buyout_terms", "official_token", "text_amendment", "resolution"];
+test("validatePayload: the seven {body only} kinds accept a null/absent payload and reject a structured one", () => {
+  const bodyOnly: ProposalKind[] = [
+    "handler_arrangement",
+    "buyout_terms",
+    "official_token",
+    "text_amendment",
+    "resolution",
+    "first_laws_ratify",
+    "first_laws_amendment",
+  ];
   for (const kind of bodyOnly) {
     assert.equal(validatePayload(kind, null, ctx), null);
     assert.equal(validatePayload(kind, undefined, ctx), null);
     assert.throws(() => validatePayload(kind, { anything: true }, ctx), isBadRequest, `${kind} should refuse a structured payload`);
+  }
+});
+
+// ---------- refusesDisguisedFirstLawsAmendment ----------
+
+test("refusesDisguisedFirstLawsAmendment: refuses a text_amendment body containing the FIRST LAWS heading literal, directing to first_laws_amendment", () => {
+  assert.equal(refusesDisguisedFirstLawsAmendment("text_amendment", "Change the prize:bounty split wording."), null);
+  const refusal = refusesDisguisedFirstLawsAmendment("text_amendment", "Reword the FIRST LAWS section to soften rule 1.");
+  assert.ok(refusal);
+  assert.match(refusal!, /first_laws_amendment instead/);
+});
+
+test("refusesDisguisedFirstLawsAmendment: a no-op for every kind other than text_amendment, even carrying the literal", () => {
+  for (const kind of PROPOSAL_KINDS.filter((k) => k !== "text_amendment")) {
+    assert.equal(refusesDisguisedFirstLawsAmendment(kind, "mentions FIRST LAWS in passing"), null, `${kind} should never be refused by this check`);
   }
 });
 
@@ -430,6 +527,22 @@ test("assertEligible: open mode, parameter/advisory tenure boundary is exactly 7
       isForbidden,
     );
   }
+});
+
+test("assertEligible: open mode, entrenched tenure boundary is exactly 14 days -- same figure as constitutional (D-025, docs/FIRST-LAWS-DESIGN.md: 'same as constitutional')", () => {
+  const opened = 100 * DAY;
+  assert.doesNotThrow(() =>
+    assertEligible(
+      baseInput({ registrationMode: "open", voteClass: "entrenched", kind: "first_laws_ratify", citizenCreatedAt: opened - 14 * DAY, proposalOpenedAt: opened }),
+    ),
+  );
+  assert.throws(
+    () =>
+      assertEligible(
+        baseInput({ registrationMode: "open", voteClass: "entrenched", kind: "first_laws_ratify", citizenCreatedAt: opened - 14 * DAY + 1, proposalOpenedAt: opened }),
+      ),
+    isForbidden,
+  );
 });
 
 test("assertEligible: registering mid-vote never enfranchises for that vote, however long the citizen then waits", () => {
