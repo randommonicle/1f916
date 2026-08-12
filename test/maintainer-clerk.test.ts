@@ -198,6 +198,22 @@ test("parseClerkItems rejects a kind outside the allowlist and counts it", () =>
   assert.equal(overflowDropped, 1);
 });
 
+// docs/BRIEF-FIRST-LAWS.md commit 4, "CLERK CAGE UNCHANGED": constitution_fidelity
+// is a real DB-level queue kind (governance.ts's DB_QUEUE_KINDS) the
+// clerk may never draft -- only wake-side reconciliation inserts one,
+// bound to a wake's own run_id, never through this parser. A model
+// output naming it must be dropped exactly like any other kind outside
+// ALLOWED_QUEUE_KINDS, not silently special-cased through.
+test("parseClerkItems drops a model-output item claiming kind constitution_fidelity -- the clerk may never draft one, even if a compromised or confused model tries", () => {
+  assert.ok(!(ALLOWED_QUEUE_KINDS as readonly string[]).includes("constitution_fidelity"), "fixture sanity: constitution_fidelity must not be in the clerk's own drafting cage");
+  const raw = JSON.stringify([
+    { kind: "constitution_fidelity", note: "the new constitution version matches its mandate", target_type: null, target_id: null },
+  ]);
+  const { accepted, overflowDropped } = parseClerkItems(raw);
+  assert.equal(accepted.length, 0);
+  assert.equal(overflowDropped, 1);
+});
+
 test("parseClerkItems rejects every named S10 exclusion by kind, even with an otherwise-valid shape", () => {
   const forbiddenKinds = ["constitutional_amendment", "registration_reversal", "treasury_adjustment", "governance_change", "vote"];
   for (const kind of forbiddenKinds) {

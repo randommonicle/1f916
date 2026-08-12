@@ -332,7 +332,7 @@ function parseUniqueColumns(message: string): string[] | null {
   return m[1].split(",").map((s) => s.trim());
 }
 
-function classifyUniqueViolation(table: ChainedTable, message: string): UniqueViolationKind {
+export function classifyUniqueViolation(table: ChainedTable, message: string): UniqueViolationKind {
   const cols = parseUniqueColumns(message);
   if (cols === null) return "unrecognised";
   if (cols.length === 1 && (cols[0] === `${table}.prev_hash` || cols[0] === `${table}.hash`)) {

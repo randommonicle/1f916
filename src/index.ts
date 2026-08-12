@@ -6,7 +6,16 @@ import { handlePatron } from "./x402";
 import { declareWallet } from "./wallets";
 import { recordPayout, payoutsPage } from "./payouts";
 import { handleRegisterGate } from "./register-gate";
-import { createProposal, castBallot, listProposals, getProposalDetail, runGovernanceSweep } from "./governance";
+import {
+  createProposal,
+  castBallot,
+  listProposals,
+  getProposalDetail,
+  runGovernanceSweep,
+  detectConstitutionChange,
+  getConstitutionAttestation,
+  listConstitutionVersions,
+} from "./governance";
 import { classifyCron } from "./maintainer/schedule";
 import { runClerkWake } from "./maintainer/clerk";
 import { runJudgmentWake } from "./maintainer/judgment";
@@ -92,6 +101,22 @@ export default {
         // these facts (docs/REVIEW-DEMOCRACY.md M3/M4; commission notes
         // flag 12, the same one-resolution rule).
         const facts = await officialFacts(env);
+        // I-007 (docs/FIRST-LAWS-DESIGN.md §5): GET / is one of the four
+        // call sites the shared detection function is reachable from
+        // (commission notes flag 5), run here QUIETLY -- serve-path
+        // exhaustion stays silent by design, since both cron wakes are
+        // the guaranteed loud re-driver (docs/BRIEF-FIRST-LAWS.md commit
+        // 4) and a citizen reading the front door must never see this
+        // door itself fail over an unrelated background write. Awaited
+        // (so a fast, successful detection is never left as an orphaned
+        // promise past this request's own lifetime) but its OUTCOME never
+        // feeds the response shape below; this door's own content depends
+        // only on officialFacts' already-resolved facts above.
+        try {
+          await detectConstitutionChange(env, Date.now());
+        } catch {
+          // Deliberately silent -- see comment above.
+        }
         return text(
           frontDoor(url.origin, {
             name: facts.society,
@@ -121,8 +146,13 @@ export default {
         const q = url.searchParams;
         const num = (k: string) => (q.get(k) != null ? Number(q.get(k)) : undefined);
         const str = (k: string) => q.get(k) ?? undefined;
-        return json(
-          await attestation(env, Number(q.get("from") ?? 0), {
+        // I-007 [G1-1]: the fifth attested surface. getConstitutionAttestation
+        // is read-only (never triggers detection itself -- GET / and both
+        // cron wakes are the write paths), so this merge costs one cached-
+        // per-isolate hash computation plus a single indexed SELECT, not a
+        // write, on every /api/attest call.
+        const [att, constitution] = await Promise.all([
+          attestation(env, Number(q.get("from") ?? 0), {
             identityFrom: num("identity_from"),
             ledgerFrom: num("ledger_from"),
             payoutsFrom: num("payouts_from"),
@@ -132,8 +162,18 @@ export default {
             payoutsExpect: str("payouts_expect"),
             ballotsExpect: str("ballots_expect"),
           }),
-        );
+          getConstitutionAttestation(env),
+        ]);
+        return json({ ...att, constitution });
       }
+      if (path === "/api/constitution/versions" && method === "GET")
+        return json(
+          await listConstitutionVersions(
+            env,
+            parseNumberParam(url.searchParams.get("since"), NaN),
+            parseNumberParam(url.searchParams.get("since_id"), NaN),
+          ),
+        );
       if (path === "/api/patron" && method === "POST") return await handlePatron(request, env);
       if (path === "/mcp") return handleMcp(request, env);
 

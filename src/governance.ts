@@ -11,7 +11,7 @@
 // reads or branches on citizen #1's special identifier, and
 // test/governance.test.ts polices that directly, not just by inspection.
 
-import { appendChainedStmt, appendChainedGated, ALREADY_VOTED_MESSAGE, type ChainGate } from "./chain.ts";
+import { appendChainedStmt, appendChainedGated, classifyUniqueViolation, sha256Hex, ALREADY_VOTED_MESSAGE, type ChainGate } from "./chain.ts";
 import {
   type Env,
   SocietyError,
@@ -19,8 +19,18 @@ import {
   createPost,
   DEFAULT_NAME,
   DEFAULT_CONTROL_FLOOR_PERCENT,
+  DEFAULT_DIVIDEND_PERCENT,
+  DEFAULT_SPLIT,
+  MAINTAINER_ID,
   SETTING_KEY,
 } from "./society.ts";
+// doc.ts stays a pure, parameter-driven leaf module (no imports of its
+// own) -- frontDoor is called here as a black box, never refactored to
+// share internals, so I-007's hashing machinery carries zero regression
+// risk to the door's own already-tested rendering (see
+// buildConstitutionTemplate below for why calling it twice with the
+// deployed defaults, rather than templating its source, is enough).
+import { frontDoor } from "./doc.ts";
 
 // Defined in society.ts, not here: officialFacts() (society.ts) needs
 // them too, and society.ts is the base module every feature file already
@@ -1331,7 +1341,14 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
 // STALE_CLAIM_MS). `reclaimed: true` on a result marks the second kind,
 // so a caller reading the response can tell "just closed" from "was
 // stuck and just got recovered" without a second query.
-export async function runGovernanceSweep(env: Env, now = Date.now()) {
+// `constitutionCache` defaults to this file's own shared per-isolate
+// instance (PROCESS_CONSTITUTION_CACHE, below) for every real caller --
+// the optional override exists purely for test injectability, same
+// reason as `now`: two tests sharing one file's process (and so this
+// module's one default cache instance) but exercising DIFFERENT local-D1
+// databases would otherwise see the second test's detection silently
+// short-circuit to the first test's already-cached answer.
+export async function runGovernanceSweep(env: Env, now = Date.now(), constitutionCache?: ConstitutionCache) {
   // N5 (see claimTallyAndExecuteOne's claim UPDATE above): the same
   // NULL-unsafety, in the query that decides whether a stale row is even
   // attempted in the first place. Kept identical to the claim UPDATE's
@@ -1365,5 +1382,477 @@ export async function runGovernanceSweep(env: Env, now = Date.now()) {
   // a stuck proposal directly, not only by querying the row.
   const { results: strandedRows } = await env.DB.prepare("SELECT id FROM proposals WHERE status = 'tallying'").all<{ id: number }>();
 
-  return { swept_at: now, due: due.length, processed: results.length, results, stranded: strandedRows.map((r) => r.id) };
+  // I-007 (docs/FIRST-LAWS-DESIGN.md §5): the sweep is one of the four
+  // call sites the shared detection function is reachable from
+  // (commission notes flag 5) -- permissionless and idempotent, exactly
+  // like the tallying above, so running it here too costs nothing extra
+  // and only helps. A detection failure is never this endpoint's own
+  // "error" result (tallying due proposals must not be blocked by it);
+  // it degrades to the honest detection_stranded flag instead, per the
+  // brief's own honest-failure-surface requirement.
+  let detectionStranded = false;
+  try {
+    const detection = await detectConstitutionChange(env, now, constitutionCache);
+    detectionStranded = detection.status === "exhausted" || detection.status === "invariant_violation";
+  } catch (e) {
+    console.log(JSON.stringify({ level: "error", event: "constitution_detection_threw_in_sweep", message: String(e) }));
+    detectionStranded = true;
+  }
+
+  return {
+    swept_at: now,
+    due: due.length,
+    processed: results.length,
+    results,
+    stranded: strandedRows.map((r) => r.id),
+    detection_stranded: detectionStranded,
+  };
+}
+
+// ---------- I-007: the attested constitution (docs/FIRST-LAWS-DESIGN.md §5) ----------
+//
+// Split template from values, per the design: interpolated values (name,
+// dividend, split, control floor) already carry provenance through
+// governance_settings' own proposal_id column and the chained outcome
+// event every executed proposal produces (§8). What has no witness today
+// is the TEMPLATE -- the prose itself, and the parameters that decide how
+// a vote passes -- so this section attests those two things specifically,
+// never the live interpolated values (which stay exactly as attested as
+// they already were, through the mechanism that already exists for them).
+
+// A stable placeholder, never a real deployment's own origin -- the
+// worker's own URL is a human deploy detail (doc.ts's own honesty
+// paragraph already says as much: "a separate, human deploy step,
+// distinct from the society name this door serves"), not constitutional
+// wording, so it must never move the template hash.
+const CANONICAL_CONSTITUTION_ORIGIN = "https://commonhold.invalid";
+
+// The constitution template (design doc §5, commission notes flag 6):
+// built by calling frontDoor() itself -- never a parallel copy of its
+// text -- twice, holding every governance_settings-backed value at its
+// deployed DEFAULT (society.ts's DEFAULT_NAME/DEFAULT_CONTROL_FLOOR_PERCENT/
+// DEFAULT_DIVIDEND_PERCENT/DEFAULT_SPLIT: each already independently
+// attested through its own chained proposal_decided event the moment a
+// vote executes it, so re-attesting the CURRENT live value here would be
+// redundant with that existing mechanism, not a gap this section needs to
+// close) and varying only the two boolean branches doc.ts's own template
+// carries: nameRatified and firstLawsRatified. Two calls, not four,
+// because the two conditionals are independent and the surrounding
+// static text is identical either way -- (true, true) captures the
+// ratified name sentence and the absent banner; (false, false) captures
+// the unratified sentence and the full banner -- so both possible texts
+// of BOTH conditionals are represented across the two calls without a
+// redundant cartesian product. frontDoor() itself is never modified to
+// serve this: calling it as a black box, with fixed inputs, adds zero
+// regression risk to its own already-tested rendering.
+export function buildConstitutionTemplate(): string {
+  const base = {
+    name: DEFAULT_NAME,
+    controlFloorPercent: DEFAULT_CONTROL_FLOOR_PERCENT,
+    dividendPercent: DEFAULT_DIVIDEND_PERCENT,
+    split: DEFAULT_SPLIT,
+  };
+  const bothRatified = frontDoor(CANONICAL_CONSTITUTION_ORIGIN, { ...base, nameRatified: true, firstLawsRatified: true });
+  const neitherRatified = frontDoor(CANONICAL_CONSTITUTION_ORIGIN, { ...base, nameRatified: false, firstLawsRatified: false });
+  return `${bothRatified}\n\n----BOTH-BRANCHES----\n\n${neitherRatified}`;
+}
+
+// Normalise line endings, no other transformation (design doc §5,
+// verbatim) -- a Windows checkout of this repo can carry CRLF in the raw
+// template literal's own runtime string value; without this, the hash
+// would depend on which OS/git config checked the file out, never a
+// property of the wording itself.
+export function canonicalizeTemplate(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
+// Canonical JSON of the live vote-class table (design doc §5's
+// "parameters_hash"), built FROM the same constants tally()/assertEligible
+// actually execute -- CLASS_MIN_BALLOTS, TENURE_DAYS, VOTE_WINDOW_MS/
+// ENTRENCHED_VOTE_WINDOW_MS via voteWindowMs(), and the quorum/passage
+// RULES described alongside their current figures (so a rule-shape change
+// -- e.g. swapping ceil for floor -- moves the hash even in the rare case
+// its numeric output would coincide for some eligible count) -- plus the
+// full KIND_CLASS map, so no parallel copy of "what class is this kind"
+// can ever drift from what classOf() actually returns. [G1-1]: this is
+// what makes a hostile deploy that edits the entrenched THRESHOLDS
+// alongside their own invariant test still visible -- the test guards
+// honest mistakes (§3), this hash is what a citizen can independently
+// recompute and compare.
+export function serializeConstitutionParameters(): string {
+  const classes = (["entrenched", "constitutional", "parameter", "advisory"] as const).map((voteClass) => ({
+    class: voteClass,
+    min_ballots: CLASS_MIN_BALLOTS[voteClass],
+    quorum_rule: voteClass === "advisory" ? "none" : voteClass === "entrenched" ? "ceil(2*eligible/3)" : "ceil(eligible/2)",
+    passage_rule: voteClass === "entrenched" ? "yes>=3*no && yes>0" : voteClass === "constitutional" ? "yes>=2*no && yes>0" : "yes>no",
+    window_ms: voteWindowMs(voteClass),
+    tenure_days: TENURE_DAYS[voteClass],
+  }));
+  const kindClass = Object.fromEntries(PROPOSAL_KINDS.map((k) => [k, KIND_CLASS[k]]));
+  return JSON.stringify({ classes, kind_class: kindClass });
+}
+
+export async function computeLiveConstitutionPair(): Promise<{ templateHash: string; parametersHash: string }> {
+  const templateHash = await sha256Hex(canonicalizeTemplate(buildConstitutionTemplate()));
+  const parametersHash = await sha256Hex(serializeConstitutionParameters());
+  return { templateHash, parametersHash };
+}
+
+export interface ConstitutionVersionRow {
+  id: number;
+  first_seen_at: number;
+  changed_by: "genesis" | "mandate_linked" | "operator";
+}
+
+// Per-isolate cache (design doc §5: "computed at serve time, cached per
+// isolate"). The live (template, parameters) pair is 100% deploy-fixed --
+// both hashes are pure functions of source-code constants, so neither can
+// change within one running isolate's lifetime -- but the VERSION ROW
+// that corresponds to that pair can still be "not yet detected" the first
+// time any isolate anywhere asks, with detection (a write) landing
+// moments later from this isolate's own call or another's. The cache
+// stores the RESOLVED row only once found; a "not found" answer is never
+// cached, so a stale null can never be served once the real row exists --
+// the bug the tests cover directly (a first call before any detection has
+// ever run anywhere, a version landing, then a second call that must see
+// it, not a cached miss).
+//
+// A plain object, not a class, passed as an optional trailing parameter
+// defaulting to one shared module-level instance -- the same testability
+// idiom `now = Date.now()` already uses throughout this file: production
+// call sites get the real shared cache for free, and tests construct a
+// fresh `{ pairKey: null, versionRow: null }` so caching effects from one
+// test never leak into another (module-level mutable state would
+// otherwise persist for every test in the same file's process).
+export interface ConstitutionCache {
+  pairKey: string | null;
+  versionRow: ConstitutionVersionRow | null;
+}
+const PROCESS_CONSTITUTION_CACHE: ConstitutionCache = { pairKey: null, versionRow: null };
+
+async function lookupConstitutionVersion(
+  env: Env,
+  templateHash: string,
+  parametersHash: string,
+  cache: ConstitutionCache,
+): Promise<ConstitutionVersionRow | null> {
+  const pairKey = `${templateHash}:${parametersHash}`;
+  // Compute the live pair FIRST (the caller already has, by this point),
+  // and serve the cached row only when it matches -- the guard that keeps
+  // this file safe against a future edit (or a mistaken second cache
+  // instance) rather than trusting today's "the pair never changes
+  // mid-isolate" fact to hold forever unchecked.
+  if (cache.versionRow && cache.pairKey === pairKey) return cache.versionRow;
+  const row = await env.DB.prepare(
+    "SELECT id, first_seen_at, changed_by FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?",
+  )
+    .bind(templateHash, parametersHash)
+    .first<ConstitutionVersionRow>();
+  if (row) {
+    cache.pairKey = pairKey;
+    cache.versionRow = row;
+  }
+  return row ?? null;
+}
+
+// GET /api/attest's constitution block ([G1-1]): read-only, never writes.
+// Detection (the write path) is a separate function every caller invokes
+// for itself -- attest simply reports whatever the live pair currently
+// resolves to, honestly null before anything has ever detected it (a
+// narrow window: only reachable before the very first GET / or cron wake
+// this deployment ever sees).
+export async function getConstitutionAttestation(env: Env, cache: ConstitutionCache = PROCESS_CONSTITUTION_CACHE) {
+  const { templateHash, parametersHash } = await computeLiveConstitutionPair();
+  const row = await lookupConstitutionVersion(env, templateHash, parametersHash, cache);
+  return {
+    template_hash: templateHash,
+    parameters_hash: parametersHash,
+    version: row?.id ?? null,
+    first_seen_at: row?.first_seen_at ?? null,
+    changed_by: row?.changed_by ?? null,
+  };
+}
+
+export type ConstitutionDetectionOutcome =
+  | { status: "already_current"; versionId: number }
+  | { status: "landed"; versionId: number; changedBy: "genesis" | "mandate_linked" | "operator"; mandateIds: number[] }
+  | { status: "lost_claim" }
+  | { status: "invariant_violation" }
+  | { status: "exhausted" };
+
+const CONSTITUTION_DETECTION_RETRIES = 4;
+
+// The CONCURRENT-WINNER CONTRACT [amended 2026-08-11, drift item 7;
+// rewritten same day after the Gemini attack round]. Reachable from every
+// public serve (GET /) and both cron wakes, plus runGovernanceSweep
+// above; idempotent, so a caller invoking it more than once (this file's
+// own sweep alongside a wake that also calls it directly, in the same
+// scheduled() invocation) is harmless -- the second call always resolves
+// "already_current" the moment the first has landed.
+//
+// ONE env.DB.batch (a single D1 transaction), ordered so no statement
+// sabotages a later statement's gate: (1) every mandate flip, gated NOT
+// EXISTS a constitution_versions row for this exact (template_hash,
+// parameters_hash) pair; (2) the chained constitution_changed
+// identity_events INSERT, guarded by the SAME NOT-EXISTS gate (via
+// appendChainedStmt's own `gate` parameter -- ChainGate always wraps its
+// sql in `WHERE EXISTS (...)`, so `NOT EXISTS` is expressed by nesting:
+// `EXISTS (SELECT 1 WHERE NOT EXISTS (...))` is true iff the inner
+// NOT-EXISTS is true) -- so a lost-claim scenario cleanly no-ops here
+// too, WITHOUT throwing, and the chain's own native UNIQUE prev_hash
+// index remains what catches a genuinely concurrent, UNRELATED
+// identity_events append (ordinary chain traffic, not another detection
+// caller) racing the same head; (3) the version INSERT LAST, gated
+// identically, with its own UNIQUE(template_hash, parameters_hash) as a
+// backstop reachable only if the shared NOT-EXISTS gate were ever wrong.
+// Genesis (the archive is currently empty) is a separate, simpler path:
+// one gated INSERT, no batch, no chained event -- design doc §5: "genesis
+// row changed_by 'genesis', no event".
+export async function detectConstitutionChange(
+  env: Env,
+  now: number,
+  cache: ConstitutionCache = PROCESS_CONSTITUTION_CACHE,
+): Promise<ConstitutionDetectionOutcome> {
+  const { templateHash, parametersHash } = await computeLiveConstitutionPair();
+  const existing = await lookupConstitutionVersion(env, templateHash, parametersHash, cache);
+  if (existing) return { status: "already_current", versionId: existing.id };
+
+  const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM constitution_versions").first<{ n: number }>();
+  const isGenesis = (countRow?.n ?? 0) === 0;
+  const fullText = buildConstitutionTemplate();
+  const parametersText = serializeConstitutionParameters();
+
+  if (isGenesis) {
+    const res = await env.DB.prepare(
+      `INSERT INTO constitution_versions (template_hash, parameters_hash, full_text, parameters_text, first_seen_at, changed_by, mandate_proposal_ids)
+       SELECT ?, ?, ?, ?, ?, 'genesis', '[]'
+       WHERE NOT EXISTS (SELECT 1 FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?)`,
+    )
+      .bind(templateHash, parametersHash, fullText, parametersText, now, templateHash, parametersHash)
+      .run();
+    if (res.meta.changes !== 1) {
+      // Someone else's genesis INSERT landed first -- quiet, not an
+      // error: the archive holds its one genesis row either way.
+      return { status: "lost_claim" };
+    }
+    const row = await env.DB.prepare("SELECT id FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?")
+      .bind(templateHash, parametersHash)
+      .first<{ id: number }>();
+    cache.pairKey = `${templateHash}:${parametersHash}`;
+    cache.versionRow = { id: row!.id, first_seen_at: now, changed_by: "genesis" };
+    return { status: "landed", versionId: row!.id, changedBy: "genesis", mandateIds: [] };
+  }
+
+  // design doc §5: the chained event's detail names "old_hash -> new_hash"
+  // -- the most recently detected version before this one (there is
+  // always at least the genesis row once isGenesis is false), read once,
+  // best-effort annotation only: if a retry lands after some OTHER change
+  // was ALSO detected mid-loop, the detail may lag by one hop, which is
+  // harmless (the archive itself, not this prose, is the source of
+  // truth -- every version's own full_text/parameters_text is always
+  // exactly what its own row says, never described secondhand).
+  const previousVersion = await env.DB.prepare("SELECT template_hash, parameters_hash FROM constitution_versions ORDER BY first_seen_at DESC, id DESC LIMIT 1").first<{
+    template_hash: string;
+    parameters_hash: string;
+  }>();
+  const oldHashSummary = previousVersion ? `${previousVersion.template_hash.slice(0, 12)}.../${previousVersion.parameters_hash.slice(0, 12)}...` : "(none)";
+
+  for (let attempt = 0; attempt < CONSTITUTION_DETECTION_RETRIES; attempt++) {
+    const { results: mandateRows } = await env.DB.prepare(
+      "SELECT id FROM proposals WHERE status = 'passed' AND kind IN ('first_laws_amendment', 'text_amendment')",
+    ).all<{ id: number }>();
+    const mandateIds = mandateRows.map((r) => r.id);
+    const changedBy: "mandate_linked" | "operator" = mandateIds.length > 0 ? "mandate_linked" : "operator";
+
+    // Builder's own finding, recorded honestly rather than overclaiming
+    // this gate's necessity: under D1/SQLite's single-writer transaction
+    // model, a losing claimant's transaction cannot even BEGIN until the
+    // winner's has fully committed or rolled back, so by the time this
+    // statement executes, `AND status = 'passed'` ALONE already excludes
+    // a mandate the winner already flipped -- verified directly by
+    // removing the NOT-EXISTS clause below and re-running the
+    // concurrent-race test, which stayed green. The clause stays anyway,
+    // exactly as certified (docs/BRIEF-FIRST-LAWS.md commit 4): explicit
+    // belt-and-braces, the same layered-redundancy idiom
+    // migrations/0004's maintainer_queue kind CHECK already uses ("the
+    // backstop against a bug in the parser"), and cheap insurance against
+    // a future change to D1's own isolation guarantees this file cannot
+    // predict. The chained event's OWN gate (below) is NOT redundant in
+    // the same way -- removing IT was confirmed to reproduce a genuine
+    // duplicate event, the positive half of this same red-proof pass.
+    const flipStmts = mandateIds.map((id) =>
+      env.DB.prepare(
+        `UPDATE proposals SET status = 'executed' WHERE id = ? AND status = 'passed'
+         AND NOT EXISTS (SELECT 1 FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?)`,
+      ).bind(id, templateHash, parametersHash),
+    );
+
+    const newHashSummary = `${templateHash.slice(0, 12)}.../${parametersHash.slice(0, 12)}...`;
+    const detail = `constitution changed ${oldHashSummary} -> ${newHashSummary} changed_by=${changedBy} mandates=[${mandateIds.join(",")}]`;
+    const eventBuild = await appendChainedStmt(
+      env.DB,
+      "identity_events",
+      { citizen_id: MAINTAINER_ID, kind: "constitution_changed", detail, created_at: now },
+      {
+        sql: "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?)",
+        args: [templateHash, parametersHash],
+      },
+    );
+
+    const versionStmt = env.DB
+      .prepare(
+        `INSERT INTO constitution_versions (template_hash, parameters_hash, full_text, parameters_text, first_seen_at, changed_by, mandate_proposal_ids)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?)`,
+      )
+      .bind(templateHash, parametersHash, fullText, parametersText, now, changedBy, JSON.stringify(mandateIds), templateHash, parametersHash);
+
+    try {
+      const results = await env.DB.batch<{ meta: { changes: number } }>([...flipStmts, eventBuild.stmt, versionStmt]);
+      const changesList = results.map((r) => r.meta?.changes);
+      if (changesList.length === 0) {
+        // Gate finding 3's own anomaly shape (docs/REVIEW-HARDENING2-GATE-2026-08-10.md),
+        // reproduced defensively though never observed against this
+        // specific batch: the write may have committed for real
+        // underneath, but the driver's own report is empty. Under-claim,
+        // never assert.
+        return { status: "lost_claim" };
+      }
+      const allOnes = changesList.every((c) => c === 1);
+      // Anything not exactly 1 -- including an absent/undefined report,
+      // the F3 principle applied here -- counts toward "did not commit".
+      const allNotOne = changesList.every((c) => c !== 1);
+
+      if (allOnes) {
+        const row = await env.DB.prepare("SELECT id FROM constitution_versions WHERE template_hash = ? AND parameters_hash = ?")
+          .bind(templateHash, parametersHash)
+          .first<{ id: number }>();
+        cache.pairKey = `${templateHash}:${parametersHash}`;
+        cache.versionRow = { id: row!.id, first_seen_at: now, changed_by: changedBy };
+        return { status: "landed", versionId: row!.id, changedBy, mandateIds };
+      }
+      if (allNotOne) {
+        // Lost claim: the row landed earlier (another caller, between our
+        // own read above and this batch's own execution) -- quiet, not
+        // an error.
+        return { status: "lost_claim" };
+      }
+      // A genuine mix: some statements committed, others did not, despite
+      // every one of them sharing the identical gate inside one
+      // transaction -- 'passed' has no other exit-writer than this
+      // linkage (docs/BRIEF-FIRST-LAWS.md commit 4), so this should be
+      // structurally impossible. Log loud, do not retry: retrying cannot
+      // fix a logic error.
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "constitution_detection_invariant_violation",
+          changes: changesList,
+          template_hash: templateHash,
+          parameters_hash: parametersHash,
+        }),
+      );
+      return { status: "invariant_violation" };
+    } catch (e) {
+      const message = String(e);
+      if (!message.includes("UNIQUE")) throw e;
+      if (classifyUniqueViolation("identity_events", message) === "chain_head") {
+        // An ordinary, unrelated identity_events append (ANY other
+        // chained write -- a ballot, a key rotation, a payout) moved the
+        // head between our read and our write, the same race every other
+        // appendChainedStmt caller already retries against. Rebuild next
+        // iteration -- eventBuild's own head-read happens fresh inside
+        // appendChainedStmt, called again at the top of the loop.
+        continue;
+      }
+      // Anything else UNIQUE-shaped in this batch can only be
+      // constitution_versions' own UNIQUE(template_hash, parameters_hash)
+      // backstop -- the only other constraint this batch's statements
+      // could ever violate -- reached by ELIMINATION, not a second
+      // bespoke parser: classifyUniqueViolation only recognises
+      // identity_events' own two chain indexes and ballots' duplicate-
+      // vote pair, neither of which this batch's statements could ever
+      // name.
+      return { status: "lost_claim" };
+    }
+  }
+  return { status: "exhausted" };
+}
+
+export interface FidelityReconciliationResult {
+  queued: number;
+  error: string | null;
+}
+
+// Wake-side reconciliation [second-pass amendment, drift item 7's own
+// follow-on]: fidelity queueing lives OUTSIDE the detection batch, since
+// maintainer_queue.run_id is NOT NULL REFERENCES maintainer_runs and run
+// kinds are closed to clerk/judgment -- a public serve (GET /) has no
+// legal run_id to give a queued item, and this file must not fabricate
+// one or loosen the column. Both cron wakes call this, after their own
+// call to detectConstitutionChange, bound to THEIR OWN run_id (honest
+// provenance). One non-genesis constitution_versions row queues at most
+// one constitution_fidelity item, ever, gated NOT EXISTS a fidelity row
+// already carrying that version's own source_ref -- idempotent, so a
+// serve-detected change is queued at the next wake (<= a day) and judged
+// at the next judgment wake, the cadence the queue always had.
+export async function reconcileConstitutionFidelityQueue(env: Env, runId: number, now: number): Promise<FidelityReconciliationResult> {
+  const { results: versions } = await env.DB.prepare(
+    "SELECT id, template_hash, parameters_hash, changed_by, mandate_proposal_ids FROM constitution_versions WHERE changed_by != 'genesis'",
+  ).all<{ id: number; template_hash: string; parameters_hash: string; changed_by: string; mandate_proposal_ids: string }>();
+
+  let queued = 0;
+  const errors: string[] = [];
+  for (const v of versions) {
+    const sourceRef = `constitution_versions:${v.id}`;
+    const note = `Constitution changed to version ${v.id} (template ${v.template_hash.slice(0, 12)}..., parameters ${v.parameters_hash.slice(0, 12)}...), changed_by=${v.changed_by}, linked mandate proposal ids=${v.mandate_proposal_ids}. Judge the fidelity of this change: does it match its linked mandate(s), exceed them, or carry no mandate at all?`;
+    try {
+      const res = await env.DB.prepare(
+        `INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status)
+         SELECT ?, ?, 'constitution_fidelity', NULL, NULL, ?, ?, 'pending'
+         WHERE NOT EXISTS (SELECT 1 FROM maintainer_queue WHERE kind = 'constitution_fidelity' AND source_ref = ?)`,
+      )
+        .bind(runId, now, sourceRef, note, sourceRef)
+        .run();
+      if (res.meta.changes === 1) queued++;
+    } catch (e) {
+      errors.push(`version ${v.id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return { queued, error: errors.length > 0 ? errors.join("; ") : null };
+}
+
+// GET /api/constitution/versions: the full archive, paginated in the
+// existing proposals/citizens (created_at, id) cursor style -- a
+// first_seen_at-only cursor would silently drop one row of a genuinely
+// simultaneous cross-isolate detection sharing a millisecond, the exact
+// class of bug docs/REVIEW-DEMOCRACY.md L2 closed for listProposals.
+export const CONSTITUTION_VERSIONS_PAGE = 200;
+
+export async function listConstitutionVersions(env: Env, since = NaN, sinceId = NaN) {
+  const total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM constitution_versions").first<{ n: number }>())?.n ?? 0;
+  const hasSince = Number.isFinite(since);
+  const hasSinceId = hasSince && Number.isFinite(sinceId);
+  const where = hasSinceId ? "WHERE first_seen_at > ? OR (first_seen_at = ? AND id > ?)" : hasSince ? "WHERE first_seen_at > ?" : "";
+  const bindArgs = hasSinceId ? [since, since, sinceId] : hasSince ? [since] : [];
+  const stmt = env.DB
+    .prepare(
+      `SELECT id, template_hash, parameters_hash, full_text, parameters_text, first_seen_at, changed_by, mandate_proposal_ids
+       FROM constitution_versions ${where} ORDER BY first_seen_at ASC, id ASC LIMIT ?`,
+    )
+    .bind(...bindArgs, CONSTITUTION_VERSIONS_PAGE);
+  const { results } = await stmt.all<{ id: number; first_seen_at: number; mandate_proposal_ids: string }>();
+  const returned = results.length;
+  const has_more = returned === CONSTITUTION_VERSIONS_PAGE;
+  const versions = results.map((r) => ({ ...r, mandate_proposal_ids: JSON.parse(r.mandate_proposal_ids) as number[] }));
+  const last = results[returned - 1];
+  return {
+    total,
+    returned,
+    page_size: CONSTITUTION_VERSIONS_PAGE,
+    has_more,
+    ...(has_more ? { next_since: last.first_seen_at, next_since_id: last.id } : {}),
+    note: "Every version this deployment has ever served, full text alongside each hash -- diffable by anyone, no trust required. If has_more, fetch again with since=<next_since>&since_id=<next_since_id>.",
+    versions,
+  };
 }

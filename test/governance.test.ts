@@ -30,6 +30,10 @@ import {
   countEligible,
   monthsFromNow,
   DB_QUEUE_KINDS,
+  canonicalizeTemplate,
+  buildConstitutionTemplate,
+  serializeConstitutionParameters,
+  computeLiveConstitutionPair,
   type ProposalKind,
   type EligibilityInput,
 } from "../src/governance.ts";
@@ -167,9 +171,39 @@ test("First Laws commit 1: clerk.ts's ALLOWED_QUEUE_KINDS (the drafting cage) is
 
 // ---------- policing: the maintainer is not special-cased ----------
 
-test("governance.ts never references MAINTAINER_ID -- the maintainer's ballot holds no tie-break or veto (design doc §4)", () => {
+// I-007's detection machinery is a narrow, reviewed exception to the
+// blanket ban below: `constitution_changed` is a SYSTEM-authored
+// identity_events row (design doc §5), and every row in that table needs
+// a real citizen_id FK -- MAINTAINER_ID (citizen #1) is the natural
+// author of an automated system action, exactly matching how
+// judgment.ts already stamps every moderation/bulletin action it
+// executes. This is authorship of a chained EVENT, not a vote, and has
+// nothing to do with tallying, eligibility, or quorum. Two lines only
+// (the import, and its one call site inside detectConstitutionChange),
+// content-matched rather than excluded by line number or file region --
+// the same discipline test/l002-residue.test.ts's own ALLOWLIST uses, so
+// a NEW reference anywhere else in the file (including a future addition
+// to this same I-007 section) is still caught.
+const MAINTAINER_ID_ALLOWED_LINES = ["MAINTAINER_ID,", "citizen_id: MAINTAINER_ID"];
+
+test("governance.ts never references MAINTAINER_ID outside the two reviewed I-007 lines -- the maintainer's ballot holds no tie-break or veto (design doc §4)", () => {
   const text = readFileSync(join(import.meta.dirname, "..", "src", "governance.ts"), "utf8");
-  assert.doesNotMatch(text, /MAINTAINER_ID/);
+  const offenders = text.split("\n").filter((line) => line.includes("MAINTAINER_ID") && !MAINTAINER_ID_ALLOWED_LINES.some((allowed) => line.includes(allowed)));
+  assert.deepEqual(
+    offenders,
+    [],
+    "MAINTAINER_ID appeared somewhere other than the two reviewed I-007 lines -- if this is a genuine new need, review and add it to the allowlist explicitly; if it is a vote-counting special-case, remove it",
+  );
+});
+
+// Positive control for the scan above: proves the allowlist is doing
+// real work (both reviewed lines genuinely exist), not vacuously passing
+// because the whole file happens to be clean regardless of the allowlist.
+test("governance.ts does carry both reviewed MAINTAINER_ID lines (the positive control for the scan above)", () => {
+  const text = readFileSync(join(import.meta.dirname, "..", "src", "governance.ts"), "utf8");
+  for (const allowed of MAINTAINER_ID_ALLOWED_LINES) {
+    assert.ok(text.includes(allowed), `expected to find a line containing "${allowed}"`);
+  }
 });
 
 // ---------- quorumThreshold ----------
@@ -750,4 +784,87 @@ test("monthsFromNow: time-of-day survives the clamp unchanged, only the date mov
 test("monthsFromNow: a non-overflowing date is completely unaffected by the clamp", () => {
   const jan15 = Date.UTC(2026, 0, 15);
   assert.equal(monthsFromNow(jan15, 1), Date.UTC(2026, 1, 15));
+});
+
+// ---------- I-007: the attested constitution (docs/FIRST-LAWS-DESIGN.md §5) ----------
+
+test("canonicalizeTemplate: normalises CRLF to LF and nothing else", () => {
+  assert.equal(canonicalizeTemplate("a\r\nb\r\nc"), "a\nb\nc");
+  assert.equal(canonicalizeTemplate("already\nlf\nonly"), "already\nlf\nonly");
+  // No other transformation: internal spacing, trailing/leading
+  // whitespace, and a bare \r (not part of a \r\n pair) all survive
+  // untouched -- the design doc is explicit ("no other transformation").
+  assert.equal(canonicalizeTemplate("  spaced  \n\ttabbed\t"), "  spaced  \n\ttabbed\t");
+  assert.equal(canonicalizeTemplate("a\rb"), "a\rb", "a bare CR with no following LF is not a CRLF pair and must survive");
+});
+
+test("buildConstitutionTemplate: captures both branch texts of both conditionals (name-ratified sentence, FIRST LAWS PROPOSED banner), and is stable across calls", () => {
+  const template = buildConstitutionTemplate();
+  // Both nameStatusSentence branches.
+  assert.ok(template.includes("The name was ratified by the founding citizens' first vote"));
+  assert.ok(template.includes("The name is provisional, held until the"));
+  // Both firstLawsBanner branches -- the banner text present, and (via
+  // the second, ratified-firstLaws rendering) the laws text starting
+  // immediately with no banner in between.
+  assert.ok(template.includes("PROPOSED: this section awaits ratification by the founding cohort"));
+  assert.ok(template.includes("Three laws, lexically ordered"));
+  // Never the real deployment's own worker URL -- a stable placeholder
+  // only (not a check against "randommonicle": that substring also
+  // appears legitimately in doc.ts's own static "ON THE SOURCE" GitHub
+  // link, unrelated to the interpolated serving origin this test cares
+  // about).
+  assert.doesNotMatch(template, /workers\.dev/);
+  assert.ok(template.includes("https://commonhold.invalid"));
+  // Pure and deterministic: reads only module constants, never a clock
+  // or randomness, so calling it twice must be byte-identical.
+  assert.equal(buildConstitutionTemplate(), template);
+});
+
+test("buildConstitutionTemplate: uses the deployed DEFAULT values, never a live governance_settings value (which is independently attested through its own chained proposal_decided event already)", () => {
+  const template = buildConstitutionTemplate().replace(/\s+/g, " ");
+  assert.ok(template.includes(DEFAULT_NAME));
+  assert.ok(template.includes(`not less than ${DEFAULT_CONTROL_FLOOR_PERCENT}% control`));
+});
+
+test("serializeConstitutionParameters: valid JSON, all four classes present with D-025's own figures, and the full eleven-kind KIND_CLASS map", () => {
+  const parsed = JSON.parse(serializeConstitutionParameters()) as {
+    classes: Array<{ class: string; min_ballots: number; window_ms: number; tenure_days: number }>;
+    kind_class: Record<string, string>;
+  };
+  assert.equal(parsed.classes.length, 4);
+  const byClass = Object.fromEntries(parsed.classes.map((c) => [c.class, c]));
+  assert.equal(byClass.entrenched.min_ballots, 4);
+  assert.equal(byClass.entrenched.window_ms, ENTRENCHED_VOTE_WINDOW_MS);
+  assert.equal(byClass.entrenched.tenure_days, 14);
+  assert.equal(byClass.constitutional.min_ballots, 3);
+  assert.equal(byClass.constitutional.window_ms, VOTE_WINDOW_MS);
+  assert.equal(byClass.parameter.min_ballots, 2);
+  assert.equal(byClass.advisory.min_ballots, 1);
+  assert.equal(Object.keys(parsed.kind_class).length, 11);
+  assert.equal(parsed.kind_class.first_laws_ratify, "entrenched");
+  assert.equal(parsed.kind_class.first_laws_amendment, "entrenched");
+  assert.equal(parsed.kind_class.resolution, "advisory");
+});
+
+test("serializeConstitutionParameters: is stable across calls (pure, no clock, no randomness)", () => {
+  assert.equal(serializeConstitutionParameters(), serializeConstitutionParameters());
+});
+
+test("computeLiveConstitutionPair: both hashes are stable 64-char lowercase hex across repeated calls (deterministic, pure)", async () => {
+  const first = await computeLiveConstitutionPair();
+  const second = await computeLiveConstitutionPair();
+  assert.deepEqual(first, second);
+  assert.match(first.templateHash, /^[0-9a-f]{64}$/);
+  assert.match(first.parametersHash, /^[0-9a-f]{64}$/);
+  assert.notEqual(first.templateHash, first.parametersHash, "sanity: the template and parameters hash different content, so they must not coincide");
+});
+
+test("the hashing mechanism itself is sensitive to content -- a one-character difference in either the template or the parameters text produces a different hash (proves detection CAN see a real wording/parameter change, independent of buildConstitutionTemplate's own current fixed inputs)", async () => {
+  const { sha256Hex } = await import("../src/chain.ts");
+  const a = await sha256Hex(canonicalizeTemplate("Three laws, lexically ordered."));
+  const b = await sha256Hex(canonicalizeTemplate("Three laws, lexically ordered!"));
+  assert.notEqual(a, b);
+  const paramsA = await sha256Hex(serializeConstitutionParameters());
+  const paramsB = await sha256Hex(JSON.stringify({ classes: [{ class: "entrenched", min_ballots: 5 }] }));
+  assert.notEqual(paramsA, paramsB);
 });

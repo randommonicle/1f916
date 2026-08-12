@@ -166,6 +166,46 @@ test("resolveExecution: an approved bookkeeping_note executes nothing but still 
   assert.equal(resolved.execute, null);
 });
 
+// docs/BRIEF-FIRST-LAWS.md commit 4: "the observational fallthrough in
+// resolveExecution already gives non-flag, non-bulletin kinds the right
+// execution semantics (verdict recorded, nothing executes) -- verify and
+// test rather than re-derive." A constitution_fidelity item is exactly
+// that shape (design doc §5: the judge's fidelity verdict is a recorded
+// decision, never an executed action) -- these two tests are that
+// verification, not a re-derivation of new behaviour.
+test("resolveExecution: an approved constitution_fidelity item executes nothing but still reports approved -- the fidelity verdict is a recorded decision, never an executed action", () => {
+  const item = {
+    kind: "constitution_fidelity" as const,
+    target_type: null,
+    target_id: null,
+    source_ref: "constitution_versions:2",
+    note: "constitution changed to version 2...",
+    target_content: null,
+    target_mod_state: null,
+    id: 1,
+  };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "matches its linked mandate exactly" }));
+  assert.equal(resolved.status, "approved");
+  assert.equal(resolved.execute, null);
+  assert.equal(resolved.reason, "matches its linked mandate exactly");
+});
+
+test("resolveExecution: a rejected constitution_fidelity item executes nothing, same as any other rejected kind", () => {
+  const item = {
+    kind: "constitution_fidelity" as const,
+    target_type: null,
+    target_id: null,
+    source_ref: "constitution_versions:2",
+    note: "constitution changed to version 2...",
+    target_content: null,
+    target_mod_state: null,
+    id: 1,
+  };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "exceeds its linked mandate" }));
+  assert.equal(resolved.status, "rejected");
+  assert.equal(resolved.execute, null);
+});
+
 // ---------- shouldFetchNextBatch / computeOverflowDropped: the batch loop (M3/M4) ----------
 
 test("JUDGMENT_QUEUE_CAP is 100", () => {

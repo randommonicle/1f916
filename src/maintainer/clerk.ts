@@ -15,6 +15,14 @@
 import { type Env, readOnchainUsdcCents } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
+// I-007 (docs/FIRST-LAWS-DESIGN.md §5): the shared constitution-detection
+// machinery, not a moderation-executing or money-moving export -- outside
+// the cage this file's own header describes (it writes only
+// constitution_versions and, via reconcileConstitutionFidelityQueue,
+// PENDING rows in maintainer_queue -- the exact table this file already
+// writes pending rows to, drafted for the judge exactly like every other
+// queue item).
+import { detectConstitutionChange, reconcileConstitutionFidelityQueue, type ConstitutionCache } from "../governance.ts";
 
 // ---------- pure: the allowlist and the parser (the real cage) ----------
 
@@ -386,11 +394,59 @@ async function getMostRecentClerkDelta(env: Env): Promise<number | null | undefi
 // (nothing new, drift unchanged since the last recorded clerk run --
 // M5: not necessarily zero drift, see shouldSkipIdleClerkWake) costs
 // zero: no model call, tokens/cost all 0, skipped_reason set.
-export async function runClerkWake(env: Env): Promise<void> {
+// "append to it if something else already wrote it -- one message per
+// failure mode" -- the same idiom judgment.ts's own appendError already
+// uses, duplicated here rather than shared (this project's own working
+// agreement for small policing/helper functions: each file stays free-
+// standing so one file's edit can never silently change another's
+// behaviour).
+function appendError(existing: string | null, addition: string): string {
+  return existing ? `${existing}; ${addition}` : addition;
+}
+
+export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCache): Promise<void> {
   const startedAt = Date.now();
 
+  // Reserved FIRST, unconditionally -- I-007's wake-side fidelity
+  // reconciliation (below) needs a real run_id to bind its own INSERTs
+  // to (maintainer_queue.run_id is NOT NULL REFERENCES maintainer_runs),
+  // so every exit path from here on FINALISES this one reserved row
+  // rather than each inserting a fresh row of its own. Supersedes the
+  // old mid-function "M2: reserve the runs row FIRST" step -- one
+  // reserve now covers both M2's own original reason (maintainer_queue's
+  // FK) and this one, so it is not repeated further down.
+  let runId: number;
+  try {
+    runId = await insertMaintainerRun(env, { kind: "clerk", startedAt, overflowDropped: 0 });
+  } catch (e) {
+    console.log(JSON.stringify({ level: "error", event: "clerk_run_reserve_failed", message: String(e) }));
+    return;
+  }
+
+  let runError: string | null = null;
+
+  // I-007 (docs/FIRST-LAWS-DESIGN.md §5): both cron wakes call the same
+  // shared detection function, then reconcile the wake-side fidelity
+  // queue bound to THIS run's own id (commission notes flag 5;
+  // docs/BRIEF-FIRST-LAWS.md commit 4's "Fidelity queueing is WAKE-SIDE
+  // RECONCILIATION" section). DB-only, no model call -- runs before the
+  // API-key gate below, so a dry key never skips it. Idempotent: harmless
+  // if runGovernanceSweep (called unconditionally in scheduled(), moments
+  // earlier in the same invocation) already detected the identical
+  // change.
+  try {
+    const detection = await detectConstitutionChange(env, startedAt, constitutionCache);
+    if (detection.status === "exhausted" || detection.status === "invariant_violation") {
+      runError = appendError(runError, `constitution detection did not resolve (${detection.status})`);
+    }
+    const fidelityReconciliation = await reconcileConstitutionFidelityQueue(env, runId, startedAt);
+    if (fidelityReconciliation.error) runError = appendError(runError, fidelityReconciliation.error);
+  } catch (e) {
+    runError = appendError(runError, `constitution detection/reconciliation threw: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   if (!env.ANTHROPIC_API_KEY) {
-    await insertMaintainerRun(env, { kind: "clerk", startedAt, finishedAt: Date.now(), skippedReason: "no api key", overflowDropped: 0 });
+    await finalizeMaintainerRun(env, runId, { finishedAt: Date.now(), skippedReason: "no api key", overflowDropped: 0, error: runError ?? undefined });
     return;
   }
 
@@ -402,22 +458,15 @@ export async function runClerkWake(env: Env): Promise<void> {
     cursor = await getClerkCursor(env);
     [candidates, drift, previousDelta] = await Promise.all([fetchClerkCandidates(env, cursor), checkBookkeepingDrift(env), getMostRecentClerkDelta(env)]);
   } catch (e) {
-    await insertMaintainerRun(env, {
-      kind: "clerk",
-      startedAt,
-      finishedAt: Date.now(),
-      overflowDropped: 0,
-      error: `failed while gathering candidates: ${e instanceof Error ? e.message : String(e)}`,
-    });
+    runError = appendError(runError, `failed while gathering candidates: ${e instanceof Error ? e.message : String(e)}`);
+    await finalizeMaintainerRun(env, runId, { finishedAt: Date.now(), overflowDropped: 0, error: runError });
     return;
   }
 
   // M5: skip rows record their own observed delta too, so the next wake's
   // comparison chains against THIS run even though it did nothing else.
   if (shouldSkipIdleClerkWake(candidates.length > 0, drift.deltaCents, previousDelta)) {
-    await insertMaintainerRun(env, {
-      kind: "clerk",
-      startedAt,
+    await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
       skippedReason: "nothing to review",
       tokensIn: 0,
@@ -426,6 +475,7 @@ export async function runClerkWake(env: Env): Promise<void> {
       itemsDrafted: 0,
       overflowDropped: 0,
       driftDeltaCents: drift.deltaCents,
+      error: runError ?? undefined,
     });
     return;
   }
@@ -434,15 +484,14 @@ export async function runClerkWake(env: Env): Promise<void> {
   const result = await callAnthropic(env, MAINTAINER_MODELS.clerk, CLERK_SYSTEM_PROMPT, prompt);
 
   if (!result.ok) {
-    await insertMaintainerRun(env, {
-      kind: "clerk",
-      startedAt,
+    runError = appendError(runError, `model call failed (stop_reason: ${result.stopReason}): ${result.error}`);
+    await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
       tokensIn: result.usage.input_tokens,
       tokensOut: result.usage.output_tokens,
       costEstimateCents: estimateCostCents(MAINTAINER_MODELS.clerk, result.usage.input_tokens, result.usage.output_tokens),
       overflowDropped: 0,
-      error: `model call failed (stop_reason: ${result.stopReason}): ${result.error}`,
+      error: runError,
       driftDeltaCents: drift.deltaCents,
     });
     return;
@@ -452,33 +501,20 @@ export async function runClerkWake(env: Env): Promise<void> {
   try {
     parsedItems = parseClerkItems(result.text);
   } catch (e) {
-    await insertMaintainerRun(env, {
-      kind: "clerk",
-      startedAt,
+    // stop_reason is named explicitly here so a max_tokens truncation
+    // that broke the JSON is diagnosable from this row alone, not just
+    // "invalid JSON" -- the exact lesson CLAUDE.md's max_tokens
+    // truncation entry (ASH sibling app) names.
+    runError = appendError(runError, `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason})`);
+    await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
       tokensIn: result.usage.input_tokens,
       tokensOut: result.usage.output_tokens,
       costEstimateCents: estimateCostCents(MAINTAINER_MODELS.clerk, result.usage.input_tokens, result.usage.output_tokens),
       overflowDropped: 0,
-      // stop_reason is named explicitly here so a max_tokens truncation
-      // that broke the JSON is diagnosable from this row alone, not just
-      // "invalid JSON" -- the exact lesson CLAUDE.md's max_tokens
-      // truncation entry (ASH sibling app) names.
-      error: `${e instanceof Error ? e.message : String(e)} (stop_reason: ${result.stopReason})`,
+      error: runError,
       driftDeltaCents: drift.deltaCents,
     });
-    return;
-  }
-
-  // M2: reserve the runs row FIRST -- maintainer_queue.run_id is a NOT
-  // NULL foreign key to it, so a valid run_id must exist before any queue
-  // row can be written. Left unfinalized (finished_at NULL) if the wake
-  // gets no further than this.
-  let runId: number;
-  try {
-    runId = await insertMaintainerRun(env, { kind: "clerk", startedAt, overflowDropped: parsedItems.overflowDropped, driftDeltaCents: drift.deltaCents });
-  } catch (e) {
-    console.log(JSON.stringify({ level: "error", event: "clerk_run_reserve_failed", message: String(e) }));
     return;
   }
 
@@ -502,6 +538,7 @@ export async function runClerkWake(env: Env): Promise<void> {
   } catch (e) {
     insertError = `failed while writing the queue (${insertedCount}/${parsedItems.accepted.length} items inserted before the failure): ${e instanceof Error ? e.message : String(e)}`;
   }
+  if (insertError) runError = appendError(runError, insertError);
 
   // Full success: the cursor advances, and items_drafted is the true
   // inserted count (equal to what was attempted). Partial failure:
@@ -521,7 +558,7 @@ export async function runClerkWake(env: Env): Promise<void> {
       itemsDrafted: insertedCount,
       overflowDropped: parsedItems.overflowDropped,
       cursorAdvancedTo,
-      error: insertError ?? undefined,
+      error: runError ?? undefined,
       // finalize does a full UPDATE of every column -- drift_delta_cents
       // must be repeated here or the reserve call's value would be wiped
       // back to NULL.

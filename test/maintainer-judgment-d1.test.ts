@@ -37,8 +37,21 @@ import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.t
 import { runJudgmentWake, executeJudgmentDecisions, reconcileApprovedQueue, encodeFlagReviewDecision } from "../src/maintainer/judgment.ts";
 import { moderateContent, flagContent, type Env } from "../src/society.ts";
 import type { QueueRow, JudgmentDecision } from "../src/maintainer/judgment.ts";
+import type { ConstitutionCache } from "../src/governance.ts";
 
 // ---------- local fixture helpers (this file's own, per society-votes-d1.test.ts's precedent -- no edits to the shared test/helpers/local-d1.ts) ----------
+
+// I-007's detection is now unconditionally wired into every runJudgmentWake
+// call (docs/BRIEF-FIRST-LAWS.md commit 4), and its own per-isolate cache
+// (governance.ts) defaults to a PROCESS-wide module singleton -- shared by
+// every test() in this file's one process, even though each test uses its
+// own, unrelated local-D1 database. Every runJudgmentWake call in this file
+// passes a fresh one, so an earlier test's own detection can never make a
+// later test's detection silently short-circuit to "already_current"
+// against a database it never actually touched.
+function freshConstitutionCache(): ConstitutionCache {
+  return { pairKey: null, versionRow: null };
+}
 
 function insertMaintainerRunRow(d1: LocalD1, kind: "clerk" | "judgment" = "judgment"): number {
   const res = d1.raw.prepare("INSERT INTO maintainer_runs (kind, started_at) VALUES (?, ?)").run(kind, Date.now());
@@ -184,7 +197,7 @@ test("wake-start reconciliation: an approved flag_review with no artifact is dri
     });
 
     const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key-unused" } as unknown as Env;
-    await runJudgmentWake(env);
+    await runJudgmentWake(env, freshConstitutionCache());
 
     const post = getPost(d1, postId);
     const run = latestRun(d1);
@@ -466,7 +479,7 @@ test("poisoned row: a reconciliation error does not prevent runJudgmentWake from
     // convention is no network in tests; see the file header).
 
     const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key-unused" } as unknown as Env;
-    await runJudgmentWake(env);
+    await runJudgmentWake(env, freshConstitutionCache());
 
     const run = latestRun(d1);
     assert.equal(run.skipped_reason, "nothing pending", "the wake reached and correctly reported the pending-queue state, not an early bail-out");
@@ -664,7 +677,7 @@ test("no-key wake still runs reconciliation: a dry ANTHROPIC_API_KEY must not sk
 
     const env = { DB: d1.DB } as unknown as Env; // ANTHROPIC_API_KEY intentionally absent
     assert.equal(env.ANTHROPIC_API_KEY, undefined);
-    await runJudgmentWake(env);
+    await runJudgmentWake(env, freshConstitutionCache());
 
     const post = getPost(d1, postId);
     const run = latestRun(d1);
@@ -693,12 +706,96 @@ test("no-key wake still surfaces a reconciliation error: a poisoned row is loud 
     });
 
     const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY
-    await runJudgmentWake(env);
+    await runJudgmentWake(env, freshConstitutionCache());
 
     const run = latestRun(d1);
     assert.equal(run.skipped_reason, "no api key");
     assert.notEqual(run.error, null, "a reconciliation error reaches the run row even when the model half never runs");
     assert.match(run.error ?? "", new RegExp(String(poisonedId)), "the error names the poisoned row");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- I-007: constitution detection + wake-side fidelity reconciliation
+// wired into runJudgmentWake, bound to the wake's OWN run_id
+// (docs/BRIEF-FIRST-LAWS.md commit 4; commission notes flag 5) ----------
+
+test("runJudgmentWake: genesis constitution detection runs even with no API key and nothing pending, and the run row it lands under is the SAME row skipped_reason/error are written to", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY, nothing pending
+    await runJudgmentWake(env, freshConstitutionCache());
+
+    const versions = d1.raw.prepare("SELECT changed_by FROM constitution_versions").all() as Array<{ changed_by: string }>;
+    assert.equal(versions.length, 1, "the wake's own detection call lands genesis");
+    assert.equal(versions[0].changed_by, "genesis");
+
+    const run = latestRun(d1);
+    assert.equal(run.skipped_reason, "no api key");
+    assert.equal(run.error, null, "a clean genesis detection must not manufacture an error on an otherwise healthy skip");
+
+    const fidelityRows = d1.raw.prepare("SELECT COUNT(*) AS n FROM maintainer_queue WHERE kind = 'constitution_fidelity'").get() as { n: number };
+    assert.equal(fidelityRows.n, 0, "genesis is excluded from fidelity reconciliation");
+  } finally {
+    d1.close();
+  }
+});
+
+test("runJudgmentWake: a non-genesis constitution change queues its own fidelity row bound to THIS wake's real run_id, alongside an ordinary reconciliation", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    // A fake prior version makes the archive non-empty, so this wake's
+    // own detection takes the non-genesis path and lands a real,
+    // fidelity-eligible version.
+    d1.raw
+      .prepare(
+        "INSERT INTO constitution_versions (template_hash, parameters_hash, full_text, parameters_text, first_seen_at, changed_by, mandate_proposal_ids) VALUES (?, ?, ?, ?, ?, 'genesis', '[]')",
+      )
+      .run("fake-prior-hash-1", "fake-prior-hash-2", "fake", "fake", Date.now());
+
+    const authorId = insertCitizen(d1, { handle: "author" });
+    const postId = insertPost(d1, authorId, { mod_state: null });
+    const priorRunId = insertMaintainerRunRow(d1);
+    insertQueueRow(d1, priorRunId, {
+      kind: "flag_review",
+      target_type: "post",
+      target_id: postId,
+      note: "flagged as spam",
+      status: "approved",
+      decided_reason: encodeFlagReviewDecision("remove", "confirmed spam"),
+    });
+
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY -- isolates this test to the DB-only paths
+    await runJudgmentWake(env, freshConstitutionCache());
+
+    const thisRun = d1.raw.prepare("SELECT id FROM maintainer_runs WHERE kind = 'judgment' ORDER BY id DESC LIMIT 1").get() as { id: number };
+    assert.notEqual(thisRun.id, priorRunId, "sanity: the wake's own reserved row is a NEW row, not the pre-seeded fixture one");
+
+    const versions = d1.raw.prepare("SELECT id, changed_by FROM constitution_versions WHERE changed_by != 'genesis'").all() as Array<{
+      id: number;
+      changed_by: string;
+    }>;
+    assert.equal(versions.length, 1, "the wake's own detection lands exactly one real (non-genesis) version");
+    assert.equal(versions[0].changed_by, "operator");
+
+    const fidelityRow = d1.raw.prepare("SELECT run_id, source_ref, status FROM maintainer_queue WHERE kind = 'constitution_fidelity'").get() as {
+      run_id: number;
+      source_ref: string;
+      status: string;
+    };
+    assert.ok(fidelityRow, "the non-genesis version must get a fidelity row");
+    assert.equal(fidelityRow.run_id, thisRun.id, "bound to THIS wake's own run_id, not the pre-seeded fixture run");
+    assert.equal(fidelityRow.source_ref, `constitution_versions:${versions[0].id}`);
+    assert.equal(fidelityRow.status, "pending");
+
+    // The ordinary reconciliation (the pre-existing feature) still ran
+    // too -- the two mechanisms coexist in the same wake without
+    // interfering with each other.
+    const post = getPost(d1, postId);
+    assert.equal(post.mod_state, "removed");
   } finally {
     d1.close();
   }
