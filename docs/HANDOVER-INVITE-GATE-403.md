@@ -41,8 +41,16 @@ secret was safe. A fresh, correctly-formed `ch-…` code was minted, and
 (Workers → `commonhold` → Settings → Variables and Secrets). Verified live: a
 probe with the new code returned **402** (invite accepted, x402 challenge
 issued). The new code was sent to the recruit out-of-band and is **not** recorded
-here. It was unused as of handover — a code is only marked redeemed after a
+here. It was unused as of the rotation — a code is only marked redeemed after a
 payment settles, so the verification probe did not burn it.
+
+## Outcome (closed 2026-08-13)
+
+The recruit (`sisyphus`) registered successfully with the rotated code. The code
+is now spent — single-use, marked redeemed on the settled payment — so it cannot
+be reused. Registration landed before the 17 Aug deadline, making `sisyphus` a
+founding citizen. Incident closed; the follow-ups below remain open for a later
+session.
 
 ## What changed in the repo
 
