@@ -33,11 +33,23 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
-import { runJudgmentWake, executeJudgmentDecisions, reconcileApprovedQueue, encodeFlagReviewDecision } from "../src/maintainer/judgment.ts";
+import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
+import {
+  runJudgmentWake,
+  executeJudgmentDecisions,
+  reconcileApprovedQueue,
+  encodeFlagReviewDecision,
+  scanPendingQueueBatch,
+  buildJudgmentPrompt,
+  JUDGMENT_SYSTEM_PROMPT,
+  JUDGMENT_QUEUE_CAP,
+  JUDGMENT_MAX_SCAN,
+  TOTAL_PROMPT_REQUEST_MAX_BYTES,
+} from "../src/maintainer/judgment.ts";
 import { moderateContent, flagContent, type Env } from "../src/society.ts";
 import type { QueueRow, JudgmentDecision } from "../src/maintainer/judgment.ts";
-import type { ConstitutionCache } from "../src/governance.ts";
+import { detectConstitutionChange, type ConstitutionCache } from "../src/governance.ts";
+import { MAINTAINER_MODELS, buildRequestBody } from "../src/maintainer/anthropic.ts";
 
 // ---------- local fixture helpers (this file's own, per society-votes-d1.test.ts's precedent -- no edits to the shared test/helpers/local-d1.ts) ----------
 
@@ -51,6 +63,39 @@ import type { ConstitutionCache } from "../src/governance.ts";
 // against a database it never actually touched.
 function freshConstitutionCache(): ConstitutionCache {
   return { pairKey: null, versionRow: null };
+}
+
+// F4/F7/F8/F9 fixtures (below) construct their own constitution_versions
+// rows with SYNTHETIC template/parameters hashes -- deliberately, so their
+// SIZE stays fully test-controlled rather than depending on the real
+// buildConstitutionTemplate() output. But a bare freshConstitutionCache()
+// makes runJudgmentWake's own I-007 detection (unconditional on every
+// wake) compare against the REAL, deploy-fixed live pair, which a
+// synthetic fixture hash can never match -- so the wake's OWN internal
+// detectConstitutionChange call lands a genuine second "operator" version
+// (real content) alongside whatever the fixture already seeded, and
+// reconcileConstitutionFidelityQueue then queues an UNRELATED second
+// constitution_fidelity row for it, whose own previous-version lookup can
+// land on the fixture's deliberately oversized version -- pure
+// cross-feature noise this file's own earlier test ("queues its own
+// fidelity row...") exercises deliberately, but that these tests must
+// suppress to keep precise control over exactly which queue rows exist.
+// (Found the hard way: an early run of the F8 lone-item red-proof below
+// showed TWO withheld items, not the one it seeded.)
+//
+// Calling detectConstitutionChange once, directly, before any fixture is
+// seeded, lands the REAL genesis row and populates a cache matching the
+// real live pair; passing THAT SAME cache into runJudgmentWake later
+// means its own internal call is a cache hit ("already_current"), so it
+// inserts nothing further. Genesis rows are excluded from
+// reconcileConstitutionFidelityQueue by construction (`changed_by !=
+// 'genesis'`), so this is harmless even for fixtures that never touch
+// constitution_versions at all.
+async function establishRealGenesisCache(d1: LocalD1): Promise<ConstitutionCache> {
+  const cache: ConstitutionCache = { pairKey: null, versionRow: null };
+  const env = { DB: d1.DB } as unknown as Env;
+  await detectConstitutionChange(env, Date.now(), cache);
+  return cache;
 }
 
 function insertMaintainerRunRow(d1: LocalD1, kind: "clerk" | "judgment" = "judgment"): number {
@@ -85,20 +130,27 @@ interface QueueRowOverrides {
   status: string;
   decided_at: number | null;
   decided_reason: string | null;
+  // F4/F7/F8/F9 additions (docs/BRIEF-FIRST-LAWS-REPAIR.md §8): both
+  // additive, optional, default to the exact pre-existing behaviour
+  // (source_ref NULL, created_at now-10s) -- no existing caller passes
+  // either, so nothing above this changes.
+  source_ref: string | null;
+  created_at: number;
 }
 
 function insertQueueRow(d1: LocalD1, runId: number, overrides: Partial<QueueRowOverrides> = {}): number {
   const now = Date.now();
   const res = d1.raw
     .prepare(
-      "INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status, decided_at, decided_reason) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+      "INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status, decided_at, decided_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .run(
       runId,
-      now - 10_000,
+      overrides.created_at ?? now - 10_000,
       overrides.kind ?? "flag_review",
       overrides.target_type ?? null,
       overrides.target_id ?? null,
+      overrides.source_ref ?? null,
       overrides.note ?? "a note",
       overrides.status ?? "approved",
       overrides.decided_at === undefined ? now - 5_000 : overrides.decided_at,
@@ -109,6 +161,169 @@ function insertQueueRow(d1: LocalD1, runId: number, overrides: Partial<QueueRowO
 
 function getQueueRow(d1: LocalD1, id: number): { status: string; decided_reason: string | null } {
   return d1.raw.prepare("SELECT status, decided_reason FROM maintainer_queue WHERE id = ?").get(id) as { status: string; decided_reason: string | null };
+}
+
+// ---------- F4/F7/F8/F9 fixture helpers (docs/BRIEF-FIRST-LAWS-REPAIR.md §8) ----------
+
+// A raw constitution_versions row, deliberately NOT built through
+// detectConstitutionChange -- these tests need precise control over
+// full_text/parameters_text SIZE (to construct near-budget and
+// over-budget evidence deterministically), which the real detection path
+// does not expose.
+function insertConstitutionVersion(
+  d1: LocalD1,
+  overrides: Partial<{
+    full_text: string;
+    parameters_text: string;
+    first_seen_at: number;
+    changed_by: "genesis" | "mandate_linked" | "operator";
+    mandate_proposal_ids: number[];
+  }> = {},
+): number {
+  const res = d1.raw
+    .prepare(
+      "INSERT INTO constitution_versions (template_hash, parameters_hash, full_text, parameters_text, first_seen_at, changed_by, mandate_proposal_ids) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(
+      `hash-${Math.random().toString(36).slice(2)}`,
+      `hash-${Math.random().toString(36).slice(2)}`,
+      overrides.full_text ?? "a small constitution text",
+      overrides.parameters_text ?? '{"classes":[]}',
+      overrides.first_seen_at ?? Date.now(),
+      overrides.changed_by ?? "operator",
+      JSON.stringify(overrides.mandate_proposal_ids ?? []),
+    );
+  return Number(res.lastInsertRowid);
+}
+
+// A complete, VALID constitution_fidelity fixture: a genesis-like
+// previous version, a real new version with the given full_text and
+// linked mandates, and the maintainer_queue row pointing at it -- exactly
+// what reconcileConstitutionFidelityQueue would have produced, but with
+// deterministic, test-controlled sizes rather than the real
+// buildConstitutionTemplate()/serializeConstitutionParameters() output.
+function insertValidFidelityFixture(
+  d1: LocalD1,
+  runId: number,
+  overrides: Partial<{ newFullText: string; mandateProposalIds: number[]; createdAt: number; firstSeenAt: number }> = {},
+): { queueId: number; versionId: number } {
+  const now = Date.now();
+  // The dedicated "previous version" sits exactly 1ms before THIS
+  // fixture's own new version -- not an arbitrary large gap -- so that
+  // when more than one fixture is seeded in the same test (the F8
+  // aggregate-split red-proof seeds two), each fixture's own previous-
+  // version lookup ((first_seen_at, id) DESC, the closest STRICTLY OLDER
+  // row) resolves to ITS OWN dedicated prior, never to a different
+  // fixture's own new version that happens to sit chronologically
+  // between them.
+  const newFirstSeenAt = overrides.firstSeenAt ?? now;
+  insertConstitutionVersion(d1, { changed_by: "genesis", first_seen_at: newFirstSeenAt - 1 });
+  const versionId = insertConstitutionVersion(d1, {
+    full_text: overrides.newFullText ?? "the new constitution text",
+    first_seen_at: newFirstSeenAt,
+    changed_by: "operator",
+    mandate_proposal_ids: overrides.mandateProposalIds ?? [],
+  });
+  const queueId = insertQueueRow(d1, runId, {
+    kind: "constitution_fidelity",
+    source_ref: `constitution_versions:${versionId}`,
+    note: `constitution changed to version ${versionId}`,
+    status: "pending",
+    decided_at: null,
+    decided_reason: null,
+    created_at: overrides.createdAt ?? now - 10_000,
+  });
+  return { queueId, versionId };
+}
+
+// A constitution_fidelity row that WILL be withheld: its source_ref names
+// a constitution_versions id that does not exist. The cheapest, most
+// direct way to construct §8.2's "named version row is missing"
+// fail-closed condition.
+function insertWithheldFidelityRow(d1: LocalD1, runId: number, missingVersionId: number, createdAt: number): number {
+  return insertQueueRow(d1, runId, {
+    kind: "constitution_fidelity",
+    source_ref: `constitution_versions:${missingVersionId}`,
+    note: `constitution changed to version ${missingVersionId}`,
+    status: "pending",
+    decided_at: null,
+    decided_reason: null,
+    created_at: createdAt,
+  });
+}
+
+// docs/BRIEF-FIRST-LAWS-REPAIR.md §8.5's own required red-proof technique:
+// "SPY on callAnthropic and assert ZERO invocations." That needs the REAL
+// callAnthropic (and the real fetch-body-construction code beneath it) in
+// the call graph -- not a mock of the thing under test -- with only the
+// actual network boundary intercepted. This project's existing "no
+// network in this suite" convention (test/maintainer-anthropic.test.ts's
+// own header) predates this requirement and exists to avoid live, costly,
+// flaky network traffic; a stubbed global fetch serves the identical
+// practical goal (zero real network calls, zero cost, zero flakiness)
+// while proving what these tests must prove: that a withhold/defer
+// decision made by the scanner genuinely prevents callAnthropic's own
+// underlying fetch from ever firing, not merely that some counter claims
+// it should have. Scoped to this file only; every test using it restores
+// the original fetch in a `finally` block.
+//
+// The stub is intentionally response-shaped, not call-count-only: it
+// parses the REAL request body's queue_item id="N" markers and returns a
+// syntactically valid judge decision (approve, reason, no action) for
+// every id found, so runJudgmentWake's own parseJudgmentDecisions and
+// executeJudgmentDecisions run for real against a realistic response,
+// for every batch a test drives through more than one model call.
+function stubAnthropicFetch(): { callCount: () => number; restore: () => void } {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+    calls++;
+    const bodyText = typeof init?.body === "string" ? init.body : "";
+    // The real request body is JSON (buildRequestBody's own shape: the
+    // prompt lives at messages[0].content as a STRING VALUE) -- every
+    // queue_item's id="N" attribute's own quote characters are therefore
+    // JSON-escaped to \" in the raw body bytes. Matching the raw text
+    // directly hunts for a literal " that is never there (found during
+    // this file's own red-proof run: every call resolved zero ids, so
+    // the stub always returned an empty decision array and nothing was
+    // ever actually decided) -- parsing first and matching against the
+    // real, unescaped prompt string is what buildJudgmentPrompt's own
+    // output actually looks like.
+    let promptText = "";
+    try {
+      const parsed = JSON.parse(bodyText) as { messages?: Array<{ content?: string }> };
+      promptText = parsed.messages?.[0]?.content ?? "";
+    } catch {
+      promptText = "";
+    }
+    const ids = [...promptText.matchAll(/queue_item id="(\d+)"/g)].map((m) => Number(m[1]));
+    const decisions = ids.map((queue_id) => ({ queue_id, decision: "approve", reason: "stubbed decision for a red-proof test", action: null }));
+    const body = {
+      content: [{ type: "text", text: JSON.stringify(decisions) }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 100, output_tokens: 50 },
+    };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  return {
+    callCount: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+// The real byte measurement, replicated from judgment.ts's own private
+// measureRequestBytes using only already-exported symbols -- lets a test
+// compute what SHOULD happen (admit/defer/withhold) from the real
+// production code path (buildJudgmentPrompt, buildRequestBody, the real
+// system prompt) rather than hand-guessing a byte count against
+// implementation details (the system prompt's own length, the JSON
+// envelope overhead) that could drift.
+function realRequestBytes(rows: QueueRow[]): number {
+  const prompt = buildJudgmentPrompt(rows);
+  const body = buildRequestBody(MAINTAINER_MODELS.judgment, JUDGMENT_SYSTEM_PROMPT, prompt);
+  return new TextEncoder().encode(JSON.stringify(body)).byteLength;
 }
 
 function getPost(d1: LocalD1, id: number): { mod_state: string | null } {
@@ -1169,6 +1384,250 @@ test("F-7: the bulletin deny-check re-stamp counts actioned only if stampQueueRo
     assert.equal(result.actioned, 0, "the UPDATE reported zero rows changed -- must not be counted, even on the deny-check branch");
     assert.equal(getQueueRow(d1, queueId).status, "approved", "consistent with the reported zero -- nothing really changed either");
     assert.equal(countPosts(d1), 0, "never posts regardless -- the deny-check itself still holds");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F4/F7/F8/F9: the fidelity hydrator + progress-safe withhold +
+// aggregate byte budget (docs/BRIEF-FIRST-LAWS-REPAIR.md §8) ----------
+
+test("F4/F7 red-proof: an oldest withheld fidelity item is reported and stays pending while a newer ordinary row is reached and decided", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    // Oldest: a withheld fidelity row -- its named version does not exist
+    // (§8.2's own "named version row is missing" fail-closed condition).
+    const withheldId = insertWithheldFidelityRow(d1, runId, 999_999, now - 20_000);
+    // Newer: an ordinary pending row, trivially decidable.
+    const ordinaryId = insertQueueRow(d1, runId, {
+      kind: "bookkeeping_note",
+      note: "routine drift, nothing to action",
+      status: "pending",
+      decided_at: null,
+      decided_reason: null,
+      created_at: now - 10_000,
+    });
+
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+    await runJudgmentWake(env, cache);
+
+    assert.equal(stub.callCount(), 1, "exactly one real model call: the withheld row never reaches a batch on its own, the ordinary row's own batch does");
+    assert.equal(getQueueRow(d1, ordinaryId).status, "approved", "the ordinary row reached a model batch and was decided");
+    assert.equal(getQueueRow(d1, withheldId).status, "pending", "the withheld row stays pending -- never decided, never silently dropped");
+
+    const run = latestRun(d1);
+    assert.match(run.error ?? "", /withheld 1 constitution_fidelity item/);
+    assert.match(run.error ?? "", new RegExp(`id=${withheldId} `), "the run row names the withheld id");
+    assert.doesNotMatch(run.error ?? "", new RegExp(`\\bid=${ordinaryId}\\b`), "the decided, non-withheld row's id must never appear in the withheld report");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F7 red-proof: a head cohort of >= JUDGMENT_QUEUE_CAP withheld fidelity rows does not starve newer ordinary rows behind it (JUDGMENT_MAX_SCAN comfortably covers the whole fixture)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const withheldIds: number[] = [];
+    for (let i = 0; i < JUDGMENT_QUEUE_CAP; i++) {
+      withheldIds.push(insertWithheldFidelityRow(d1, runId, 999_000 + i, now - (JUDGMENT_QUEUE_CAP - i) * 1_000 - 50_000));
+    }
+    const ordinaryIds: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      ordinaryIds.push(
+        insertQueueRow(d1, runId, {
+          kind: "bookkeeping_note",
+          note: `ordinary row ${i}`,
+          status: "pending",
+          decided_at: null,
+          decided_reason: null,
+          created_at: now - (3 - i) * 1_000,
+        }),
+      );
+    }
+
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+    await runJudgmentWake(env, cache);
+
+    const run = latestRun(d1);
+    // This fixture's 103 pending rows sit comfortably under JUDGMENT_MAX_SCAN
+    // (1000) -- the scan-limit branch must never bind here; if it did, that
+    // would itself be the starvation this test exists to rule out.
+    assert.doesNotMatch(run.error ?? "", /scan limit reached/);
+    for (const id of ordinaryIds) {
+      assert.equal(getQueueRow(d1, id).status, "approved", `ordinary row ${id} must be reached and decided, not starved behind the withheld head cohort`);
+    }
+    for (const id of withheldIds) {
+      assert.equal(getQueueRow(d1, id).status, "pending", `withheld row ${id} must stay pending, never silently dropped or re-decided`);
+    }
+    assert.match(run.error ?? "", new RegExp(`withheld ${JUDGMENT_QUEUE_CAP} constitution_fidelity items`));
+    assert.ok(stub.callCount() >= 1, "at least one real model call must have reached the ordinary rows");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F8 red-proof: two individually-admissible fidelity items whose COMBINED real request body exceeds the budget land in separate scans, never concatenated", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    // Each item alone comfortably fits (~150KB of full_text plus fixed
+    // overhead, well under the 256,000-byte budget); the two together do
+    // not.
+    const bigText = "X".repeat(150_000);
+    const { queueId: id1 } = insertValidFidelityFixture(d1, runId, { newFullText: bigText, createdAt: now - 20_000, firstSeenAt: now - 20_000 });
+    const { queueId: id2 } = insertValidFidelityFixture(d1, runId, { newFullText: bigText, createdAt: now - 10_000, firstSeenAt: now - 10_000 });
+
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY -- this test drives scanPendingQueueBatch directly, no model call anywhere in it
+
+    const batch1 = await scanPendingQueueBatch(env, null, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
+    assert.equal(batch1.admissible.length, 1, "only the first item fits in the first scan");
+    assert.equal(batch1.admissible[0].id, id1);
+    assert.equal(batch1.withheld.length, 0, "the second item is DEFERRED, not withheld -- it fits fine on its own, just not alongside the first");
+    assert.equal(batch1.drained, false, "the deferred second item means there is more left to scan");
+
+    const bytes1 = realRequestBytes(batch1.admissible);
+    assert.ok(bytes1 <= TOTAL_PROMPT_REQUEST_MAX_BYTES, `batch 1's real request body (${bytes1} bytes) must not exceed the budget`);
+
+    const batch2 = await scanPendingQueueBatch(env, batch1.nextCursor, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
+    assert.equal(batch2.admissible.length, 1, "the deferred second item is admitted alone once it gets a fresh, empty batch");
+    assert.equal(batch2.admissible[0].id, id2);
+    assert.equal(batch2.withheld.length, 0);
+    assert.equal(batch2.drained, true, "nothing left after the second item");
+
+    const bytes2 = realRequestBytes(batch2.admissible);
+    assert.ok(bytes2 <= TOTAL_PROMPT_REQUEST_MAX_BYTES, `batch 2's real request body (${bytes2} bytes) must not exceed the budget`);
+
+    // Sanity precondition: the scenario is genuinely meaningful --
+    // concatenating what the scanner deliberately kept split really would
+    // have broken the budget, measured the same real way.
+    const combinedBytes = realRequestBytes([...batch1.admissible, ...batch2.admissible]);
+    assert.ok(
+      combinedBytes > TOTAL_PROMPT_REQUEST_MAX_BYTES,
+      `the whole point of the split: concatenated (${combinedBytes} bytes) must exceed the budget even though each half alone (${bytes1} + ${bytes2}) does not`,
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("F8 red-proof: a lone fidelity item whose real request body exceeds the budget even alone is withheld loudly, never a silent forever-defer, and NEVER reaches the model (spy)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const hugeText = "X".repeat(260_000); // alone, already past TOTAL_PROMPT_REQUEST_MAX_BYTES (256,000) before any fixed overhead
+    const { queueId } = insertValidFidelityFixture(d1, runId, { newFullText: hugeText, createdAt: now - 10_000, firstSeenAt: now - 10_000 });
+
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+    await runJudgmentWake(env, cache);
+
+    assert.equal(stub.callCount(), 0, "callAnthropic's own underlying fetch must NEVER fire for a wake whose only candidate cannot fit even an empty batch -- a config-only assertion could not establish this, only a real spy can");
+    assert.equal(getQueueRow(d1, queueId).status, "pending", "stays pending -- never a silent forever-defer");
+
+    const run = latestRun(d1);
+    assert.match(run.error ?? "", /withheld 1 constitution_fidelity item/);
+    assert.match(run.error ?? "", new RegExp(`id=${queueId} \\(evidence exceeds request budget\\)`), "the run row names the exact §8.5 reason phrase for this id");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F9 red-proof: an accepted control/quote-heavy mandate body (8000 code units, the real proposal acceptance cap) is bounded by the real byte measure -- admitted and judged, or withheld with ZERO model calls, never truncated-and-judged", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const proposerId = insertCitizen(d1, { handle: "mandate-proposer" });
+    // A body createProposal itself would accept (governance.ts:640, cap
+    // society.ts:42 = 8000 code units), filled with control characters
+    // and quotes -- the exact hostile-but-legitimate shape F9 reproduced:
+    // JSON.stringify expands a control-char run roughly 6x.
+    const hostileBody = (String.fromCharCode(1) + '"').repeat(4_000);
+    assert.equal(hostileBody.length, 8_000, "sanity: the fixture body sits exactly at the real acceptance cap");
+    const mandateId = insertProposal(d1, {
+      kind: "text_amendment",
+      status: "passed",
+      proposer_id: proposerId,
+      title: "A hostile-shaped but accepted mandate",
+      body: hostileBody,
+    });
+    const { queueId } = insertValidFidelityFixture(d1, runId, { mandateProposalIds: [mandateId], createdAt: now - 10_000, firstSeenAt: now - 10_000 });
+
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+    await runJudgmentWake(env, cache);
+
+    const status = getQueueRow(d1, queueId).status;
+    if (status === "pending") {
+      assert.equal(stub.callCount(), 0, "if withheld, the model must never have been called");
+      const run = latestRun(d1);
+      assert.match(run.error ?? "", new RegExp(`id=${queueId} \\(evidence exceeds request budget\\)`));
+    } else {
+      assert.equal(status, "approved", "if not withheld, it must have been genuinely judged (approved), never a silent third state");
+      assert.ok(stub.callCount() >= 1, "if judged, a real model call must have happened");
+    }
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F9 red-proof: a CJK-heavy mandate body whose CODE-UNIT length looks safely under budget but whose real UTF-8 BYTE length is not is withheld on the byte measure, never wrongly admitted on a code-unit measure", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const proposerId = insertCitizen(d1, { handle: "cjk-mandate-proposer" });
+    // Each CJK character is ONE UTF-16 code unit (.length) but THREE
+    // UTF-8 bytes -- 90,000 code units is comfortably "under budget" by a
+    // naive .length comparison against TOTAL_PROMPT_REQUEST_MAX_BYTES
+    // (256,000), but its real byteLength (~270,000+) is not. This is the
+    // exact F9 shape: a code-unit metric would wrongly admit this; the
+    // real byte metric correctly does not. (Not capped at the real 8000
+    // proposal-body limit -- this fixture is inserted directly, the same
+    // "untrusted archive text" threat model §8.5 names, to demonstrate
+    // the metric itself, not to claim this exact size is reachable
+    // through createProposal today.)
+    const cjkBody = "あ".repeat(90_000); // U+3042 HIRAGANA LETTER A, 3 bytes in UTF-8
+    assert.ok(cjkBody.length < TOTAL_PROMPT_REQUEST_MAX_BYTES, "sanity: the naive code-unit length alone looks safely under budget");
+    const mandateId = insertProposal(d1, {
+      kind: "text_amendment",
+      status: "passed",
+      proposer_id: proposerId,
+      title: "A CJK-heavy mandate",
+      body: cjkBody,
+    });
+    const { queueId } = insertValidFidelityFixture(d1, runId, { mandateProposalIds: [mandateId], createdAt: now - 10_000, firstSeenAt: now - 10_000 });
+
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY -- drives the scanner directly, no model call anywhere in it
+
+    const outcome = await scanPendingQueueBatch(env, null, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
+
+    assert.equal(outcome.admissible.length, 0, "the CJK item must NOT be admitted -- its real byte length exceeds the budget even though its code-unit length does not");
+    assert.equal(outcome.withheld.length, 1);
+    assert.equal(outcome.withheld[0].id, queueId);
+    assert.equal(outcome.withheld[0].reason, "evidence exceeds request budget");
   } finally {
     d1.close();
   }

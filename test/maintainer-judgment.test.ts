@@ -14,12 +14,14 @@ import assert from "node:assert/strict";
 import {
   JUDGMENT_QUEUE_CAP,
   JUDGMENT_MAX_BATCHES,
+  JUDGMENT_MAX_SCAN,
+  TOTAL_PROMPT_REQUEST_MAX_BYTES,
   JUDGMENT_SYSTEM_PROMPT,
   splitBulletinDraft,
   bulletinDenyCheck,
   parseJudgmentDecisions,
   resolveExecution,
-  shouldFetchNextBatch,
+  shouldContinueBatchLoop,
   computeOverflowDropped,
   buildJudgmentPrompt,
   shapeTargetContent,
@@ -38,6 +40,7 @@ function row(over: Partial<QueueRow> & { id: number }): QueueRow {
     note: "a note",
     target_content: null,
     target_mod_state: null,
+    fidelity_evidence: null,
     ...over,
   };
 }
@@ -131,7 +134,7 @@ function decision(over: Partial<JudgmentDecision> & { queue_id: number }): Judgm
 }
 
 test("resolveExecution: an approved bulletin_draft that fails the deny-check resolves to rejected with execute null (never posts)", () => {
-  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Claim your reward\nSign here to continue", target_content: null, target_mod_state: null, id: 1 };
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Claim your reward\nSign here to continue", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
   const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "seems like a fine bulletin" }));
   assert.equal(resolved.status, "rejected");
   assert.equal(resolved.execute, null);
@@ -139,28 +142,28 @@ test("resolveExecution: an approved bulletin_draft that fails the deny-check res
 });
 
 test("resolveExecution: an approved bulletin_draft that passes the deny-check resolves to approved with a bulletin to post", () => {
-  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet this week.", target_content: null, target_mod_state: null, id: 1 };
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet this week.", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
   const resolved = resolveExecution(item, decision({ queue_id: 1 }));
   assert.equal(resolved.status, "approved");
   assert.deepEqual(resolved.execute, { kind: "bulletin", title: "Weekly digest", body: "All quiet this week." });
 });
 
 test("resolveExecution: a rejected decision always executes nothing, regardless of kind", () => {
-  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet.", target_content: null, target_mod_state: null, id: 1 };
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet.", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
   const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "not newsworthy" }));
   assert.equal(resolved.status, "rejected");
   assert.equal(resolved.execute, null);
 });
 
 test("resolveExecution: an approved flag_review maps to a moderate execution with the decided action", () => {
-  const item = { kind: "flag_review" as const, target_type: "post" as const, target_id: 42, source_ref: "flag on post 42", note: "spam", target_content: null, target_mod_state: null, id: 1 };
+  const item = { kind: "flag_review" as const, target_type: "post" as const, target_id: 42, source_ref: "flag on post 42", note: "spam", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
   const resolved = resolveExecution(item, decision({ queue_id: 1, action: "remove", reason: "confirmed spam" }));
   assert.equal(resolved.status, "approved");
   assert.deepEqual(resolved.execute, { kind: "moderate", targetType: "post", targetId: 42, action: "remove" });
 });
 
 test("resolveExecution: an approved bookkeeping_note executes nothing but still reports approved", () => {
-  const item = { kind: "bookkeeping_note" as const, target_type: null, target_id: null, source_ref: null, note: "drift observed", target_content: null, target_mod_state: null, id: 1 };
+  const item = { kind: "bookkeeping_note" as const, target_type: null, target_id: null, source_ref: null, note: "drift observed", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
   const resolved = resolveExecution(item, decision({ queue_id: 1 }));
   assert.equal(resolved.status, "approved");
   assert.equal(resolved.execute, null);
@@ -182,6 +185,7 @@ test("resolveExecution: an approved constitution_fidelity item executes nothing 
     note: "constitution changed to version 2...",
     target_content: null,
     target_mod_state: null,
+    fidelity_evidence: null,
     id: 1,
   };
   const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "matches its linked mandate exactly" }));
@@ -199,6 +203,7 @@ test("resolveExecution: a rejected constitution_fidelity item executes nothing, 
     note: "constitution changed to version 2...",
     target_content: null,
     target_mod_state: null,
+    fidelity_evidence: null,
     id: 1,
   };
   const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "exceeds its linked mandate" }));
@@ -206,7 +211,7 @@ test("resolveExecution: a rejected constitution_fidelity item executes nothing, 
   assert.equal(resolved.execute, null);
 });
 
-// ---------- shouldFetchNextBatch / computeOverflowDropped: the batch loop (M3/M4) ----------
+// ---------- shouldContinueBatchLoop / computeOverflowDropped: the batch loop (M3/M4, F7) ----------
 
 test("JUDGMENT_QUEUE_CAP is 100", () => {
   assert.equal(JUDGMENT_QUEUE_CAP, 100);
@@ -216,24 +221,42 @@ test("JUDGMENT_MAX_BATCHES is 4", () => {
   assert.equal(JUDGMENT_MAX_BATCHES, 4);
 });
 
-test("shouldFetchNextBatch: continues when the last batch came back full and the ceiling is not reached", () => {
-  assert.equal(shouldFetchNextBatch(100, 1, 100, 4), true);
-  assert.equal(shouldFetchNextBatch(100, 3, 100, 4), true);
+test("JUDGMENT_MAX_SCAN is comfortably above JUDGMENT_QUEUE_CAP -- an ordinary wake, and the F7 red-proof's own >=cap withheld head cohort, must never bind it", () => {
+  assert.ok(JUDGMENT_MAX_SCAN > JUDGMENT_QUEUE_CAP, "JUDGMENT_MAX_SCAN must exceed JUDGMENT_QUEUE_CAP or a single full admissible batch could never be assembled without hitting the scan ceiling first");
+  assert.ok(JUDGMENT_MAX_SCAN >= JUDGMENT_QUEUE_CAP * 5, "headroom for a realistic withheld cohort to sit ahead of ordinary items without starving them");
 });
 
-test("shouldFetchNextBatch: stops when the last batch came back short of the cap -- the queue is proven drained", () => {
-  assert.equal(shouldFetchNextBatch(37, 1, 100, 4), false);
-  assert.equal(shouldFetchNextBatch(0, 1, 100, 4), false);
+test("TOTAL_PROMPT_REQUEST_MAX_BYTES is generous against Fable's real input budget (verified: 1M-token context window) yet a real, finite bound", () => {
+  assert.ok(TOTAL_PROMPT_REQUEST_MAX_BYTES > 0);
+  assert.ok(TOTAL_PROMPT_REQUEST_MAX_BYTES < 10_000_000, "must be a real transport bound, not effectively unlimited");
 });
 
-test("shouldFetchNextBatch: stops at the hard ceiling even when the last batch came back full", () => {
-  assert.equal(shouldFetchNextBatch(100, 4, 100, 4), false);
+// F7 (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.5): replaces shouldFetchNextBatch.
+// Continuation is now driven by the scanner's own two authoritative
+// signals (drained, scanLimitHit), never by how many items ended up
+// admissible in the last batch -- an admissible-short batch (interspersed
+// withheld rows) can still have plenty more behind it.
+test("shouldContinueBatchLoop: continues when the scan is neither drained nor scan-limited and the ceiling is not reached", () => {
+  assert.equal(shouldContinueBatchLoop(false, false, 1, 4), true);
+  assert.equal(shouldContinueBatchLoop(false, false, 3, 4), true);
 });
 
-test("shouldFetchNextBatch: the ceiling is checked before the batch-size test, not after", () => {
-  // A batch full AND at the ceiling must stop -- the ceiling wins.
-  assert.equal(shouldFetchNextBatch(100, 4, 100, 4), false);
-  assert.equal(shouldFetchNextBatch(9999, 10, 100, 4), false);
+test("shouldContinueBatchLoop: stops once the scan reports drained, regardless of batchesRun", () => {
+  assert.equal(shouldContinueBatchLoop(true, false, 1, 4), false);
+});
+
+test("shouldContinueBatchLoop: stops once the scan reports scanLimitHit, regardless of batchesRun", () => {
+  assert.equal(shouldContinueBatchLoop(false, true, 1, 4), false);
+});
+
+test("shouldContinueBatchLoop: stops at the hard batchesRun ceiling even when neither drained nor scan-limited", () => {
+  assert.equal(shouldContinueBatchLoop(false, false, 4, 4), false);
+});
+
+test("shouldContinueBatchLoop: any one of the three stop conditions wins, not just the ceiling", () => {
+  assert.equal(shouldContinueBatchLoop(true, true, 0, 4), false);
+  assert.equal(shouldContinueBatchLoop(true, false, 0, 4), false);
+  assert.equal(shouldContinueBatchLoop(false, true, 0, 4), false);
 });
 
 test("computeOverflowDropped: zero when this wake actioned everything that was pending at the start", () => {
@@ -394,6 +417,34 @@ test("buildJudgmentPrompt renders a null mod_state on present target_content as 
 test("buildJudgmentPrompt omits the target_content block entirely when it does not apply (not a flag_review on a post/comment)", () => {
   const prompt = buildJudgmentPrompt([row({ id: 1, kind: "bookkeeping_note", note: "drift observed", target_content: null })]);
   assert.doesNotMatch(prompt, /<target_content/);
+});
+
+// F4 (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.3 item 1): a constitution_fidelity
+// row's assembled evidence must reach the prompt verbatim, delimited, the
+// same way target_content does for flag_review.
+test("buildJudgmentPrompt carries a constitution_fidelity item's fidelity_evidence block verbatim, delimited", () => {
+  const evidence = [
+    "<constitution_fidelity_evidence>",
+    "  <previous_version>\nPREVIOUS FULL TEXT\n\nPREVIOUS PARAMS TEXT\n  </previous_version>",
+    "  <new_version>\nNEW FULL TEXT\n\nNEW PARAMS TEXT\n  </new_version>",
+    '  <linked_mandate id="7" status="passed">\n    <title>Rename the society</title>\n    <body>MANDATE BODY TEXT</body>\n  </linked_mandate>',
+    "</constitution_fidelity_evidence>",
+  ].join("\n");
+  const prompt = buildJudgmentPrompt([
+    row({ id: 1, kind: "constitution_fidelity", source_ref: "constitution_versions:2", note: "constitution changed to version 2", fidelity_evidence: evidence }),
+  ]);
+  assert.match(prompt, /<constitution_fidelity_evidence>/);
+  assert.match(prompt, /PREVIOUS FULL TEXT/);
+  assert.match(prompt, /PREVIOUS PARAMS TEXT/);
+  assert.match(prompt, /NEW FULL TEXT/);
+  assert.match(prompt, /NEW PARAMS TEXT/);
+  assert.match(prompt, /MANDATE BODY TEXT/);
+  assert.match(prompt, /<\/constitution_fidelity_evidence>/);
+});
+
+test("buildJudgmentPrompt omits the fidelity_evidence block entirely when it does not apply (null on every non-fidelity kind)", () => {
+  const prompt = buildJudgmentPrompt([row({ id: 1, kind: "bookkeeping_note", note: "drift observed" })]);
+  assert.doesNotMatch(prompt, /<constitution_fidelity_evidence>/);
 });
 
 test("buildJudgmentPrompt renders the '(target no longer exists)' sentinel like any other target_content, not specially", () => {
