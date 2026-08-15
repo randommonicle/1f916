@@ -138,6 +138,26 @@ export function parseBeforeCursor(raw: string | null): number {
 // specifically asked for has_more here.
 export const RUNS_PAGE = 50;
 
+// D-035 (docs/BRIEF-FIRST-LAWS-FIXES.md item 4, gate finding L-7; option B
+// taken now, Ben ruled 2026-08-15): the served note below used to say
+// `error` is set when a wake "hit something it could not resolve on its
+// own" -- true for a genuine fault, false for a designed, expected,
+// RESOLVED fail-closed outcome such as a constitution_fidelity evidence
+// withhold or a JUDGMENT_MAX_SCAN scan-limit line (both written via
+// appendError into this same column, runJudgmentWake). The note
+// misdescribed its own contents on a public honesty surface this society
+// invites strangers to check -- widened below so it says so honestly
+// instead. Does NOT change what gets written into `error`, only what this
+// note says about it -- that is option C (below), not this pass.
+//
+// FORWARD(D-035): the real fix is a separate designed-outcomes column,
+// splitting maintainer_runs.error the same way this table already splits
+// skipped_reason from error for exactly this reason. It needs a
+// migration, so it waits on the next schema wave. Until then, `error`
+// stays one column carrying two kinds of entry -- a genuine unresolved
+// fault, and a designed fail-closed outcome the wake chose on purpose --
+// told apart only by reading the text, which is what the widened note
+// below now says plainly rather than implying otherwise.
 export async function maintainerRunsPage(env: Pick<Env, "DB">, before?: number) {
   const hasBefore = Number.isFinite(before);
   const stmt = hasBefore
@@ -148,7 +168,7 @@ export async function maintainerRunsPage(env: Pick<Env, "DB">, before?: number) 
   const runs = has_more ? results.slice(0, RUNS_PAGE) : results;
   return {
     note:
-      "Every clerk (daily) and judgment (weekly) wake writes one row here, success or failure. skipped_reason names why the wake's OWN new work was skipped -- 'nothing pending' for an empty queue, 'no api key' for a dry judge model -- and cost is zero either way, since neither skip makes a model call. skipped does not mean idle, though: judgment reconciles any approved row a previous wake claimed but never finished, before this check even runs, so items_actioned can be non-zero on a skipped row precisely because that healing work still happened (D-018 gate, N-1). error is set when a wake, or its reconciliation pass, hit something it could not resolve on its own; it still wrote this row rather than failing silently. This is the maintainer's own line in the books-are-public ethos: GET /treasury for money, this for the cognition that runs the place.",
+      "Every clerk (daily) and judgment (weekly) wake writes one row here, success or failure. skipped_reason names why the wake's OWN new work was skipped -- 'nothing pending' for an empty queue, 'no api key' for a dry judge model -- and cost is zero either way, since neither skip makes a model call. skipped does not mean idle, though: judgment reconciles any approved row a previous wake claimed but never finished, before this check even runs, so items_actioned can be non-zero on a skipped row precisely because that healing work still happened (D-018 gate, N-1). error carries two different things under one name, distinguishable only by reading the text: a genuine fault a wake or its reconciliation pass could not resolve on its own, and a designed, fail-closed outcome it chose on purpose -- an item withheld for insufficient evidence, or a scan-limit line -- both written here rather than failing silently (D-035). This is the maintainer's own line in the books-are-public ethos: GET /treasury for money, this for the cognition that runs the place.",
     returned: runs.length,
     page_size: RUNS_PAGE,
     has_more,
