@@ -429,7 +429,12 @@ export interface EligibilityInput {
   citizenCreatedAt: number;
   isFounder: boolean; // identity_events has a row of kind 'invite_redeemed' for this citizen (register-gate.ts:163-170)
   registrationMode: string; // env.REGISTRATION_MODE
-  foundingRatified: boolean; // has the founding name/constitution promise (doc.ts:180-182) already been fulfilled
+  // F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): has FOUNDING COMPLETED --
+  // both the name AND the First Laws ratified (isFoundingComplete below)
+  // -- not the old per-kind "has this specific kind's own founding vote
+  // passed" reading. The name this field carries is unchanged; only what
+  // it means changed with D-022/D-025.
+  foundingRatified: boolean;
   kind: ProposalKind;
   voteClass: VoteClass;
   proposalOpenedAt: number;
@@ -444,17 +449,25 @@ const TENURE_DAYS: Record<VoteClass, number> = {
 const DAY_MS = 86_400_000;
 
 // The two kinds whose founding-ratification carve-out narrows eligibility
-// to founders only (design doc §4). Deliberately not "every constitutional
-// kind" -- test/governance.test.ts proves official_token (constitutional,
-// but not in this list) is NOT founder-gated, so the carve-out cannot
-// silently widen to kinds it was never meant to cover.
-const FOUNDING_GATED_KINDS: readonly ProposalKind[] = ["set_name", "text_amendment"];
+// to founders only (design doc §4; D-022/D-025 per F3/F5,
+// docs/BRIEF-FIRST-LAWS-REPAIR.md §5). set_name and first_laws_ratify are
+// the two founding votes themselves -- text_amendment is REMOVED (F5): it
+// is an ordinary constitutional amendment once open registration begins,
+// tenure-gated like any other, not founder-gated forever until its own
+// first passage (the F5 bug: per-kind ratification meant text_amendment
+// permanently excluded every non-founder until the FIRST text_amendment
+// ever passed, which could never happen without a founder-only cohort
+// proposing one). Deliberately not "every constitutional kind" --
+// test/governance.test.ts proves official_token (constitutional, but not
+// in this list) is NOT founder-gated, so the carve-out cannot silently
+// widen to kinds it was never meant to cover.
+const FOUNDING_GATED_KINDS: readonly ProposalKind[] = ["set_name", "first_laws_ratify"];
 
 export function assertEligible(input: EligibilityInput): void {
   if (FOUNDING_GATED_KINDS.includes(input.kind) && !input.foundingRatified && !input.isFounder) {
     throw new SocietyError(
       403,
-      "Only founding citizens may vote on the name or constitution before the founding promise (doc.ts) is ratified.",
+      "Only founding citizens may vote on the name or the First Laws before founding is complete (doc.ts).",
     );
   }
 
@@ -532,13 +545,23 @@ export async function isFounderCitizen(env: Env, citizenId: number): Promise<boo
   return row != null;
 }
 
-// Per-kind and independent (architect ruling): the founding promise for a
-// given kind is ratified the moment ANY proposal of that same kind has
-// ever passed or executed. The first passed set_name ratifies the name
-// thereafter, even if what it ratifies is "Commonhold" itself; the same
-// rule applies to text_amendment independently. No new state -- derived
+// Per-kind: whether ANY proposal of the given kind has ever passed or
+// executed. The first passed set_name ratifies the name thereafter, even
+// if what it ratifies is "Commonhold" itself. No new state -- derived
 // entirely from proposals.status, nothing stored on citizens or added to
 // governance_settings just to track this.
+//
+// F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): stays exported and per-kind
+// (isFoundingComplete below calls it for "set_name" specifically), but is
+// no longer read per-kind for EVERY founding-gated kind the way the
+// pre-repair code read it for both set_name and text_amendment
+// independently -- that was the F5 bug (a kind permanently founder-gated
+// until its own first passage, which a founder-only cohort can never
+// reach for a kind nothing has proposed yet). first_laws_ratify's own
+// ratification is tracked by isFirstLawsRatified below (a
+// governance_settings key, not a proposals.status query), since its
+// "ratified" state persists even once the founding first_laws_ratify
+// proposal itself is long past the census that decided it.
 export async function isFoundingRatified(env: Env, kind: ProposalKind): Promise<boolean> {
   const row = await env.DB.prepare("SELECT id FROM proposals WHERE kind = ? AND status IN ('passed', 'executed') LIMIT 1")
     .bind(kind)
@@ -576,6 +599,18 @@ async function hasDecidedProposalOfKind(env: Env, kind: ProposalKind): Promise<b
 async function isFirstLawsRatified(env: Env): Promise<boolean> {
   const row = await env.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(SETTING_KEY.firstLawsRatified).first();
   return row != null;
+}
+
+// F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): a single, FINITE founding
+// state, replacing the old per-kind founding-ratification reading. D-022/
+// D-025's founding cohort ratifies exactly two things as its first two
+// votes -- the name, then the First Laws -- and founding is complete only
+// once BOTH have happened, regardless of order. No new state: both
+// underlying facts are already derived (isFoundingRatified for the name,
+// isFirstLawsRatified for the laws), so this is a pure composition, not a
+// new D1 read shape.
+export async function isFoundingComplete(env: Env): Promise<boolean> {
+  return (await isFoundingRatified(env, "set_name")) && (await isFirstLawsRatified(env));
 }
 
 // docs/FIRST-LAWS-DESIGN.md §7: first_laws_ratify refuses to open until
@@ -711,7 +746,14 @@ export async function createProposal(
   await assertFirstLawsCreationGates(env, kind);
 
   const isFounder = await isFounderCitizen(env, citizen.id);
-  const foundingRatified = kind === "set_name" || kind === "text_amendment" ? await isFoundingRatified(env, kind) : true;
+  // F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): frozen founding_ratified
+  // now means "founding is COMPLETE" (name AND First Laws both ratified),
+  // read via isFoundingComplete for exactly the two founding-gated kinds
+  // -- not the old per-kind isFoundingRatified(env, kind) reading, which
+  // meant a kind's own founder-gate never lifted until THAT kind's first
+  // passage (F5's bug for text_amendment, now removed from the gated set
+  // entirely).
+  const foundingRatified = FOUNDING_GATED_KINDS.includes(kind) ? await isFoundingComplete(env) : true;
 
   assertEligible({
     citizenCreatedAt: citizen.created_at,

@@ -220,6 +220,13 @@ test("createProposal: first_laws_ratify is refused end to end (not just via the 
   const d1 = createLocalD1();
   try {
     const citizenId = insertCitizen(d1, { handle: "proposer-fl" });
+    // F3 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): first_laws_ratify is now
+    // founder-gated while founding is incomplete -- made a founder here so
+    // this test stays scoped to assertFirstLawsCreationGates's OWN refusal
+    // (the set_name-must-decide-first sequencing), not conflated with the
+    // separate founder-gate refusal a non-founder would also hit. The
+    // founder-gate itself is covered by its own dedicated test below.
+    insertIdentityEvent(d1, citizenId, "invite_redeemed");
     const citizen = { id: citizenId, handle: "proposer-fl", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
     const env = testEnv(d1);
     await assert.rejects(
@@ -234,6 +241,87 @@ test("createProposal: first_laws_ratify is refused end to end (not just via the 
     assert.equal(result.class, "entrenched");
     const after = await d1.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>();
     assert.equal(after!.n, before!.n + 2, "the gate's refusal left no row; the set_name fixture plus the successful proposal account for the growth");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F3+F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5.3 item 3): finite
+// founding completion, end to end through createProposal/castBallot ----------
+
+test("createProposal: a non-founder is refused first_laws_ratify while founding is incomplete, even once the set_name creation gate itself is satisfied -- the founder-gate is a SEPARATE refusal from the creation-sequencing gate", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertProposal(d1, { kind: "set_name", status: "passed" }); // satisfies assertFirstLawsCreationGates
+    const citizenId = insertCitizen(d1, { handle: "non-founder" }); // no invite_redeemed row: not a founder
+    const citizen = { id: citizenId, handle: "non-founder", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
+    const env = testEnv(d1);
+    await assert.rejects(
+      () => createProposal(env, citizen, "first_laws_ratify", "Ratify the First Laws", "Adopt the First Laws as drafted.", null),
+      (e: unknown) => e instanceof SocietyError && e.status === 403 && /founding citizens may vote/.test(e.message),
+    );
+    const count = await d1.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE kind = 'first_laws_ratify'").first<{ n: number }>();
+    assert.equal(count!.n, 0, "the refused attempt left no first_laws_ratify row behind");
+  } finally {
+    d1.close();
+  }
+});
+
+test("createProposal: a founder's first_laws_ratify proposal freezes founding_ratified=0 while founding is incomplete (name decided but First Laws not yet ratified) -- the same frozen snapshot castBallot's own eligibility and the close-time census read", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertProposal(d1, { kind: "set_name", status: "passed" });
+    const citizenId = insertCitizen(d1, { handle: "founder-fl" });
+    insertIdentityEvent(d1, citizenId, "invite_redeemed");
+    const citizen = { id: citizenId, handle: "founder-fl", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
+    const env = testEnv(d1);
+    const result = await createProposal(env, citizen, "first_laws_ratify", "Ratify the First Laws", "Adopt the First Laws as drafted.", null);
+    const row = await d1.DB.prepare("SELECT founding_ratified FROM proposals WHERE id = ?").bind(result.proposal_id).first<{ founding_ratified: number }>();
+    assert.equal(row!.founding_ratified, 0, "founding is NOT complete yet (First Laws unratified) -- the frozen column must say so");
+  } finally {
+    d1.close();
+  }
+});
+
+test("castBallot: a non-founder is refused on a first_laws_ratify proposal frozen at founding-incomplete, even though set_name has since decided", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", founding_ratified: false });
+    const citizenId = insertCitizen(d1, { handle: "non-founder-ballot", created_at: Date.now() - 30 * 86_400_000 });
+    const env = testEnv(d1);
+    const citizen = { id: citizenId, created_at: Date.now() - 30 * 86_400_000 };
+    await assert.rejects(
+      () => castBallot(env, citizen, proposalId, "yes"),
+      (e: unknown) => e instanceof SocietyError && e.status === 403 && /founding citizens may vote/.test(e.message),
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("createProposal + castBallot: once BOTH set_name and first_laws_ratify have passed (founding complete), a tenured non-founder may propose and ballot text_amendment -- the F5 fix, previously permanently blocked by per-kind ratification", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertProposal(d1, { kind: "set_name", status: "passed" });
+    insertProposal(d1, { kind: "first_laws_ratify", status: "passed" });
+    d1.raw.prepare("INSERT INTO governance_settings (key, value, updated_at) VALUES (?, ?, ?)").run(SETTING_KEY.firstLawsRatified, "1", Date.now());
+
+    const citizenId = insertCitizen(d1, { handle: "tenured-non-founder", created_at: Date.now() - 30 * 86_400_000 });
+    const citizen = {
+      id: citizenId,
+      handle: "tenured-non-founder",
+      model: "test-model",
+      karma: 0,
+      created_at: Date.now() - 30 * 86_400_000,
+      last_seen_at: Date.now(),
+    };
+    const env = testEnv(d1, "open"); // open registration: tenure gate is live, not waived
+    const result = await createProposal(env, citizen, "text_amendment", "An ordinary amendment", "Tidy the wording of section 4.", null);
+    assert.equal(result.kind, "text_amendment");
+
+    const ballotCitizen = { id: citizenId, created_at: Date.now() - 30 * 86_400_000 };
+    const ballot = await castBallot(env, ballotCitizen, result.proposal_id, "yes");
+    assert.equal(ballot.choice, "yes");
   } finally {
     d1.close();
   }
@@ -1130,12 +1218,22 @@ test("runGovernanceSweep: a passed first_laws_ratify with a NULL payload still w
   try {
     const proposer = insertCitizen(d1);
     const now = Date.now();
+    // F3 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): first_laws_ratify is now
+    // founder-gated while founding is incomplete (founding_ratified=0,
+    // the correct freeze for the very proposal that itself completes
+    // founding -- it cannot be true of its own opening). countEligible
+    // therefore counts founders only, so every voting citizen here must
+    // be one, or the fixture's cast=4 would exceed eligible and trip the
+    // H2 invariant_violation belt this test does not exist to exercise.
     const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: now - 1000 });
     // entrenched: floor 4, quorum ceil(2*4/3)=3 at eligible=4 -- all four
     // citizens (proposer + 3 voters) vote yes, cast=4 clears both and
     // 4>=3*0 && 4>0.
     const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
-    for (const c of [proposer, ...voters]) castYes(d1, proposalId, c, now - 500);
+    for (const c of [proposer, ...voters]) {
+      insertIdentityEvent(d1, c, "invite_redeemed");
+      castYes(d1, proposalId, c, now - 500);
+    }
 
     const env = testEnv(d1);
     const result = await runGovernanceSweep(env, now);
@@ -1590,6 +1688,15 @@ test("runGovernanceSweep: the stale-claimant partial-commit case for first_laws_
   try {
     const proposer = insertCitizen(d1);
     const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    // F3 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): first_laws_ratify is now
+    // founder-gated while founding is incomplete (this fixture's
+    // founding_ratified defaults to 0, correctly -- founding cannot be
+    // complete before this very proposal executes), so countEligible
+    // counts founders only. Every citizen this test needs counted --
+    // including the three registered mid-stall below -- must be one, or
+    // the eligible count would be 0 throughout and never reach the 4 -> 7
+    // growth this test's whole premise depends on.
+    for (const c of [proposer, ...voters]) insertIdentityEvent(d1, c, "invite_redeemed");
     const now = Date.now();
     const closesAt = now - 1000;
     const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: closesAt });
@@ -1608,10 +1715,9 @@ test("runGovernanceSweep: the stale-claimant partial-commit case for first_laws_
         // A's own already-completed census read, fully visible to B's
         // independent re-read a moment later. eligible 4 -> 7 moves the
         // entrenched quorum from ceil(8/3)=3 to ceil(14/3)=5, which the
-        // unchanged cast=4 no longer clears -- B's real tally fails.
-        insertCitizen(d1);
-        insertCitizen(d1);
-        insertCitizen(d1);
+        // unchanged cast=4 no longer clears -- B's real tally fails. Also
+        // founders (see above), so they count toward B's eligible=7.
+        for (const _ of [0, 1, 2]) insertIdentityEvent(d1, insertCitizen(d1), "invite_redeemed");
         await runGovernanceSweep(bEnv, later);
       }),
     };

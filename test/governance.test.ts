@@ -600,22 +600,39 @@ test("assertEligible: registering mid-vote never enfranchises for that vote, how
   );
 });
 
-test("assertEligible: founding carve-out blocks a non-founder on set_name/text_amendment while unratified", () => {
-  for (const kind of ["set_name", "text_amendment"] as const) {
+// F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5.3 item 1): the founding-gated
+// set is now {set_name, first_laws_ratify} -- the two founding votes
+// themselves -- and text_amendment is REMOVED from it (F5: an ordinary
+// constitutional amendment, tenure-gated like any other, not founder-
+// gated forever until its own first passage). Split into the positive
+// case (both gated kinds block a non-founder while foundingRatified is
+// false) and the negative case (text_amendment, given the SAME inputs,
+// must NOT throw) so the test cannot silently pass by asserting the old
+// three-kind grouping.
+test("assertEligible: founding carve-out blocks a non-founder on set_name/first_laws_ratify while founding is incomplete", () => {
+  for (const kind of ["set_name", "first_laws_ratify"] as const) {
+    const voteClass = classOf(kind);
     assert.throws(
-      () => assertEligible(baseInput({ kind, voteClass: "constitutional", foundingRatified: false, isFounder: false, registrationMode: "invite_only" })),
+      () => assertEligible(baseInput({ kind, voteClass, foundingRatified: false, isFounder: false, registrationMode: "invite_only" })),
       isForbidden,
+      `${kind} must be founder-gated while founding is incomplete`,
     );
     assert.doesNotThrow(() =>
-      assertEligible(baseInput({ kind, voteClass: "constitutional", foundingRatified: false, isFounder: true, registrationMode: "invite_only" })),
+      assertEligible(baseInput({ kind, voteClass, foundingRatified: false, isFounder: true, registrationMode: "invite_only" })),
     );
   }
+});
+
+test("assertEligible: text_amendment is NOT founder-gated (F5) -- the same inputs that block set_name/first_laws_ratify above must not throw for text_amendment", () => {
+  assert.doesNotThrow(() =>
+    assertEligible(baseInput({ kind: "text_amendment", voteClass: "constitutional", foundingRatified: false, isFounder: false, registrationMode: "invite_only" })),
+  );
 });
 
 test("assertEligible: founding carve-out does not extend to other constitutional kinds", () => {
   // official_token is constitutional but not in the founding-gated list --
   // a non-founder must be eligible here even while founding is unratified,
-  // proving the carve-out is scoped to exactly set_name/text_amendment.
+  // proving the carve-out is scoped to exactly set_name/first_laws_ratify.
   assert.doesNotThrow(() =>
     assertEligible(baseInput({ kind: "official_token", voteClass: "constitutional", foundingRatified: false, isFounder: false, registrationMode: "invite_only" })),
   );
@@ -720,6 +737,27 @@ test("countEligible: a founding-gated kind while unratified counts only founders
   const n = countEligible(citizens, founderIds, {
     kind: "set_name",
     voteClass: "constitutional",
+    registrationMode: "invite_only",
+    foundingRatified: false,
+    proposalOpenedAt: 100 * DAY,
+  });
+  assert.equal(n, 2);
+});
+
+// F3 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5.3 item 2): first_laws_ratify is
+// NOW in FOUNDING_GATED_KINDS (it was not, pre-repair) -- its own census
+// while founding is incomplete must count founders only, exactly like
+// set_name's above.
+test("countEligible: a first_laws_ratify census while founding is incomplete counts only founders", () => {
+  const citizens = [
+    { id: 1, created_at: 0 },
+    { id: 2, created_at: 0 },
+    { id: 3, created_at: 0 },
+  ];
+  const founderIds = new Set([1, 3]);
+  const n = countEligible(citizens, founderIds, {
+    kind: "first_laws_ratify",
+    voteClass: "entrenched",
     registrationMode: "invite_only",
     foundingRatified: false,
     proposalOpenedAt: 100 * DAY,

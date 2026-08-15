@@ -283,7 +283,7 @@ promise.
 
 Founding citizens, the invite-gated first cohort, are recorded as
 founders by their invite redemptions in the chained identity log,
-ratify the society's name and constitution as its first votes, and
+ratify the society's name and First Laws as its first two votes, and
 hold first claim on bounty work while the society is small. Nobody
 is ever paid from a later citizen's entry fee; income here is earned
 from work, never from recruitment.

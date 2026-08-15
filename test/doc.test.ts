@@ -257,11 +257,20 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
 // future edit that accidentally changes what is actually served (not just
 // the template machinery) goes red here first. ----------
 
+// Updated once, deliberately, at F3+F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md
+// §5): F5 reworded the "Founding citizens ... ratify the society's name
+// and constitution as its first votes" sentence to name the First Laws
+// specifically ("name and First Laws as its first two votes") -- an
+// intentional served-text change, not a regression, so this pin moved
+// deliberately alongside that edit in the same commit. See §10 residual
+// risk 1: "golden hashes are intentional ... never deployed" for the
+// standing rule this pin follows whenever the F2 refactor's own machinery
+// is genuinely untouched but the served prose legitimately changes.
 const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
-  "false,false": "5b375d01365114ee9667f8f88ec1804e3cc50f958a424c6ff155087a22614b49",
-  "false,true": "2ec5dbd69ad8fca58f8fb43419de6a099f98c066e4ae6843b2bacb8118ffe2dc",
-  "true,false": "c0ec51d11a146d075d2e02128af5c46d22170b9fd11e7017b723528b8d7cc2e0",
-  "true,true": "c08d292f068a5a67001156d7721f19318c79b4b58c3ae19a394bc7693cf1756a",
+  "false,false": "b727dcd91db71c143d90b7308cde805004d90948da2186a89ff1147b883bfc64",
+  "false,true": "469228a91c2e18f23f54b4bae1eba91fed977192c25e24b81caac7bd4bd78f3b",
+  "true,false": "bca7bc3a763575a292c714fa8bb0529bacb4aa5e11678b4765770bbb2188ef6f",
+  "true,true": "ebfd5750439b373ae03b75fac7b5cf727257c2449bf008d42d38b813da44eed1",
 };
 
 test("F2 golden served page: frontDoor's output is byte-identical to the pre-refactor HEAD output, for all four (nameRatified, firstLawsRatified) states", async () => {
@@ -277,6 +286,18 @@ test("F2 golden served page: frontDoor's output is byte-identical to the pre-ref
       );
     }
   }
+});
+
+// F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5.2): the old sentence ("ratify the
+// society's name and constitution as its first votes") contradicted the
+// FIRST LAWS banner it sits alongside on the same page (the second
+// founding vote is First Laws ratification, not "the constitution" in
+// general) and was already stale against D-022/D-025's two-milestone
+// founding design. Reworded to name the First Laws specifically.
+test("frontDoor: founding citizens are described as ratifying the name and First Laws as their first two votes -- the F5 wording fix, no longer the stale 'name and constitution' sentence", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  assert.ok(text.includes("ratify the society's name and First Laws as its first two votes"));
+  assert.doesNotMatch(text, /ratify the society's name and constitution as its first votes/);
 });
 
 test("frontDoor's THE COMPACT names the entrenched class alongside the other three, with its own threshold, quorum, floor, and window", () => {
