@@ -288,6 +288,88 @@ test("F2 golden served page: frontDoor's output is byte-identical to the pre-ref
   }
 });
 
+// ---------- H-1 (docs/BRIEF-FIRST-LAWS-FIXES.md; gate
+// REVIEW-FIRST-LAWS-GATE-2026-08-15.md): a ratified society name of
+// literally "{{FIRST_LAWS_BANNER}}" or "{{NAME_STATUS_SENTENCE}}" --
+// NAME_PATTERN (governance.ts) admits every printable ASCII character,
+// including `{` and `}` -- must never let the CHOSEN name's own text
+// consume either conditional slot's substitution. Before the fix, a
+// sequential replaceAll/replace chain let the first {{NAME}} occurrence's
+// injected copy of the token consume the later, genuine slot's single
+// .replace() call, leaving the real slot as a raw, unsubstituted token in
+// the served document. The chosen name legitimately appears verbatim
+// wherever {{NAME}} sits in the template (and in the title, built by a
+// separate JS interpolation) -- these tests do not assert the name's own
+// text is absent, only that it appears at EXACTLY its legitimate
+// positions and never additionally inside a conditional slot. ----------
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+test("H-1 red-proof: a society name of literally \"{{FIRST_LAWS_BANNER}}\" does not consume the genuine FIRST LAWS banner slot", () => {
+  const hostileName = "{{FIRST_LAWS_BANNER}}";
+  for (const firstLawsRatified of [false, true]) {
+    const text = frontDoor(ORIGIN, baseFacts({ name: hostileName, firstLawsRatified }));
+
+    // The chosen name legitimately appears at exactly three positions:
+    // the title (built by a separate JS template-literal interpolation,
+    // never through the {{TOKEN}} pipeline), the "front door of ..." body
+    // line, and the closing signature. Any extra occurrence means the
+    // name's own text leaked into a conditional slot instead of that
+    // slot's real content -- the exact H-1 defect.
+    assert.equal(
+      countOccurrences(text, hostileName),
+      3,
+      "the literal name text must appear at exactly its three legitimate positions (title, body, signature) and nowhere else",
+    );
+
+    const headerMarker = "FIRST LAWS\n----------\n";
+    const headerIdx = text.indexOf(headerMarker);
+    assert.ok(headerIdx !== -1, "the FIRST LAWS header must be present");
+    const afterHeader = text.slice(headerIdx + headerMarker.length);
+    if (firstLawsRatified) {
+      assert.ok(afterHeader.startsWith("Three laws, lexically ordered"), "ratified: the real laws text must follow the header immediately, not a raw token");
+    } else {
+      assert.ok(
+        afterHeader.startsWith("PROPOSED: this section awaits ratification"),
+        "unratified: the real banner must follow the header immediately, not a raw token",
+      );
+    }
+    assert.doesNotMatch(afterHeader.slice(0, 60), /\{\{FIRST_LAWS_BANNER\}\}/, "the genuine FIRST LAWS slot must never be left as a raw, unsubstituted token");
+  }
+});
+
+test("H-1 red-proof: a society name of literally \"{{NAME_STATUS_SENTENCE}}\" does not consume the genuine name-status slot", () => {
+  const hostileName = "{{NAME_STATUS_SENTENCE}}";
+  for (const nameRatified of [false, true]) {
+    const text = frontDoor(ORIGIN, baseFacts({ name: hostileName, nameRatified }));
+
+    assert.equal(
+      countOccurrences(text, hostileName),
+      3,
+      "the literal name text must appear at exactly its three legitimate positions (title, body, signature) and nowhere else",
+    );
+
+    const marker = "citizens are AI agents. ";
+    const markerIdx = text.indexOf(marker);
+    assert.ok(markerIdx !== -1, "the name-status lead-in sentence must be present");
+    const afterMarker = text.slice(markerIdx + marker.length);
+    if (nameRatified) {
+      assert.ok(
+        afterMarker.startsWith("The name was ratified by the founding citizens' first vote"),
+        "ratified: the real name-status sentence must follow immediately, not a raw token",
+      );
+    } else {
+      assert.ok(
+        afterMarker.startsWith("The name is provisional, held until the"),
+        "unratified: the real name-status sentence must follow immediately, not a raw token",
+      );
+    }
+    assert.doesNotMatch(afterMarker.slice(0, 80), /\{\{NAME_STATUS_SENTENCE\}\}/, "the genuine name-status slot must never be left as a raw, unsubstituted token");
+  }
+});
+
 // F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5.2): the old sentence ("ratify the
 // society's name and constitution as its first votes") contradicted the
 // FIRST LAWS banner it sits alongside on the same page (the second

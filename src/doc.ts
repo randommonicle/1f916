@@ -395,13 +395,27 @@ code allows, and gives its reasons in the open.
 — {{NAME}}
 `;
 
-// The one render primitive both frontDoor() (a single selected fragment
+// H-1 (docs/BRIEF-FIRST-LAWS-FIXES.md; gate REVIEW-FIRST-LAWS-GATE-2026-08-15.md):
+// the one render primitive both frontDoor() (a single selected fragment
 // per conditional) and governance.ts's buildConstitutionTemplate() (both
 // fragments present, superset) call -- never a second, parallel token
-// substitution. Token replacement order does not matter: no token's own
-// replacement text can ever contain another `{{...}}` token (every
-// substituted value is a plain name, origin URL, or a fragment constant
-// with no `{{` in its own text).
+// substitution. A SINGLE regex pass over the template, with a function
+// replacer resolving each `{{TOKEN}}` from one lookup, is what makes this
+// safe -- not token ordering. String.prototype.replace never rescans a
+// function replacer's own return value for further matches, so whatever a
+// substituted value CONTAINS is irrelevant: it can never consume another
+// slot's substitution, because nothing substituted is ever handed back to
+// the regex.
+//
+// This replaces a sequential replaceAll/replace chain whose safety
+// comment here used to claim "no token's own replacement text can ever
+// contain another token" -- false for `name`. NAME_PATTERN
+// (governance.ts) admits every printable ASCII character, including `{`
+// and `}`, so a ratified name of literally "{{FIRST_LAWS_BANNER}}" or
+// "{{NAME_STATUS_SENTENCE}}" let an early {{NAME}} substitution consume
+// the later, genuine conditional slot's own single .replace() call,
+// leaving that slot serving a raw, unsubstituted token in the served
+// constitution. The fix here is immune by construction, not by ordering.
 export function renderFrontDoor(
   name: string,
   origin: string,
@@ -412,14 +426,17 @@ export function renderFrontDoor(
   firstLawsBanner: string,
 ): string {
   const title = `${name} — a society for AI agents`;
-  const body = FRONT_DOOR_TEMPLATE.replaceAll("{{NAME}}", name)
-    .replaceAll("{{ORIGIN}}", origin)
-    .replaceAll("{{CONTROL_FLOOR_PERCENT}}", String(controlFloorPercent))
-    .replaceAll("{{DIVIDEND_PERCENT}}", String(dividendPercent))
-    .replaceAll("{{SPLIT_PRIZE}}", String(split.prize))
-    .replaceAll("{{SPLIT_BOUNTY}}", String(split.bounty))
-    .replace("{{NAME_STATUS_SENTENCE}}", nameStatusSentence)
-    .replace("{{FIRST_LAWS_BANNER}}", firstLawsBanner);
+  const values: Record<string, string> = {
+    NAME: name,
+    ORIGIN: origin,
+    CONTROL_FLOOR_PERCENT: String(controlFloorPercent),
+    DIVIDEND_PERCENT: String(dividendPercent),
+    SPLIT_PRIZE: String(split.prize),
+    SPLIT_BOUNTY: String(split.bounty),
+    NAME_STATUS_SENTENCE: nameStatusSentence,
+    FIRST_LAWS_BANNER: firstLawsBanner,
+  };
+  const body = FRONT_DOOR_TEMPLATE.replace(/\{\{([A-Z_]+)\}\}/g, (whole, token: string) => values[token] ?? whole);
   return `${title}\n${"=".repeat(title.length)}${body}`;
 }
 
