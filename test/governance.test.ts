@@ -34,6 +34,8 @@ import {
   buildConstitutionTemplate,
   serializeConstitutionParameters,
   computeLiveConstitutionPair,
+  CLASS_QUORUM_RULE,
+  CLASS_PASSAGE_RULE,
   type ProposalKind,
   type EligibilityInput,
 } from "../src/governance.ts";
@@ -42,6 +44,15 @@ import { SocietyError } from "../src/society.ts";
 
 const isBadRequest = (e: unknown) => e instanceof SocietyError && e.status === 400;
 const isForbidden = (e: unknown) => e instanceof SocietyError && e.status === 403;
+
+// F1 golden pin (docs/BRIEF-FIRST-LAWS-REPAIR.md §3.3 item 2): computed
+// once, after the F1 fix landed, from sha256Hex(serializeConstitutionParameters())
+// at rest -- see the dedicated test below. A hostile deploy that edits an
+// entrenched threshold now moves this pin (and the live parameters_hash a
+// citizen can independently recompute) just as loudly as it moves the
+// executed tally() comparison, because both now read the identical
+// CLASS_QUORUM_RULE/CLASS_PASSAGE_RULE tables.
+const GOLDEN_PARAMETERS_HASH = "75ec4865db63222ef0a417198e21950a5bc255d22478e7a9f1cda1540f0dfe76";
 
 // ---------- vote classes ----------
 
@@ -848,6 +859,50 @@ test("serializeConstitutionParameters: valid JSON, all four classes present with
 
 test("serializeConstitutionParameters: is stable across calls (pure, no clock, no randomness)", () => {
   assert.equal(serializeConstitutionParameters(), serializeConstitutionParameters());
+});
+
+// ---------- F1 (docs/BRIEF-FIRST-LAWS-REPAIR.md §3): the executed rule and
+// the attested rule are the SAME table, not two independent copies ----------
+
+test("F1 coupling: serializeConstitutionParameters emits the SAME CLASS_QUORUM_RULE/CLASS_PASSAGE_RULE objects tally() reads, for every class", () => {
+  const parsed = JSON.parse(serializeConstitutionParameters()) as {
+    classes: Array<{ class: "entrenched" | "constitutional" | "parameter" | "advisory"; quorum_rule: unknown; passage_rule: unknown }>;
+  };
+  const byClass = Object.fromEntries(parsed.classes.map((c) => [c.class, c]));
+  for (const voteClass of ["entrenched", "constitutional", "parameter", "advisory"] as const) {
+    assert.deepEqual(byClass[voteClass].quorum_rule, CLASS_QUORUM_RULE[voteClass], `${voteClass} quorum_rule must match CLASS_QUORUM_RULE exactly`);
+    assert.deepEqual(byClass[voteClass].passage_rule, CLASS_PASSAGE_RULE[voteClass], `${voteClass} passage_rule must match CLASS_PASSAGE_RULE exactly`);
+  }
+});
+
+test("F1 coupling: tally() passes/fails at the exact boundary CLASS_PASSAGE_RULE's own yesAtLeastTimesNo describes, entrenched class, k read from the table not hardcoded", () => {
+  const k = CLASS_PASSAGE_RULE.entrenched;
+  assert.equal(k.shape, "supermajority");
+  const yesAtLeastTimesNo = k.shape === "supermajority" ? k.yesAtLeastTimesNo : NaN;
+  // no=2 (not 1): keeps cast comfortably clear of the floor(4)/quorum(1 at
+  // eligible=1) regardless of what k happens to be, so this test's own
+  // pass/fail verdict is driven purely by the margin comparison against
+  // the table's k, never confounded by a floor/quorum edge shifting
+  // alongside a mutated k (the exact confound a no=1 construction hit
+  // during this test's own red-proof).
+  const atBoundary = tally("entrenched", yesAtLeastTimesNo * 2, 2, 0, 1);
+  assert.equal(atBoundary.status, "passed", `yes=${yesAtLeastTimesNo * 2} no=2 must pass at the exact ${yesAtLeastTimesNo}x boundary`);
+  const oneBelow = tally("entrenched", yesAtLeastTimesNo * 2 - 1, 2, 0, 1);
+  assert.equal(oneBelow.status, "failed", `yes=${yesAtLeastTimesNo * 2 - 1} no=2 must fail, one below the boundary`);
+});
+
+// Golden parameters_hash pin (enforce-invariants-in-build): computed after
+// the F1 fix landed (CLASS_QUORUM_RULE/CLASS_PASSAGE_RULE objects replacing
+// the hand-typed quorum_rule/passage_rule strings), from
+// serializeConstitutionParameters() at rest, no live DB involved. Recorded
+// here so an unreviewed edit to the tables' declared shape or figures moves
+// this pin as loudly as it moves the live parameters_hash a citizen can
+// independently recompute -- see the prove-it-can-fail note on this test in
+// the checkpoint log for the mutate-and-confirm-red round.
+test("F1 golden pin: sha256Hex(serializeConstitutionParameters()) matches the committed constant", async () => {
+  const { sha256Hex } = await import("../src/chain.ts");
+  const hash = await sha256Hex(serializeConstitutionParameters());
+  assert.equal(hash, GOLDEN_PARAMETERS_HASH, "parameters_hash moved -- if this is an intentional First Laws repair change, recompute and update GOLDEN_PARAMETERS_HASH deliberately, never silently");
 });
 
 test("computeLiveConstitutionPair: both hashes are stable 64-char lowercase hex across repeated calls (deterministic, pure)", async () => {

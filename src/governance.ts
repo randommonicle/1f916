@@ -159,13 +159,67 @@ export const CLASS_MIN_BALLOTS: Record<VoteClass, number> = {
 };
 
 // ---------- tally arithmetic ----------
+//
+// F1 (docs/BRIEF-FIRST-LAWS-REPAIR.md §3): the executable comparison
+// tally() runs and the hand-typed string literals serializeConstitutionParameters()
+// once emitted for the SAME rule were two independent copies with nothing
+// coupling them -- a deploy that edited the executed rule left the
+// attested parameters_hash completely unaware. CLASS_QUORUM_RULE and
+// CLASS_PASSAGE_RULE below are now the single source both tally() (via
+// quorumFor/passes) and the serialiser (verbatim) read, so the two can no
+// longer independently drift.
+export type QuorumRule =
+  | { shape: "fraction"; num: number; den: number } // cast >= ceil(num*eligible/den)
+  | { shape: "none" };
+export type PassageRule =
+  | { shape: "supermajority"; yesAtLeastTimesNo: number } // yes >= k*no && yes > 0
+  | { shape: "plurality" }; // yes > no
+
+export const CLASS_QUORUM_RULE: Record<VoteClass, QuorumRule> = {
+  entrenched: { shape: "fraction", num: 2, den: 3 },
+  constitutional: { shape: "fraction", num: 1, den: 2 },
+  parameter: { shape: "fraction", num: 1, den: 2 },
+  advisory: { shape: "none" },
+};
+export const CLASS_PASSAGE_RULE: Record<VoteClass, PassageRule> = {
+  entrenched: { shape: "supermajority", yesAtLeastTimesNo: 3 },
+  constitutional: { shape: "supermajority", yesAtLeastTimesNo: 2 },
+  parameter: { shape: "plurality" },
+  advisory: { shape: "plurality" },
+};
+
+function quorumFromRule(rule: QuorumRule, eligible: number): number {
+  return rule.shape === "none" ? 0 : Math.ceil((rule.num * eligible) / rule.den);
+}
+
+// Pure. What tally() actually calls -- reads CLASS_QUORUM_RULE for the
+// given class, so a table edit and the executed threshold can never
+// disagree. "none" (advisory) resolves to 0 for completeness; tally()
+// itself never asks for advisory's quorum (advisory skips the quorum gate
+// entirely, unchanged from before this commit).
+export function quorumFor(voteClass: VoteClass, eligible: number): number {
+  return quorumFromRule(CLASS_QUORUM_RULE[voteClass], eligible);
+}
+
+// Pure. What tally() actually calls for the pass/fail margin -- reads
+// CLASS_PASSAGE_RULE for the given class. The explicit `yes > 0` clause on
+// a supermajority rule exists so an all-abstain ballot that clears
+// quorum/floor on presence alone cannot pass on 0 >= 0; plurality already
+// implies yes > 0 whenever it passes, so no separate clause is needed there.
+export function passes(voteClass: VoteClass, yes: number, no: number): boolean {
+  const rule = CLASS_PASSAGE_RULE[voteClass];
+  return rule.shape === "supermajority" ? yes >= rule.yesAtLeastTimesNo * no && yes > 0 : yes > no;
+}
 
 // ceil(E/2), the quorum threshold for constitutional and parameter classes
 // (design doc §6). Exposed on its own so the arithmetic itself -- not just
 // its effect inside tally() below -- is directly testable: integer
-// division only, no floats near a constitutional boundary.
+// division only, no floats near a constitutional boundary. A thin reader
+// of CLASS_QUORUM_RULE.constitutional (identical to .parameter's own
+// fraction, 1/2) rather than a second hardcoded ceil(eligible/2) -- one
+// copy of the fraction, not two.
 export function quorumThreshold(eligible: number): number {
-  return Math.ceil(eligible / 2);
+  return quorumFromRule(CLASS_QUORUM_RULE.constitutional, eligible);
 }
 
 // ceil(2E/3), the quorum threshold for the entrenched class alone (D-025
@@ -173,9 +227,10 @@ export function quorumThreshold(eligible: number): number {
 // ceil(E/2). Exposed on its own for the identical reason quorumThreshold
 // is: directly testable arithmetic, no float near a constitutional
 // boundary. Crosses above the entrenched floor (4) at E=7 -- below that,
-// the floor is what actually binds.
+// the floor is what actually binds. A thin reader of
+// CLASS_QUORUM_RULE.entrenched, same discipline as quorumThreshold above.
 export function entrenchedQuorumThreshold(eligible: number): number {
-  return Math.ceil((2 * eligible) / 3);
+  return quorumFromRule(CLASS_QUORUM_RULE.entrenched, eligible);
 }
 
 export type TallyStatus = "passed" | "failed";
@@ -202,7 +257,7 @@ export function tally(voteClass: VoteClass, yes: number, no: number, abstain: nu
   const cast = yes + no + abstain;
 
   if (voteClass !== "advisory") {
-    const threshold = voteClass === "entrenched" ? entrenchedQuorumThreshold(eligible) : quorumThreshold(eligible);
+    const threshold = quorumFor(voteClass, eligible);
     if (cast < threshold) {
       return { status: "failed", cast, reason: "quorum" };
     }
@@ -210,7 +265,7 @@ export function tally(voteClass: VoteClass, yes: number, no: number, abstain: nu
   if (cast < CLASS_MIN_BALLOTS[voteClass]) {
     return { status: "failed", cast, reason: "floor" };
   }
-  const passed = voteClass === "entrenched" ? yes >= 3 * no && yes > 0 : voteClass === "constitutional" ? yes >= 2 * no && yes > 0 : yes > no;
+  const passed = passes(voteClass, yes, no);
   return passed ? { status: "passed", cast } : { status: "failed", cast, reason: "margin" };
 }
 
@@ -1483,8 +1538,12 @@ export function serializeConstitutionParameters(): string {
   const classes = (["entrenched", "constitutional", "parameter", "advisory"] as const).map((voteClass) => ({
     class: voteClass,
     min_ballots: CLASS_MIN_BALLOTS[voteClass],
-    quorum_rule: voteClass === "advisory" ? "none" : voteClass === "entrenched" ? "ceil(2*eligible/3)" : "ceil(eligible/2)",
-    passage_rule: voteClass === "entrenched" ? "yes>=3*no && yes>0" : voteClass === "constitutional" ? "yes>=2*no && yes>0" : "yes>no",
+    // The SAME rule objects tally() interprets (via quorumFor/passes),
+    // emitted verbatim -- never a hand-typed string re-describing them.
+    // F1 (docs/BRIEF-FIRST-LAWS-REPAIR.md §3): this is what makes editing
+    // the executed rule and editing the attested rule the SAME edit.
+    quorum_rule: CLASS_QUORUM_RULE[voteClass],
+    passage_rule: CLASS_PASSAGE_RULE[voteClass],
     window_ms: voteWindowMs(voteClass),
     tenure_days: TENURE_DAYS[voteClass],
   }));
