@@ -61,7 +61,12 @@ const isForbidden = (e: unknown) => e instanceof SocietyError && e.status === 40
 // carrying FIRST_LAWS_POLICY verbatim, an intentional content change
 // (F6's whole point -- the state machine's declared shape is now part of
 // what this hash covers), not a regression. See §10 residual risk 1.
-const GOLDEN_PARAMETERS_HASH = "6f5d17a61b1ff5843ef90e93a17dca59073501fc6036fd00bf08071ce78136d4";
+// Updated again, deliberately, at H-2 (docs/BRIEF-FIRST-LAWS-FIXES.md):
+// ratificationEffects.first_laws_ratify gained a valueSource discriminator
+// -- H-2's whole point, the value a ratification effect writes is now
+// attested policy data too, not a hardcoded expression -- another
+// intentional content change, not a regression.
+const GOLDEN_PARAMETERS_HASH = "83c76b5abfe8af794f198e0d656c8f0efda7f99340ed1adae5ff2fddeef6f6b6";
 
 // ---------- vote classes ----------
 

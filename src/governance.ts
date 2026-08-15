@@ -485,6 +485,20 @@ interface CreationPrerequisiteRule {
   requiresAlreadyRatified?: boolean; // first_laws_amendment: true
 }
 
+// H-2 (docs/BRIEF-FIRST-LAWS-FIXES.md): the value a ratification effect
+// writes is itself attested policy data, not a hardcoded expression --
+// exactly one member today. first_laws_ratify carries no payload of its
+// own (docs/FIRST-LAWS-DESIGN.md §7: its value IS the ratifying
+// proposal's own id), so "proposal_id" is the only value source this
+// state machine needs; a future second no-payload machine-executable
+// kind would add a member here, not a parallel field elsewhere.
+type RatificationValueSource = "proposal_id";
+
+interface RatificationEffect {
+  setsSettingKey: string;
+  valueSource: RatificationValueSource;
+}
+
 export interface FirstLawsPolicy {
   // (b) founder treatment
   foundingGatedKinds: readonly ProposalKind[]; // ["set_name","first_laws_ratify"]
@@ -493,7 +507,21 @@ export interface FirstLawsPolicy {
   creationPrerequisites: Partial<Record<ProposalKind, CreationPrerequisiteRule>>;
   // (c) ratification execution (design §7 step 4)
   machineExecutableKinds: readonly ProposalKind[]; // includes first_laws_ratify
-  ratificationEffects: { first_laws_ratify: { setsSettingKey: string } }; // SETTING_KEY.firstLawsRatified
+  // H-2: a Partial map, the same indexable-plus-undefined-guard shape
+  // creationPrerequisites already uses -- keyed by the kind whose
+  // ratification writes a setting with no payload of its own. Codex's H-2
+  // reproduction showed a hardcoded `kind === "first_laws_ratify"` gate
+  // and a hardcoded `String(proposalId)` value could each be mutated with
+  // ZERO hash movement (settingsStatementForExecution's old shape, before
+  // this fix): changing the gate to `kind === "set_name"` left
+  // parameters_hash unchanged while ratification silently stopped
+  // writing; changing the value to `String(proposalId + 1)` likewise left
+  // the hash unchanged while the wrong value landed. Both the KEY an
+  // effect is registered under and its VALUE SOURCE are now policy data
+  // the serialiser hashes verbatim (serializeConstitutionParameters
+  // emits FIRST_LAWS_POLICY whole), so neither mutation is possible
+  // without moving the hash.
+  ratificationEffects: Partial<Record<ProposalKind, RatificationEffect>>;
 }
 
 // Deliberately NOT `as const`: the per-field prove-it-can-fail red-proofs
@@ -509,7 +537,7 @@ export const FIRST_LAWS_POLICY: FirstLawsPolicy = {
     first_laws_amendment: { requiresAlreadyRatified: true },
   },
   machineExecutableKinds: ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise", "first_laws_ratify"],
-  ratificationEffects: { first_laws_ratify: { setsSettingKey: SETTING_KEY.firstLawsRatified } },
+  ratificationEffects: { first_laws_ratify: { setsSettingKey: SETTING_KEY.firstLawsRatified, valueSource: "proposal_id" } },
 };
 
 // The two kinds whose founding-ratification carve-out narrows eligibility
@@ -664,13 +692,26 @@ async function hasDecidedProposalOfKind(env: Env, kind: ProposalKind): Promise<b
   return row != null;
 }
 
-// Whether first_laws_ratify has already passed -- governance_settings key
-// first_laws_ratified is set the moment it executes (settingsStatementForExecution
+// Whether first_laws_ratify has already passed -- the governance_settings
+// key is set the moment it executes (settingsStatementForExecution
 // below). D1-touching, so this lives here rather than in PayloadContext
 // (read once per createProposal call regardless of kind; this is a
 // First-Laws-specific extra read, only made for these two kinds).
+//
+// L-4 fold-in (docs/BRIEF-FIRST-LAWS-FIXES.md, H-2): reads the SAME
+// policy-derived key settingsStatementForExecution writes --
+// FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey
+// -- rather than SETTING_KEY.firstLawsRatified directly. The gate's L-4
+// finding: mutating that policy field used to leave the WRITE under the
+// new key while this READ still checked the old one, one fact held in
+// two places on the two sides of a read/write pair. A missing effect
+// (only reachable by a policy mutation that bypasses the type system,
+// never a well-typed deploy) fails closed: no attested key, so nothing
+// can honestly be reported as ratified.
 async function isFirstLawsRatified(env: Env): Promise<boolean> {
-  const row = await env.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(SETTING_KEY.firstLawsRatified).first();
+  const key = FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify?.setsSettingKey;
+  if (!key) return false;
+  const row = await env.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(key).first();
   return row != null;
 }
 
@@ -1221,6 +1262,23 @@ function upsertSettingStmt(env: Env, key: string, value: string, expiresAt: numb
   ).bind(key, value, expiresAt, proposalId, now, proposalId, now);
 }
 
+// H-2 (docs/BRIEF-FIRST-LAWS-FIXES.md): the sole interpreter of a
+// ratification effect's valueSource discriminator. A value source
+// outside the declared union is only reachable by a policy mutation that
+// bypasses the type system (a red-proof's deliberate corruption, never a
+// well-typed deploy) -- fail closed rather than silently guess at a
+// value nothing attested.
+function resolveRatificationValue(valueSource: RatificationValueSource, proposalId: number): string {
+  switch (valueSource) {
+    case "proposal_id":
+      return String(proposalId);
+    default: {
+      const unrecognised: never = valueSource;
+      throw new SocietyError(500, `first_laws ratification effect has an unattested valueSource: ${String(unrecognised)}`);
+    }
+  }
+}
+
 // The governance_settings write for a passed machine-executable kind's
 // payload -- one statement, added to the same atomic batch as the
 // proposal status update and the chained outcome event (§8). Mandate
@@ -1229,19 +1287,22 @@ function upsertSettingStmt(env: Env, key: string, value: string, expiresAt: numb
 // set status passed with no settings write at all -- "their force is the
 // public record" (§8).
 function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Record<string, unknown> | null, proposalId: number, now: number) {
-  // first_laws_ratify carries NO payload at all (docs/FIRST-LAWS-DESIGN.md
-  // §7: its value IS the proposal id, not a structured field) -- checked
-  // BEFORE the payload guard below, which would otherwise treat it as
-  // "nothing to write" and silently flip the proposal to 'executed' with
-  // no settings row at all [drift item 5]. Every OTHER machine-executable
-  // kind still needs its own real payload, so this must not become a
-  // blanket bypass of the guard. F6 (§6.2): reads the setting key from
-  // FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey
-  // rather than the hardcoded SETTING_KEY.firstLawsRatified reference --
-  // a policy edit to which setting gets written now changes what actually
-  // gets written, not merely what a comment says gets written.
-  if (kind === "first_laws_ratify") {
-    return upsertSettingStmt(env, FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey, String(proposalId), null, proposalId, now);
+  // H-2: looked up by the proposal's OWN kind, before the payload guard
+  // below -- first_laws_ratify carries NO payload at all
+  // (docs/FIRST-LAWS-DESIGN.md §7: its value IS the proposal id, not a
+  // structured field), which the guard would otherwise treat as "nothing
+  // to write" and silently flip the proposal to 'executed' with no
+  // settings row at all [drift item 5]. Genuinely indexed by `kind`, not
+  // a hardcoded `kind === "first_laws_ratify"` literal: Codex's H-2
+  // reproduction changed that literal to `kind === "set_name"` and
+  // parameters_hash never moved, because the OLD gate was code, not
+  // policy data. Here the kind an effect is registered under IS the
+  // object key the serialiser hashes, so mis-keying it moves the hash by
+  // construction. The VALUE is likewise resolved from the effect's own
+  // attested valueSource, not a hardcoded String(proposalId) expression.
+  const effect = FIRST_LAWS_POLICY.ratificationEffects[kind];
+  if (effect) {
+    return upsertSettingStmt(env, effect.setsSettingKey, resolveRatificationValue(effect.valueSource, proposalId), null, proposalId, now);
   }
   if (!payload) return null;
   switch (kind) {

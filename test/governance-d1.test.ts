@@ -429,7 +429,7 @@ test("F6 per-field prove-it-can-fail: removing first_laws_ratify from FIRST_LAWS
 
 test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey writes a DIFFERENT setting key, AND moves the attested parameters_hash", async () => {
   const d1 = createLocalD1();
-  const originalKey = FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey;
+  const originalKey = FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify!.setsSettingKey;
   try {
     const proposer = insertCitizen(d1);
     const now = Date.now();
@@ -442,7 +442,7 @@ test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.ratificationEff
     const env = testEnv(d1);
     const hashBefore = await sha256Hex(serializeConstitutionParameters());
 
-    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey = "hijacked_setting_key";
+    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify!.setsSettingKey = "hijacked_setting_key";
 
     const result = await runGovernanceSweep(env, now);
     assert.equal(result.results[0].outcome, "executed");
@@ -455,7 +455,102 @@ test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.ratificationEff
     const hashAfter = await sha256Hex(serializeConstitutionParameters());
     assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change");
   } finally {
-    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey = originalKey;
+    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify!.setsSettingKey = originalKey;
+    d1.close();
+  }
+});
+
+// ---------- H-2 (docs/BRIEF-FIRST-LAWS-FIXES.md): the setsSettingKey
+// hijack above already proved the writer reads the policy's KEY. Codex's
+// H-2 finding was that the KIND GATE and the VALUE were both STILL
+// hardcoded beneath that -- neither reproducible by mutating setsSettingKey
+// alone. These two red-proofs mirror Codex's own reproduction technique
+// (mutate the gate; separately mutate the value) against the fixed code,
+// each asserting the hash moves, which is the entire point of the fix. ----------
+
+test("H-2 red-proof: removing FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify (the kind gate) stops the ratification write entirely, AND moves the attested parameters_hash", async () => {
+  const d1 = createLocalD1();
+  const originalEffect = FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify;
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: now - 1000 });
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    for (const c of [proposer, ...voters]) {
+      insertIdentityEvent(d1, c, "invite_redeemed");
+      castYes(d1, proposalId, c, now - 500);
+    }
+    const env = testEnv(d1);
+    const hashBefore = await sha256Hex(serializeConstitutionParameters());
+
+    // Codex's H-2 reproduction changed the OLD hardcoded branch's literal
+    // from `kind === "first_laws_ratify"` to `kind === "set_name"` and
+    // found parameters_hash never moved (the branch was code, not policy
+    // data). Against the fixed, indexable design there is no second,
+    // code-level gate left to mutate -- "the branch no longer fires for
+    // this kind" IS "this kind has no registered effect", so deleting the
+    // key is the direct equivalent mutation.
+    delete FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify;
+
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "executed", "still executable -- machineExecutableKinds is untouched by this mutation, only ratificationEffects is");
+
+    const realSetting = await d1.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(originalEffect!.setsSettingKey).first();
+    assert.equal(
+      realSetting,
+      null,
+      "after mutation: NO settings row at all -- executed with a silently absent write, exactly Codex's reproduced consequence ('the passed First Laws proposal reached executed with no setting row')",
+    );
+
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change -- this is the whole point of the fix");
+  } finally {
+    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify = originalEffect;
+    d1.close();
+  }
+});
+
+test("H-2 red-proof: mutating FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.valueSource to an unattested value stops the ratification write from resolving any value, AND moves the attested parameters_hash", async () => {
+  const d1 = createLocalD1();
+  const effect = FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify!;
+  const originalValueSource = effect.valueSource;
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: now - 1000 });
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    for (const c of [proposer, ...voters]) {
+      insertIdentityEvent(d1, c, "invite_redeemed");
+      castYes(d1, proposalId, c, now - 500);
+    }
+    const env = testEnv(d1);
+    const hashBefore = await sha256Hex(serializeConstitutionParameters());
+
+    // Codex's H-2 reproduction separately mutated the VALUE
+    // (String(proposalId) -> String(proposalId + 1)) and found the hash
+    // unchanged too -- the value was a hardcoded expression, not policy
+    // data. The equivalent mutation against the fixed design corrupts the
+    // attested discriminator that CHOOSES the value; bypassing the type
+    // system deliberately, the same way the setsSettingKey hijack test
+    // above does for the key (RatificationValueSource has exactly one
+    // legitimate member, so only a runtime-only corruption can reach this).
+    (effect as unknown as { valueSource: string }).valueSource = "not_an_attested_source";
+
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(
+      result.results[0].outcome,
+      "error",
+      "an unattested valueSource fails closed (throws, caught by runGovernanceSweep's per-proposal isolation) rather than silently guessing at a value nothing attested",
+    );
+    assert.match(result.results[0].error ?? "", /unattested valueSource/, "the sweep's own reported error must name what went wrong");
+
+    const realSetting = await d1.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(effect.setsSettingKey).first();
+    assert.equal(realSetting, null, "no settings row at all -- the resolver refused to guess a value for an unattested source rather than writing something wrong");
+
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the policy corruption -- this is the whole point of the fix");
+  } finally {
+    effect.valueSource = originalValueSource;
     d1.close();
   }
 });
