@@ -36,6 +36,9 @@ import {
   computeLiveConstitutionPair,
   CLASS_QUORUM_RULE,
   CLASS_PASSAGE_RULE,
+  FIRST_LAWS_POLICY,
+  FOUNDING_GATED_KINDS,
+  MACHINE_EXECUTABLE_KINDS,
   type ProposalKind,
   type EligibilityInput,
 } from "../src/governance.ts";
@@ -53,7 +56,12 @@ const isForbidden = (e: unknown) => e instanceof SocietyError && e.status === 40
 // citizen can independently recompute) just as loudly as it moves the
 // executed tally() comparison, because both now read the identical
 // CLASS_QUORUM_RULE/CLASS_PASSAGE_RULE tables.
-const GOLDEN_PARAMETERS_HASH = "75ec4865db63222ef0a417198e21950a5bc255d22478e7a9f1cda1540f0dfe76";
+// Updated once, deliberately, at F6 (docs/BRIEF-FIRST-LAWS-REPAIR.md §6):
+// serializeConstitutionParameters gained a first_laws_policy field
+// carrying FIRST_LAWS_POLICY verbatim, an intentional content change
+// (F6's whole point -- the state machine's declared shape is now part of
+// what this hash covers), not a regression. See §10 residual risk 1.
+const GOLDEN_PARAMETERS_HASH = "6f5d17a61b1ff5843ef90e93a17dca59073501fc6036fd00bf08071ce78136d4";
 
 // ---------- vote classes ----------
 
@@ -990,6 +998,70 @@ test("F1 golden pin: sha256Hex(serializeConstitutionParameters()) matches the co
   const { sha256Hex } = await import("../src/chain.ts");
   const hash = await sha256Hex(serializeConstitutionParameters());
   assert.equal(hash, GOLDEN_PARAMETERS_HASH, "parameters_hash moved -- if this is an intentional First Laws repair change, recompute and update GOLDEN_PARAMETERS_HASH deliberately, never silently");
+});
+
+// ---------- F6 (docs/BRIEF-FIRST-LAWS-REPAIR.md §6): the First Laws state
+// machine's declared shape is now attested, not three independent
+// un-attested surfaces ----------
+
+test("F6 shippable red 1: serializeConstitutionParameters's first_laws_policy field deep-equals the canonical serialisation of the executable FIRST_LAWS_POLICY", () => {
+  const parsed = JSON.parse(serializeConstitutionParameters()) as { first_laws_policy: unknown };
+  // Round-trip FIRST_LAWS_POLICY through JSON.parse(JSON.stringify(...))
+  // too, so the comparison is plain-object-to-plain-object (deepEqual
+  // does not care about `undefined` map values the way a raw object
+  // comparison against a Partial<Record<...>> with missing keys might),
+  // not a live-object-vs-parsed-object mismatch that would fail for
+  // reasons unrelated to what this test actually checks.
+  const canonical = JSON.parse(JSON.stringify(FIRST_LAWS_POLICY));
+  assert.deepEqual(parsed.first_laws_policy, canonical);
+});
+
+test("F6 shippable red 2: FOUNDING_GATED_KINDS and MACHINE_EXECUTABLE_KINDS are IDENTITY aliases of FIRST_LAWS_POLICY's own arrays, not copies", () => {
+  assert.equal(FOUNDING_GATED_KINDS, FIRST_LAWS_POLICY.foundingGatedKinds, "must be the SAME array object (===), not a value-equal copy");
+  assert.equal(MACHINE_EXECUTABLE_KINDS, FIRST_LAWS_POLICY.machineExecutableKinds, "must be the SAME array object (===), not a value-equal copy");
+});
+
+// Per-field prove-it-can-fail (§6.3 item 3), foundingGatedKinds: mutated
+// IN PLACE (not by reassigning FIRST_LAWS_POLICY.foundingGatedKinds to a
+// new array, which would only decouple the FOUNDING_GATED_KINDS alias
+// bound at module load from the policy's own later-reassigned property --
+// an artefact of how this test mutates the field, not a real-world
+// concern, since a genuine hostile SOURCE edit changes the one array
+// literal both readers were always going to share). In-place mutation
+// (via a mutable-array cast around the readonly type) is what an actual
+// content edit to the declared list looks like at runtime, and proves the
+// executor (assertEligible, via FOUNDING_GATED_KINDS) and the attested
+// hash (via FIRST_LAWS_POLICY.foundingGatedKinds, the SAME object) move
+// together.
+test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.foundingGatedKinds changes assertEligible's behaviour AND moves the attested parameters_hash, together", async () => {
+  const { sha256Hex } = await import("../src/chain.ts");
+  const mutable = FIRST_LAWS_POLICY.foundingGatedKinds as ProposalKind[];
+  const original = [...mutable];
+  const hashBefore = await sha256Hex(serializeConstitutionParameters());
+  const inputBefore: EligibilityInput = {
+    citizenCreatedAt: 0,
+    isFounder: false,
+    registrationMode: "invite_only",
+    foundingRatified: false,
+    kind: "first_laws_ratify",
+    voteClass: "entrenched",
+    proposalOpenedAt: 0,
+  };
+  assert.throws(() => assertEligible(inputBefore), "before mutation: first_laws_ratify must still be founder-gated");
+
+  try {
+    mutable.length = 0;
+    mutable.push("set_name"); // first_laws_ratify silently dropped -- a non-founder is now let through
+    assert.doesNotThrow(() => assertEligible(inputBefore), "after mutation: first_laws_ratify is no longer founder-gated -- a non-founder must now be let through");
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change");
+  } finally {
+    mutable.length = 0;
+    mutable.push(...original);
+  }
+  // Revert confirmed: both the behaviour and the hash are back to normal.
+  assert.throws(() => assertEligible(inputBefore), isForbidden);
+  assert.equal(await sha256Hex(serializeConstitutionParameters()), hashBefore);
 });
 
 test("computeLiveConstitutionPair: both hashes are stable 64-char lowercase hex across repeated calls (deterministic, pure)", async () => {

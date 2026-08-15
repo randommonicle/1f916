@@ -448,6 +448,70 @@ const TENURE_DAYS: Record<VoteClass, number> = {
 };
 const DAY_MS = 86_400_000;
 
+// ---------- F6: the attested First Laws policy (docs/BRIEF-FIRST-LAWS-REPAIR.md §6) ----------
+//
+// The First Laws state machine -- founder treatment, creation
+// prerequisites, and the ratification effect -- previously lived as
+// three independent, un-attested surfaces (a standalone
+// FOUNDING_GATED_KINDS const, a hardcoded if/else ladder in
+// assertFirstLawsCreationGates, and a standalone MACHINE_EXECUTABLE_KINDS
+// const plus a hardcoded branch in settingsStatementForExecution). None
+// of the three were read by computeLiveConstitutionPair, so a deploy that
+// weakened any of them left BOTH attested hashes unchanged, wrote no
+// constitution_versions row, and never reached the fidelity queue -- F1
+// and F3/F5 above are INSTANCES of exactly this general class.
+//
+// FIRST_LAWS_POLICY is now the one declared, executable source. Every
+// executor below reads it directly (never a parallel copy), and
+// serializeConstitutionParameters emits it verbatim into parameters_text,
+// so weakening any of its declared knobs moves parameters_hash. This
+// attests the state machine's DECLARED SHAPE, not that every executor
+// genuinely interprets it forever -- a real fix requires rewiring the
+// executor to ignore the policy, which is now a visible divorce from a
+// declaration it still claims to read, not a silent one (§6.2's own
+// honest residual).
+
+// (a) creation prerequisites (design §7): a rule an executor either has
+// (refuse per its fields) or does not (a no-op for that kind). A fixed
+// two-literal-key object typed by ProposalKind's full union would not be
+// indexable by an arbitrary ProposalKind and would not type-check
+// exhaustively against assertFirstLawsCreationGates's own `kind:
+// ProposalKind` parameter -- Partial<Record<...>> plus an
+// undefined-guard interpreter is the compilable shape (round-2
+// amendment, §6.2).
+interface CreationPrerequisiteRule {
+  requiresDecidedKind?: ProposalKind; // first_laws_ratify: "set_name" (passed|failed|executed)
+  refusedWhenAlreadyRatified?: boolean; // first_laws_ratify: true
+  requiresAlreadyRatified?: boolean; // first_laws_amendment: true
+}
+
+export interface FirstLawsPolicy {
+  // (b) founder treatment
+  foundingGatedKinds: readonly ProposalKind[]; // ["set_name","first_laws_ratify"]
+  foundingMilestones: readonly ("set_name_ratified" | "first_laws_ratified")[]; // completion = all present
+  // (a) creation prerequisites
+  creationPrerequisites: Partial<Record<ProposalKind, CreationPrerequisiteRule>>;
+  // (c) ratification execution (design §7 step 4)
+  machineExecutableKinds: readonly ProposalKind[]; // includes first_laws_ratify
+  ratificationEffects: { first_laws_ratify: { setsSettingKey: string } }; // SETTING_KEY.firstLawsRatified
+}
+
+// Deliberately NOT `as const`: the per-field prove-it-can-fail red-proofs
+// (test/governance.test.ts) mutate individual fields at runtime to prove
+// each executor genuinely reads this object rather than a frozen or
+// copied snapshot of it -- `as const` (or Object.freeze) would make that
+// impossible to express honestly.
+export const FIRST_LAWS_POLICY: FirstLawsPolicy = {
+  foundingGatedKinds: ["set_name", "first_laws_ratify"],
+  foundingMilestones: ["set_name_ratified", "first_laws_ratified"],
+  creationPrerequisites: {
+    first_laws_ratify: { requiresDecidedKind: "set_name", refusedWhenAlreadyRatified: true },
+    first_laws_amendment: { requiresAlreadyRatified: true },
+  },
+  machineExecutableKinds: ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise", "first_laws_ratify"],
+  ratificationEffects: { first_laws_ratify: { setsSettingKey: SETTING_KEY.firstLawsRatified } },
+};
+
 // The two kinds whose founding-ratification carve-out narrows eligibility
 // to founders only (design doc §4; D-022/D-025 per F3/F5,
 // docs/BRIEF-FIRST-LAWS-REPAIR.md §5). set_name and first_laws_ratify are
@@ -461,7 +525,16 @@ const DAY_MS = 86_400_000;
 // test/governance.test.ts proves official_token (constitutional, but not
 // in this list) is NOT founder-gated, so the carve-out cannot silently
 // widen to kinds it was never meant to cover.
-const FOUNDING_GATED_KINDS: readonly ProposalKind[] = ["set_name", "first_laws_ratify"];
+//
+// F6: an IDENTITY alias to FIRST_LAWS_POLICY.foundingGatedKinds, not a
+// copy -- test/governance.test.ts asserts `===` directly, so this const
+// existing at all can never again drift into a second, independently
+// edited list the way the pre-F6 standalone const risked.
+// Exported (was module-private pre-F6) so test/governance.test.ts can
+// assert the identity relationship directly (`FOUNDING_GATED_KINDS ===
+// FIRST_LAWS_POLICY.foundingGatedKinds`), not merely infer it from
+// behaviour.
+export const FOUNDING_GATED_KINDS = FIRST_LAWS_POLICY.foundingGatedKinds;
 
 export function assertEligible(input: EligibilityInput): void {
   if (FOUNDING_GATED_KINDS.includes(input.kind) && !input.foundingRatified && !input.isFounder) {
@@ -601,41 +674,63 @@ async function isFirstLawsRatified(env: Env): Promise<boolean> {
   return row != null;
 }
 
-// F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5): a single, FINITE founding
-// state, replacing the old per-kind founding-ratification reading. D-022/
-// D-025's founding cohort ratifies exactly two things as its first two
-// votes -- the name, then the First Laws -- and founding is complete only
-// once BOTH have happened, regardless of order. No new state: both
+// F3/F5 (docs/BRIEF-FIRST-LAWS-REPAIR.md §5), F6 (§6.2): a single,
+// FINITE founding state, replacing the old per-kind founding-ratification
+// reading. D-022/D-025's founding cohort ratifies exactly two things as
+// its first two votes -- the name, then the First Laws -- and founding is
+// complete only once every milestone FIRST_LAWS_POLICY.foundingMilestones
+// declares has happened, regardless of order. No new state: both
 // underlying facts are already derived (isFoundingRatified for the name,
-// isFirstLawsRatified for the laws), so this is a pure composition, not a
-// new D1 read shape.
+// isFirstLawsRatified for the laws); this is a pure composition, not a
+// new D1 read shape. F6: genuinely INTERPRETS the declared milestone
+// list (each milestone maps to its existing predicate below) rather than
+// hardcoding a two-line AND -- removing a milestone from the policy
+// removes it from what completion requires, not merely from a comment
+// describing what completion requires.
+const FOUNDING_MILESTONE_PREDICATES: Record<"set_name_ratified" | "first_laws_ratified", (env: Env) => Promise<boolean>> = {
+  set_name_ratified: (env) => isFoundingRatified(env, "set_name"),
+  first_laws_ratified: (env) => isFirstLawsRatified(env),
+};
+
 export async function isFoundingComplete(env: Env): Promise<boolean> {
-  return (await isFoundingRatified(env, "set_name")) && (await isFirstLawsRatified(env));
+  for (const milestone of FIRST_LAWS_POLICY.foundingMilestones) {
+    if (!(await FOUNDING_MILESTONE_PREDICATES[milestone](env))) return false;
+  }
+  return true;
 }
 
-// docs/FIRST-LAWS-DESIGN.md §7: first_laws_ratify refuses to open until
-// (a) the cohort has actually decided the name (passed or failed both
-// count) and (b) the laws are not ALREADY ratified (nothing left to
-// ratify). first_laws_amendment refuses to open until the laws exist to
-// amend. Neither check applies to any other kind -- a no-op for them.
+// docs/FIRST-LAWS-DESIGN.md §7, F6 (docs/BRIEF-FIRST-LAWS-REPAIR.md §6.2):
+// first_laws_ratify refuses to open until (a) the cohort has actually
+// decided the name (passed or failed both count) and (b) the laws are
+// not ALREADY ratified (nothing left to ratify). first_laws_amendment
+// refuses to open until the laws exist to amend. Neither check applies to
+// any other kind -- a no-op for them. F6: interprets
+// FIRST_LAWS_POLICY.creationPrerequisites[kind] through a narrow
+// undefined guard, replacing the old hardcoded `if (kind ===
+// "first_laws_ratify") ... else if (kind === "first_laws_amendment")`
+// ladder -- removing a prerequisite from the policy removes both the
+// enforcement AND changes parameters_hash, where the old ladder's
+// hardcoded conditions could be edited with no attested trace at all.
+// Error strings kept byte-identical to the pre-F6 ladder's own (their D1
+// tests assert substrings against them, and the served refusals depend
+// on them).
 export async function assertFirstLawsCreationGates(env: Env, kind: ProposalKind): Promise<void> {
-  if (kind === "first_laws_ratify") {
-    if (!(await hasDecidedProposalOfKind(env, "set_name"))) {
-      throw new SocietyError(
-        403,
-        "first_laws_ratify cannot open until a set_name proposal has reached a decision (passed or failed) -- the cohort must decide the name first.",
-      );
-    }
-    if (await isFirstLawsRatified(env)) {
-      throw new SocietyError(400, "the First Laws are already ratified -- nothing left to ratify. Propose a first_laws_amendment instead.");
-    }
-  } else if (kind === "first_laws_amendment") {
-    if (!(await isFirstLawsRatified(env))) {
-      throw new SocietyError(
-        403,
-        "first_laws_amendment cannot open until the First Laws are ratified -- there is nothing yet to amend. Propose first_laws_ratify first.",
-      );
-    }
+  const rule = FIRST_LAWS_POLICY.creationPrerequisites[kind];
+  if (!rule) return; // no First Laws prerequisite declared for this kind
+  if (rule.requiresDecidedKind && !(await hasDecidedProposalOfKind(env, rule.requiresDecidedKind))) {
+    throw new SocietyError(
+      403,
+      "first_laws_ratify cannot open until a set_name proposal has reached a decision (passed or failed) -- the cohort must decide the name first.",
+    );
+  }
+  if (rule.refusedWhenAlreadyRatified && (await isFirstLawsRatified(env))) {
+    throw new SocietyError(400, "the First Laws are already ratified -- nothing left to ratify. Propose a first_laws_amendment instead.");
+  }
+  if (rule.requiresAlreadyRatified && !(await isFirstLawsRatified(env))) {
+    throw new SocietyError(
+      403,
+      "first_laws_amendment cannot open until the First Laws are ratified -- there is nothing yet to amend. Propose first_laws_ratify first.",
+    );
   }
 }
 
@@ -1091,7 +1186,14 @@ export async function getProposalDetail(env: Env, proposalId: number) {
 // UPDATE actually changed a row proceeds past this point for that
 // proposal; the other sees changes:0 and moves on.
 
-const MACHINE_EXECUTABLE_KINDS: readonly ProposalKind[] = ["set_name", "set_dividend_uplift", "set_split", "control_floor_raise", "first_laws_ratify"];
+// F6 (docs/BRIEF-FIRST-LAWS-REPAIR.md §6.2): an IDENTITY alias to
+// FIRST_LAWS_POLICY.machineExecutableKinds, not a copy -- same discipline
+// as FOUNDING_GATED_KINDS above. Removing first_laws_ratify from the
+// policy now removes it from what a passed ratification actually
+// executes (isExecutable below), not merely from a comment claiming it
+// does.
+// Exported for the identical reason FOUNDING_GATED_KINDS is above.
+export const MACHINE_EXECUTABLE_KINDS = FIRST_LAWS_POLICY.machineExecutableKinds;
 
 // docs/REVIEW-DEMOCRACY.md H1's belt: a re-claim (below) can, in the
 // narrow window it exists for, race a still-live-but-slow original
@@ -1133,9 +1235,13 @@ function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Re
   // "nothing to write" and silently flip the proposal to 'executed' with
   // no settings row at all [drift item 5]. Every OTHER machine-executable
   // kind still needs its own real payload, so this must not become a
-  // blanket bypass of the guard.
+  // blanket bypass of the guard. F6 (§6.2): reads the setting key from
+  // FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey
+  // rather than the hardcoded SETTING_KEY.firstLawsRatified reference --
+  // a policy edit to which setting gets written now changes what actually
+  // gets written, not merely what a comment says gets written.
   if (kind === "first_laws_ratify") {
-    return upsertSettingStmt(env, SETTING_KEY.firstLawsRatified, String(proposalId), null, proposalId, now);
+    return upsertSettingStmt(env, FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey, String(proposalId), null, proposalId, now);
   }
   if (!payload) return null;
   switch (kind) {
@@ -1592,7 +1698,15 @@ export function serializeConstitutionParameters(): string {
     tenure_days: TENURE_DAYS[voteClass],
   }));
   const kindClass = Object.fromEntries(PROPOSAL_KINDS.map((k) => [k, KIND_CLASS[k]]));
-  return JSON.stringify({ classes, kind_class: kindClass });
+  // F6 (docs/BRIEF-FIRST-LAWS-REPAIR.md §6.2): FIRST_LAWS_POLICY emitted
+  // verbatim -- the SAME object every executor above reads -- so the
+  // state machine's declared shape (founder treatment, creation
+  // prerequisites, ratification effect) is now part of parameters_hash.
+  // Deterministic key order: FIRST_LAWS_POLICY is one literal object,
+  // declared once and never re-ordered at runtime (only individual field
+  // VALUES are ever mutated, by the red-proofs below), so JSON.stringify's
+  // own insertion-order serialisation is stable across calls.
+  return JSON.stringify({ classes, kind_class: kindClass, first_laws_policy: FIRST_LAWS_POLICY });
 }
 
 export async function computeLiveConstitutionPair(): Promise<{ templateHash: string; parametersHash: string }> {

@@ -27,6 +27,7 @@ import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type
 import {
   isFounderCitizen,
   isFoundingRatified,
+  isFoundingComplete,
   assertFirstLawsCreationGates,
   castBallot,
   createProposal,
@@ -35,6 +36,9 @@ import {
   listProposals,
   PROPOSAL_PAGE,
   PROPOSAL_KINDS,
+  FIRST_LAWS_POLICY,
+  serializeConstitutionParameters,
+  type ProposalKind,
 } from "../src/governance.ts";
 import {
   SocietyError,
@@ -48,7 +52,7 @@ import {
   CITIZEN_PAGE,
 } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
-import { verifyRows, appendChained, type ChainRow } from "../src/chain.ts";
+import { verifyRows, appendChained, sha256Hex, type ChainRow } from "../src/chain.ts";
 
 function testEnv(d1: ReturnType<typeof createLocalD1>, registrationMode = "invite_only"): Env {
   return {
@@ -323,6 +327,135 @@ test("createProposal + castBallot: once BOTH set_name and first_laws_ratify have
     const ballot = await castBallot(env, ballotCitizen, result.proposal_id, "yes");
     assert.equal(ballot.choice, "yes");
   } finally {
+    d1.close();
+  }
+});
+
+// ---------- F6 (docs/BRIEF-FIRST-LAWS-REPAIR.md §6.3 item 3): per-field
+// prove-it-can-fail for the three D1-touching policy fields (pure fields
+// -- foundingGatedKinds -- are covered in test/governance.test.ts) ----------
+
+test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.foundingMilestones flips isFoundingComplete, AND moves the attested parameters_hash", async () => {
+  const d1 = createLocalD1();
+  const originalMilestones = [...FIRST_LAWS_POLICY.foundingMilestones];
+  try {
+    insertProposal(d1, { kind: "set_name", status: "passed" }); // name ratified; First Laws NOT ratified
+    const env = testEnv(d1);
+    const hashBefore = await sha256Hex(serializeConstitutionParameters());
+    assert.equal(await isFoundingComplete(env), false, "before mutation: First Laws unratified -- founding must not be complete");
+
+    const mutable = FIRST_LAWS_POLICY.foundingMilestones as ("set_name_ratified" | "first_laws_ratified")[];
+    mutable.length = 0;
+    mutable.push("set_name_ratified"); // first_laws_ratified milestone silently dropped
+
+    assert.equal(await isFoundingComplete(env), true, "after mutation: founding now reads complete on the name alone -- the flip this test proves");
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change");
+  } finally {
+    const mutable = FIRST_LAWS_POLICY.foundingMilestones as ("set_name_ratified" | "first_laws_ratified")[];
+    mutable.length = 0;
+    mutable.push(...originalMilestones);
+    d1.close();
+  }
+});
+
+test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.creationPrerequisites.first_laws_ratify stops the name-first gate from refusing, AND moves the attested parameters_hash", async () => {
+  const d1 = createLocalD1();
+  const originalRule = FIRST_LAWS_POLICY.creationPrerequisites.first_laws_ratify;
+  try {
+    const env = testEnv(d1); // no set_name proposal at all
+    const hashBefore = await sha256Hex(serializeConstitutionParameters());
+    await assert.rejects(
+      () => assertFirstLawsCreationGates(env, "first_laws_ratify"),
+      (e: unknown) => e instanceof SocietyError && e.status === 403,
+      "before mutation: the name-first gate must refuse with no set_name decided",
+    );
+
+    delete FIRST_LAWS_POLICY.creationPrerequisites.first_laws_ratify;
+
+    await assert.doesNotReject(
+      () => assertFirstLawsCreationGates(env, "first_laws_ratify"),
+      "after mutation: the name-first gate no longer refuses -- the exact silent-corruption shape F6 exists to make visible",
+    );
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change");
+  } finally {
+    FIRST_LAWS_POLICY.creationPrerequisites.first_laws_ratify = originalRule;
+    d1.close();
+  }
+});
+
+test("F6 per-field prove-it-can-fail: removing first_laws_ratify from FIRST_LAWS_POLICY.machineExecutableKinds leaves a passed ratification at status='passed' (never executed) with no settings write, AND moves the attested parameters_hash", async () => {
+  const d1 = createLocalD1();
+  const mutable = FIRST_LAWS_POLICY.machineExecutableKinds as ProposalKind[];
+  const original = [...mutable];
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: now - 1000 });
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    // Founders (see the F3 comment on the analogous fixture above): entrenched
+    // quorum/floor at eligible=4 need all four voting to clear.
+    for (const c of [proposer, ...voters]) {
+      insertIdentityEvent(d1, c, "invite_redeemed");
+      castYes(d1, proposalId, c, now - 500);
+    }
+    const env = testEnv(d1);
+    const hashBefore = await sha256Hex(serializeConstitutionParameters());
+
+    mutable.length = 0;
+    mutable.push("set_name", "set_dividend_uplift", "set_split", "control_floor_raise"); // first_laws_ratify dropped
+
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(
+      result.results[0].outcome,
+      "passed",
+      "after mutation: a passing first_laws_ratify must stay 'passed', never 'executed' -- it is no longer in the machine-executable set",
+    );
+
+    const row = await d1.DB.prepare("SELECT status FROM proposals WHERE id = ?").bind(proposalId).first<{ status: string }>();
+    assert.equal(row!.status, "passed");
+    const setting = await d1.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(SETTING_KEY.firstLawsRatified).first();
+    assert.equal(setting, null, "the first_laws_ratified setting must be ABSENT -- no execution means no write");
+
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change");
+  } finally {
+    mutable.length = 0;
+    mutable.push(...original);
+    d1.close();
+  }
+});
+
+test("F6 per-field prove-it-can-fail: mutating FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey writes a DIFFERENT setting key, AND moves the attested parameters_hash", async () => {
+  const d1 = createLocalD1();
+  const originalKey = FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey;
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const proposalId = insertProposal(d1, { kind: "first_laws_ratify", status: "open", proposer_id: proposer, opened_at: now - 15 * 86_400_000, closes_at: now - 1000 });
+    const voters = [insertCitizen(d1), insertCitizen(d1), insertCitizen(d1)];
+    for (const c of [proposer, ...voters]) {
+      insertIdentityEvent(d1, c, "invite_redeemed");
+      castYes(d1, proposalId, c, now - 500);
+    }
+    const env = testEnv(d1);
+    const hashBefore = await sha256Hex(serializeConstitutionParameters());
+
+    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey = "hijacked_setting_key";
+
+    const result = await runGovernanceSweep(env, now);
+    assert.equal(result.results[0].outcome, "executed");
+
+    const realSetting = await d1.DB.prepare("SELECT 1 FROM governance_settings WHERE key = ?").bind(originalKey).first();
+    assert.equal(realSetting, null, "the REAL first_laws_ratified key must be absent -- ratification wrote the hijacked key instead");
+    const hijacked = await d1.DB.prepare("SELECT value FROM governance_settings WHERE key = ?").bind("hijacked_setting_key").first<{ value: string }>();
+    assert.equal(hijacked!.value, String(proposalId), "the hijacked key must carry the ratifying proposal's own id, proving the write really happened under the mutated key");
+
+    const hashAfter = await sha256Hex(serializeConstitutionParameters());
+    assert.notEqual(hashAfter, hashBefore, "the attested parameters_hash must move alongside the behavioural change");
+  } finally {
+    FIRST_LAWS_POLICY.ratificationEffects.first_laws_ratify.setsSettingKey = originalKey;
     d1.close();
   }
 });
