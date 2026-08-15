@@ -1632,3 +1632,128 @@ test("F9 red-proof: a CJK-heavy mandate body whose CODE-UNIT length looks safely
     d1.close();
   }
 });
+
+// ---------- M-1 (docs/BRIEF-FIRST-LAWS-FIXES.md; gate
+// REVIEW-FIRST-LAWS-GATE-2026-08-15.md; brief §8.3 items 2 and 3): the
+// two brief-mandated red-proofs the gate and Codex both found missing.
+// Every withheld fixture ABOVE this point is built by
+// insertWithheldFidelityRow, whose named constitution_versions id simply
+// does not exist -- the FIRST of hydrateFidelityEvidence's fail-closed
+// conditions, which short-circuits before the hydrator ever reaches a
+// real version row, a real predecessor, or a real linked mandate. So
+// nothing above this point ever asserted the CONTENT the hydrator
+// carries when it succeeds, nor the specific case of a linked mandate id
+// that is absent from `proposals`. Both reviewers drove these branches
+// manually and found the behaviour already correct -- this is a coverage
+// defect, not a behaviour defect, but as the gate put it,
+// buildFidelityEvidenceBlock could drop a whole section and the suite
+// would stay green. ----------
+
+test("M-1 red-proof (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.3 item 2): the hydrator carries REAL archive rows into fidelity_evidence -- v1's full_text and parameters_text, v2's full_text and parameters_text, and the linked mandate's real proposal body, all three evidence-block sections present with real content, not merely the queue row's own note", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+
+    const proposerId = insertCitizen(d1, { handle: "mandate-proposer" });
+    const mandateId = insertProposal(d1, {
+      kind: "text_amendment",
+      status: "passed",
+      proposer_id: proposerId,
+      title: "Tidy section 4",
+      body: "MANDATE BODY the judge must see verbatim, not merely the queue note.",
+    });
+
+    // Two real constitution_versions rows, built directly (not via
+    // insertValidFidelityFixture) so BOTH the previous and the new
+    // version carry their own distinguishable full_text AND
+    // parameters_text -- proving all four named pieces (v1.full_text,
+    // v2.full_text, v2.parameters_text per §8.3 item 2, plus v1's own
+    // parameters_text, the other half of the <previous_version> block)
+    // independently, not merely that SOME content reached the evidence.
+    insertConstitutionVersion(d1, {
+      full_text: "V1 PREVIOUS FULL TEXT",
+      parameters_text: "V1 PREVIOUS PARAMETERS TEXT",
+      changed_by: "genesis",
+      first_seen_at: now - 20_000,
+    });
+    const v2Id = insertConstitutionVersion(d1, {
+      full_text: "V2 NEW FULL TEXT",
+      parameters_text: "V2 NEW PARAMETERS TEXT",
+      changed_by: "mandate_linked",
+      first_seen_at: now - 10_000,
+      mandate_proposal_ids: [mandateId],
+    });
+    const queueId = insertQueueRow(d1, runId, {
+      kind: "constitution_fidelity",
+      source_ref: `constitution_versions:${v2Id}`,
+      note: `constitution changed to version ${v2Id}`,
+      status: "pending",
+      decided_at: null,
+      decided_reason: null,
+      created_at: now - 5_000,
+    });
+
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY -- drives the scanner directly, no model call anywhere in it
+    const outcome = await scanPendingQueueBatch(env, null, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
+
+    assert.equal(outcome.withheld.length, 0, "a fully-formed fixture must never withhold");
+    assert.equal(outcome.admissible.length, 1);
+    assert.equal(outcome.admissible[0].id, queueId);
+    const evidence = outcome.admissible[0].fidelity_evidence;
+    assert.ok(evidence, "fidelity_evidence must be populated, not null -- today's gap (M-1): the field exists but no D1 test ever asserted its content");
+    assert.ok(evidence!.includes("V1 PREVIOUS FULL TEXT"), "the PREVIOUS version's real full_text must reach the evidence (§8.3 item 2: v1.full_text)");
+    assert.ok(evidence!.includes("V1 PREVIOUS PARAMETERS TEXT"), "the PREVIOUS version's real parameters_text must reach the evidence -- the other half of the <previous_version> block");
+    assert.ok(evidence!.includes("V2 NEW FULL TEXT"), "the NEW version's real full_text must reach the evidence (§8.3 item 2: v2.full_text)");
+    assert.ok(evidence!.includes("V2 NEW PARAMETERS TEXT"), "the NEW version's real parameters_text must reach the evidence (§8.3 item 2: v2.parameters_text)");
+    assert.ok(evidence!.includes("MANDATE BODY the judge must see verbatim"), "the linked mandate's real proposal body must reach the evidence, not merely its id (§8.3 item 2: p.body)");
+    assert.ok(evidence!.includes(`<linked_mandate id="${mandateId}" status="passed">`), "the linked mandate block must be tagged with the real proposal id and status");
+
+    // The three evidence-block SECTIONS, in the order buildFidelityEvidenceBlock emits them.
+    assert.ok(evidence!.includes("<previous_version>"), "the previous_version section tag must be present");
+    assert.ok(evidence!.includes("<new_version>"), "the new_version section tag must be present");
+    assert.ok(evidence!.includes("<linked_mandate"), "the linked_mandate section tag must be present");
+  } finally {
+    d1.close();
+  }
+});
+
+test("M-1 red-proof (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.3 item 3): a linked mandate proposal absent from `proposals` withholds the item loudly -- never handed to the model with only the note", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+
+    // A genuine, well-formed fixture in every respect EXCEPT the linked
+    // mandate: mandateProposalIds names an id with no row in `proposals`
+    // at all -- distinct from insertWithheldFidelityRow's own "named
+    // version row is missing" case (this version row IS real, and its
+    // predecessor IS real; only the linked mandate is absent).
+    const missingMandateId = 999_888;
+    const { queueId } = insertValidFidelityFixture(d1, runId, {
+      mandateProposalIds: [missingMandateId],
+      createdAt: now - 10_000,
+      firstSeenAt: now - 10_000,
+    });
+
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+    await runJudgmentWake(env, cache);
+
+    assert.equal(stub.callCount(), 0, "the model must never be called with an item whose linked mandate is missing -- today (pre-fix coverage) this assertion is untested, not unenforced");
+    assert.equal(getQueueRow(d1, queueId).status, "pending", "the item stays pending, never silently dropped or wrongly decided");
+
+    const run = latestRun(d1);
+    assert.match(
+      run.error ?? "",
+      new RegExp(`id=${queueId} \\(a linked mandate proposal for constitution_versions row \\d+ is missing from proposals\\)`),
+      "the run row's withheld report must name the real reason (the hydrator's own fail-closed message), not a generic failure",
+    );
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
