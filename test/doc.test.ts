@@ -14,7 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { frontDoor, type FrontDoorFacts } from "../src/doc.ts";
 import * as governance from "../src/governance.ts";
-import { CHAINED_TABLE_COUNT } from "../src/chain.ts";
+import { CHAINED_TABLE_COUNT, sha256Hex } from "../src/chain.ts";
 
 const ORIGIN = "https://commonhold.example.invalid";
 
@@ -243,6 +243,40 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
   assert.ok(idx !== -1);
   const after = text.slice(idx + "FIRST LAWS\n----------\n".length);
   assert.ok(after.startsWith("Three laws, lexically ordered"), "the laws text must start immediately, no banner line, once ratified");
+});
+
+// ---------- F2 (docs/BRIEF-FIRST-LAWS-REPAIR.md §4, commission notes flag
+// 6): frontDoor now renders FROM the exported FRONT_DOOR_TEMPLATE plus the
+// named fragment constants, rather than building the whole document as a
+// single template literal with the fragments interpolated inline. The
+// refactor's one hard invariant: frontDoor's OWN served output must not
+// move by a single byte for any of the four boolean states -- this is the
+// live page at index.ts:121, and the golden pins below are exactly the
+// pre-refactor output (captured from HEAD before this commit, at the
+// identical ORIGIN/base facts this file's own baseFacts() uses), so any
+// future edit that accidentally changes what is actually served (not just
+// the template machinery) goes red here first. ----------
+
+const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
+  "false,false": "5b375d01365114ee9667f8f88ec1804e3cc50f958a424c6ff155087a22614b49",
+  "false,true": "2ec5dbd69ad8fca58f8fb43419de6a099f98c066e4ae6843b2bacb8118ffe2dc",
+  "true,false": "c0ec51d11a146d075d2e02128af5c46d22170b9fd11e7017b723528b8d7cc2e0",
+  "true,true": "c08d292f068a5a67001156d7721f19318c79b4b58c3ae19a394bc7693cf1756a",
+};
+
+test("F2 golden served page: frontDoor's output is byte-identical to the pre-refactor HEAD output, for all four (nameRatified, firstLawsRatified) states", async () => {
+  for (const nameRatified of [false, true]) {
+    for (const firstLawsRatified of [false, true]) {
+      const text = frontDoor(ORIGIN, baseFacts({ nameRatified, firstLawsRatified }));
+      const hash = await sha256Hex(text);
+      const key = `${nameRatified},${firstLawsRatified}`;
+      assert.equal(
+        hash,
+        GOLDEN_FRONT_DOOR_SHA256[key],
+        `frontDoor(nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified}) moved from its pre-refactor golden -- the live page at index.ts:121 must not change as a side effect of the FRONT_DOOR_TEMPLATE refactor`,
+      );
+    }
+  }
 });
 
 test("frontDoor's THE COMPACT names the entrenched class alongside the other three, with its own threshold, quorum, floor, and window", () => {

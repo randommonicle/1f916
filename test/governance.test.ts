@@ -41,6 +41,7 @@ import {
 } from "../src/governance.ts";
 import { ALLOWED_QUEUE_KINDS } from "../src/maintainer/clerk.ts";
 import { SocietyError } from "../src/society.ts";
+import { frontDoor, NAME_STATUS_RATIFIED, NAME_STATUS_PROVISIONAL, FIRST_LAWS_BANNER } from "../src/doc.ts";
 
 const isBadRequest = (e: unknown) => e instanceof SocietyError && e.status === 400;
 const isForbidden = (e: unknown) => e instanceof SocietyError && e.status === 403;
@@ -809,26 +810,74 @@ test("canonicalizeTemplate: normalises CRLF to LF and nothing else", () => {
   assert.equal(canonicalizeTemplate("a\rb"), "a\rb", "a bare CR with no following LF is not a CRLF pair and must survive");
 });
 
-test("buildConstitutionTemplate: captures both branch texts of both conditionals (name-ratified sentence, FIRST LAWS PROPOSED banner), and is stable across calls", () => {
+// F2 (docs/BRIEF-FIRST-LAWS-REPAIR.md §4.3 item 2): replaces the old
+// two-diagonal-calls sampler test. That sampler asserted specific
+// substrings the two diagonal frontDoor() calls happened to cover -- true
+// only because the two conditionals (nameRatified, firstLawsRatified)
+// happen to be independent today. This test instead (a) asserts every
+// fragment constant is present VERBATIM (proving the superset construction
+// really does carry both name-status branches and the banner, not merely
+// text that happens to overlap with them), and (b) proves the general
+// property directly: for EVERY one of the four (nameRatified,
+// firstLawsRatified) states, every line frontDoor actually serves (at the
+// identical DEFAULT values and canonical origin buildConstitutionTemplate
+// itself uses) appears somewhere in buildConstitutionTemplate()'s own
+// text -- so a FUTURE third conditional doc.ts might grow cannot silently
+// serve a mixed-state clause neither of two fixed diagonal calls would
+// have exercised, the exact class of gap F2 closes.
+const CANONICAL_CONSTITUTION_ORIGIN_FOR_TEST = "https://commonhold.invalid"; // governance.ts's own private constant, mirrored here for the line-by-line comparison below
+
+test("buildConstitutionTemplate: carries both nameStatusSentence branches and the FIRST_LAWS_BANNER fragment verbatim, and is stable across calls", () => {
   const template = buildConstitutionTemplate();
-  // Both nameStatusSentence branches.
-  assert.ok(template.includes("The name was ratified by the founding citizens' first vote"));
-  assert.ok(template.includes("The name is provisional, held until the"));
-  // Both firstLawsBanner branches -- the banner text present, and (via
-  // the second, ratified-firstLaws rendering) the laws text starting
-  // immediately with no banner in between.
-  assert.ok(template.includes("PROPOSED: this section awaits ratification by the founding cohort"));
-  assert.ok(template.includes("Three laws, lexically ordered"));
+  assert.ok(template.includes(NAME_STATUS_RATIFIED), "the ratified name-status sentence must be present verbatim");
+  assert.ok(template.includes(NAME_STATUS_PROVISIONAL), "the provisional name-status sentence must be present verbatim");
+  assert.ok(template.includes(FIRST_LAWS_BANNER), "the FIRST LAWS PROPOSED banner must be present verbatim");
   // Never the real deployment's own worker URL -- a stable placeholder
   // only (not a check against "randommonicle": that substring also
   // appears legitimately in doc.ts's own static "ON THE SOURCE" GitHub
   // link, unrelated to the interpolated serving origin this test cares
   // about).
   assert.doesNotMatch(template, /workers\.dev/);
-  assert.ok(template.includes("https://commonhold.invalid"));
+  assert.ok(template.includes(CANONICAL_CONSTITUTION_ORIGIN_FOR_TEST));
   // Pure and deterministic: reads only module constants, never a clock
   // or randomness, so calling it twice must be byte-identical.
   assert.equal(buildConstitutionTemplate(), template);
+});
+
+test("F2 superset coverage: for all four (nameRatified, firstLawsRatified) states, every line frontDoor actually serves appears somewhere in buildConstitutionTemplate()", () => {
+  const template = buildConstitutionTemplate();
+  const defaultFacts = {
+    name: DEFAULT_NAME,
+    controlFloorPercent: DEFAULT_CONTROL_FLOOR_PERCENT,
+    dividendPercent: 2, // society.ts's DEFAULT_DIVIDEND_PERCENT -- not re-exported by governance.ts, mirrored as a literal (test/doc.test.ts's own baseFacts does the same)
+    split: { prize: 4, bounty: 3 }, // society.ts's DEFAULT_SPLIT
+  };
+  // The nameStatusSentence fragment is spliced MID-SENTENCE ("citizens are
+  // AI agents. {{NAME_STATUS_SENTENCE}} There is"), so the two rendered
+  // lines it touches mix static text with the fragment's own two lines --
+  // those two lines legitimately do not appear verbatim in
+  // buildConstitutionTemplate() (whose own superset carries BOTH
+  // sentences back-to-back with a separator, not spliced into the
+  // surrounding sentence). Excluded here by content, not by line number,
+  // since coverage of the fragment ITSELF is already asserted verbatim by
+  // the test immediately above -- this test's job is the surrounding
+  // static prose, which the FIRST_LAWS_BANNER fragment does not have this
+  // problem (it is a prefix ending in its own blank line, so "Three laws,
+  // lexically ordered:" always starts a clean line either way).
+  const conditionalLineFragments = [...NAME_STATUS_RATIFIED.split("\n"), ...NAME_STATUS_PROVISIONAL.split("\n")];
+  for (const nameRatified of [false, true]) {
+    for (const firstLawsRatified of [false, true]) {
+      const served = frontDoor(CANONICAL_CONSTITUTION_ORIGIN_FOR_TEST, { ...defaultFacts, nameRatified, firstLawsRatified });
+      for (const line of served.split("\n")) {
+        if (line.trim().length === 0) continue; // blank lines are trivially present everywhere; not a meaningful assertion
+        if (conditionalLineFragments.some((frag) => line.includes(frag))) continue;
+        assert.ok(
+          template.includes(line),
+          `frontDoor(nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified}) served a line buildConstitutionTemplate() does not carry: ${JSON.stringify(line)}`,
+        );
+      }
+    }
+  }
 });
 
 test("buildConstitutionTemplate: uses the deployed DEFAULT values, never a live governance_settings value (which is independently attested through its own chained proposal_decided event already)", () => {

@@ -25,12 +25,15 @@ import {
   SETTING_KEY,
 } from "./society.ts";
 // doc.ts stays a pure, parameter-driven leaf module (no imports of its
-// own) -- frontDoor is called here as a black box, never refactored to
-// share internals, so I-007's hashing machinery carries zero regression
-// risk to the door's own already-tested rendering (see
-// buildConstitutionTemplate below for why calling it twice with the
-// deployed defaults, rather than templating its source, is enough).
-import { frontDoor } from "./doc.ts";
+// own). F2 (docs/BRIEF-FIRST-LAWS-REPAIR.md §4, commission notes flag 6):
+// buildConstitutionTemplate below no longer calls frontDoor twice and
+// concatenates two diagonal renderings (a sampler that silently assumed
+// its two conditionals were independent) -- it calls the SAME
+// renderFrontDoor primitive frontDoor itself calls, with BOTH
+// name-status fragments and the banner fragment present at once, so the
+// attested template is a strict superset of every clause frontDoor can
+// ever serve, not a sample of two states among an unbounded number.
+import { renderFrontDoor, NAME_STATUS_RATIFIED, NAME_STATUS_PROVISIONAL, FIRST_LAWS_BANNER } from "./doc.ts";
 
 // Defined in society.ts, not here: officialFacts() (society.ts) needs
 // them too, and society.ts is the base module every feature file already
@@ -1482,34 +1485,33 @@ export async function runGovernanceSweep(env: Env, now = Date.now(), constitutio
 // wording, so it must never move the template hash.
 const CANONICAL_CONSTITUTION_ORIGIN = "https://commonhold.invalid";
 
-// The constitution template (design doc §5, commission notes flag 6):
-// built by calling frontDoor() itself -- never a parallel copy of its
-// text -- twice, holding every governance_settings-backed value at its
-// deployed DEFAULT (society.ts's DEFAULT_NAME/DEFAULT_CONTROL_FLOOR_PERCENT/
-// DEFAULT_DIVIDEND_PERCENT/DEFAULT_SPLIT: each already independently
-// attested through its own chained proposal_decided event the moment a
-// vote executes it, so re-attesting the CURRENT live value here would be
-// redundant with that existing mechanism, not a gap this section needs to
-// close) and varying only the two boolean branches doc.ts's own template
-// carries: nameRatified and firstLawsRatified. Two calls, not four,
-// because the two conditionals are independent and the surrounding
-// static text is identical either way -- (true, true) captures the
-// ratified name sentence and the absent banner; (false, false) captures
-// the unratified sentence and the full banner -- so both possible texts
-// of BOTH conditionals are represented across the two calls without a
-// redundant cartesian product. frontDoor() itself is never modified to
-// serve this: calling it as a black box, with fixed inputs, adds zero
-// regression risk to its own already-tested rendering.
+// The constitution template (design doc §5, commission notes flag 6, F2
+// docs/BRIEF-FIRST-LAWS-REPAIR.md §4): built by calling doc.ts's
+// renderFrontDoor() -- the SAME render primitive frontDoor() itself calls
+// -- never a parallel copy of its text, holding every
+// governance_settings-backed value at its deployed DEFAULT (society.ts's
+// DEFAULT_NAME/DEFAULT_CONTROL_FLOOR_PERCENT/DEFAULT_DIVIDEND_PERCENT/
+// DEFAULT_SPLIT: each already independently attested through its own
+// chained proposal_decided event the moment a vote executes it, so
+// re-attesting the CURRENT live value here would be redundant with that
+// existing mechanism, not a gap this section needs to close).
+//
+// F2's fix, replacing the old two-diagonal-calls sampler: rather than
+// selecting ONE fragment per conditional (frontDoor's own job), this
+// passes BOTH name-status fragments (concatenated, with a plain-text
+// separator so neither text can be mistaken for running into the other)
+// and the FIRST_LAWS_BANNER fragment (present, not absent -- the
+// ratified branch is "", which carries no distinguishing text of its own
+// to attest) into the one render call. The old sampler's two diagonal
+// calls covered every clause ONLY because its two conditionals happened
+// to be independent -- an assumption a future third conditional in a
+// mixed state could silently violate, serving a clause neither diagonal
+// exercises. This construction has no such assumption: every fragment
+// this file knows about is present in the one string that gets hashed,
+// regardless of how many conditionals doc.ts ever gains.
 export function buildConstitutionTemplate(): string {
-  const base = {
-    name: DEFAULT_NAME,
-    controlFloorPercent: DEFAULT_CONTROL_FLOOR_PERCENT,
-    dividendPercent: DEFAULT_DIVIDEND_PERCENT,
-    split: DEFAULT_SPLIT,
-  };
-  const bothRatified = frontDoor(CANONICAL_CONSTITUTION_ORIGIN, { ...base, nameRatified: true, firstLawsRatified: true });
-  const neitherRatified = frontDoor(CANONICAL_CONSTITUTION_ORIGIN, { ...base, nameRatified: false, firstLawsRatified: false });
-  return `${bothRatified}\n\n----BOTH-BRANCHES----\n\n${neitherRatified}`;
+  const nameStatusSuperset = `${NAME_STATUS_RATIFIED}\n\n----NAME-STATUS-ALT----\n\n${NAME_STATUS_PROVISIONAL}`;
+  return renderFrontDoor(DEFAULT_NAME, CANONICAL_CONSTITUTION_ORIGIN, DEFAULT_CONTROL_FLOOR_PERCENT, DEFAULT_DIVIDEND_PERCENT, DEFAULT_SPLIT, nameStatusSuperset, FIRST_LAWS_BANNER);
 }
 
 // Normalise line endings, no other transformation (design doc §5,
