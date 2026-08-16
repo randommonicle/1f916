@@ -404,6 +404,15 @@ export const JUDGMENT_MAX_BATCHES = 4;
 // common one.
 export const JUDGMENT_MAX_SCAN = 1000;
 
+// §10 (D-038 / D-036(b)): the armed trigger for the deferred durable cyclic
+// cursor -- 250 pending rows at wake start, or 250 withheld in one run. When
+// pendingAtStart reaches this, runJudgmentWake persists an observable
+// `cursor trigger reached: pending_at_start=N` clause (below) so the public
+// /api/maintainer-runs surface names the condition the cursor work will
+// answer. The cursor itself is NOT built in this wave (needs a migration) --
+// see the FORWARD(D-036) marker beside the clause.
+export const CURSOR_TRIGGER_PENDING = 250;
+
 // F8/F9 (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.5): the hard transport guard
 // on the REAL request body, measured in true UTF-8 bytes
 // (measureRequestBytes below) -- never a character count, never a fixed
@@ -1618,6 +1627,33 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     });
     return;
   }
+
+  // §10 (D-038): the deferred-cursor trigger, made OBSERVABLE. D-036(b)
+  // deferred the durable cyclic cursor behind an armed trigger -- 250 pending
+  // rows, or 250 withheld in one run -- "detectable from the public
+  // /api/maintainer-runs". Codex proved the premise false as built:
+  // pendingAtStart was computed and never persisted, and the served fields
+  // (overflow_dropped, items_actioned) cannot reconstruct it, so a run
+  // starting at exactly 250 could publish an overflow below 250. This appends
+  // the clause to the run's `error` via the existing appendError idiom, so it
+  // PERSISTS in the maintainer_runs record and serves publicly through
+  // maintainerRunsPage -- no migration, no schema change. It rides the D-035
+  // ruling that `error` carries designed outcomes as well as faults; the
+  // served note (runs.ts) is widened to name this third kind. The
+  // withheld-cohort half of the trigger (250 withheld in one run) is already
+  // served by the existing `withheld N` clause below and needs no new code.
+  if (pendingAtStart >= CURSOR_TRIGGER_PENDING) {
+    runError = appendError(runError, `cursor trigger reached: pending_at_start=${pendingAtStart}`);
+  }
+  // FORWARD(D-036): the durable cyclic cursor ITSELF is deferred behind this
+  // now-observable trigger. It needs a migration (a persisted cursor column),
+  // and this wave is code-only, so it is NOT built here. When it lands it
+  // replaces the per-wake cursor reset (the scan always restarts from the
+  // oldest pending row each wake) with a cursor that resumes where the last
+  // wake stopped, so a persistently oversized withheld/pending head can no
+  // longer starve the rows behind it across wakes. The observer already
+  // exists: the cloud watchman routine reads /api/maintainer-runs daily
+  // (~06:38 UTC, trig_01N1yvdo1miNdGnJ3WcXvJVA).
 
   let tokensIn = 0;
   let tokensOut = 0;

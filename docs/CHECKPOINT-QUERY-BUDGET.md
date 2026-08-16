@@ -345,4 +345,35 @@ test:
 
 Restored → green. Full suite 590/590, typecheck clean, all files NUL-clean.
 The invocation-level compound counter proof (real scheduled() + real sweep,
-total <= 50) is the next-plus-one commit (THE PROOF). Commit `<pending>`.
+total <= 50) is the next-plus-one commit (THE PROOF). Commit `510cc11`.
+
+---
+
+## Commit 8 — §10 (D-038): the deferred-cursor trigger, made observable
+
+**What it did.**
+- `judgment.ts`: `CURSOR_TRIGGER_PENDING = 250`; when `pendingAtStart >= 250`
+  the wake appends `cursor trigger reached: pending_at_start=N` (real N) to the
+  run's `error` via the existing `appendError` idiom, so it PERSISTS in
+  `maintainer_runs` and serves publicly. No migration. Codex's finding: the old
+  code computed `pendingAtStart` and never persisted it, and the served fields
+  could not reconstruct it, so a run starting at exactly 250 could publish an
+  overflow below 250 -- the trigger's premise ("detectable from
+  /api/maintainer-runs") was false as built. Now it is true.
+- `FORWARD(D-036)` marker planted beside the clause: the durable cyclic cursor
+  ITSELF is deferred (needs a migration; this wave is code-only). Greppable.
+- `runs.ts`: the served note widened from "two different things" to "three" --
+  naming the designed OBSERVATION (cursor-trigger) as a third kind of `error`
+  content, alongside the fault and the fail-closed outcome, plus the new
+  'batches shed for subrequest budget' line under the fail-closed kind. The
+  public surface keeps describing its own contents honestly.
+- The withheld-cohort half of the trigger (250 withheld in one run) needed NO
+  new code -- the existing `withheld N` clause already serves it.
+
+**Proof (with its built-in red-proof).** End-to-end through `runJudgmentWake`
+then `maintainerRunsPage` (the exact public read surface §10 names): 250
+pending rows -> the clause with exact N comes back out of the served page, and
+the served note names the third kind. Its pair asserts 249 rows do NOT arm the
+trigger -- the boundary is exact, proving the clause CAN be absent (the
+can-it-fail). Full suite 592/592, typecheck clean, all files NUL-clean.
+Commit `<pending>`.

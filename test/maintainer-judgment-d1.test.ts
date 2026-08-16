@@ -36,6 +36,8 @@ import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { installSubrequestCounter } from "./helpers/subrequest-counter.ts";
 import { estimateSweepCost } from "../src/maintainer/budget.ts";
+import { maintainerRunsPage } from "../src/maintainer/runs.ts";
+import { CURSOR_TRIGGER_PENDING } from "../src/maintainer/judgment.ts";
 import {
   runJudgmentWake,
   executeJudgmentDecisions,
@@ -1913,6 +1915,66 @@ test("§9 shed: a busy co-resident sweep (priorCost = 2-due sweep) sheds later b
     const run = latestRun(d1);
     assert.match(run.error ?? "", /judgment batches shed for subrequest budget after 2 batches/, "the shed is loud, one clause, naming how many batches ran");
     assert.equal(run.overflow_dropped, 2, "the deferred pending rows are counted by computeOverflowDropped, exactly like a JUDGMENT_MAX_BATCHES overflow");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- §10 (D-038): the deferred-cursor trigger, made observable. When
+// pendingAtStart reaches CURSOR_TRIGGER_PENDING the wake persists an
+// observable clause that MUST survive out through maintainerRunsPage (the
+// public /api/maintainer-runs surface the cloud watchman reads). ----------
+
+test("§10 D-038: pendingAtStart >= 250 persists a 'cursor trigger reached: pending_at_start=N' clause that comes back OUT of maintainerRunsPage, exact N", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    // Exactly CURSOR_TRIGGER_PENDING pending rows -- the armed boundary.
+    for (let i = 0; i < CURSOR_TRIGGER_PENDING; i++) {
+      insertQueueRow(d1, runId, { kind: "bookkeeping_note", note: `pending ${i}`, status: "pending", decided_at: null, decided_reason: null, created_at: now - (CURSOR_TRIGGER_PENDING - i) * 100 });
+    }
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+
+    await runJudgmentWake(env, cache);
+
+    // The exact assertion §10 demands: the clause comes back out of the PUBLIC
+    // read surface, not merely off the row directly.
+    const page = await maintainerRunsPage(env);
+    const judgmentRun = page.runs.find((r) => (r as { kind: string }).kind === "judgment") as { error: string | null } | undefined;
+    assert.ok(judgmentRun, "the judgment run is served");
+    assert.match(judgmentRun!.error ?? "", new RegExp(`cursor trigger reached: pending_at_start=${CURSOR_TRIGGER_PENDING}`), "the exact clause, with the real N, serves publicly");
+    // And the served note now names this third kind of `error` content.
+    assert.match(page.note, /cursor trigger reached/, "the public note describes its own contents honestly (D-038 third kind)");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("§10 D-038 red-proof: 249 pending rows do NOT arm the trigger -- the boundary is exact, never a false alarm", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    for (let i = 0; i < CURSOR_TRIGGER_PENDING - 1; i++) {
+      insertQueueRow(d1, runId, { kind: "bookkeeping_note", note: `pending ${i}`, status: "pending", decided_at: null, decided_reason: null, created_at: now - (CURSOR_TRIGGER_PENDING - i) * 100 });
+    }
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+
+    await runJudgmentWake(env, cache);
+
+    const page = await maintainerRunsPage(env);
+    const judgmentRun = page.runs.find((r) => (r as { kind: string }).kind === "judgment") as { error: string | null } | undefined;
+    assert.ok(judgmentRun, "the judgment run is served");
+    assert.doesNotMatch(judgmentRun!.error ?? "", /cursor trigger reached/, "one row below the threshold must NOT arm the trigger");
   } finally {
     stub.restore();
     d1.close();
