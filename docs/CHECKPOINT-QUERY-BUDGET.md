@@ -376,4 +376,62 @@ pending rows -> the clause with exact N comes back out of the served page, and
 the served note names the third kind. Its pair asserts 249 rows do NOT arm the
 trigger -- the boundary is exact, proving the clause CAN be absent (the
 can-it-fail). Full suite 592/592, typecheck clean, all files NUL-clean.
-Commit `<pending>`.
+Commit `da4f4e0`.
+
+---
+
+## Commit 9 — THE PROOF: the invocation-level subrequest matrix
+
+**What it did.** `test/maintainer-scheduled-budget.test.ts`: wraps the ENTIRE
+real `scheduled()` invocation (the Worker default export) behind ONE shared
+counter over BOTH the D1 boundary (createLocalD1 onExec) AND globalThis.fetch,
+so every Anthropic model call and every Base RPC probe counts as a subrequest.
+The sweep runs first, then the wake, in one invocation sharing the 50 budget --
+so these prove the COMPOUND cases (D-041). The verdict for every path is
+`total() <= 50 && !breached()`. A `before()` hook pre-warms the shared
+constitution cache once so detection is a deterministic 0-cost hit.
+
+**THE SCENARIO MATRIX (measured from the proof, not estimated; uncontended
+chain appends -- each collision retry adds ~2; conservative per-statement batch
+counting, NOT platform-confirmed):**
+
+| path | D1 | fetches | total | headroom |
+|---|---|---|---|---|
+| J1 judgment quiet (0-due sweep, 0 replay, 1 bulletin) | 15 | 1 | 16 | 34 |
+| J2 judgment FOUR FULL BATCHES at C=1 (4 bulletins, 6/decision) | 36 | 4 | 40 | 10 |
+| J3 judgment withhold (missing-version fidelity + bulletin) | 16 | 1 | 17 | 33 |
+| J4 judgment execution-failure (flag on vanished post) | 13 | 1 | 14 | 36 |
+| **J5 COMPOUND (2-due sweep + 3 replay + 4 pending) -> shed** | 42 | 0 | **42** | 8 |
+| J6 60-row missing-version fidelity head | ~5 | 0 | <20 | >30 |
+| judgment, sweep cohort 0 / 1 / 2 (+1 bulletin) | 15/23/31 | 1 | 16/24/32 | 34/26/18 |
+| **C1 clerk full: 50 flags + 4-RPC drift + 1-due sweep + K inserts** | 39 | 5 | **44** | 6 |
+| shape 4 permissionless sweep, 0 / 1 / 2 due | 2/10/18 | 0 | 2/10/18 | 48/40/32 |
+
+Worst judgment = J5 compound at 42 (shed: fetch 0, all four batches shed, loud
+clause present). Worst clerk = C1 at 44 (the dynamic cap held inserts to 18 of
+the 20 the model proposed). Every path lands with real headroom, none at 50.
+
+**Shapes 3 & 4 costed (report):** shape 3 (GET / -> detectConstitutionChange at
+steady state) is 0-1 D1 (cache hit / one lookup), matching the free-limits
+audit's 2-13 flat read surface; no repair expected. Shape 4 (POST
+/api/governance/sweep) measured at 2 / 10 / 18 for 0 / 1 / 2 due -- the §8
+cohort cap bounds it, and `cohort_capped` tells a backlog-draining caller to
+call again.
+
+**The two load-bearing e2e RED-PROOFS (pasted).**
+1. Fetches ARE counted (a proof that fails only on "query 51" misses this).
+   Injected an extra `callAnthropic` per batch; re-ran J2:
+   ```
+   ✖ PROOF J2 ... exactly four model calls (JUDGMENT_MAX_BATCHES), each counted
+       actual: 8, expected: 4,
+   ```
+2. Set-based classification, at the INVOCATION level (the founding error one
+   level out). Set `D1_MAX_BIND_PARAMS = 1` (per-row) and re-ran J6 through the
+   real scheduled():
+   ```
+   ✖ PROOF J6 ... 60-row fidelity head never exceeded budget (total 52, d1 52, fetch 0)
+   ```
+   `breached` latched at subrequest 51 inside the real invocation. Restored ->
+   green; judgment.ts confirmed identical to HEAD (no diff).
+
+Full suite 601/601, typecheck clean, proof file NUL-clean. Commit `<pending>`.
