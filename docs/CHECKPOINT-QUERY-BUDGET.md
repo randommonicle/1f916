@@ -234,7 +234,7 @@ between this commit and the PROOF commit, §7(a)'s correctness rests on the
 unchanged shaping function plus structural review of the map lookup (postMap
 keyed by post id, commentMap by comment id, resolved by the flag's own
 target_type -- no cross-table id collision). Full suite 581/581, typecheck
-clean, clerk.ts NUL-clean. Commit `<pending>`.
+clean, clerk.ts NUL-clean. (Commit hash below.)
 
 **§7(b) — CLERK_QUEUE_CAP** is set in the §9 budget commit, where the clerk's
 own end-to-end arithmetic (including the co-resident sweep) determines the
@@ -485,4 +485,33 @@ a real newline, never backslash-u (L-009).
 
 That is the exact production failure (run 11) reproduced at both parsers.
 Restored -> green. Full suite 612/612, typecheck clean; all six touched files
-NUL-clean, no backslash-u notation anywhere. Commit `<pending>`.
+NUL-clean, no backslash-u notation anywhere. Commit `cf5c2aa`.
+
+---
+
+# WAVE CLOSE
+
+**Commits (local only on `main`, be307e5..cf5c2aa, ahead 10 of `origin/main`):**
+`be307e5` counting seam · `08bec68` §3 reconciliation · `231fcc8` §1/§2
+set-based scanner · `2d539cb` §4 cap=1 + §6 replay LIMIT · `299f7e3` §7(a)
+clerk flag hydration · `445dfbc` §8 sweep cohort · `510cc11` §9 shed ·
+`da4f4e0` §10 D-038 · `12b2dc1` THE PROOF · `cf5c2aa` commission extension
+(fence-strip, distinct unit).
+
+**Final state at HEAD `cf5c2aa`:** `npm test` 612/612 pass, `npm run typecheck`
+clean. `git diff dfc3988..HEAD --stat -- migrations/ schema.sql` EMPTY (code-only,
+no schema touched). Build proxy: `git archive HEAD` -> clean dir -> `npm ci` ->
+`tsc` clean and 612/612 reproduced from tracked manifests alone. CAVEAT: `tsc` is
+a WEAKER proxy than the real production bundle -- the production build is
+`npx wrangler deploy`, which custody forbids in any form, so the wrangler bundle
+was NOT built.
+
+**Values chosen (for the gate to scrutinise):** `JUDGMENT_QUEUE_CAP=1` (ruled,
+D-037); `JUDGMENT_REPLAY_CAP=3`, `SWEEP_COHORT_CAP=2`, `CLERK_QUEUE_CAP=50`
+(ceiling; dynamic affordable cap flexes 9..27) -- all builder-chosen, all
+validated by the measured matrix under 50 with headroom. The cost-table
+estimates (budget.ts) are conservative; the invocation counter proof is their
+enforcement.
+
+**Not deployed, not pushed.** This is builder evidence for one D-018 Opus
+re-gate over this wave plus the already-landed First Laws waves.
