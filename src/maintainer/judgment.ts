@@ -13,6 +13,7 @@
 import { type Env, MAINTAINER_ID, CONSTITUTION, moderateContent, createPost } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, buildRequestBody } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
+import { canOpenJudgmentBatch } from "./budget.ts";
 import { truncateBody } from "./clerk.ts";
 // Type ownership split (commission notes flag 3, docs/BRIEF-FIRST-LAWS.md
 // commit 4's "CLERK CAGE UNCHANGED" section): QueueRow.kind reads rows
@@ -1303,12 +1304,16 @@ async function bulletinArtifactExists(env: Env, title: string, body: string, dec
 export async function reconcileApprovedQueue(
   env: Env,
   maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
-): Promise<{ actioned: number; error: string | null }> {
+): Promise<{ actioned: number; error: string | null; rowsProcessed: number }> {
+  // rowsProcessed: how many stranded rows this replay actually walked (bounded
+  // by JUDGMENT_REPLAY_CAP). The judgment batch loop prices this at
+  // REPLAY_PER_ROW_COST when deciding whether it can afford another batch (§9),
+  // so the shed accounts for what the replay already spent.
   let rows: ReconcileRow[];
   try {
     rows = await fetchReconcilableApprovedRows(env);
   } catch (e) {
-    return { actioned: 0, error: `wake-start reconciliation failed while reading approved queue rows: ${e instanceof Error ? e.message : String(e)}` };
+    return { actioned: 0, error: `wake-start reconciliation failed while reading approved queue rows: ${e instanceof Error ? e.message : String(e)}`, rowsProcessed: 0 };
   }
 
   let actioned = 0;
@@ -1460,7 +1465,7 @@ export async function reconcileApprovedQueue(
     }
   }
 
-  return { actioned, error: errors.length > 0 ? errors.join("; ") : null };
+  return { actioned, error: errors.length > 0 ? errors.join("; ") : null, rowsProcessed: rows.length };
 }
 
 // ---------- the wake itself ----------
@@ -1490,7 +1495,12 @@ export async function reconcileApprovedQueue(
 // otherwise see the SECOND test's detection short-circuit to the FIRST
 // test's already-cached answer -- correct behaviour for one real
 // deployment's one real database, a test-isolation hazard for two.
-export async function runJudgmentWake(env: Env, constitutionCache?: ConstitutionCache): Promise<void> {
+// §9 (D-041): `priorCost` is the estimated subrequests the governance sweep
+// already spent this invocation (scheduled() passes estimateSweepCost(...);
+// see index.ts). It defaults to 0 so a direct test call, or any caller with
+// no co-resident sweep, gets the full budget for its own batches. The batch
+// loop uses it to shed batches it cannot pay for, LOUDLY, before opening them.
+export async function runJudgmentWake(env: Env, constitutionCache?: ConstitutionCache, priorCost = 0): Promise<void> {
   const startedAt = Date.now();
 
   // Reserved FIRST, unconditionally -- I-007's wake-side fidelity
@@ -1614,6 +1624,11 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   let costEstimateCents = 0;
   let batchItemsActioned = 0;
   let batchesRun = 0;
+  // §9 (D-041): set true when the budget-aware loop refuses to open a batch it
+  // cannot pay for. The pending rows it did not reach stay pending and are
+  // counted by computeOverflowDropped below (exactly like a JUDGMENT_MAX_BATCHES
+  // overflow); this flag drives the one loud appendError clause naming the shed.
+  let batchesShed = false;
   // F7/F8/F9: the raw-scan cursor persists ACROSS batch calls within this
   // one wake (never across wakes -- no schema to store it in, so a fresh
   // wake always starts scanning from the oldest pending row again; see
@@ -1626,6 +1641,18 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   let scanLimitHitOverall = false;
 
   while (true) {
+    // §9 (D-041): shed BEFORE starting a batch we cannot pay for. Opening a
+    // batch costs a scan page + a model fetch + up to 6 decision writes; if the
+    // sweep this invocation ran (priorCost), the wake's fixed reads, the replay
+    // rows already processed, and the batches already opened leave no room for
+    // another batch AND the finalise reserve, stop here. If the cost table
+    // drifts below reality, the end-to-end counter proof
+    // (test/maintainer-scheduled-budget.test.ts) goes red at 51 -- that is the
+    // enforcement.
+    if (!canOpenJudgmentBatch(priorCost, reconciliation.rowsProcessed, batchesRun)) {
+      batchesShed = true;
+      break;
+    }
     let scanOutcome: Awaited<ReturnType<typeof scanPendingQueueBatch>>;
     try {
       scanOutcome = await scanPendingQueueBatch(env, cursor, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
@@ -1687,6 +1714,12 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   }
   if (scanLimitHitOverall) {
     runError = appendError(runError, `judgment scan limit reached (${JUDGMENT_MAX_SCAN} raw rows scanned in a batch) -- some pending rows may remain unscanned this wake`);
+  }
+  if (batchesShed) {
+    // §9 (D-041): loud, one clause, following the scan-limit idiom above. The
+    // deferred pending rows are counted by computeOverflowDropped below and
+    // wait for the next wake, exactly as a JUDGMENT_MAX_BATCHES overflow does.
+    runError = appendError(runError, `judgment batches shed for subrequest budget after ${batchesRun} batch${batchesRun === 1 ? "" : "es"} -- a busy co-resident sweep/replay left no budget for more decisions this wake; the remaining pending rows are deferred (overflow_dropped) to the next wake`);
   }
 
   // F7: withheld items are deliberately excluded and separately, loudly

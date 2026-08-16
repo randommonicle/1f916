@@ -35,6 +35,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { installSubrequestCounter } from "./helpers/subrequest-counter.ts";
+import { estimateSweepCost } from "../src/maintainer/budget.ts";
 import {
   runJudgmentWake,
   executeJudgmentDecisions,
@@ -1849,6 +1850,69 @@ test("M-1 red-proof (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.3 item 3): a linked man
       new RegExp(`id=${queueId} \\(a linked mandate proposal for constitution_versions row \\d+ is missing from proposals\\)`),
       "the run row's withheld report must name the real reason (the hydrator's own fail-closed message), not a generic failure",
     );
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- §9 (D-041): the budget-aware batch loop sheds batches it cannot
+// pay for, LOUDLY, before opening them. Driven at the wake level with an
+// explicit priorCost (the co-resident sweep's estimated cost); the full
+// scheduled() compound proof lives in test/maintainer-scheduled-budget.test.ts.
+// ----------
+
+test("§9 control: a quiet invocation (priorCost = zero-due sweep) opens all four batches -- four bulletins decided, no shed clause", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    for (let i = 0; i < 4; i++) {
+      insertQueueRow(d1, runId, { kind: "bulletin_draft", note: `Quiet digest ${i}\nBody number ${i}, all calm.`, status: "pending", decided_at: null, decided_reason: null, created_at: now - (4 - i) * 1_000 });
+    }
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+
+    await runJudgmentWake(env, cache, estimateSweepCost(0)); // priorCost = 3
+
+    assert.equal(countPosts(d1), 4, "all four bulletins decided across four batches -- the JUDGMENT_MAX_BATCHES ceiling, affordable when nothing else ran");
+    assert.equal(stub.callCount(), 4, "four real model calls, one per batch");
+    const run = latestRun(d1);
+    assert.doesNotMatch(run.error ?? "", /batches shed for subrequest budget/, "no shed on a quiet invocation");
+    assert.equal(run.overflow_dropped, 0, "nothing deferred");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("§9 shed: a busy co-resident sweep (priorCost = 2-due sweep) sheds later batches -- fewer decisions, the rest deferred and counted, with the loud clause", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    // Same four pending bulletins as the control; only priorCost differs.
+    for (let i = 0; i < 4; i++) {
+      insertQueueRow(d1, runId, { kind: "bulletin_draft", note: `Busy digest ${i}\nBody number ${i}, all calm.`, status: "pending", decided_at: null, decided_reason: null, created_at: now - (4 - i) * 1_000 });
+    }
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+
+    // priorCost = estimateSweepCost(2) = 21. canOpenJudgmentBatch: batch 1 (37)
+    // and batch 2 (45) fit; batch 3 (53) does not -> shed after 2 batches.
+    await runJudgmentWake(env, cache, estimateSweepCost(2));
+
+    assert.equal(countPosts(d1), 2, "only two bulletins decided before the loop shed the rest for budget");
+    assert.equal(stub.callCount(), 2, "exactly two real model calls -- the shed happens BEFORE opening batch 3, so no wasted model call");
+    const pending = d1.raw.prepare("SELECT COUNT(*) AS n FROM maintainer_queue WHERE status = 'pending'").get() as { n: number };
+    assert.equal(pending.n, 2, "the two undecided bulletins stay pending -- deferred, never lost");
+    const run = latestRun(d1);
+    assert.match(run.error ?? "", /judgment batches shed for subrequest budget after 2 batches/, "the shed is loud, one clause, naming how many batches ran");
+    assert.equal(run.overflow_dropped, 2, "the deferred pending rows are counted by computeOverflowDropped, exactly like a JUDGMENT_MAX_BATCHES overflow");
   } finally {
     stub.restore();
     d1.close();

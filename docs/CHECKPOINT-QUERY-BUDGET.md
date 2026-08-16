@@ -284,4 +284,65 @@ deferred and still open, then a second sweep drains it. Removed the LIMIT:
 ```
 
 Restored → green. Full suite 582/582, typecheck clean, both files NUL-clean.
-Commit `<pending>`.
+Commit `445dfbc`.
+
+---
+
+## Commit 7 — §9 (D-041): the budget-aware shed, both wakes
+
+**What it did.** New `src/maintainer/budget.ts`: the shared, statically-derived
+subrequest cost table + three pure helpers (`estimateSweepCost`,
+`canOpenJudgmentBatch`, `affordableClerkInserts`). Wired:
+- `index.ts` `scheduled()` captures the sweep's `processed` count, computes
+  `priorCost = estimateSweepCost(processed)` (worst-case `estimateSweepCost(
+  SWEEP_COHORT_CAP)` if the sweep threw), and threads it into both wakes.
+- `runJudgmentWake(env, cache?, priorCost=0)`: the batch loop calls
+  `canOpenJudgmentBatch(priorCost, replayRowsProcessed, batchesRun)` BEFORE
+  opening each batch; if it can't pay, sets `batchesShed` and breaks. The
+  deferred pending rows are counted by the existing `computeOverflowDropped`
+  and one loud `appendError` clause names the shed (scan-limit idiom).
+  `reconcileApprovedQueue` now returns `rowsProcessed` (the replay cost input).
+- `runClerkWake(env, cache?, priorCost=0)`: passes
+  `affordableClerkInserts(priorCost, CLERK_QUEUE_CAP)` to `parseClerkItems`, so
+  the accepted drafts are capped at what the budget affords and the surplus
+  surfaces as `overflow_dropped` with no new code path.
+
+**Design decisions.**
+- Why dynamic, not static: the judgment CANNOT statically fit 4 batches + any
+  co-resident sweep (even a 1-due sweep + 4 full batches = 51), and D-041
+  declined lowering JUDGMENT_MAX_BATCHES. So the judgment MUST shed. Kept
+  `SWEEP_COHORT_CAP=2` and `CLERK_QUEUE_CAP=50` unchanged (no test churn) and
+  made the CLERK dynamic too ("apply the same reasoning") rather than crushing
+  its static cap to ~5-9; the clerk's affordable cap flexes 9 (busy sweep) to
+  ~27 (quiet), always <= 50. `priorCost` defaults to 0 so every existing
+  direct wake-test keeps the full budget and stays green.
+- Estimates are conservative (>= real) so the shed fires early; the invocation
+  counter proof is the enforcement (a drift below reality reddens the compound
+  proof at 51). `JUDGMENT_BATCH_COST` carries the FORWARD(D-037) marker;
+  the sweep base/per-proposal, replay-per-row, and clerk-fixed each sit beside
+  the phase they price.
+- **Throughput note for the gate:** the whole system is judge-bound (D-037:
+  at most 4 decisions/week). The clerk's affordable cap (9-27/day) and the
+  sweep cohort (2/invocation across 8 weekly crons + the permissionless
+  endpoint) both vastly exceed 4/week, so their exact values are not the
+  binding constraint on queue growth -- the judge cap is (ruled, D-037).
+
+**Proof.** `test/maintainer-budget.test.ts` (6 tests) pins the arithmetic at
+its exact boundaries: the compound worst case (2-due + 3 replay) sheds the
+FIRST batch; a 1-due sweep opens 3 then sheds the 4th; the clerk affordable
+cap shrinks with the sweep, never negative, never above the ceiling. Two
+wake-level integration tests (D1 file): a quiet invocation (priorCost=3) opens
+all 4 batches; a busy one (priorCost=21) opens 2 then sheds, decides 2, defers
+2 (overflow_dropped=2), and emits the loud clause -- with the shed happening
+BEFORE opening batch 3, so no wasted model call.
+
+**Red-proof (pasted).** Disabled the shed (`if (false)`), re-ran the §9 shed
+test:
+
+```
+✖ §9 shed ... actual: 4, expected: 2,
+```
+
+Restored → green. Full suite 590/590, typecheck clean, all files NUL-clean.
+The invocation-level compound counter proof (real scheduled() + real sweep,
+total <= 50) is the next-plus-one commit (THE PROOF). Commit `<pending>`.

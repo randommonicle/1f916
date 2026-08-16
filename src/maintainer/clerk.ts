@@ -15,6 +15,7 @@
 import { type Env, readOnchainUsdcCents } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
+import { affordableClerkInserts } from "./budget.ts";
 // I-007 (docs/FIRST-LAWS-DESIGN.md §5): the shared constitution-detection
 // machinery, not a moderation-executing or money-moving export -- outside
 // the cage this file's own header describes (it writes only
@@ -415,7 +416,15 @@ function appendError(existing: string | null, addition: string): string {
   return existing ? `${existing}; ${addition}` : addition;
 }
 
-export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCache): Promise<void> {
+// §9 (D-041): `priorCost` is the estimated subrequests the governance sweep
+// already spent this invocation (scheduled() passes estimateSweepCost(...)).
+// Defaults to 0 so a direct test call, or any caller with no co-resident
+// sweep, gets the full budget. The clerk's fixed cost is flat (no batch
+// multiplier), so it closes with a per-insert affordability cap rather than
+// shedding whole batches: it drafts as many queue items as the remaining
+// budget affords, up to CLERK_QUEUE_CAP, and the surplus the model proposed is
+// counted as overflow_dropped exactly as a volume overflow is.
+export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCache, priorCost = 0): Promise<void> {
   const startedAt = Date.now();
 
   // Reserved FIRST, unconditionally -- I-007's wake-side fidelity
@@ -510,7 +519,12 @@ export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCac
 
   let parsedItems: { accepted: QueueItemDraft[]; overflowDropped: number };
   try {
-    parsedItems = parseClerkItems(result.text);
+    // §9 (D-041): cap the accepted drafts at what the shared subrequest budget
+    // affords this invocation (after the co-resident sweep's priorCost), never
+    // more than CLERK_QUEUE_CAP. parseClerkItems already caps-and-counts the
+    // overflow, so a budget-tightened cap surfaces as overflow_dropped with no
+    // new code path -- the honest "did not draft, deferred" signal.
+    parsedItems = parseClerkItems(result.text, affordableClerkInserts(priorCost, CLERK_QUEUE_CAP));
   } catch (e) {
     // stop_reason is named explicitly here so a max_tokens truncation
     // that broke the JSON is diagnosable from this row alone, not just

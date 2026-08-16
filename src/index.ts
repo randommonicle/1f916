@@ -12,6 +12,7 @@ import {
   listProposals,
   getProposalDetail,
   runGovernanceSweep,
+  SWEEP_COHORT_CAP,
   detectConstitutionChange,
   getConstitutionAttestation,
   listConstitutionVersions,
@@ -19,6 +20,7 @@ import {
 import { classifyCron } from "./maintainer/schedule.ts";
 import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
+import { estimateSweepCost } from "./maintainer/budget.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { parseNumberParam } from "./queryParams.ts";
 import {
@@ -325,16 +327,23 @@ export default {
     // sweeping costs nothing extra and only helps. Isolated in its own
     // try/catch so a sweep failure can never prevent the wake below from
     // still attempting to run, and vice versa.
+    // §9 (D-041): the sweep shares this ONE invocation's 50-subrequest budget
+    // with the wake below. Its estimated cost -- from how many due proposals it
+    // processed -- is threaded into the wake as `priorCost` so the wake sheds
+    // work it cannot pay for. If the sweep threw before it could report a
+    // count, assume the worst-case cohort so the wake stays conservative.
+    let priorCost = estimateSweepCost(SWEEP_COHORT_CAP);
     try {
-      await runGovernanceSweep(env);
+      const sweep = await runGovernanceSweep(env);
+      priorCost = estimateSweepCost(sweep.processed);
     } catch (e) {
       console.log(JSON.stringify({ level: "error", event: "governance_sweep_failed", cron: controller.cron, message: String(e) }));
     }
 
     const wake = classifyCron(controller.cron);
     try {
-      if (wake === "clerk") await runClerkWake(env);
-      else if (wake === "judgment") await runJudgmentWake(env);
+      if (wake === "clerk") await runClerkWake(env, undefined, priorCost);
+      else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
       // else: an unrecognised cron string. wrangler.jsonc only ever
       // registers the two crons above, so this should not happen -- but a
       // dispatch table that quietly does nothing for anything else is
