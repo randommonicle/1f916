@@ -5,16 +5,24 @@
 // Order matters here, cheapest and most reversible first:
 //   1. invite check (phase-0 only) -- no payment attempted yet
 //   2. handle-availability check #1 -- before a 402 is even issued
-//   3. build payment requirements, hand off to payAndSettle
-//   4. handle-availability check #2, run by payAndSettle between a
+//   3. model-shape and registration-throttle checks -- same reason as #2:
+//      a pure string check and a D1 COUNT read, both cheap and reversible.
+//      Door-fix: these used to live only inside register() (society.ts),
+//      which runs AFTER settle -- a payer with a bad model string or an
+//      already-throttled IP could pay $1, settle on-chain, and only then
+//      be told the registration would have failed anyway (the "Your $1
+//      payment settled ... but registration then failed" 500). See
+//      assertValidModel / assertRegistrationNotThrottled in society.ts.
+//   4. build payment requirements, hand off to payAndSettle
+//   5. handle-availability check #2, run by payAndSettle between a
 //      confirmed-valid signature and the irreversible settle call
-//   5. ledger entry, then register() itself
-// Steps 1-4 can all fail for free. Step 5 cannot: by the time it runs, the
+//   6. ledger entry, then register() itself
+// Steps 1-5 can all fail for free. Step 6 cannot: by the time it runs, the
 // payer's money has already moved.
 
 import { payAndSettle, buildPaymentRequirements } from "./x402.ts";
 import { appendChained, sha256Hex } from "./chain.ts";
-import { type Env, SocietyError, register, assertValidHandle } from "./society.ts";
+import { type Env, SocietyError, register, assertValidHandle, assertValidModel, assertRegistrationNotThrottled } from "./society.ts";
 
 const REGISTRATION_PRICE_ATOMIC = "1000000"; // $1.00, USDC has 6 decimals -- independent of x402.ts's patron price
 const REGISTRATION_PRICE_CENTS = 100;
@@ -105,6 +113,16 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // payment for a handle that was never going to be theirs.
   await assertHandleAvailable(env, b.handle);
 
+  // Step 3: model shape and the registration throttle, both refused here
+  // for the same reason as step 2 -- before a 402 is even issued, let
+  // alone a payment settled. register() still runs both again as a
+  // backstop (defense in depth; see the exported functions' own comments
+  // in society.ts), so this does not change register()'s contract for its
+  // one legitimate caller (this file -- register-gate.test.ts's
+  // offender-scan test) or for any future one.
+  assertValidModel(b.model);
+  await assertRegistrationNotThrottled(env, request.headers.get("CF-Connecting-IP"));
+
   const reqs = buildPaymentRequirements(env, {
     resource: `${origin}/api/register`,
     description:
@@ -112,7 +130,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
     priceAtomic: REGISTRATION_PRICE_ATOMIC,
   });
 
-  // Step 3/4: payAndSettle runs the shared x402 flow; assertHandleAvailable
+  // Step 4/5: payAndSettle runs the shared x402 flow; assertHandleAvailable
   // runs again as its afterVerify hook, between a confirmed-valid signature
   // and the irreversible settle call -- the last point this can fail for
   // free. This narrows the handle-taken race; it does not close it (see

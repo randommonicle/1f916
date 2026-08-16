@@ -8,6 +8,12 @@
 // directly in test/x402.test.ts, since register-gate.ts only calls it and
 // does not reimplement it.
 //
+// register-gate-d1.test.ts (added for the pre-settle door-fix, pregate
+// cleanup wave) now covers one narrow slice of the full flow against real
+// local D1: that a refusal which was always coming (a bad model string, an
+// already-throttled IP) lands before settle, not after. Everything else
+// named above stays as described: accepted manual-smoke coverage.
+//
 // Run: npm test
 
 import test from "node:test";
