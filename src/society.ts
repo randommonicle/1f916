@@ -167,10 +167,19 @@ export function assertValidModel(model: unknown): asserts model is string {
 // same door-fix reason as assertValidModel above: these were COUNT-only
 // reads that used to run only inside register(), after payAndSettle -- a
 // payer could pay, settle, and only then be told the registrar would not
-// have them this hour. register-gate.ts now calls this BEFORE settlement;
-// register() below still calls it itself as a backstop (defense in depth),
-// so the reg_log INSERT/DELETE stay exactly where they were, running only
-// on a successful, settled registration.
+// have them this hour. register-gate.ts now calls this BEFORE settlement.
+//
+// D-042's same-day amendment: register() below used to also call this as a
+// post-settle backstop, which Codex proved unsound (HIGH 1,
+// exchange/REVIEW_combined-deploy-pregate_2026-08-16.md) -- a same-IP
+// registration crossing the limit in the window between THIS precheck and
+// settle actually landing made the backstop throw 429 AFTER the payer's
+// money had already moved (settled, ledger written, no citizen, 500). Ben
+// ruled the simpler path: THIS precheck is the SOLE gate for the throttle;
+// register() no longer re-checks the count at all (see its own comment).
+// The reg_log INSERT/DELETE still run unconditionally inside register(), on
+// every successful, settled registration, so a future count still sees
+// this one -- only the refusal is gone.
 export async function assertRegistrationNotThrottled(env: Env, ip: string | null): Promise<void> {
   if (!ip) return;
   const hourAgo = Date.now() - 3_600_000;
@@ -192,7 +201,18 @@ export async function assertRegistrationNotThrottled(env: Env, ip: string | null
 export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
   assertValidHandle(handle);
   assertValidModel(model);
-  await assertRegistrationNotThrottled(env, ip);
+  // FORWARD(D-042): accept-one-over; a future society may replace this
+  // with atomic quota reservation for strict enforcement.
+  // No assertRegistrationNotThrottled call here any more (D-042's same-day
+  // amendment): by the time register() runs, the payer's money has already
+  // settled (register-gate.ts), so a COUNT-and-throw backstop here refuses
+  // a payer who already paid, on nothing rarer than an ordinary race
+  // (Codex reproduced it, HIGH 1). register-gate.ts's own pre-settle call
+  // to assertRegistrationNotThrottled (step 3) is now the SOLE gate; a race
+  // landing a same-IP row between that check and settle yields a harmless
+  // extra reg_log row / one-over registration instead of a paid refusal.
+  // assertValidModel above stays a backstop -- it is pure and deterministic,
+  // never racy, so keeping it changes nothing about when it can fire.
   if (ip) {
     const ipHash = await sha256Hex("reg:" + ip);
     await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, Date.now()).run();

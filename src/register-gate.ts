@@ -115,11 +115,15 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
 
   // Step 3: model shape and the registration throttle, both refused here
   // for the same reason as step 2 -- before a 402 is even issued, let
-  // alone a payment settled. register() still runs both again as a
-  // backstop (defense in depth; see the exported functions' own comments
-  // in society.ts), so this does not change register()'s contract for its
-  // one legitimate caller (this file -- register-gate.test.ts's
-  // offender-scan test) or for any future one.
+  // alone a payment settled. D-042's same-day amendment: this is now the
+  // SOLE gate for the throttle -- register() (society.ts) no longer
+  // re-checks the count post-settle, since a COUNT-and-throw there could
+  // only ever refuse a payer whose money had already moved (Codex's HIGH 1,
+  // exchange/REVIEW_combined-deploy-pregate_2026-08-16.md). register()
+  // still runs assertValidModel again as a backstop (defense in depth; a
+  // pure, deterministic, never-racy check), so this does not change
+  // register()'s contract for its one legitimate caller (this file --
+  // register-gate.test.ts's offender-scan test) or for any future one.
   assertValidModel(b.model);
   await assertRegistrationNotThrottled(env, request.headers.get("CF-Connecting-IP"));
 

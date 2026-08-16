@@ -191,3 +191,70 @@ test("a payer whose IP is already at the 3/hour registration limit is refused BE
     d1.close();
   }
 });
+
+// D-042's same-day amendment (DECISIONS.md; pre-gate fixes wave, HIGH 1 --
+// exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX round 1).
+// Codex reproduced an interleaving the two tests above cannot reach: the
+// pre-settle precheck above only proves an ALREADY-throttled IP is refused
+// before settle. It says nothing about an IP that CROSSES the threshold in
+// the gap between that precheck and settle actually landing -- and
+// register()'s own throttle backstop (society.ts), retained for defense in
+// depth, used to COUNT-and-throw post-settle, so a race there paid-refused
+// a payer instead of accepting a harmless one-over. Reproduced here by
+// inserting the THIRD same-IP reg_log row from inside the facilitator's own
+// /verify callback -- the exact real-world race window (a second concurrent
+// registration's precheck-then-settle interleaving with this one), not a
+// contrived direct call.
+test("RED-PROOF (D-042 amendment, HIGH 1): a third same-IP registration lands during the /verify callback -- register() must accept the one-over, never paid-refuse", async () => {
+  const d1 = createLocalD1();
+  const ip = "203.0.113.99"; // RFC 5737 TEST-NET-3, distinct from the other throttle test's IP
+  const ipHash = await sha256Hex("reg:" + ip);
+  const now = Date.now();
+  // Precheck-time state: 2 rows, strictly under the 3/hour limit --
+  // register-gate.ts's step-3 precheck (assertRegistrationNotThrottled)
+  // passes and a 402/payment flow begins.
+  for (let i = 0; i < 2; i++) {
+    d1.raw.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").run(ipHash, now);
+  }
+  const original = globalThis.fetch;
+  let verifyCalls = 0;
+  let settleCalls = 0;
+  globalThis.fetch = (async (url: unknown) => {
+    const href = String(url);
+    if (href === `${FACILITATOR_URL}/verify`) {
+      verifyCalls++;
+      // Codex's own interleaving: a THIRD same-IP registration's reg_log
+      // row lands here, during the facilitator's /verify round trip --
+      // after register-gate.ts's precheck already passed, before settle.
+      d1.raw.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").run(ipHash, Date.now());
+      return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (href === `${FACILITATOR_URL}/settle`) {
+      settleCalls++;
+      return new Response(
+        JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000000abc", transaction: "0xfeedfeedfeed" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected fetch in register-gate-d1.test.ts: ${href}`);
+  }) as typeof fetch;
+  try {
+    const env = testEnv(d1);
+    const request = registerRequest({ handle: "one-over-citizen", model: "test-model" }, ip);
+    const res = await handleRegisterGate(request, env);
+    assert.equal(res.status, 201, "the one-over race must be ACCEPTED (a 201 citizen), not paid-refused with a post-settle 500");
+    const payload = (await res.json()) as { citizen_id: number; handle: string };
+    assert.equal(payload.handle, "one-over-citizen");
+    assert.equal(verifyCalls, 1, "the settle flow must have run -- /verify called exactly once");
+    assert.equal(settleCalls, 1, "/settle must have run exactly once -- the payment genuinely settles on the one-over path");
+    const row = d1.raw.prepare("SELECT id FROM citizens WHERE handle = ?").get("one-over-citizen");
+    assert.ok(row, "the citizen must actually be created -- this is the whole point of accept-one-over");
+    const ledgerCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM ledger").get() as { n: number };
+    assert.equal(ledgerCount.n, 1, "settle ran exactly once, so exactly one ledger entry");
+    const regLogCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ?").get(ipHash) as { n: number };
+    assert.equal(regLogCount.n, 4, "2 seeded + 1 raced + register()'s own INSERT -- the one-over is RECORDED, not refused, so a future count still sees it");
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
