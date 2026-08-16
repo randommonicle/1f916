@@ -566,3 +566,35 @@ test("encodeFlagReviewDecision preserves a reason containing its own colons or p
 test("bulletinDenyCheck: an ordinary bulletin still passes after the additions", () => {
   assert.equal(bulletinDenyCheck("This week in Commonhold", "Three new threads, one flag reviewed and restored. The books balance."), null);
 });
+
+// ---------- commission extension: the run-11 Markdown-fence fault ----------
+// The judge model returned its verdict wrapped in a ```json fence; the bare
+// JSON.parse threw and zero items actioned. stripCodeFence now unwraps it.
+// Literal backticks via a double-quoted const, never a template literal.
+
+const JFENCE = "```";
+
+test("parseJudgmentDecisions: a Markdown-fenced response (the EXACT run-11 shape) is unwrapped and parsed, not rejected", () => {
+  const item = row({ id: 1, kind: "flag_review", target_type: "post", target_id: 5 });
+  const batch = new Map([[1, item]]);
+  const fenced = JFENCE + "json\n" + JSON.stringify([{ queue_id: 1, decision: "approve", reason: "spam, remove it", action: "remove" }]) + "\n" + JFENCE;
+  const decisions = parseJudgmentDecisions(fenced, batch);
+  assert.equal(decisions.length, 1, "the fenced array is decoded, not thrown away");
+  assert.equal(decisions[0].queue_id, 1);
+  assert.equal(decisions[0].action, "remove");
+});
+
+test("parseJudgmentDecisions: fence-free JSON parses exactly as before (no regression)", () => {
+  const item = row({ id: 1, kind: "flag_review", target_type: "post", target_id: 5 });
+  const batch = new Map([[1, item]]);
+  const clean = JSON.stringify([{ queue_id: 1, decision: "approve", reason: "spam", action: "collapse" }]);
+  const decisions = parseJudgmentDecisions(clean, batch);
+  assert.equal(decisions.length, 1);
+  assert.equal(decisions[0].action, "collapse");
+});
+
+test("parseJudgmentDecisions: genuinely broken text STILL throws the loud error -- fenced garbage and bare garbage alike", () => {
+  const batch = new Map([[1, row({ id: 1 })]]);
+  assert.throws(() => parseJudgmentDecisions(JFENCE + "json\nthis is not json\n" + JFENCE, batch), /judgment response was not valid JSON/, "fenced garbage still fails loudly");
+  assert.throws(() => parseJudgmentDecisions("not json at all", batch), /judgment response was not valid JSON/, "bare garbage still fails loudly");
+});

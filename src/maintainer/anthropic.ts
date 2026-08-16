@@ -87,6 +87,34 @@ export function extractText(content: AnthropicContentBlock[]): string | null {
   return block ? (block.text as string) : null;
 }
 
+// Pure. The live judgment wake on 2026-08-16 (maintainer run 11) actioned
+// ZERO items because the judge model returned its JSON verdict wrapped in a
+// Markdown code fence (three backticks, then `json`, a newline, the array,
+// a newline, a closing fence). The bare JSON.parse both maintainer parsers do
+// threw "response was not valid JSON" and every fenced run since would repeat
+// it. This strips a SURROUNDING code fence when present -- an opening fence of
+// exactly three backticks, an optional language tag, and a newline, plus a
+// matching closing fence at the very end, with surrounding whitespace ignored
+// -- and returns the inner text for the caller to JSON.parse. It is a shared
+// pre-parse step for BOTH the judgment and clerk parsers.
+//
+// Deliberately narrow and non-destructive: text with NO surrounding fence is
+// returned UNCHANGED (the original string, not even trimmed), so already-clean
+// JSON parses byte-identically to before -- the fence tolerance adds a case,
+// it never alters the existing one. Genuinely unparseable text, fenced or not,
+// still reaches JSON.parse and still throws the caller's own loud
+// "...response was not valid JSON" error: this tolerates the fence, never
+// real garbage (honest-failure-surfacing). Only a fence wrapping the WHOLE
+// content is stripped; trailing prose after the closing fence does not match,
+// so it falls through to the honest parse error rather than being silently
+// half-read.
+export function stripCodeFence(text: string): string {
+  const trimmed = text.trim();
+  // ^```<optional-lang>\n  ...content...  \n```$  (CR-tolerant on both newlines)
+  const fence = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$/.exec(trimmed);
+  return fence ? fence[1] : text;
+}
+
 // Pure. The request body, isolated so its shape (no temperature, the
 // generous fixed max_tokens) is directly assertable in tests rather than
 // only claimed in a comment.

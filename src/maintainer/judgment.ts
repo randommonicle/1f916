@@ -11,7 +11,7 @@
 // paper, not the authoritative record.
 
 import { type Env, MAINTAINER_ID, CONSTITUTION, moderateContent, createPost } from "../society.ts";
-import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, buildRequestBody } from "./anthropic.ts";
+import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, buildRequestBody, stripCodeFence } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
 import { canOpenJudgmentBatch } from "./budget.ts";
 import { truncateBody } from "./clerk.ts";
@@ -201,7 +201,10 @@ function isPlainObject(raw: unknown): raw is Record<string, unknown> {
 export function parseJudgmentDecisions(rawText: string, batch: Map<number, QueueRow>): JudgmentDecision[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(rawText);
+    // stripCodeFence tolerates a Markdown-fenced response (the run-11 fault);
+    // fence-free text passes through unchanged, and genuine garbage still
+    // throws the loud error below.
+    parsed = JSON.parse(stripCodeFence(rawText));
   } catch (e) {
     throw new Error(`judgment response was not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
   }

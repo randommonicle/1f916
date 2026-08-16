@@ -434,4 +434,55 @@ call again.
    `breached` latched at subrequest 51 inside the real invocation. Restored ->
    green; judgment.ts confirmed identical to HEAD (no diff).
 
-Full suite 601/601, typecheck clean, proof file NUL-clean. Commit `<pending>`.
+Full suite 601/601, typecheck clean, proof file NUL-clean. Commit `12b2dc1`.
+
+---
+
+# COMMISSION EXTENSION (distinct unit) — the run-11 Markdown-fence fault
+
+Operator-approved, additive, separate from the query-budget wave (which was
+complete and green at `12b2dc1` before this). The live judgment wake on
+2026-08-16 (maintainer run 11) actioned ZERO items because the judge model
+returned its JSON verdict wrapped in a Markdown code fence (three backticks,
+`json`, newline, the array, newline, closing fence); the bare `JSON.parse`
+threw "judgment response was not valid JSON" and would recur on every fenced
+run. The clerk (DAILY wake) carried the identical fault.
+
+## Fence-strip commit — `src/maintainer/anthropic.ts` + both parsers
+
+**What it did.** New shared pure helper `stripCodeFence(text)` in `anthropic.ts`
+(the module BOTH parsers already import). It unwraps a surrounding Markdown
+fence -- `^```<optional-lang>\n ...content... \n```$`, whitespace-tolerant --
+and returns the inner text; text with NO fence is returned UNCHANGED (the
+original string, not even trimmed), so clean JSON parses byte-identically.
+Wired into `parseJudgmentDecisions` (`judgment.ts:189-193`) and
+`parseClerkItems` (`clerk.ts:135-139`): `JSON.parse(stripCodeFence(rawText))`
+inside the existing try/catch, so the loud "...response was not valid JSON"
+error still fires on genuine garbage (fenced or not), and the `Array.isArray`
+top-level check is unchanged and still after the parse. Only the fence is
+tolerated; real garbage still fails loudly (honest-failure-surfacing). Trailing
+prose after the closing fence does NOT match, so it falls through to the honest
+error rather than being half-read.
+
+**Tests (11 new).** `stripCodeFence` unit tests (5): the exact run-11 shape
+unwrapped; bare fence (no lang) unwrapped; fence-free returned byte-identical;
+fenced-garbage and bare-garbage still fail to parse; trailing-prose falls
+through. Parser-path tests at BOTH `parseJudgmentDecisions` (3) and
+`parseClerkItems` (3): fenced run-11 shape accepted; fence-free no regression;
+genuine garbage still throws the loud error. Literal backticks are built via a
+double-quoted `const`, never a template literal (commission mechanics); `\n` is
+a real newline, never backslash-u (L-009).
+
+**Red-proof (pasted, BOTH paths).** Reverted both parsers to bare
+`JSON.parse(rawText)` and re-ran the fenced tests:
+
+```
+✖ parseClerkItems: a Markdown-fenced response (the run-11 shape) ...
+  Error: clerk response was not valid JSON: Unexpected token '`', "```json [{"... is not valid JSON
+✖ parseJudgmentDecisions: a Markdown-fenced response (the EXACT run-11 shape) ...
+  Error: judgment response was not valid JSON: Unexpected token '`', "```json [{"... is not valid JSON
+```
+
+That is the exact production failure (run 11) reproduced at both parsers.
+Restored -> green. Full suite 612/612, typecheck clean; all six touched files
+NUL-clean, no backslash-u notation anywhere. Commit `<pending>`.

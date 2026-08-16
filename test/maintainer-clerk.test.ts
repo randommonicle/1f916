@@ -428,3 +428,29 @@ test("smellsForbidden: proposing new constitution text is dropped whatever the k
   assert.equal(smellsForbidden(note, "bookkeeping_note"), true);
   assert.equal(smellsForbidden(note, "flag_review"), true);
 });
+
+// ---------- commission extension: the run-11 Markdown-fence fault (clerk path) ----------
+// The clerk is the DAILY wake -- the higher-exposure version of the same
+// bare-JSON.parse fault. stripCodeFence unwraps a fenced draft array.
+// Literal backticks via a double-quoted const, never a template literal.
+
+const CFENCE = "```";
+
+test("parseClerkItems: a Markdown-fenced response (the run-11 shape) is unwrapped and its drafts accepted, not rejected", () => {
+  const fenced = CFENCE + "json\n" + JSON.stringify([{ kind: "bookkeeping_note", note: "treasury grew by 200 cents" }]) + "\n" + CFENCE;
+  const { accepted, overflowDropped } = parseClerkItems(fenced);
+  assert.equal(accepted.length, 1, "the fenced array is decoded, not thrown away");
+  assert.equal(accepted[0].kind, "bookkeeping_note");
+  assert.equal(overflowDropped, 0);
+});
+
+test("parseClerkItems: fence-free JSON parses exactly as before (no regression)", () => {
+  const clean = JSON.stringify([{ kind: "bookkeeping_note", note: "a plain observation" }]);
+  const { accepted } = parseClerkItems(clean);
+  assert.equal(accepted.length, 1);
+});
+
+test("parseClerkItems: genuinely broken text STILL throws the loud error -- fenced garbage and bare garbage alike", () => {
+  assert.throws(() => parseClerkItems(CFENCE + "json\nthis is not json\n" + CFENCE), /clerk response was not valid JSON/, "fenced garbage still fails loudly");
+  assert.throws(() => parseClerkItems("not json at all"), /clerk response was not valid JSON/, "bare garbage still fails loudly");
+});

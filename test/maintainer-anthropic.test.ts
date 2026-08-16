@@ -18,6 +18,7 @@ import {
   ANTHROPIC_PRICING,
   estimateCostCents,
   extractText,
+  stripCodeFence,
   buildRequestBody,
   isAbortError,
   type AnthropicContentBlock,
@@ -155,4 +156,45 @@ test("isAbortError returns false for a non-Error value, never throws", () => {
   assert.equal(isAbortError(null), false);
   assert.equal(isAbortError(undefined), false);
   assert.equal(isAbortError({ name: "AbortError" }), false); // not an Error instance
+});
+
+// ---------- stripCodeFence (the run-11 fault: the model fenced its JSON) ----------
+// Literal backticks are embedded via single-quoted strings, never template
+// literals (commission mechanics); \n is a real newline, never backslash-u (L-009).
+
+const BT3 = "```"; // three backticks, built without a template literal
+
+test("stripCodeFence: the EXACT run-11 shape (```json\n[array]\n```) is unwrapped to its inner JSON", () => {
+  const fenced = BT3 + "json\n" + '[{"queue_id":1,"decision":"approve","reason":"ok","action":null}]' + "\n" + BT3;
+  const inner = stripCodeFence(fenced);
+  const parsed = JSON.parse(inner);
+  assert.ok(Array.isArray(parsed), "the stripped text parses to the array the model meant");
+  assert.equal(parsed[0].queue_id, 1);
+});
+
+test("stripCodeFence: a bare fence with no language tag is also unwrapped", () => {
+  const fenced = BT3 + "\n" + "[1,2,3]" + "\n" + BT3;
+  assert.deepEqual(JSON.parse(stripCodeFence(fenced)), [1, 2, 3]);
+});
+
+test("stripCodeFence: fence-free text is returned UNCHANGED, byte-identical -- the tolerance never alters clean JSON", () => {
+  const clean = '[{"a":1}]';
+  assert.equal(stripCodeFence(clean), clean, "no fence -> the original string, not even trimmed");
+  const withWhitespace = '  \n [1,2] \n ';
+  assert.equal(stripCodeFence(withWhitespace), withWhitespace, "surrounding whitespace on clean JSON is left exactly as-is (JSON.parse tolerates it, as before)");
+});
+
+test("stripCodeFence: genuinely broken text after stripping still fails to parse -- the loud failure is preserved, not swallowed", () => {
+  const fencedGarbage = BT3 + "json\n" + "this is not json at all" + "\n" + BT3;
+  assert.throws(() => JSON.parse(stripCodeFence(fencedGarbage)), "stripped-but-still-garbage must throw at JSON.parse, never a silent pass");
+  const bareGarbage = "not json";
+  assert.equal(stripCodeFence(bareGarbage), "not json", "fence-free garbage is unchanged");
+  assert.throws(() => JSON.parse(stripCodeFence(bareGarbage)));
+});
+
+test("stripCodeFence: trailing prose after the closing fence does NOT match -- falls through to the honest parse error, never half-read", () => {
+  const trailing = BT3 + "json\n" + "[1,2]" + "\n" + BT3 + "\nand here is my explanation";
+  // No clean surrounding fence -> returned unchanged -> JSON.parse throws (loud).
+  assert.equal(stripCodeFence(trailing), trailing);
+  assert.throws(() => JSON.parse(stripCodeFence(trailing)));
 });

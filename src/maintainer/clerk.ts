@@ -13,7 +13,7 @@
 // judgment.ts reads with the full context in front of it.
 
 import { type Env, readOnchainUsdcCents } from "../society.ts";
-import { MAINTAINER_MODELS, callAnthropic, estimateCostCents } from "./anthropic.ts";
+import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, stripCodeFence } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
 import { affordableClerkInserts } from "./budget.ts";
 // I-007 (docs/FIRST-LAWS-DESIGN.md §5): the shared constitution-detection
@@ -135,7 +135,10 @@ function isPlainObject(raw: unknown): raw is Record<string, unknown> {
 export function parseClerkItems(rawText: string, cap: number = CLERK_QUEUE_CAP): { accepted: QueueItemDraft[]; overflowDropped: number } {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(rawText);
+    // stripCodeFence tolerates a Markdown-fenced response (the run-11 fault);
+    // fence-free text passes through unchanged, and genuine garbage still
+    // throws the loud error below.
+    parsed = JSON.parse(stripCodeFence(rawText));
   } catch (e) {
     throw new Error(`clerk response was not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
   }
