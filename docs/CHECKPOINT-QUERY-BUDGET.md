@@ -239,3 +239,49 @@ clean, clerk.ts NUL-clean. Commit `<pending>`.
 **§7(b) — CLERK_QUEUE_CAP** is set in the §9 budget commit, where the clerk's
 own end-to-end arithmetic (including the co-resident sweep) determines the
 honest value.
+
+Commit `299f7e3`.
+
+---
+
+## Commit 6 — §8: bound the sweep cohort
+
+**What it did.** `runGovernanceSweep` (`src/governance.ts`) looped every due
+proposal unbounded, and it runs on EVERY invocation before both cron wakes
+(and directly on the permissionless `POST /api/governance/sweep`), sharing
+the 50-subrequest budget at ~8-9 statements per due proposal. Added
+`SWEEP_COHORT_CAP = 2` and put it as a `LIMIT` on the due SELECT (preferred
+over a loop break so rows beyond the cap are never even CLAIMED), with
+`ORDER BY closes_at ASC, id ASC` so proposals still close in order. Added an
+observable `cohort_capped` boolean to the response (computed from counts in
+hand, no extra query) so a caller draining a backlog knows to call again.
+
+**Value chosen: S = 2.** Co-resident arithmetic on the worst shape (judgment
+wake, per §8's instruction): the sweep costs due(1) + stranded(1) +
+detection(0 cached) + 2×~9 = ~20. The judgment wake's non-sheddable floor
+(sweep ~20 + wake fixed 1+0+1+1 + replay [1 + 3×6] + pending 1 + finalise 1 =
+~24) totals ~44, ≤ 50 with ~6 headroom, and the D-041 batch loop (next
+commit) sheds all batches when the floor is this high, so finalise always
+lands. **FLAG for the gate:** S=2 forces the clerk's static insert cap down
+to ~10 (below §4's "low twenties"); the lever is S=1 (sweep ~11, clerk K
+~18). I chose S=2 for sweep throughput and flag the K consequence rather than
+silently taking either; the gate should rule on the S vs K tradeoff. The
+compound e2e proof (next commit) measures the real floor.
+
+**Behaviour preserved.** 176 governance tests + full suite stay green. The
+`ORDER BY` is deterministic and the added response field is additive (no
+deepEqual test broke). Deferred proposals re-qualify next invocation
+(closes_at ≤ now stays true); `stranded` still names all tallying rows.
+
+**Red-proof (pasted).** New "§8 sweep cohort cap" seeds cap+1 due proposals,
+asserts `due===2`, `processed===2`, `cohort_capped===true`, the latest-due
+deferred and still open, then a second sweep drains it. Removed the LIMIT:
+
+```
+✖ §8 sweep cohort cap ...
+    actual: 3,
+    expected: 2,
+```
+
+Restored → green. Full suite 582/582, typecheck clean, both files NUL-clean.
+Commit `<pending>`.

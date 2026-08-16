@@ -32,6 +32,7 @@ import {
   castBallot,
   createProposal,
   runGovernanceSweep,
+  SWEEP_COHORT_CAP,
   monthsFromNow,
   listProposals,
   PROPOSAL_PAGE,
@@ -1214,6 +1215,43 @@ test("runGovernanceSweep: a proposal that fails quorum lands as 'failed', no set
 
     const settings = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings").first<{ n: number }>();
     assert.equal(settings!.n, 0, "a failed tally must never write a governance_settings row");
+  } finally {
+    d1.close();
+  }
+});
+
+test("§8 sweep cohort cap: at most SWEEP_COHORT_CAP due proposals are processed per invocation, earliest-due first, the rest deferred to the next sweep and never claimed (docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §8)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    for (let i = 0; i < 9; i++) insertCitizen(d1); // 10 citizens; no-ballot proposals fail quorum -> all are "processed" outcomes
+    const now = Date.now();
+    // SWEEP_COHORT_CAP + 1 due proposals, distinct closes_at so the
+    // earliest-due-first order is deterministic (i=0 earliest).
+    const total = SWEEP_COHORT_CAP + 1;
+    const ids: number[] = [];
+    for (let i = 0; i < total; i++) {
+      ids.push(insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - (total - i) * 1000 }));
+    }
+
+    const env = testEnv(d1);
+    const first = await runGovernanceSweep(env, now);
+    assert.equal(first.due, SWEEP_COHORT_CAP, "the due SELECT itself is capped -- rows beyond the cap are never read as due, never claimed");
+    assert.equal(first.processed, SWEEP_COHORT_CAP, "exactly the cohort cap is processed");
+    assert.equal(first.cohort_capped, true, "a full cohort signals there may be more waiting -- the public 'call again' cue");
+
+    // Exactly one proposal (the latest-due, i = total-1) is untouched.
+    const stillOpen = ids.filter((id) => (d1.raw.prepare("SELECT status FROM proposals WHERE id = ?").get(id) as { status: string }).status === "open");
+    assert.equal(stillOpen.length, 1, "one due proposal was deferred, not claimed");
+    assert.equal(stillOpen[0], ids[total - 1], "the deferred one is the LATEST-due -- proposals still close in order");
+
+    // A second invocation (or any permissionless POST /api/governance/sweep)
+    // drains the deferred proposal with a fresh budget.
+    const second = await runGovernanceSweep(env, now);
+    assert.equal(second.processed, 1, "the deferred proposal is drained by the next sweep");
+    assert.equal(second.cohort_capped, false, "and now the backlog is clear");
+    const anyOpen = ids.filter((id) => (d1.raw.prepare("SELECT status FROM proposals WHERE id = ?").get(id) as { status: string }).status === "open");
+    assert.equal(anyOpen.length, 0, "nothing is lost -- deferral is self-healing");
   } finally {
     d1.close();
   }

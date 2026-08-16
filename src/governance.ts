@@ -1615,16 +1615,40 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
 // module's one default cache instance) but exercising DIFFERENT local-D1
 // databases would otherwise see the second test's detection silently
 // short-circuit to the first test's already-cached answer.
+// docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §8 (D-037): the sweep looped every due
+// proposal unbounded, and it runs on EVERY invocation before both cron wakes
+// (and directly, permissionlessly, on POST /api/governance/sweep), sharing
+// the 50-subrequest budget. Each due proposal costs ~8-9 statements through
+// claimTallyAndExecuteOne, so an unbounded cohort could exhaust the budget
+// (the audit put the ceiling near seven simultaneously-due) before either
+// wake ran. Capped at a small constant per invocation. The LIMIT is on the
+// due SELECT (not a loop break) so rows beyond the cap are never even
+// CLAIMED -- what one invocation defers, the next cron sweep or any
+// permissionless POST /api/governance/sweep drains, each with a fresh budget;
+// the STALE_CLAIM_MS reclaim and the `stranded` report already make deferral
+// self-healing and loud, and `cohort_capped` below names it on every
+// response. Value: 2 -- see the co-resident arithmetic in
+// docs/CHECKPOINT-QUERY-BUDGET.md (§8/§9); with the judgment wake it keeps
+// the non-sheddable floor (sweep + replay + wake fixed + finalise) under 50
+// so the loud run-row write always lands, and the D-041 batch loop sheds
+// batches to pay for whatever the sweep consumed.
+export const SWEEP_COHORT_CAP = 2;
+
 export async function runGovernanceSweep(env: Env, now = Date.now(), constitutionCache?: ConstitutionCache) {
   // N5 (see claimTallyAndExecuteOne's claim UPDATE above): the same
   // NULL-unsafety, in the query that decides whether a stale row is even
   // attempted in the first place. Kept identical to the claim UPDATE's
   // own WHERE shape so "found as due" and "actually claimable" never
   // disagree about which rows qualify.
+  //
+  // §8: ORDER BY closes_at ASC, id ASC so proposals still close in order
+  // (earliest-due first, id as the deterministic tiebreak for a genuine
+  // same-millisecond tie), and LIMIT SWEEP_COHORT_CAP so a large due cohort
+  // is processed a bounded number at a time, never claimed all at once.
   const { results: due } = await env.DB.prepare(
-    `SELECT id, status FROM proposals WHERE (status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND (tallied_at IS NULL OR tallied_at <= ?))`,
+    `SELECT id, status FROM proposals WHERE (status = 'open' AND closes_at <= ?) OR (status = 'tallying' AND (tallied_at IS NULL OR tallied_at <= ?)) ORDER BY closes_at ASC, id ASC LIMIT ?`,
   )
-    .bind(now, now - STALE_CLAIM_MS)
+    .bind(now, now - STALE_CLAIM_MS, SWEEP_COHORT_CAP)
     .all<{ id: number; status: string }>();
 
   const results: Array<{ proposal_id: number; outcome: SweepOutcome | "error"; reclaimed?: true; error?: string }> = [];
@@ -1673,6 +1697,13 @@ export async function runGovernanceSweep(env: Env, now = Date.now(), constitutio
     results,
     stranded: strandedRows.map((r) => r.id),
     detection_stranded: detectionStranded,
+    // §8: this invocation processed a full cohort (== the cap), so there MAY
+    // be more due proposals it deferred to the next invocation. An honest
+    // "possibly more waiting" signal on the public sweep response, computed
+    // from counts already in hand -- no extra query. `due` above is now the
+    // capped count (<= SWEEP_COHORT_CAP), so a caller draining a backlog
+    // knows to call again while this stays true.
+    cohort_capped: due.length === SWEEP_COHORT_CAP,
   };
 }
 
