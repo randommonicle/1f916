@@ -311,14 +311,14 @@ touched by this commit's changes. Five touched files (`src/society.ts`,
 escape notation anywhere. `git diff dfc3988..HEAD --stat -- migrations/
 schema.sql` still empty — no new table, `reg_log` reused as-is.
 
-Commit `<filled after this commit lands>`.
+Commit `d77865b`.
 
 ---
 
 # WAVE CLOSE
 
 **Commits:** `1fb7ee3` throttle-backstop accept-one-over (HIGH 1) ·
-`721d9ec` classification-chunk budget pricing (HIGH 2) · `<filled>`
+`721d9ec` classification-chunk budget pricing (HIGH 2) · `d77865b`
 sweep rate cap + residual documentation (contention), all local only on
 `main`, ahead of `origin/main` by baseline-13 + 3.
 
