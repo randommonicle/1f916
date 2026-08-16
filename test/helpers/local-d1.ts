@@ -61,10 +61,25 @@ export interface LocalD1 {
   close(): void;
 }
 
-export function createLocalD1(): LocalD1 {
+// docs/BRIEF-JUDGMENT-QUERY-BUDGET.md (THE PROOF): the subrequest-budget
+// wave needs to count every D1 statement the code under test issues
+// through this D1-shaped adapter as one subrequest -- the same pool
+// outbound fetch() draws from on Cloudflare's Free plan. `onExec` is that
+// seam: called once for every first()/all()/run() AND once per statement
+// inside batch() (the four execution methods the brief names), BEFORE the
+// statement actually runs against SQLite. A counter closure wired here can
+// therefore throw before executing subrequest 51 exactly as the platform's
+// own limit would (see test/helpers/subrequest-counter.ts). onExec is
+// only ever supplied by the proof harness; every existing createLocalD1()
+// caller passes nothing and is completely unaffected (the raw connection,
+// used for fixture seeding, never routes through this adapter and so is
+// never counted -- seeding is scaffolding, not code under test). Seeding
+// via d1.raw stays uncounted for the same reason.
+export function createLocalD1(opts: { onExec?: (kind: "d1") => void } = {}): LocalD1 {
   const raw = new DatabaseSync(":memory:");
   const schemaPath = join(import.meta.dirname, "..", "..", "schema.sql");
   raw.exec(readFileSync(schemaPath, "utf8"));
+  const onExec = opts.onExec;
 
   // Real D1PreparedStatement supports first()/all()/run() directly on the
   // result of prepare(), with no bind() call, for parameterless queries --
@@ -79,14 +94,17 @@ export function createLocalD1(): LocalD1 {
         return statement(sql, boundArgs);
       },
       async first<T>(): Promise<T | null> {
+        onExec?.("d1");
         const row = raw.prepare(sql).get(...(args as never[]));
         return (row ?? null) as T | null;
       },
       async all<T>(): Promise<{ results: T[] }> {
+        onExec?.("d1");
         const rows = raw.prepare(sql).all(...(args as never[]));
         return { results: rows as T[] };
       },
       async run() {
+        onExec?.("d1");
         const result = raw.prepare(sql).run(...(args as never[]));
         return { meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } };
       },
@@ -103,11 +121,20 @@ export function createLocalD1(): LocalD1 {
     // -- verified directly (see the file header) before this was trusted,
     // since "atomicity" is exactly the property src/governance.ts's
     // commitOutcome relies on this for.
+    //
+    // onExec fires once PER STATEMENT inside the batch, not once for the
+    // whole batch: the brief rules that batch metering is unconfirmed on
+    // the platform, so the conservative measured count is one subrequest
+    // per statement (docs/RECON-CLOUDFLARE-FREE-LIMITS §1.2). Fired before
+    // the statement runs, so a budget-exceeding batch throws mid-batch and
+    // the BEGIN is rolled back below, exactly as an aborted real batch
+    // would leave nothing committed.
     async batch<T = unknown>(stmts: D1StatementLike[]): Promise<T[]> {
       raw.exec("BEGIN");
       try {
         const out: unknown[] = [];
         for (const stmt of stmts) {
+          onExec?.("d1");
           const result = raw.prepare(stmt.__sql).run(...(stmt.__args as never[]));
           out.push({ meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } });
         }
