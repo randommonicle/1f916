@@ -300,15 +300,6 @@ export function shapeFlagTargetText(row: { title?: string | null; body: string |
   return truncateBody(raw, 1000);
 }
 
-async function fetchFlagTargetText(env: Env, targetType: string, targetId: number): Promise<string> {
-  if (targetType === "post") {
-    const row = await env.DB.prepare("SELECT title, body, mod_state FROM posts WHERE id = ?").bind(targetId).first<{ title: string; body: string | null; mod_state: string | null }>();
-    return shapeFlagTargetText(row, "post");
-  }
-  const row = await env.DB.prepare("SELECT body, mod_state FROM comments WHERE id = ?").bind(targetId).first<{ body: string; mod_state: string | null }>();
-  return shapeFlagTargetText(row, "comment");
-}
-
 // D1-touching. Reads posts/comments/flags/citizens created after `cursor`,
 // each stream capped defensively before the combined merge, then merged
 // oldest-first and sliced to CLERK_INPUT_CAP overall -- "max 50 items per
@@ -347,8 +338,28 @@ async function fetchClerkCandidates(env: Env, cursor: number): Promise<(RawCandi
       text: `<item type="comment" id="${m.id}" post_id="${m.post_id}">\n${truncateBody(m.body)}\n</item>`,
     });
   }
+  // docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §7: bulk-fetch every flagged target's
+  // text in at most TWO reads (one posts, one comments) instead of one query
+  // PER flag candidate -- the per-flag loop could cost up to CLERK_INPUT_CAP
+  // (50) subrequests on its own. shapeFlagTargetText's per-target shaped-text
+  // / sentinel semantics are preserved exactly (post -> title+body, anything
+  // else -> comments table, a vanished row -> its honest sentinel). The flag
+  // stream is capped at CLERK_INPUT_CAP=50, comfortably under D1's 100-param
+  // ceiling, so no chunking is needed here.
+  const flagPostIds = [...new Set(flagRows.results.filter((f) => f.target_type === "post").map((f) => f.target_id))];
+  const flagCommentIds = [...new Set(flagRows.results.filter((f) => f.target_type !== "post").map((f) => f.target_id))];
+  const flagPostMap = new Map<number, { title: string | null; body: string | null; mod_state: string | null }>();
+  if (flagPostIds.length > 0) {
+    const { results } = await env.DB.prepare(`SELECT id, title, body, mod_state FROM posts WHERE id IN (${flagPostIds.map(() => "?").join(", ")})`).bind(...flagPostIds).all<{ id: number; title: string | null; body: string | null; mod_state: string | null }>();
+    for (const r of results) flagPostMap.set(r.id, r);
+  }
+  const flagCommentMap = new Map<number, { body: string | null; mod_state: string | null }>();
+  if (flagCommentIds.length > 0) {
+    const { results } = await env.DB.prepare(`SELECT id, body, mod_state FROM comments WHERE id IN (${flagCommentIds.map(() => "?").join(", ")})`).bind(...flagCommentIds).all<{ id: number; body: string | null; mod_state: string | null }>();
+    for (const r of results) flagCommentMap.set(r.id, r);
+  }
   for (const f of flagRows.results) {
-    const targetText = await fetchFlagTargetText(env, f.target_type, f.target_id);
+    const targetText = f.target_type === "post" ? shapeFlagTargetText(flagPostMap.get(f.target_id) ?? null, "post") : shapeFlagTargetText(flagCommentMap.get(f.target_id) ?? null, "comment");
     candidates.push({
       created_at: f.created_at,
       text: `<item type="flag" target_type="${f.target_type}" target_id="${f.target_id}">\nA citizen flagged this ${f.target_type} (reason: ${f.reason ? truncateBody(f.reason, 300) : "none given"}).\nFlagged content: ${targetText}\n</item>`,

@@ -206,4 +206,36 @@ untouched. Removed the `LIMIT ?`:
 ```
 
 Restored → green. Full suite 581/581, typecheck clean, all three files
-NUL-clean. Commit `<pending>`.
+NUL-clean. Commit `2d539cb`.
+
+---
+
+## Commit 5 — §7(a): clerk set-based flag hydration
+
+**What it did.** Replaced the clerk's per-flag-candidate loop
+(`fetchClerkCandidates`, `src/maintainer/clerk.ts`) -- which called
+`fetchFlagTargetText` once per flag, up to `CLERK_INPUT_CAP=50` subrequests
+on its own -- with at most TWO bulk reads (one flagged-posts IN-query, one
+flagged-comments IN-query). Removed the now-dead `fetchFlagTargetText`. The
+pure `shapeFlagTargetText` is unchanged, so the per-target shaped-text /
+sentinel semantics (post → title+body, anything else → comments table, a
+vanished row → its sentinel) are byte-identical. No chunking: the flag stream
+is capped at 50, under D1's 100-param ceiling.
+
+**Behaviour preserved.** All 59 clerk tests stay green; no test referenced
+the removed helper.
+
+**Proof placement (deliberate).** §7's subrequest red-proof and the bulk-fetch
+correctness proof (right flag → right target row) live in the PROOF commit's
+mandated clerk end-to-end proof (shape 2: "a full 50-candidate flag-heavy
+gather"), where the flag hydration cost is proven flag-count-INDEPENDENT and
+red-proved by reverting to per-flag. Flagged here so the deferral is visible:
+between this commit and the PROOF commit, §7(a)'s correctness rests on the
+unchanged shaping function plus structural review of the map lookup (postMap
+keyed by post id, commentMap by comment id, resolved by the flag's own
+target_type -- no cross-table id collision). Full suite 581/581, typecheck
+clean, clerk.ts NUL-clean. Commit `<pending>`.
+
+**§7(b) — CLERK_QUEUE_CAP** is set in the §9 budget commit, where the clerk's
+own end-to-end arithmetic (including the co-resident sweep) determines the
+honest value.
