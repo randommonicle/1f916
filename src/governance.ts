@@ -2075,29 +2075,52 @@ export interface FidelityReconciliationResult {
 // serve-detected change is queued at the next wake (<= a day) and judged
 // at the next judgment wake, the cadence the queue always had.
 export async function reconcileConstitutionFidelityQueue(env: Env, runId: number, now: number): Promise<FidelityReconciliationResult> {
-  const { results: versions } = await env.DB.prepare(
-    "SELECT id, template_hash, parameters_hash, changed_by, mandate_proposal_ids FROM constitution_versions WHERE changed_by != 'genesis'",
-  ).all<{ id: number; template_hash: string; parameters_hash: string; changed_by: string; mandate_proposal_ids: string }>();
-
-  let queued = 0;
-  const errors: string[] = [];
-  for (const v of versions) {
-    const sourceRef = `constitution_versions:${v.id}`;
-    const note = `Constitution changed to version ${v.id} (template ${v.template_hash.slice(0, 12)}..., parameters ${v.parameters_hash.slice(0, 12)}...), changed_by=${v.changed_by}, linked mandate proposal ids=${v.mandate_proposal_ids}. Judge the fidelity of this change: does it match its linked mandate(s), exceed them, or carry no mandate at all?`;
-    try {
-      const res = await env.DB.prepare(
-        `INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status)
-         SELECT ?, ?, 'constitution_fidelity', NULL, NULL, ?, ?, 'pending'
-         WHERE NOT EXISTS (SELECT 1 FROM maintainer_queue WHERE kind = 'constitution_fidelity' AND source_ref = ?)`,
-      )
-        .bind(runId, now, sourceRef, note, sourceRef)
-        .run();
-      if (res.meta.changes === 1) queued++;
-    } catch (e) {
-      errors.push(`version ${v.id}: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  // docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §3: ONE `INSERT ... SELECT`, and the
+  // whole-table read goes WITH it -- the source SELECT is now INSIDE the
+  // insert statement. This closes the 1+N SUBREQUEST multiplier the loop
+  // carried (the old shape read the whole table = 1, then issued one
+  // idempotent INSERT per non-genesis version = N, so 1+N statements every
+  // wake, N = lifetime constitution-changing deploys, on BOTH cron wakes =
+  // eight times a week). It is now a FIXED one statement regardless of N.
+  //
+  // The note is assembled in SQL with `||`/substr(...) to be byte-identical
+  // to the prose the loop built in JS: `substr(x, 1, 12)` is `x.slice(0,12)`,
+  // and mandate_proposal_ids is the raw JSON column text exactly as before.
+  // Every concatenated column (id, template_hash, parameters_hash,
+  // changed_by, mandate_proposal_ids) is NOT NULL in schema.sql, so the
+  // concatenation can never collapse the NOT NULL note to SQL NULL for any
+  // row a real archive can hold.
+  //
+  // Rows-read is NOT claimed closed: an `INSERT ... SELECT` still SCANS
+  // constitution_versions inside the one statement (the audit's literal
+  // "whole-table rescan" concerns rows read, not subrequests). The
+  // `NOT EXISTS` predicate bounds it to versions not yet queued, but with no
+  // index on maintainer_queue.source_ref the correlated check is per source
+  // row; rows-read therefore grows one row per constitution-changing deploy,
+  // effectively static between deploys (constitution_versions is currently
+  // empty and gains one row per constitution change). That growth is
+  // accepted here as negligible against the subrequest budget this wave
+  // exists to protect -- see the brief §3 report note. Idempotency is
+  // unchanged: each cv.id maps to exactly one source_ref, and NOT EXISTS
+  // blocks only a source_ref that already has a fidelity row, so a set-based
+  // insert can neither double-insert nor be fooled by its own in-flight rows.
+  try {
+    const res = await env.DB.prepare(
+      `INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status)
+       SELECT ?, ?, 'constitution_fidelity', NULL, NULL,
+         'constitution_versions:' || cv.id,
+         'Constitution changed to version ' || cv.id || ' (template ' || substr(cv.template_hash, 1, 12) || '..., parameters ' || substr(cv.parameters_hash, 1, 12) || '...), changed_by=' || cv.changed_by || ', linked mandate proposal ids=' || cv.mandate_proposal_ids || '. Judge the fidelity of this change: does it match its linked mandate(s), exceed them, or carry no mandate at all?',
+         'pending'
+       FROM constitution_versions cv
+       WHERE cv.changed_by != 'genesis'
+         AND NOT EXISTS (SELECT 1 FROM maintainer_queue mq WHERE mq.kind = 'constitution_fidelity' AND mq.source_ref = 'constitution_versions:' || cv.id)`,
+    )
+      .bind(runId, now)
+      .run();
+    return { queued: res.meta.changes, error: null };
+  } catch (e) {
+    return { queued: 0, error: `fidelity reconciliation insert failed: ${e instanceof Error ? e.message : String(e)}` };
   }
-  return { queued, error: errors.length > 0 ? errors.join("; ") : null };
 }
 
 // GET /api/constitution/versions: the full archive, paginated in the

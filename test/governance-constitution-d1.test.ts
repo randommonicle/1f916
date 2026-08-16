@@ -16,6 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
+import { installSubrequestCounter } from "./helpers/subrequest-counter.ts";
 import {
   computeLiveConstitutionPair,
   getConstitutionAttestation,
@@ -515,6 +516,34 @@ test("reconcileConstitutionFidelityQueue: the genesis version never gets a fidel
     const count = await d1.DB.prepare("SELECT COUNT(*) AS n FROM maintainer_queue").first<{ n: number }>();
     assert.equal(count!.n, 0);
   } finally {
+    d1.close();
+  }
+});
+
+test("reconcileConstitutionFidelityQueue costs ONE D1 statement regardless of how many non-genesis versions it queues (docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §3: the 1+N subrequest multiplier collapses to 1)", async () => {
+  const counter = installSubrequestCounter(() => new Response("{}", { status: 200 }));
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    // Five distinct non-genesis versions, none yet queued -- the old loop
+    // shape cost 1 (whole-table SELECT) + 5 (one INSERT per version) = 6
+    // subrequests here; the set-based INSERT ... SELECT costs exactly 1.
+    // Seeded via d1.raw, uncounted (fixture scaffolding, not code under test).
+    for (let i = 0; i < 5; i++) seedFakePriorVersion(d1, { changed_by: "operator", first_seen_at: 1000 + i });
+    const runId = d1.raw.prepare("INSERT INTO maintainer_runs (kind, started_at) VALUES ('judgment', ?)").run(Date.now()).lastInsertRowid;
+    const env = testEnv(d1);
+
+    const result = await reconcileConstitutionFidelityQueue(env, Number(runId), Date.now());
+
+    assert.equal(result.queued, 5, "all five non-genesis versions get their fidelity row");
+    assert.equal(result.error, null);
+    assert.equal(counter.fetches(), 0, "reconciliation makes no outbound fetch");
+    assert.equal(
+      counter.d1(),
+      1,
+      "ONE D1 statement for five versions -- the whole-table read moved INSIDE the insert. The old 1-per-version loop would report 6 here, so this catches a per-row regression.",
+    );
+  } finally {
+    counter.restore();
     d1.close();
   }
 });

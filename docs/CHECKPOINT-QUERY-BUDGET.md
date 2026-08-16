@@ -55,3 +55,48 @@ hook lives there. No behaviour change to any existing path.
 **Red-proof.** The seam's own can-it-fail is the `assert.rejects` at the
 51st subrequest, proven for both a D1 statement and a fetch (see the test
 file). Full suite 577/577 (573 + 4), typecheck clean.
+
+Commit `be307e5`.
+
+---
+
+## Commit 2 — §3: reconciliation loop → one `INSERT ... SELECT`
+
+**What it did.** Rewrote `reconcileConstitutionFidelityQueue`
+(`src/governance.ts`) from a whole-table read + one idempotent INSERT per
+non-genesis version (1+N statements, on BOTH cron wakes = 8×/week) to a
+single `INSERT ... SELECT` with the source read moved inside it. Fixed one
+D1 statement regardless of N. The note is assembled in SQL with
+`||`/`substr(...)` byte-identical to the JS prose the loop built.
+
+**Key decision.** Rows-read is NOT claimed closed and the report says so:
+the `INSERT ... SELECT` still scans `constitution_versions` inside the one
+statement; the `NOT EXISTS` bounds it to un-queued versions but with no
+index on `maintainer_queue.source_ref` the correlated check is per source
+row. Growth is one row per constitution-changing deploy, static between
+deploys, negligible against the subrequest budget. The subrequest
+multiplier (the wave's actual target) IS closed: 1+N → 1.
+
+**Latitude.** None beyond the brief's explicit §3 grant to either bound
+rows-read or state it accepted; I stated it accepted, with the reason.
+
+**Behaviour preserved.** All four existing `reconcileConstitutionFidelityQueue`
+D1 tests stay green (queued count, error null, source_ref regex,
+run_id/kind/target/status, idempotency, genesis exclusion). No test pins
+the note text; all concatenated columns are NOT NULL in schema, so the
+concat can never collapse the NOT NULL note to SQL NULL.
+
+**Red-proof (pasted).** New test "costs ONE D1 statement regardless of how
+many non-genesis versions it queues" seeds 5 non-genesis versions and
+asserts `counter.d1() === 1`. Reverted the function to the per-row loop and
+re-ran:
+
+```
+✖ reconcileConstitutionFidelityQueue costs ONE D1 statement ...
+  AssertionError: ... The old 1-per-version loop would report 6 here ...
+    actual: 6,
+    expected: 1,
+```
+
+Restored → green. Full suite 578/578, typecheck clean, both files
+NUL-clean. Commit `<pending>`.
