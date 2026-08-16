@@ -154,4 +154,56 @@ missing-version pending head classifies in a PINNED 11 D1 statements" asserts
 
 That is the founding error of this wave reproduced exactly: per-row
 hydration blows the 50-subrequest budget mid-scan. Restored → green. Full
-suite 579/579, typecheck clean, both files NUL-clean. Commit `<pending>`.
+suite 579/579, typecheck clean, both files NUL-clean. Commit `231fcc8`.
+
+---
+
+## Commit 4 — §4 honest constants (partial) + §6 replay LIMIT
+
+**What it did.** (`src/maintainer/judgment.ts`)
+- `JUDGMENT_QUEUE_CAP` 100 → **1** (D-037): 17 fixed + 24C, C=1 costs 41, C=2
+  costs 65, ceiling 50. At most four decisions per weekly wake, an upper
+  bound not a promise. Comment records the ruling and that 100 was a
+  pre-existing defect, not a First Laws regression.
+- `JUDGMENT_MAX_SCAN` stays 1000; its comment rewritten to state the real
+  post-§1/§2 relationship (a row/memory ceiling, NOT a per-cap query
+  multiplier; the cap is a separate decision-throughput ceiling; only the
+  subrequest proof ties either to the platform).
+- §6: `JUDGMENT_REPLAY_CAP = 3` and `fetchReconcilableApprovedRows` gains
+  `LIMIT ?`, KEEPING `ORDER BY decided_at DESC` (load-bearing against gate
+  reproduction G1). Rows beyond the cap wait for the next wake; replay is
+  idempotent so deferral is safe.
+
+**Key decision / value chosen.** Replay cap R=3. Arithmetic: each replayed
+row costs ≤6 subrequests, so R≤18. The §9 budget-aware batch loop (later
+commit) sheds batches to pay for whatever the sweep and this replay consume,
+and the non-sheddable floor (sweep cohort + replay + the wake's fixed reads +
+the finalise write) must stay under 50 so the loud run-row write always
+lands. R=3 is a builder-chosen value; **flagged for the D-018 gate to
+sanity-check against the §9 compound proof** — if a real backlog ever needs
+faster draining that is a throughput ruling, not a code change.
+
+**Test updates forced by the cap change** (kept green, not weakened):
+- `maintainer-judgment.test.ts`: "JUDGMENT_QUEUE_CAP is 100" → "is 1";
+  the stale "MAX_SCAN > cap*5" rationale rewritten to assert the real
+  row/memory-ceiling relationship; new test pins JUDGMENT_REPLAY_CAP small
+  and positive.
+- `maintainer-judgment-d1.test.ts` F7: the withheld head-cohort size was
+  `JUDGMENT_QUEUE_CAP` (a magnitude that collapsed to 1 and broke the plural
+  assertion). Decoupled to a local `WITHHELD_COHORT = 100` so the
+  starvation-avoidance intent survives; the F8/F9 byte tests still pass the
+  cap through and stay green at cap=1 (the two-item split now lands via the
+  cap rather than the byte budget, and the sanity precondition still holds).
+
+**Red-proof (pasted).** New "§6 replay cap" test seeds R+2=5 stranded
+bulletins and asserts `actioned === 3`, the newest 3 posted, oldest 2
+untouched. Removed the `LIMIT ?`:
+
+```
+✖ §6 replay cap ...
+    actual: 5,
+    expected: 3,
+```
+
+Restored → green. Full suite 581/581, typecheck clean, all three files
+NUL-clean. Commit `<pending>`.

@@ -15,6 +15,7 @@ import {
   JUDGMENT_QUEUE_CAP,
   JUDGMENT_MAX_BATCHES,
   JUDGMENT_MAX_SCAN,
+  JUDGMENT_REPLAY_CAP,
   TOTAL_PROMPT_REQUEST_MAX_BYTES,
   JUDGMENT_SYSTEM_PROMPT,
   splitBulletinDraft,
@@ -213,17 +214,28 @@ test("resolveExecution: a rejected constitution_fidelity item executes nothing, 
 
 // ---------- shouldContinueBatchLoop / computeOverflowDropped: the batch loop (M3/M4, F7) ----------
 
-test("JUDGMENT_QUEUE_CAP is 100", () => {
-  assert.equal(JUDGMENT_QUEUE_CAP, 100);
+test("JUDGMENT_QUEUE_CAP is 1 (D-037: the ruled decision-throughput cap -- at most four decisions per weekly wake, four batches x one item)", () => {
+  assert.equal(JUDGMENT_QUEUE_CAP, 1);
 });
 
 test("JUDGMENT_MAX_BATCHES is 4", () => {
   assert.equal(JUDGMENT_MAX_BATCHES, 4);
 });
 
-test("JUDGMENT_MAX_SCAN is comfortably above JUDGMENT_QUEUE_CAP -- an ordinary wake, and the F7 red-proof's own >=cap withheld head cohort, must never bind it", () => {
-  assert.ok(JUDGMENT_MAX_SCAN > JUDGMENT_QUEUE_CAP, "JUDGMENT_MAX_SCAN must exceed JUDGMENT_QUEUE_CAP or a single full admissible batch could never be assembled without hitting the scan ceiling first");
-  assert.ok(JUDGMENT_MAX_SCAN >= JUDGMENT_QUEUE_CAP * 5, "headroom for a realistic withheld cohort to sit ahead of ordinary items without starving them");
+test("JUDGMENT_MAX_SCAN is a real, finite row/memory ceiling (docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §4: after the set-based work it is a row-read bound, NOT a per-cap query multiplier)", () => {
+  // Post-§1/§2 the scan cost is fixed regardless of page composition, so this
+  // is no longer "10x the cap" -- it is a standalone row/memory ceiling on
+  // one scan. It must be a real bound (not effectively unlimited) and
+  // comfortably above the throughput cap so a withheld head cohort never
+  // starves ordinary rows behind it within a single scan.
+  assert.equal(JUDGMENT_MAX_SCAN, 1000);
+  assert.ok(JUDGMENT_MAX_SCAN > JUDGMENT_QUEUE_CAP, "the scan ceiling must exceed the per-batch decision cap");
+  assert.ok(JUDGMENT_MAX_SCAN < 1_000_000, "a real row/memory bound, not effectively unlimited");
+});
+
+test("JUDGMENT_REPLAY_CAP is a small positive constant (§6: the stranded-approved replay cohort, bounded so a backlog cannot exhaust the invocation before the pending batch)", () => {
+  assert.ok(JUDGMENT_REPLAY_CAP >= 1, "at least one stranded row heals per wake");
+  assert.ok(JUDGMENT_REPLAY_CAP <= 5, "small enough that <=6 subrequests per replayed row keeps the non-sheddable floor under budget");
 });
 
 test("TOTAL_PROMPT_REQUEST_MAX_BYTES is generous against Fable's real input budget (verified: 1M-token context window) yet a real, finite bound", () => {

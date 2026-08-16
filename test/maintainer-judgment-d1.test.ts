@@ -45,6 +45,7 @@ import {
   JUDGMENT_SYSTEM_PROMPT,
   JUDGMENT_QUEUE_CAP,
   JUDGMENT_MAX_SCAN,
+  JUDGMENT_REPLAY_CAP,
   TOTAL_PROMPT_REQUEST_MAX_BYTES,
 } from "../src/maintainer/judgment.ts";
 import { moderateContent, flagContent, type Env } from "../src/society.ts";
@@ -500,6 +501,54 @@ test("bulletin reconciliation: an approved draft with no post gets one created v
     assert.equal(post.body, "All quiet this week.");
     assert.equal(post.pinned, 1, "a bulletin is auto-pinned, same as the primary path");
     assert.equal(post.citizen_id, maintainer.id);
+  } finally {
+    d1.close();
+  }
+});
+
+test("§6 replay cap: reconcileApprovedQueue replays at most JUDGMENT_REPLAY_CAP stranded rows per wake, newest-decided first; the rest wait for the next wake (docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §6)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    // JUDGMENT_REPLAY_CAP + 2 stranded approved bulletin drafts, each with a
+    // distinct title/body (so no dupe_hash collision) and a distinct
+    // decided_at. i=0 is the newest decision, i=cap+1 the oldest.
+    const total = JUDGMENT_REPLAY_CAP + 2;
+    const ids: number[] = [];
+    for (let i = 0; i < total; i++) {
+      ids.push(
+        insertQueueRow(d1, runId, {
+          kind: "bulletin_draft",
+          note: `Digest ${i}\nBody number ${i}, all quiet.`,
+          status: "approved",
+          decided_at: now - i * 1_000,
+          decided_reason: "looked fine to the judge",
+        }),
+      );
+    }
+
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer);
+
+    assert.equal(result.actioned, JUDGMENT_REPLAY_CAP, "exactly JUDGMENT_REPLAY_CAP rows replay this wake -- the cohort is bounded so a backlog cannot exhaust the invocation before the pending batch");
+    assert.equal(countPosts(d1), JUDGMENT_REPLAY_CAP, "exactly that many bulletins posted, not the whole backlog");
+    // A successful bulletin replay does not re-stamp the row (idempotency
+    // comes from bulletinArtifactExists finding the post next time), so every
+    // row is still 'approved'. The meaningful distinction is which rows got a
+    // POST: the newest JUDGMENT_REPLAY_CAP were replayed (newest-decided first
+    // is load-bearing against gate reproduction G1), the oldest two were never
+    // fetched and so wait for the next wake.
+    for (let i = 0; i < total; i++) {
+      const posted = (d1.raw.prepare("SELECT COUNT(*) AS n FROM posts WHERE title = ?").get(`Digest ${i}`) as { n: number }).n;
+      if (i < JUDGMENT_REPLAY_CAP) {
+        assert.equal(posted, 1, `the newest-decided row (rank ${i}) was replayed -- its bulletin exists`);
+      } else {
+        assert.equal(posted, 0, `the oldest-decided row (rank ${i}) was never fetched -- no bulletin, it waits for the next wake`);
+      }
+      assert.equal(getQueueRow(d1, ids[i]).status, "approved", `row ${ids[i]} stays approved (a replay does not re-stamp; deferral is safe)`);
+    }
   } finally {
     d1.close();
   }
@@ -1431,7 +1480,7 @@ test("F4/F7 red-proof: an oldest withheld fidelity item is reported and stays pe
   }
 });
 
-test("F7 red-proof: a head cohort of >= JUDGMENT_QUEUE_CAP withheld fidelity rows does not starve newer ordinary rows behind it (JUDGMENT_MAX_SCAN comfortably covers the whole fixture)", async () => {
+test("F7 red-proof: a large head cohort of withheld fidelity rows does not starve newer ordinary rows behind it (JUDGMENT_MAX_SCAN comfortably covers the whole fixture)", async () => {
   const d1 = createLocalD1();
   const stub = stubAnthropicFetch();
   try {
@@ -1439,9 +1488,16 @@ test("F7 red-proof: a head cohort of >= JUDGMENT_QUEUE_CAP withheld fidelity row
     const cache = await establishRealGenesisCache(d1);
     const runId = insertMaintainerRunRow(d1);
     const now = Date.now();
+    // A cohort deliberately far larger than JUDGMENT_QUEUE_CAP (now 1), so the
+    // starvation this rules out is a real many-rows-ahead cohort, not a
+    // one-row nicety. Comfortably under JUDGMENT_MAX_SCAN (1000): one scan
+    // walks past the whole cohort, withholding each, and still reaches the
+    // ordinary rows. Decoupled from the cap on purpose -- the cap governs how
+    // many DECISIONS a batch makes, not how many withheld rows a scan skips.
+    const WITHHELD_COHORT = 100;
     const withheldIds: number[] = [];
-    for (let i = 0; i < JUDGMENT_QUEUE_CAP; i++) {
-      withheldIds.push(insertWithheldFidelityRow(d1, runId, 999_000 + i, now - (JUDGMENT_QUEUE_CAP - i) * 1_000 - 50_000));
+    for (let i = 0; i < WITHHELD_COHORT; i++) {
+      withheldIds.push(insertWithheldFidelityRow(d1, runId, 999_000 + i, now - (WITHHELD_COHORT - i) * 1_000 - 50_000));
     }
     const ordinaryIds: number[] = [];
     for (let i = 0; i < 3; i++) {
@@ -1471,7 +1527,7 @@ test("F7 red-proof: a head cohort of >= JUDGMENT_QUEUE_CAP withheld fidelity row
     for (const id of withheldIds) {
       assert.equal(getQueueRow(d1, id).status, "pending", `withheld row ${id} must stay pending, never silently dropped or re-decided`);
     }
-    assert.match(run.error ?? "", new RegExp(`withheld ${JUDGMENT_QUEUE_CAP} constitution_fidelity items`));
+    assert.match(run.error ?? "", new RegExp(`withheld ${WITHHELD_COHORT} constitution_fidelity items`));
     assert.ok(stub.callCount() >= 1, "at least one real model call must have reached the ordinary rows");
   } finally {
     stub.restore();

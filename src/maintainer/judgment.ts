@@ -55,7 +55,19 @@ async function loadMaintainerCitizen(env: Env) {
   };
 }
 
-export const JUDGMENT_QUEUE_CAP = 100;
+// docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §4 / D-037 (Ben's ruling on the
+// architect's recommendation). A judgment invocation on the favourable
+// post-repair path costs 17 fixed + 24C subrequests, where C is this cap
+// (items admitted per batch) and each approved bulletin costs 6 through the
+// real executors across JUDGMENT_MAX_BATCHES=4 batches. C=1 costs 41, C=2
+// costs 65; the Free-plan ceiling is 50. So the ruled value is 1 -- AT MOST
+// four decisions per weekly judgment wake (four batches x one item each),
+// an upper bound not a promise (D-041's budget-aware shed can run fewer on a
+// crowded morning). Acceptable at five citizens and a queue of one;
+// revisitable later BY RULING, not by the builder. Was 100 -- a pre-existing
+// defect on the deployed 62a3925 (100 decisions alone exceed the budget
+// several times over), not a First Laws regression.
+export const JUDGMENT_QUEUE_CAP = 1;
 
 export interface QueueRow {
   id: number;
@@ -375,14 +387,20 @@ Decide every item listed below. An item you omit stays pending for next week -- 
 // weekly-judgment estimate averaged over a month of mostly-one-batch weeks.
 export const JUDGMENT_MAX_BATCHES = 4;
 
-// F7 (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.5): a named, loud ceiling on how
-// many raw pending rows one scanPendingQueueBatch call will read through
-// while looking for admissible items -- bounds the D1 read cost of a
-// pathological head cohort (a run of withheld or corrupted rows sitting
-// oldest-first) without ever silently starving the rows behind it. Set
-// comfortably above JUDGMENT_QUEUE_CAP (10x) so an ordinary wake, and the
-// red-proof's own >=JUDGMENT_QUEUE_CAP withheld head cohort, never binds
-// it -- binding it is the loud, exceptional case, not the common one.
+// A named, loud ceiling on how many raw pending rows one
+// scanPendingQueueBatch call will read through while looking for admissible
+// items. docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §4: after the §1/§2 set-based
+// work, this bound's MEANING changed. It is no longer a "10x the cap" query
+// multiplier (at JUDGMENT_QUEUE_CAP=1 that framing reads as nonsense): the
+// page and its classification now cost a FIXED number of statements
+// regardless of the page's composition, so this is a ROW-READ / MEMORY
+// ceiling on one scan, while JUDGMENT_QUEUE_CAP is a separate
+// decision-THROUGHPUT ceiling. Neither ties to the platform on its own --
+// the subrequest proof (test/maintainer-scheduled-budget.test.ts) is what
+// ties them both to the 50-subrequest limit. 1000 rows of pending scan is a
+// generous row/memory bound that a healthy queue never approaches; binding
+// it is the loud, exceptional case (the scan-limit run-row clause), not the
+// common one.
 export const JUDGMENT_MAX_SCAN = 1000;
 
 // F8/F9 (docs/BRIEF-FIRST-LAWS-REPAIR.md §8.5): the hard transport guard
@@ -1053,10 +1071,35 @@ interface ReconcileRow {
 // newest-decided-first means an older row, when its turn comes, sees the
 // newer row's own artifact for what it actually is: a later decision by
 // decided_at, correctly named as such.
+// docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §6 (D-037): the replay was unbounded
+// and runs BEFORE the pending batch and before pendingAtStart is even read,
+// so a backlog of stranded approved rows could exhaust the whole invocation
+// on healing alone. Each replayed row costs up to ~6 subrequests through the
+// real executors (moderateContent / createPost), so the cohort is capped at
+// a small constant. Rows beyond the cap wait for the next wake, exactly as a
+// deferred sweep proposal waits for the next sweep; the replay is idempotent
+// by design (each row's own artifact check re-runs), so deferral is safe.
+// The value must fit the compound arithmetic: with the judgment baseline at
+// 41 (17 fixed + 24C at C=1) and the D-041 budget-aware batch loop shedding
+// batches to pay for whatever the sweep and this replay consumed, 3 rows
+// (<=18 subrequests) keeps the non-sheddable floor -- sweep cohort + this
+// replay + the wake's own fixed reads + the finalise write -- safely under
+// 50 so the loud run-row write always lands. This is a builder-chosen value
+// the D-018 gate should sanity-check against the §9 compound proof; if a real
+// backlog ever needs faster draining it is a throughput ruling, not a code
+// change here.
+export const JUDGMENT_REPLAY_CAP = 3;
+
+// The newest-decided-first order (decided_at DESC) is load-bearing against
+// gate reproduction G1 (see the header comment above); the LIMIT takes the
+// first JUDGMENT_REPLAY_CAP rows OF THAT ORDER, so the most recent stranded
+// decisions heal first and older ones wait rather than any row being lost.
 async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> {
   const { results } = await env.DB.prepare(
-    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') AND (kind != 'flag_review' OR (target_type IN ('post', 'comment') AND target_id IS NOT NULL)) ORDER BY decided_at DESC",
-  ).all<ReconcileRow>();
+    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') AND (kind != 'flag_review' OR (target_type IN ('post', 'comment') AND target_id IS NOT NULL)) ORDER BY decided_at DESC LIMIT ?",
+  )
+    .bind(JUDGMENT_REPLAY_CAP)
+    .all<ReconcileRow>();
   return results;
 }
 
