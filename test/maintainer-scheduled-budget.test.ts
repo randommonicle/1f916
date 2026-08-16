@@ -194,6 +194,58 @@ test("PROOF J5 -- the D-041 COMPOUND worst case (2-due sweep + 3 stranded replay
   }
 });
 
+// Pregate cleanup wave (docs/CHECKPOINT-PREGATE.md), added after THE PROOF
+// (commit 12b2dc1) closed the wave: a verification pass measured, through
+// this same real scheduled() invocation, that the matrix above skips the
+// INTERIOR of the shed decision space. J5 proves the BOUNDARY (2-due sweep
+// + 3-replay-cap -> every batch sheds, fetch=0, total 42) and the sweep-
+// cohort test below proves the QUIET end (0 sweep/replay, 1 batch). Neither
+// proves the point in between where the sweep and replay are real but
+// SMALL enough that canOpenJudgmentBatch keeps affording batches -- so
+// several of them actually run (a real model fetch + real decision writes
+// each), stacked on top of real (not shed) sweep and replay cost. That
+// combination is the genuine peak this file's own arithmetic predicts is
+// higher than either extreme: worked from budget.ts's real constants, a
+// 1-due sweep (estimateSweepCost(1) = 3 + 9 = 12) and a 1-row replay
+// (6) leaves canOpenJudgmentBatch(12, 1, batchesOpened) affording
+// batchesOpened <= 2, i.e. batches 1-3 open for real and a 4th sheds.
+test("PROOF J-interior -- a 1-due sweep + 1 replayed row + a full pending fidelity set, opening several REAL batches on top of sweep+replay (the interior peak between J5's all-shed boundary and the quiet case)", async () => {
+  const counter = installSubrequestCounter(judgmentResponder);
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    for (let i = 0; i < 4; i++) insertCitizen(d1); // a small census for the sweep's tally
+    const runId = seedRunRow(d1);
+    const now = Date.now();
+    // Sweep cohort: 1 due proposal (the interior case, not the 2-cap boundary).
+    seedDueProposal(d1, now - 3_000);
+    // Replay cohort: 1 stranded approved bulletin (not the 3-cap boundary).
+    seedApprovedBulletin(d1, runId, 0, now - 2_000);
+    // A full pending fidelity set, every one withheld (missing-version, J6's
+    // own cheap fixture shape): scanned and classified set-based in whichever
+    // batch first reaches them, costing real D1 without ever calling the
+    // model for them. Older than every bulletin below, so they are the FIRST
+    // page a scan sees.
+    for (let i = 0; i < 50; i++) {
+      d1.raw
+        .prepare("INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status) VALUES (?, ?, 'constitution_fidelity', NULL, NULL, ?, 'missing', 'pending')")
+        .run(runId, now - 50_000 - i, `constitution_versions:${900000 + i}`);
+    }
+    // Five real pending bulletins, newer than every fidelity item: enough for
+    // canOpenJudgmentBatch to open several real batches on top of the sweep
+    // and replay cost above, with at least one left over so the shed still
+    // has something to protect the budget against.
+    for (let i = 0; i < 5; i++) seedPendingBulletin(d1, runId, i, now - 2_500 + i * 100);
+    await callScheduled(JUDGMENT_CRON, makeEnv(d1));
+    const posts = (d1.raw.prepare("SELECT COUNT(*) AS n FROM posts").get() as { n: number }).n;
+    assert.equal(counter.breached(), false, `interior compound never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()}, posts ${posts})`);
+    assert.ok(counter.total() <= 50, `interior compound total ${counter.total()} <= 50 -- the real peak, not the shed boundary`);
+  } finally {
+    counter.restore();
+    d1.close();
+  }
+});
+
 test("PROOF sweep cohorts 0 / 1 / cap through the judgment invocation each stay <= 50", async () => {
   for (const dueCount of [0, 1, 2]) {
     const counter = installSubrequestCounter(judgmentResponder);
@@ -275,6 +327,48 @@ test("PROOF C1 -- clerk full gather (50-candidate flag-heavy) + 4-RPC-worst drif
   } finally {
     counter.restore();
     d1.close();
+  }
+});
+
+// Pregate cleanup wave (docs/CHECKPOINT-PREGATE.md): PROOF C1 above only
+// measured the clerk's full-gather worst case at governance-sweep cohort 1.
+// A verification pass measured the SAME full-gather shape at cohort 0 and
+// cohort 2 (the cap) too, on the reasoning that affordableClerkInserts
+// shrinks as priorCost grows, so cohort 2's affordable insert cap (and
+// therefore its own subrequest total) sits closest to the ceiling. Mirrors
+// C1's own fixture exactly (50 flags, 4-RPC drift, K=20 model-proposed
+// drafts), varying only the due-proposal count -- same idiom as the
+// "sweep cohorts 0 / 1 / cap" judgment test above, looping rather than
+// tripling C1's body. Cohort 1 itself stays in PROOF C1, unchanged.
+test("PROOF clerk full gather at governance-sweep cohort 0 and cohort 2 (cohort 1 already covered by PROOF C1)", async () => {
+  const K = 20;
+  for (const dueCount of [0, 2]) {
+    const clerkResponder = (url: string, init: { body?: unknown } | undefined) => {
+      if (url.includes("api.anthropic.com")) {
+        const drafts = Array.from({ length: K }, (_, i) => ({ kind: "bookkeeping_note", note: `drift note ${i}` }));
+        return makeModelRpcResponder({ judgmentModel: MAINTAINER_MODELS.judgment, clerkModel: MAINTAINER_MODELS.clerk, onClerk: () => clerkDraftText(drafts) })(url, init);
+      }
+      // Base RPC probe: return a "0x" result so every fallback RPC is tried.
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x" }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const counter = installSubrequestCounter(clerkResponder);
+    const d1 = createLocalD1({ onExec: counter.consume });
+    try {
+      seedMaintainer(d1);
+      for (let i = 0; i < 4; i++) insertCitizen(d1);
+      const now = Date.now();
+      for (let i = 0; i < dueCount; i++) seedDueProposal(d1, now - (i + 1) * 1_000);
+      for (let i = 0; i < 50; i++) {
+        const postId = Number(d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (1, ?, ?, ?, 0, 'm', ?)").run(`P${i}`, `body ${i}`, `h${i}`, now - 1_000_000).lastInsertRowid);
+        d1.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (1, 'post', ?, 'spam', ?)").run(postId, now - (50 - i) * 100);
+      }
+      await callScheduled(CLERK_CRON, makeEnv(d1));
+      assert.equal(counter.breached(), false, `clerk cohort ${dueCount}: never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+      assert.ok(counter.total() <= 50, `clerk full-gather cohort ${dueCount} total ${counter.total()} <= 50`);
+    } finally {
+      counter.restore();
+      d1.close();
+    }
   }
 });
 
