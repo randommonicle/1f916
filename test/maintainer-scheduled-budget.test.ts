@@ -246,6 +246,54 @@ test("PROOF J-interior -- a 1-due sweep + 1 replayed row + a full pending fideli
   }
 });
 
+// Pre-gate fixes wave (docs/CHECKPOINT-PREGATE-FIXES.md), HIGH 2 --
+// exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX round 1.
+// Codex changed PROOF J-interior's own fidelity-row count from 50 to 400,
+// then 401, in a scratch clone and found the 401 case threw AT subrequest
+// 51 (a D1 statement) with the finalise write among the casualties: the
+// classifier's version-existence chunk cost scales with the DISTINCT
+// missing-version count (ceil(N/100) extra D1 statements per fan-out),
+// which JUDGMENT_BATCH_COST's flat per-batch estimate prices at zero. This
+// is that same mutation, committed: identical fixture shape to PROOF
+// J-interior above (1-due sweep + 1 replayed row + 5 pending bulletins),
+// with 401 missing-version fidelity rows instead of 50. The wake must shed
+// the classification LOUDLY and its own finalise write must still land --
+// never the refused 51st subrequest this class of bug produces.
+test("PROOF J-interior-401 -- 401 missing-version fidelity rows: the wake sheds classification loudly and finalises, never the refused 51st subrequest", async () => {
+  const counter = installSubrequestCounter(judgmentResponder);
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    for (let i = 0; i < 4; i++) insertCitizen(d1); // a small census for the sweep's tally
+    const runId = seedRunRow(d1);
+    const now = Date.now();
+    // Sweep cohort: 1 due proposal, same as PROOF J-interior.
+    seedDueProposal(d1, now - 3_000);
+    // Replay cohort: 1 stranded approved bulletin, same as PROOF J-interior.
+    seedApprovedBulletin(d1, runId, 0, now - 2_000);
+    // 401 missing-version fidelity rows (Codex's own reproduction number),
+    // every one withheld, every one naming a DIFFERENT version id so the
+    // classifier's existence-chunk count actually scales with N. Older than
+    // everything else below, so they are the FIRST page a scan sees.
+    for (let i = 0; i < 401; i++) {
+      d1.raw
+        .prepare("INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status) VALUES (?, ?, 'constitution_fidelity', NULL, NULL, ?, 'missing', 'pending')")
+        .run(runId, now - 500_000 - i, `constitution_versions:${900000 + i}`);
+    }
+    // Five real pending bulletins, newer than every fidelity item -- same as
+    // PROOF J-interior, so any batches that DO open have real work to do.
+    for (let i = 0; i < 5; i++) seedPendingBulletin(d1, runId, i, now - 2_500 + i * 100);
+    await callScheduled(JUDGMENT_CRON, makeEnv(d1));
+    assert.equal(counter.breached(), false, `401-row fidelity head never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+    assert.ok(counter.total() <= 50, `401-row fidelity head total ${counter.total()} <= 50 -- the finalise write must land, never the refused 51st subrequest`);
+    const run = d1.raw.prepare("SELECT error FROM maintainer_runs WHERE kind = 'judgment' ORDER BY started_at DESC LIMIT 1").get() as { error: string | null };
+    assert.match(run.error ?? "", /classification shed for subrequest budget/, "the classification shed is loud (in the served run error), never silent");
+  } finally {
+    counter.restore();
+    d1.close();
+  }
+});
+
 test("PROOF sweep cohorts 0 / 1 / cap through the judgment invocation each stay <= 50", async () => {
   for (const dueCount of [0, 1, 2]) {
     const counter = installSubrequestCounter(judgmentResponder);

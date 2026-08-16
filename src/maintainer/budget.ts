@@ -83,6 +83,66 @@ export function canOpenJudgmentBatch(priorCost: number, replayRowsProcessed: num
   return spent + JUDGMENT_BATCH_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }
 
+// HIGH 2 companion (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md
+// CODEX round 1): JUDGMENT_BATCH_COST prices a scan page's own read but
+// assumes classifying it costs NOTHING extra (8 = 1 scan page + 1 model
+// fetch + up to 6 decision writes, with 0 left for classification) -- true
+// only while every bulk fan-out inside classifyAndHydratePage
+// (maintainer/judgment.ts) stays within its first D1_MAX_BIND_PARAMS-sized
+// chunk. A page dominated by many DISTINCT ids in one fan-out category
+// (Codex's reproduction: hundreds of constitution_fidelity rows each
+// naming a different missing constitution_versions id) needs MORE chunk
+// statements than that flat estimate prices, and the shortfall was
+// completely unpriced -- Codex measured the extra chunk statements pushing
+// the wake's own finalise write into the refused 51st subrequest at 401
+// pending fidelity rows.
+//
+// D1's bind-parameter cap (100 per query, both plans) is what forces the
+// chunking in the first place -- see classifyAndHydratePage's own `chunk`
+// calls, all sized to this constant.
+export const D1_MAX_BIND_PARAMS = 100;
+
+// Pure. Conservative (>= real) worst-case chunk-statement count for
+// classifying a raw scan page from ROW COUNTS alone -- cheap, in-memory,
+// already-fetched data, never a second D1 round trip just to know the true
+// distinct-id counts. Distinct ids in any one fan-out category can never
+// exceed that category's own row count (postCount/commentCount/
+// fidelityCount are disjoint subsets of the same page, since a row is
+// never more than one kind), so counting rows is always a safe substitute
+// for counting the true distinct sets classifyAndHydratePage actually
+// queries by.
+//
+// fidelityCount prices THREE separate fan-outs off the same rows --
+// version existence, linked mandates, and version+predecessor bodies --
+// because a fidelity row's classification can touch all three regardless
+// of how many turn out admissible. A row withheld at the existence check
+// (Codex's own missing-version fixture) costs LESS in reality, never more,
+// so this stays a safe overestimate for that case. It assumes at most a
+// handful of mandates per constitution version -- a version naming
+// unusually many linked mandates is a residual this does not fully price,
+// the same kind of documented, made-rare-not-impossible residual
+// FINALISE_RESERVE's own comment accepts for chain-retry contention; real
+// constitution versions come from the governance amendment process, not an
+// unauthenticated public surface, so the volume this would need is not
+// attacker-reachable the way a pending-queue backlog organically is.
+export function classifyChunkCost(postCount: number, commentCount: number, fidelityCount: number): number {
+  const chunksOf = (n: number) => Math.ceil(n / D1_MAX_BIND_PARAMS);
+  return chunksOf(postCount) + chunksOf(commentCount) + chunksOf(fidelityCount) /* existence */ + chunksOf(fidelityCount) /* mandates, worst case */ + chunksOf(fidelityCount * 2) /* bodies: version + predecessor, worst case */;
+}
+
+// Pure. How many EXTRA classification chunk statements (beyond the base
+// scan-page read JUDGMENT_BATCH_COST already prices) can THIS batch afford,
+// given everything already spent and the batches already opened -- the
+// exact same `spent` arithmetic canOpenJudgmentBatch uses, expressed as
+// slack instead of a boolean. Only meaningful once canOpenJudgmentBatch has
+// already said this batch may open at all (which guarantees the result is
+// >= 0); a caller that skips that check could see a negative number and
+// must treat it as zero headroom, not a negative budget.
+export function classifyChunkBudget(priorCost: number, replayRowsProcessed: number, batchesOpened: number): number {
+  const spent = priorCost + JUDGMENT_WAKE_FIXED_COST + replayRowsProcessed * REPLAY_PER_ROW_COST + batchesOpened * JUDGMENT_BATCH_COST;
+  return INVOCATION_SUBREQUEST_BUDGET - spent - JUDGMENT_BATCH_COST - FINALISE_RESERVE;
+}
+
 // Pure. How many queue inserts can the clerk afford this invocation, capped at
 // `ceiling` (CLERK_QUEUE_CAP)? Never negative. On a quiet-sweep day this is
 // near the ceiling; on a busy-sweep day it shrinks, and the surplus the model

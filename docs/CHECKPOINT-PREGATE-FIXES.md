@@ -85,6 +85,121 @@ exits 1 on the NUL scratch file and 0 on all three touched files), no
 backslash-u escape notation anywhere. `git diff dfc3988..HEAD --stat --
 migrations/ schema.sql` still empty.
 
+Commit `1fb7ee3`.
+
+---
+
+## Commit 2 — HIGH 2: price the classification chunks so the wake sheds before the finalise write is refused
+
+**What it did.** `JUDGMENT_BATCH_COST=8` (`src/maintainer/budget.ts`) prices
+a scan page read, a model fetch, and up to six decision writes, with ZERO
+allocated to classification chunking (1+0+1+6=8 by the constant's own
+derivation). `classifyAndHydratePage`'s five bulk fan-out reads (flag_review
+post/comment bodies, constitution_fidelity version existence, linked
+mandates, version+predecessor bodies) are each chunked at
+`D1_MAX_BIND_PARAMS=100` ids per statement — a page dominated by many
+DISTINCT ids in one category (Codex's reproduction: hundreds of
+constitution_fidelity rows each naming a different missing version) needs
+far more chunk statements than the flat estimate prices. Codex measured the
+extra chunks pushing the wake's own finalise write into the refused 51st
+subrequest at 401 pending fidelity rows.
+
+**Fix — a computed classification cap the budget affords.** Chose this over
+a live "stop mid-chunk-loop" interrupt: interrupting `classifyAndHydratePage`
+partway through a chunk loop risks fabricating a disposition for a row whose
+data was never actually checked (e.g. reporting "version missing" for a row
+whose existence chunk simply never ran) — a correctness hazard the brief's
+own L-003 norm (never invent an artifact that is not there) forbids. Instead:
+
+- `budget.ts` gained `D1_MAX_BIND_PARAMS` (moved here from `judgment.ts`,
+  now the single source both the real `chunk()` calls and the pricing model
+  use), `classifyChunkCost(postCount, commentCount, fidelityCount)` — a
+  pure, conservative (>= real) worst-case chunk-statement count computed
+  from ROW COUNTS alone (cheap, in-memory, zero extra D1 cost, since
+  distinct ids in any category can never exceed that category's own row
+  count) — and `classifyChunkBudget(priorCost, replayRowsProcessed,
+  batchesOpened)`, exposing `canOpenJudgmentBatch`'s own slack arithmetic as
+  a number instead of a boolean.
+- `judgment.ts` gained `safeClassifyPrefixLength(page, chunkBudget)`: walks
+  the ALREADY-FETCHED page (no extra D1 cost) and finds the longest PREFIX
+  (in scan order) whose worst-case chunk cost fits the budget.
+  `scanPendingQueueBatch` now truncates its page to that prefix BEFORE
+  calling `classifyAndHydratePage` — the untruncated remainder is simply
+  never looked at this call (never a false disposition), and the cursor
+  stops before it so the next call re-scans it fresh, the identical idiom
+  already used for a cap hit or a byte-budget defer. New optional 5th
+  parameter `chunkBudget = Infinity` (every existing direct-harness test
+  caller is unaffected, unedited).
+- `classifyAndHydratePage` now counts every chunk statement it actually
+  issues (`chunksIssued`) and returns it alongside its classification map —
+  pure bookkeeping, no query or control-flow change.
+- `runJudgmentWake`'s batch loop accumulates `classifyExtraSpent` (the REAL
+  extra chunk cost every completed `scanPendingQueueBatch` call issued this
+  wake) and folds it into `priorCost` for every later `canOpenJudgmentBatch`
+  / `classifyChunkBudget` call — otherwise a classification-heavy batch's
+  real overspend would be invisible to the NEXT batch's own gate, since
+  `canOpenJudgmentBatch` only ever assumed the flat `JUDGMENT_BATCH_COST`
+  per completed batch.
+- A new loud, named run-error clause ("judgment classification shed for
+  subrequest budget...") fires whenever any call this wake truncated —
+  matching the `scanLimitHitOverall`/`batchesShed` idiom already in the
+  file. The unclassified rows are never actioned or withheld, so
+  `computeOverflowDropped` counts them as backlog automatically — no
+  special-casing needed, the shed is published via the SAME two idioms
+  (`overflow_dropped` and the run error) the task asked for.
+
+**Flagged residual, not silently smoothed over.** `classifyChunkCost` prices
+the mandate/body fan-outs assuming at most a handful of linked mandates per
+constitution version; a version naming unusually many mandates is not fully
+priced by this conservative bound. Documented at the constant's own site
+(`budget.ts`) as the same class of accepted, made-rare residual
+`FINALISE_RESERVE`'s own comment already carries for chain-retry
+contention — constitution versions come from the governance amendment
+process, not an unauthenticated public surface, so this is not
+attacker-reachable the way a pending-queue backlog organically is.
+
+**Red-proof (pasted, run against the UNFIXED code first).** New test in
+`test/maintainer-scheduled-budget.test.ts`, `PROOF J-interior-401`: the
+identical fixture shape to the existing `PROOF J-interior` (1-due sweep + 1
+replayed row + 5 pending bulletins), with 401 missing-version fidelity rows
+instead of 50 (Codex's own reproduction number). Reverted only the source
+fix via `git stash` (keeping the new test in the working tree) to run it
+against the unfixed code:
+
+```
+{"level":"error","event":"judgment_run_finalize_failed","run_id":2,"message":"Error: subrequest budget exceeded: attempted subrequest 51 of a 50-subrequest invocation (this one is a d1); running totals d1=48 fetch=3"}
+✖ PROOF J-interior-401 ... (52.7612ms)
+  AssertionError [ERR_ASSERTION]: 401-row fidelity head never exceeded budget (total 51, d1 48, fetch 3)
+  true !== false
+```
+
+Byte-for-byte the same numbers Codex pasted (`d1=48 fetch=3`,
+`judgment_run_finalize_failed`) — the finalise write is the refused 51st
+subrequest. After restoring the fix (`git stash pop`), the same test: total
+stays <= 50, `breached()` false, and the run's `error` column matches
+`/classification shed for subrequest budget/` — the shed fired and was
+published, not silently dropped.
+
+**Lower-count scenario proving normal operation is unchanged.** The
+EXISTING `PROOF J-interior` (50 missing-version rows, same sweep/replay
+shape) stayed green throughout with NO changes to its own assertions or
+measured values — confirmed by hand before writing the fix: at that
+fixture's batch-1 slack (`classifyChunkBudget` computes 16 there), the
+conservative cost for 50 fidelity rows is 3 (well under budget), so
+`safeClassifyPrefixLength` never truncates and classification proceeds
+byte-for-byte as before. Full file (12 tests) reran green after the fix,
+including `PROOF J6` (60-row fidelity head, a different sweep/replay
+shape) and every clerk/sweep-cohort scenario, none of which touch the
+judgment classify path or were affected.
+
+**Behaviour preserved.** Full suite 619/619 (618 + 1 new), typecheck clean.
+Three touched files (`src/maintainer/budget.ts`, `src/maintainer/judgment.ts`,
+`test/maintainer-scheduled-budget.test.ts`) NUL-clean, no backslash-u escape
+notation anywhere. `git diff dfc3988..HEAD --stat -- migrations/ schema.sql`
+still empty — `judgment.ts`'s own diff is code-only (no new table, no new
+column; `chunksIssued`/`classifyBudgetExhausted` are in-memory fields on an
+existing internal interface, not persisted).
+
 Commit `<filled after this commit lands>`.
 
 ---

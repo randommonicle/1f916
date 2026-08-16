@@ -13,7 +13,7 @@
 import { type Env, MAINTAINER_ID, CONSTITUTION, moderateContent, createPost } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, buildRequestBody, stripCodeFence } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
-import { canOpenJudgmentBatch } from "./budget.ts";
+import { canOpenJudgmentBatch, classifyChunkBudget, classifyChunkCost, D1_MAX_BIND_PARAMS } from "./budget.ts";
 import { truncateBody } from "./clerk.ts";
 // Type ownership split (commission notes flag 3, docs/BRIEF-FIRST-LAWS.md
 // commit 4's "CLERK CAGE UNCHANGED" section): QueueRow.kind reads rows
@@ -560,11 +560,15 @@ function buildFidelityEvidenceBlock(newVersion: FidelityConstitutionVersion, pre
     .join("\n");
 }
 
-// D1 caps bound parameters at 100 per query (both plans), so every
-// `id IN (...)` fan-out below is chunked at 100. A page of 1,000
-// missing-version rows therefore classifies in 1 page read + ceil(1000/100)
-// = 10 existence chunks = 11 D1 statements -- the pinned §1 regression cost.
-const D1_MAX_BIND_PARAMS = 100;
+// D1 caps bound parameters at 100 per query (both plans, D1_MAX_BIND_PARAMS,
+// now budget.ts's own constant -- classifyChunkCost/classifyChunkBudget
+// there price exactly this chunking), so every `id IN (...)` fan-out below
+// is chunked at 100. A page of 1,000 missing-version rows therefore
+// classifies in 1 page read + ceil(1000/100) = 10 existence chunks = 11 D1
+// statements -- the pinned §1 regression cost, TRUE ONLY when the whole
+// page's classification is actually affordable; see safeClassifyPrefixLength
+// below for what happens when it is not (HIGH 2,
+// exchange/REVIEW_combined-deploy-pregate_2026-08-16.md).
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
@@ -594,8 +598,16 @@ interface ClassifiedRow {
 // version-existence/predecessor classification plus a bulk mandate read, and
 // only the admissible candidates get their version + predecessor BODIES
 // fetched in bulk. Returns one entry per page row, keyed by id.
-async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map<number, ClassifiedRow>> {
+async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<{ classified: Map<number, ClassifiedRow>; chunksIssued: number }> {
   const result = new Map<number, ClassifiedRow>();
+  // HIGH 2 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX
+  // round 1): counts every chunk STATEMENT this call actually issues across
+  // all five bulk fan-outs below, so the caller (scanPendingQueueBatch) can
+  // accumulate the REAL extra cost classification spent this wake -- the
+  // amount JUDGMENT_BATCH_COST's flat estimate assumes is zero (see
+  // budget.ts's own classifyChunkCost/classifyChunkBudget comments). Pure
+  // bookkeeping; changes no query, no control flow.
+  let chunksIssued = 0;
   const baseRow = (raw: RawScanRow, over: Partial<QueueRow> = {}): QueueRow => ({
     id: raw.id,
     kind: raw.kind,
@@ -615,11 +627,13 @@ async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map
   const commentIds = [...new Set(flagRows.filter((r) => r.target_type === "comment").map((r) => r.target_id as number))];
   const postMap = new Map<number, { title: string | null; body: string | null; mod_state: string | null }>();
   for (const ids of chunk(postIds, D1_MAX_BIND_PARAMS)) {
+    chunksIssued++;
     const { results } = await env.DB.prepare(`SELECT id, title, body, mod_state FROM posts WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<{ id: number; title: string | null; body: string | null; mod_state: string | null }>();
     for (const r of results) postMap.set(r.id, r);
   }
   const commentMap = new Map<number, { body: string | null; mod_state: string | null }>();
   for (const ids of chunk(commentIds, D1_MAX_BIND_PARAMS)) {
+    chunksIssued++;
     const { results } = await env.DB.prepare(`SELECT id, body, mod_state FROM comments WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<{ id: number; body: string | null; mod_state: string | null }>();
     for (const r of results) commentMap.set(r.id, r);
   }
@@ -649,6 +663,7 @@ async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map
   const versionIds = [...new Set(fidRows.map((f) => f.versionId))];
   const versionClass = new Map<number, VersionClass>();
   for (const ids of chunk(versionIds, D1_MAX_BIND_PARAMS)) {
+    chunksIssued++;
     const { results } = await env.DB.prepare(
       `SELECT cv.id AS id, cv.first_seen_at AS first_seen_at, cv.mandate_proposal_ids AS mandate_proposal_ids,
          (SELECT p.id FROM constitution_versions p WHERE (p.first_seen_at < cv.first_seen_at) OR (p.first_seen_at = cv.first_seen_at AND p.id < cv.id) ORDER BY p.first_seen_at DESC, p.id DESC LIMIT 1) AS prev_id
@@ -673,6 +688,7 @@ async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map
   }
   const mandateMap = new Map<number, FidelityMandateProposal>();
   for (const ids of chunk([...mandateIdSet], D1_MAX_BIND_PARAMS)) {
+    chunksIssued++;
     const { results } = await env.DB.prepare(`SELECT id, title, body, payload, status FROM proposals WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<FidelityMandateProposal>();
     for (const r of results) mandateMap.set(r.id, r);
   }
@@ -710,6 +726,7 @@ async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map
   const bodyIds = [...new Set(admissibleFid.flatMap((a) => [a.versionId, a.vc.prev_id as number]))];
   const bodyMap = new Map<number, { full_text: string; parameters_text: string }>();
   for (const ids of chunk(bodyIds, D1_MAX_BIND_PARAMS)) {
+    chunksIssued++;
     const { results } = await env.DB.prepare(`SELECT id, full_text, parameters_text FROM constitution_versions WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<{ id: number; full_text: string; parameters_text: string }>();
     for (const r of results) bodyMap.set(r.id, { full_text: r.full_text, parameters_text: r.parameters_text });
   }
@@ -742,7 +759,7 @@ async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map
     result.set(raw.id, { row: baseRow(raw), withheldReason: null });
   }
 
-  return result;
+  return { classified: result, chunksIssued };
 }
 
 // ---------- F7/F8/F9: the progress-safe, byte-budgeted scan (D1-touching) ----------
@@ -787,6 +804,43 @@ interface QueueScanOutcome {
   scanLimitHit: boolean;
   drained: boolean;
   nextCursor: QueueScanCursor | null; // null once drained; otherwise resume point for the next call
+  // HIGH 2 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX
+  // round 1): true when safeClassifyPrefixLength truncated this call's page
+  // before classification -- the remaining rows were never looked at this
+  // call (never a false disposition), and nextCursor stops before them so
+  // the next call re-scans them fresh. runJudgmentWake turns this into a
+  // loud, named run-error clause.
+  classifyBudgetExhausted: boolean;
+  // How many chunk statements classifyAndHydratePage actually issued this
+  // call -- the REAL extra cost beyond JUDGMENT_BATCH_COST's flat estimate,
+  // for the caller to accumulate into future batches' own budget checks.
+  chunksIssued: number;
+}
+
+// HIGH 2 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX round
+// 1). Pure, in-memory, zero extra D1 cost -- the page is already fetched.
+// Finds the longest PREFIX (in scan order: created_at ASC, id ASC, the same
+// order the page itself is in) whose worst-case classification chunk cost
+// (budget.ts's classifyChunkCost) fits `chunkBudget`. A prefix, never a
+// filtered subset: stopping at the first row that would breach budget means
+// the cursor can resume cleanly from exactly there next call, and every row
+// classifyAndHydratePage is actually asked to classify gets one, honest,
+// real disposition -- never a guessed or fabricated one for a row this call
+// chose not to look at. `chunkBudget = Infinity` (the default every
+// existing direct caller gets) always returns page.length -- no cap, byte
+// for byte the pre-HIGH-2 behaviour.
+function safeClassifyPrefixLength(page: RawScanRow[], chunkBudget: number): number {
+  let postCount = 0;
+  let commentCount = 0;
+  let fidelityCount = 0;
+  for (let i = 0; i < page.length; i++) {
+    const row = page[i];
+    if (row.kind === "flag_review" && row.target_type === "post" && row.target_id != null) postCount++;
+    else if (row.kind === "flag_review" && row.target_type === "comment" && row.target_id != null) commentCount++;
+    else if (row.kind === "constitution_fidelity") fidelityCount++;
+    if (classifyChunkCost(postCount, commentCount, fidelityCount) > chunkBudget) return i;
+  }
+  return page.length;
 }
 
 // The exact phrase §8.5 names for the byte-budget withhold case ("a
@@ -823,25 +877,43 @@ async function fetchQueueScanPage(
 // set -- the F8 aggregate-split red-proof (§8.5) is most precisely proven at
 // this exact boundary (two scanner calls, no model call needed either side
 // of it) rather than only inferred through a full wake.
-export async function scanPendingQueueBatch(env: Env, cursor: QueueScanCursor | null, cap: number, maxScan: number): Promise<QueueScanOutcome> {
+export async function scanPendingQueueBatch(env: Env, cursor: QueueScanCursor | null, cap: number, maxScan: number, chunkBudget: number = Infinity): Promise<QueueScanOutcome> {
   const page = await fetchQueueScanPage(env, cursor, maxScan);
-  // §1/§2: classify AND hydrate the whole page set-based, up front, in a
-  // fixed number of bulk queries -- the withhold decisions no longer cost a
-  // per-row query, and only classification-admissible rows had their bodies
-  // fetched. The walk below is byte-for-byte the same control flow as the
-  // per-row era; it just reads each row's disposition from the precomputed
-  // map instead of hydrating inline, so scannedCount, the byte-budget
-  // admit/defer/withhold split, cursor advancement, and scanLimitHit/drained
-  // are all preserved exactly.
-  const classified = await classifyAndHydratePage(env, page);
+
+  // HIGH 2 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX
+  // round 1): classification's own bulk fan-out reads are chunked at
+  // D1_MAX_BIND_PARAMS ids per statement, and a page dominated by many
+  // distinct ids can need far more of them than JUDGMENT_BATCH_COST's flat
+  // estimate prices (budget.ts's classifyChunkCost/classifyChunkBudget).
+  // safeClassifyPrefixLength truncates this already-fetched page to the
+  // longest prefix the caller's budget affords BEFORE classification ever
+  // runs -- the remainder is left unclassified this call, exactly like a
+  // cap hit or a byte-budget defer below, never classified with a false
+  // disposition and never advanced past.
+  const classifyPrefixLen = safeClassifyPrefixLength(page, chunkBudget);
+  const classifyBudgetExhausted = classifyPrefixLen < page.length;
+  const scannablePage = classifyBudgetExhausted ? page.slice(0, classifyPrefixLen) : page;
+
+  // §1/§2: classify AND hydrate the (possibly truncated) page set-based, up
+  // front, in a fixed number of bulk queries -- the withhold decisions no
+  // longer cost a per-row query, and only classification-admissible rows
+  // had their bodies fetched. The walk below is byte-for-byte the same
+  // control flow as the per-row era; it just reads each row's disposition
+  // from the precomputed map instead of hydrating inline, so scannedCount,
+  // the byte-budget admit/defer/withhold split, cursor advancement, and
+  // scanLimitHit/drained are all preserved exactly.
+  const { classified, chunksIssued } = await classifyAndHydratePage(env, scannablePage);
 
   const admissible: QueueRow[] = [];
   const withheld: WithheldItem[] = [];
   let cur = cursor;
   let scannedCount = 0;
-  let stoppedEarly = false; // cap reached or a defer -- the page may hold unprocessed rows either way
+  // cap reached, a byte-budget defer, or the classification budget ran out
+  // before this row -- the page (page.length, not scannablePage.length) may
+  // hold unprocessed rows in every one of those three cases.
+  let stoppedEarly = classifyBudgetExhausted;
 
-  for (const raw of page) {
+  for (const raw of scannablePage) {
     if (admissible.length >= cap) {
       stoppedEarly = true;
       break;
@@ -888,7 +960,7 @@ export async function scanPendingQueueBatch(env: Env, cursor: QueueScanCursor | 
   const scanLimitHit = !stoppedEarly && page.length === maxScan;
   const drained = !stoppedEarly && page.length < maxScan;
 
-  return { admissible, withheld, scannedCount, scanLimitHit, drained, nextCursor: drained ? null : cur };
+  return { admissible, withheld, scannedCount, scanLimitHit, drained, nextCursor: drained ? null : cur, classifyBudgetExhausted, chunksIssued };
 }
 
 // M4: the true pending backlog, read once before this wake's batch loop
@@ -1678,6 +1750,17 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   let cursor: { createdAt: number; id: number } | null = null;
   const allWithheld: Array<{ id: number; reason: string }> = [];
   let scanLimitHitOverall = false;
+  // HIGH 2 companion to §9 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md
+  // CODEX round 1): classification's own chunk statements are priced
+  // separately from JUDGMENT_BATCH_COST's flat per-batch estimate, which
+  // assumes classification costs nothing beyond the scan page's own read
+  // (budget.ts). classifyExtraSpent accumulates the REAL extra chunk
+  // statements every completed scanPendingQueueBatch call actually issued
+  // this wake, folded into `priorCost` for every later gate/budget check so
+  // a classification-heavy batch is never silently forgotten by the NEXT
+  // batch's own gate.
+  let classifyExtraSpent = 0;
+  let classifyBudgetExhaustedOverall = false;
 
   while (true) {
     // §9 (D-041): shed BEFORE starting a batch we cannot pay for. Opening a
@@ -1687,14 +1770,22 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     // another batch AND the finalise reserve, stop here. If the cost table
     // drifts below reality, the end-to-end counter proof
     // (test/maintainer-scheduled-budget.test.ts) goes red at 51 -- that is the
-    // enforcement.
-    if (!canOpenJudgmentBatch(priorCost, reconciliation.rowsProcessed, batchesRun)) {
+    // enforcement. `effectivePriorCost` folds in classification's own real
+    // overspend from earlier batches this wake (HIGH 2, above).
+    const effectivePriorCost = priorCost + classifyExtraSpent;
+    if (!canOpenJudgmentBatch(effectivePriorCost, reconciliation.rowsProcessed, batchesRun)) {
       batchesShed = true;
       break;
     }
+    // HIGH 2: the same slack canOpenJudgmentBatch just confirmed is
+    // non-negative, expressed as how many EXTRA classification chunk
+    // statements (beyond the scan-page read already priced in
+    // JUDGMENT_BATCH_COST) this batch's own scan may afford before the
+    // finalise reserve is touched -- see budget.ts's classifyChunkBudget.
+    const chunkBudget = classifyChunkBudget(effectivePriorCost, reconciliation.rowsProcessed, batchesRun);
     let scanOutcome: Awaited<ReturnType<typeof scanPendingQueueBatch>>;
     try {
-      scanOutcome = await scanPendingQueueBatch(env, cursor, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
+      scanOutcome = await scanPendingQueueBatch(env, cursor, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN, chunkBudget);
     } catch (e) {
       runError = appendError(runError, `failed while scanning batch ${batchesRun + 1} of the queue: ${e instanceof Error ? e.message : String(e)}`);
       break;
@@ -1703,6 +1794,8 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     cursor = scanOutcome.nextCursor;
     allWithheld.push(...scanOutcome.withheld);
     if (scanOutcome.scanLimitHit) scanLimitHitOverall = true;
+    if (scanOutcome.classifyBudgetExhausted) classifyBudgetExhaustedOverall = true;
+    classifyExtraSpent += scanOutcome.chunksIssued;
 
     // F7: everything downstream reads `admissible` only, never the raw
     // scanned count -- a scan that found zero admissible items (fully
@@ -1753,6 +1846,15 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   }
   if (scanLimitHitOverall) {
     runError = appendError(runError, `judgment scan limit reached (${JUDGMENT_MAX_SCAN} raw rows scanned in a batch) -- some pending rows may remain unscanned this wake`);
+  }
+  if (classifyBudgetExhaustedOverall) {
+    // HIGH 2 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md CODEX
+    // round 1): a scanned page held more distinct ids than the remaining
+    // subrequest budget could safely classify this wake -- the unscanned
+    // rows were never actioned or withheld, so computeOverflowDropped below
+    // counts them as backlog automatically; this is the loud, named
+    // publication the shed itself requires (never a silent drop).
+    runError = appendError(runError, `judgment classification shed for subrequest budget -- a scanned page held more distinct ids than the remaining budget could safely classify; the unscanned rows are deferred (overflow_dropped) to the next wake`);
   }
   if (batchesShed) {
     // §9 (D-041): loud, one clause, following the scan-limit idiom above. The
