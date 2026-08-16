@@ -198,6 +198,61 @@ export async function assertRegistrationNotThrottled(env: Env, ip: string | null
   }
 }
 
+// Pre-gate fixes wave, contention finding (exchange/REVIEW_query-budget-brief_2026-08-15.md
+// / exchange/REVIEW_combined-deploy-pregate_2026-08-16.md, both CODEX
+// round 1, CONVERGED): a per-IP rate cap on the PUBLIC, permissionless
+// `POST /api/governance/sweep` (index.ts) -- see FINALISE_RESERVE's own
+// comment (maintainer/budget.ts) for why this exists. At the ~47/50
+// interior peak a judgment wake can reach, FINALISE_RESERVE absorbs ONE
+// concurrent `appendChained` UNIQUE-retry collision, but TWO refuse the
+// wake's own finalise write. Reaching "two concurrent" needs a SECOND
+// writer racing the cron wake's own sweep -- this public endpoint is the
+// only one an outside caller can hammer to try to manufacture that.
+//
+// No new table: reg_log's mechanism (hashed identifier, COUNT over a
+// rolling window, pruned after 24h) is a generic per-key throttle
+// already, registration-specific only in the ONE caller that has used it
+// so far -- this wave is code-only (no migration permitted), so reusing
+// it rather than adding a table is the fix that fits the constraint, not
+// a shortcut. The hash input is namespaced ("sweep:" here vs
+// assertRegistrationNotThrottled's "reg:" above), so the two throttles'
+// counts can never collide or leak into each other despite sharing a
+// table: hammering this endpoint never eats into a citizen's own
+// registration allowance, and vice versa (proven directly,
+// test/governance-sweep-throttle-d1.test.ts).
+//
+// Generous by design (10/hour/IP) -- this is volume protection under the
+// endpoint's own existing cost analysis (index.ts: a no-work call is one
+// bounded SELECT, due-work is separately bounded by SWEEP_COHORT_CAP and
+// the proposal-creation rate caps), not an attempt to make the endpoint
+// expensive to call occasionally. It makes sustained concurrent hammering
+// from ONE IP rare, which is the residual FINALISE_RESERVE's comment
+// documents rather than closes outright.
+//
+// Deliberately NOT called from runGovernanceSweep itself, and not from
+// scheduled()'s own direct call to it: the INTERNAL cron sweep must stay
+// completely unaffected by this cap, which is why the check lives at the
+// HTTP route (index.ts) rather than inside the shared function both paths
+// call.
+const SWEEP_THROTTLE_PER_IP_PER_HOUR = 10;
+
+export async function assertPublicSweepNotThrottled(env: Env, ip: string | null): Promise<void> {
+  if (!ip) return;
+  const hourAgo = Date.now() - 3_600_000;
+  const ipHash = await sha256Hex("sweep:" + ip);
+  const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at > ?")
+    .bind(ipHash, hourAgo)
+    .first<{ n: number }>();
+  if ((mine?.n ?? 0) >= SWEEP_THROTTLE_PER_IP_PER_HOUR) {
+    throw new SocietyError(
+      429,
+      "Too many governance-sweep calls from your address this hour. The maintainer's own cron wake sweeps on its own schedule regardless -- calling this endpoint again is never necessary to make governance progress.",
+    );
+  }
+  await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, Date.now()).run();
+  await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(Date.now() - 86_400_000).run();
+}
+
 export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
   assertValidHandle(handle);
   assertValidModel(model);

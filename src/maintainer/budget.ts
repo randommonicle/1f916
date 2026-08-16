@@ -65,6 +65,24 @@ export const CLERK_WAKE_FIXED_COST = 18;
 // with stated headroom; a chain-append UNIQUE-collision retry (only possible
 // under concurrent invocations, not within one sequential sweep) adds ~2 each
 // and is called out in the report rather than reserved in full.
+//
+// Contention finding, D-042/D-041's accept-a-rare-residual posture
+// (exchange/REVIEW_query-budget-brief_2026-08-15.md /
+// exchange/REVIEW_combined-deploy-pregate_2026-08-16.md, both CODEX round
+// 1, CONVERGED): at the ~47/50 interior peak a judgment wake can reach,
+// this reserve absorbs exactly ONE such collision -- the finalise write
+// still lands, on the slop alone. TWO concurrent collisions (+4, not +2)
+// DO refuse the finalise write; this is an ACCEPTED residual, not closed
+// here, the same posture D-042 already took for the registration-throttle
+// one-over (society.ts). Reaching "two concurrent" needs a SECOND writer
+// racing the cron wake's own co-resident sweep, and the only way an
+// outside caller can manufacture one is the public, permissionless
+// `POST /api/governance/sweep` (index.ts) -- now rate-capped per IP
+// (assertPublicSweepNotThrottled, society.ts), which is what makes this
+// residual RARE rather than routinely reachable. Raising this constant
+// to cover two collisions outright was considered and rejected: it buys
+// safety against a residual the rate cap already makes rare, at the cost
+// of shedding real work on every ordinary, uncontended wake.
 export const FINALISE_RESERVE = 2;
 
 // Pure. The sweep's estimated cost given how many due proposals it processed

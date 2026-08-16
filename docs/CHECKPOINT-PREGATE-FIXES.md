@@ -200,6 +200,155 @@ still empty — `judgment.ts`'s own diff is code-only (no new table, no new
 column; `chunksIssued`/`classifyBudgetExhausted` are in-memory fields on an
 existing internal interface, not persisted).
 
+Commit `721d9ec`.
+
+---
+
+## Commit 3 — contention: rate-cap the public sweep + document the two-collision residual
+
+**What it did.** At the ~47/48 interior peak a judgment wake can reach,
+`FINALISE_RESERVE=2` absorbs ONE `appendChained` UNIQUE-retry collision
+(~2 subrequests) but TWO concurrent collisions (+4) refuse the wake's own
+finalise write (Codex converged on this arithmetic across both pre-gate
+reviews). Reaching "two concurrent" needs a second chain writer racing the
+cron wake's own co-resident sweep — and the only way an outside caller can
+manufacture one is the public, permissionless `POST /api/governance/sweep`
+(`index.ts`), which has been unrate-limited since `docs/BRIEF-HARDENING.md`
+commit 3's ORIGINAL ruling (a different, governance-side threat model that
+no longer covers this contention risk).
+
+**Fix (a) — per-IP rate cap on the public HTTP entry only.** New
+`assertPublicSweepNotThrottled(env, ip)` in `society.ts`, mirroring
+`assertRegistrationNotThrottled`'s exact shape (hashed IP, `COUNT` over a
+rolling hour, INSERT, 24h prune). No new table: this wave is code-only (no
+migration permitted), so it reuses `reg_log` — a generic per-key throttle
+mechanism whose only current caller happens to be registration, not a
+registration-specific table in principle. The hash input is namespaced
+(`"sweep:" + ip` here vs `"reg:" + ip` for registration), so the two
+throttles' counts share a table but never a hash and can never cross-count
+— proven directly, not merely asserted (see the red-proof below). Wired
+into ONLY the HTTP route in `index.ts`, before `runGovernanceSweep(env)`;
+`scheduled()`'s own direct call to `runGovernanceSweep` (the internal cron
+path) is untouched, calling the same shared function with no throttle in
+its way, exactly as the task required. Generous by design (10/hour/IP) —
+volume protection under the endpoint's own pre-existing cost analysis
+(a no-work call is one bounded SELECT, due-work is separately bounded by
+`SWEEP_COHORT_CAP` and the proposal-creation rate caps), not an attempt to
+make the endpoint expensive to call occasionally. Rewrote the endpoint's
+own stale comment in `index.ts`, which had asserted "deliberately NO cap
+... unrate-limited by design" — now false — into a corrected account:
+the ORIGINAL governance-side reasoning (still true, kept, clearly framed
+as historical) plus the SUPERSEDING contention reasoning (why a cap
+exists now).
+
+**Blast-radius sweep for the same claim elsewhere.** Grepped `src/` for
+every other place asserting the endpoint is "unrate-limited" (not just the
+one obvious site) and found one more: `governance.ts`'s own comment on why
+`castBallot` guards its chained append (`docs/REVIEW-DEMOCRACY-RECHECK.md`
+N1) cited the sweep's lack of a rate limit as part of why the race window
+is real. Checked whether the new cap actually weakens that argument before
+touching it: it does not — the race is about a single call landing at an
+unpredictable sub-second moment, not about call VOLUME, so a 10/hour cap
+does nothing to close it (any one of the ten, a different IP, or the
+unthrottled internal cron sweep is equally sufficient). Corrected the
+word, not the argument: reworded to name the new cap explicitly and state
+why the guard remains necessary regardless. Left `docs/REVIEW-DEMOCRACY-RECHECK.md`
+(a dated, point-in-time review record) and `DECISIONS.md`'s D-037 entry
+(describes discovering the sweep as a fourth invocation shape, never
+asserts its rate-limit status) untouched — historical records, not living
+claims.
+
+**Fix (b) — document the residual at its own site.** Extended
+`FINALISE_RESERVE`'s comment (`budget.ts`) to name the two-collision case
+as an ACCEPTED residual, not closed by this commit — the same
+accept-a-rare-residual posture D-042 already took for the registration
+throttle's one-over (Commit 1). States plainly that raising the reserve to
+cover two collisions outright was considered and rejected (it would shed
+real work on every ordinary, uncontended wake to guard against a case the
+rate cap already makes rare), and names the rate cap as what makes the
+residual RARE, cross-referencing `assertPublicSweepNotThrottled`.
+
+**Red-proof (pasted, run against the UNFIXED/uncapped code first).** New
+file `test/governance-sweep-throttle-d1.test.ts` (four tests, real D1 via
+`worker.fetch`, no mocks beyond the D1-shaped adapter every other
+`-d1.test.ts` file already uses). Reverted only `society.ts`+`index.ts` via
+`git stash` (keeping the new test in the working tree) to run the first
+test against the unfixed code:
+
+```
+✖ RED-PROOF (contention finding): the 11th public sweep POST from one IP within the hour is refused with 429 (44.8143ms)
+  AssertionError [ERR_ASSERTION]: the 11th call from the SAME IP inside the hour must be refused
+  200 !== 429
+    actual: 200
+    expected: 429
+```
+
+Ten calls succeed, the 11th ALSO succeeds — completely uncapped, as the
+endpoint's own now-corrected comment used to claim on purpose. After
+restoring the fix (`git stash pop`), all four tests pass:
+
+1. The 11th call from one IP is refused 429; the first ten succeed.
+2. The INTERNAL path — `runGovernanceSweep(env)` called directly, exactly
+   as `scheduled()` calls it — succeeds even immediately after the SAME
+   IP was throttled at the public door, proving the cap never reaches the
+   cron path.
+3. A different IP is unaffected by another IP's exhausted cap (per-IP,
+   not global).
+4. Ten sweep calls from an IP land ten `reg_log` rows under the
+   sweep-namespaced hash (asserted directly against the row count, not
+   inferred), and that SAME IP's registration throttle
+   (`assertRegistrationNotThrottled`) still reports unthrottled —
+   verifying the no-cross-contamination claim the source comment makes,
+   rather than leaving it asserted but unproven.
+
+**Behaviour preserved.** Full suite 623/623 (619 + 4 new), typecheck
+clean. `PROOF shape 4` (`maintainer-scheduled-budget.test.ts`, calls
+`runGovernanceSweep` directly, bypassing the HTTP route entirely) stayed
+green and unedited — confirms the internal/direct call path was never
+touched by this commit's changes. Five touched files (`src/society.ts`,
+`src/index.ts`, `src/governance.ts` (comment only), `src/maintainer/budget.ts`,
+`test/governance-sweep-throttle-d1.test.ts`) NUL-clean, no backslash-u
+escape notation anywhere. `git diff dfc3988..HEAD --stat -- migrations/
+schema.sql` still empty — no new table, `reg_log` reused as-is.
+
 Commit `<filled after this commit lands>`.
 
 ---
+
+# WAVE CLOSE
+
+**Commits:** `1fb7ee3` throttle-backstop accept-one-over (HIGH 1) ·
+`721d9ec` classification-chunk budget pricing (HIGH 2) · `<filled>`
+sweep rate cap + residual documentation (contention), all local only on
+`main`, ahead of `origin/main` by baseline-13 + 3.
+
+**Final state:** `npm test` 623/623 pass, `npm run typecheck` clean.
+`git diff dfc3988..HEAD --stat -- migrations/ schema.sql` EMPTY across all
+three commits — every fix is code/test-only, no schema touched anywhere in
+this wave. NUL-scan clean on every touched file across all three commits
+(eleven total: `src/society.ts`, `src/register-gate.ts`,
+`test/register-gate-d1.test.ts`, `src/maintainer/budget.ts`,
+`src/maintainer/judgment.ts`, `test/maintainer-scheduled-budget.test.ts`,
+`src/index.ts`, `src/governance.ts`,
+`test/governance-sweep-throttle-d1.test.ts`, plus this file), each
+red-proofed against a scratch NUL file first. No backslash-u escape
+notation anywhere (L-009).
+
+**Not deployed, not pushed, no secrets touched, no `*.local.*` files
+read, no `npx wrangler` run.** This is builder evidence for the next
+D-018 Opus re-gate, alongside the already-landed First Laws and
+query-budget waves and the already-closed pre-gate cleanup wave
+(`docs/CHECKPOINT-PREGATE.md`).
+
+**Every finding closed; nothing flagged as unresolved.** All three
+red-proofs reproduced Codex's own findings at the same boundary Codex
+used (HIGH 1's exact interleaving via the facilitator `/verify` callback;
+HIGH 2's exact fixture number, 401, with byte-identical failure numbers
+`d1=48 fetch=3`; the contention finding's own endpoint). One documented,
+deliberate residual remains BY DESIGN, not by omission: two concurrent
+chain-append collisions during a co-resident cron wake still refuse the
+finalise write (Commit 3's fix (b)) — this is the SAME accept-a-rare-
+residual posture D-042 already ratified for the registration throttle's
+one-over, made rare rather than closed, and documented at both sites
+(`FINALISE_RESERVE` in `budget.ts`, the `FORWARD(D-042)` marker in
+`society.ts`).

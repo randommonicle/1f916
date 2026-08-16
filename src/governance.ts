@@ -1070,8 +1070,13 @@ export async function castBallot(
   // N1, reproduced): the status/window check above reads the proposal
   // once, but appending is still ~3 more D1 round trips away (isFounder,
   // the existing-ballot check, the head read inside the append itself),
-  // and POST /api/governance/sweep is permissionless and unrate-limited --
-  // it can claim and fully tally this proposal inside that gap. An
+  // and POST /api/governance/sweep is permissionless -- pre-gate fixes
+  // wave, rate-capped per IP since (society.ts's
+  // assertPublicSweepNotThrottled), but that caps VOLUME over an hour, not
+  // TIMING: a single call landing at the wrong sub-second moment is still
+  // enough, from any of the 10/hour this IP gets, any other IP, or the
+  // unthrottled internal cron sweep itself -- it can claim and fully tally
+  // this proposal inside that gap. An
   // unguarded append would still land on the chain, published and handed
   // a chain_head, yet excluded from the tally that already ran: three
   // ballots against a tally of two, an internally impossible public

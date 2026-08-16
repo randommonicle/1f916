@@ -46,6 +46,7 @@ import {
   history,
   citizenDirectory,
   attestation,
+  assertPublicSweepNotThrottled,
 } from "./society.ts";
 
 function json(data: unknown, status = 200): Response {
@@ -261,24 +262,37 @@ export default {
       // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
       //
       // Sweep rate cap: architect ruling, docs/BRIEF-HARDENING.md commit
-      // 3 -- deliberately NO cap this pass, subject to Ben's veto.
-      // Permissionless and unrate-limited by design (design doc §5 point
-      // 5: closing and tallying a proposal is deterministic code, not a
-      // privileged act), and the recheck's own N1 gave the sweep a second
-      // use as a race-widening lever -- but post-N1 (the guarded chained
-      // ballot append) the race it could widen is closed, so hammering
-      // this endpoint buys an attacker nothing. A no-work call costs one
-      // bounded SELECT, the same as any other public GET, all equally
-      // uncapped today; due-work is itself bounded by the proposal
-      // rate caps (assertProposalRateCaps: one open proposal per citizen,
-      // two per rolling week), so the worst case a hammered sweep can
-      // force is small and self-limiting. Primary defences named
-      // explicitly, not left implicit: N1's guard, and the
-      // proposal-creation rate caps. Revisit if D1 quota pressure ever
-      // actually shows up in the books (GET /treasury /
-      // /api/maintainer-runs) -- this is a judgement call against today's
-      // scale, not a claim that no volume could ever matter.
-      if (path === "/api/governance/sweep" && method === "POST") return json(await runGovernanceSweep(env));
+      // 3, ORIGINALLY deliberately no cap -- permissionless and
+      // unrate-limited by design (design doc §5 point 5: closing and
+      // tallying a proposal is deterministic code, not a privileged act),
+      // and post-N1 (the guarded chained ballot append) hammering this
+      // endpoint bought an attacker nothing on the GOVERNANCE side: a
+      // no-work call costs one bounded SELECT, due-work is itself bounded
+      // by the proposal rate caps (assertProposalRateCaps: one open
+      // proposal per citizen, two per rolling week).
+      //
+      // SUPERSEDED, pre-gate fixes wave (contention finding,
+      // exchange/REVIEW_query-budget-brief_2026-08-15.md /
+      // exchange/REVIEW_combined-deploy-pregate_2026-08-16.md, both CODEX
+      // round 1, CONVERGED): the query-budget wave's own FINALISE_RESERVE
+      // analysis found a DIFFERENT reason this endpoint needed a cap --
+      // not governance-side abuse, but subrequest CONTENTION with the
+      // cron wake's own co-resident sweep. At the ~47/50 interior peak a
+      // judgment wake can reach, FINALISE_RESERVE absorbs ONE concurrent
+      // chain-append collision, but TWO refuse the wake's own finalise
+      // write; this public, permissionless endpoint is the only way an
+      // outside caller can manufacture a second concurrent writer. Now
+      // rate-capped per IP (assertPublicSweepNotThrottled, society.ts) --
+      // generous (10/hour), volume protection under the SAME cost
+      // analysis above, not a claim that a single call is expensive. The
+      // INTERNAL cron sweep (scheduled(), below) calls runGovernanceSweep
+      // directly and never touches this check. See FINALISE_RESERVE's own
+      // comment (maintainer/budget.ts) for the residual this makes rare
+      // rather than closes outright.
+      if (path === "/api/governance/sweep" && method === "POST") {
+        await assertPublicSweepNotThrottled(env, request.headers.get("CF-Connecting-IP"));
+        return json(await runGovernanceSweep(env));
+      }
       if (path === "/api/proposals" && method === "GET")
         return json(
           await listProposals(
