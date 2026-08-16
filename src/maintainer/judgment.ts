@@ -475,29 +475,21 @@ export function shapeTargetContent(
 
 // ---------- D1-touching ----------
 
-async function fetchTargetContentForJudgment(
-  env: Env,
-  targetType: "post" | "comment",
-  targetId: number,
-): Promise<{ content: string; modState: string | null }> {
-  if (targetType === "post") {
-    const row = await env.DB.prepare("SELECT title, body, mod_state FROM posts WHERE id = ?")
-      .bind(targetId)
-      .first<{ title: string; body: string | null; mod_state: string | null }>();
-    return shapeTargetContent("post", row);
-  }
-  const row = await env.DB.prepare("SELECT body, mod_state FROM comments WHERE id = ?")
-    .bind(targetId)
-    .first<{ body: string; mod_state: string | null }>();
-  return shapeTargetContent("comment", row);
-}
-
-// ---------- F4: constitution_fidelity evidence hydration (D1-touching) ----------
+// ---------- F4 / §1 / §2: set-based fidelity classification + bulk hydration (D1-touching) ----------
 //
-// docs/BRIEF-FIRST-LAWS-REPAIR.md §8.2. Assembles the REAL evidence a
-// fidelity verdict needs -- the previous archived version, the new
-// version, and every linked mandate's full body -- and fails closed
-// (never truncates, never guesses) when any of it is missing.
+// docs/BRIEF-FIRST-LAWS-REPAIR.md §8.2 (what evidence a fidelity verdict
+// needs) AND docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §1/§2 (why it is now
+// assembled SET-BASED). The prior shape hydrated every scanned row one at a
+// time: a flag_review cost 1 query, a constitution_fidelity cost 1 (version)
+// + 1 (predecessor) + one query PER linked mandate id, looped -- so a page
+// of malformed or mandate-heavy rows could exhaust the whole invocation's
+// subrequest budget before a single decision landed. classifyAndHydratePage
+// below classifies the WHOLE page's admissibility in a FIXED number of
+// statements regardless of how many rows are malformed (§1), then fetches
+// version/predecessor/mandate BODIES only for the classification-admissible
+// candidate set, in bulk (§2). The withhold REASONS are byte-identical to
+// the per-row hydrator they replace, so every red-proof that asserts against
+// them stays green.
 
 interface FidelityConstitutionVersion {
   id: number;
@@ -505,31 +497,6 @@ interface FidelityConstitutionVersion {
   full_text: string;
   parameters_text: string;
   mandate_proposal_ids: number[];
-}
-
-async function fetchConstitutionVersionForFidelity(env: Env, id: number): Promise<FidelityConstitutionVersion | null> {
-  const row = await env.DB.prepare("SELECT id, first_seen_at, full_text, parameters_text, mandate_proposal_ids FROM constitution_versions WHERE id = ?")
-    .bind(id)
-    .first<{ id: number; first_seen_at: number; full_text: string; parameters_text: string; mandate_proposal_ids: string }>();
-  if (!row) return null;
-  return { ...row, mandate_proposal_ids: JSON.parse(row.mandate_proposal_ids) as number[] };
-}
-
-// The version immediately before `id` in archive order -- the same
-// (first_seen_at, id) total-order cursor idiom this codebase already uses
-// for proposals/citizens/constitution_versions pagination (design doc's
-// own L2 fix), so a genuine same-millisecond tie can never be misread as
-// "no previous version". A non-genesis version always has a prior row;
-// absence here means a corrupted archive, per §8.2's own fail-closed rule.
-async function fetchPreviousConstitutionVersionForFidelity(env: Env, beforeFirstSeenAt: number, beforeId: number): Promise<{ full_text: string; parameters_text: string } | null> {
-  const row = await env.DB.prepare(
-    `SELECT full_text, parameters_text FROM constitution_versions
-     WHERE (first_seen_at < ?) OR (first_seen_at = ? AND id < ?)
-     ORDER BY first_seen_at DESC, id DESC LIMIT 1`,
-  )
-    .bind(beforeFirstSeenAt, beforeFirstSeenAt, beforeId)
-    .first<{ full_text: string; parameters_text: string }>();
-  return row ?? null;
 }
 
 interface FidelityMandateProposal {
@@ -540,29 +507,13 @@ interface FidelityMandateProposal {
   status: string;
 }
 
-// Every id in `ids` must resolve to a real proposals row, or the whole
-// fetch fails closed (returns null) -- §8.2: "any linked mandate id is
-// absent from proposals" is one of the named withhold conditions.
-// Sequential, not Promise.all: matches this file's existing per-row style
-// (fetchPendingQueueBatch's own flag loop, before this commit) and this
-// runs inside a weekly wake, not a request path.
-async function fetchMandateProposalsForFidelity(env: Env, ids: number[]): Promise<FidelityMandateProposal[] | null> {
-  const proposals: FidelityMandateProposal[] = [];
-  for (const id of ids) {
-    const row = await env.DB.prepare("SELECT id, title, body, payload, status FROM proposals WHERE id = ?")
-      .bind(id)
-      .first<{ id: number; title: string; body: string; payload: string | null; status: string }>();
-    if (!row) return null;
-    proposals.push(row);
-  }
-  return proposals;
-}
-
 // Pure. Assembles the delimited, labelled-untrusted evidence block the
 // system prompt promises (§8.2's own idiom, mirroring flag_review's
-// <target_content>). Every value inside is citizen- or archive-authored
-// text, never an instruction to the judge -- the surrounding posture
-// (JUDGMENT_SYSTEM_PROMPT) already says so once, for every block.
+// <target_content>). BYTE-FOR-BYTE unchanged from the per-row era -- the
+// M-1 and F8/F9 red-proofs measure the real bytes of exactly this output,
+// so its shape is load-bearing and must not drift. Mandates are rendered in
+// the order buildFidelityEvidenceBlock receives them, and the caller passes
+// them in mandate_proposal_ids order, exactly as the old per-row fetch did.
 function buildFidelityEvidenceBlock(newVersion: FidelityConstitutionVersion, previousVersion: { full_text: string; parameters_text: string }, mandates: FidelityMandateProposal[]): string {
   const mandateBlocks = mandates
     .map((m) => `  <linked_mandate id="${m.id}" status="${m.status}">\n    <title>${m.title}</title>\n    <body>${m.body}</body>\n  </linked_mandate>`)
@@ -578,32 +529,189 @@ function buildFidelityEvidenceBlock(newVersion: FidelityConstitutionVersion, pre
     .join("\n");
 }
 
-type FidelityHydrationOutcome = { evidence: string } | { withheldReason: string };
+// D1 caps bound parameters at 100 per query (both plans), so every
+// `id IN (...)` fan-out below is chunked at 100. A page of 1,000
+// missing-version rows therefore classifies in 1 page read + ceil(1000/100)
+// = 10 existence chunks = 11 D1 statements -- the pinned §1 regression cost.
+const D1_MAX_BIND_PARAMS = 100;
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+function placeholders(n: number): string {
+  return new Array(n).fill("?").join(", ");
+}
 
-// D1-touching. Parses `<id>` from a constitution_fidelity row's own
-// source_ref (the "constitution_versions:<id>" shape
-// reconcileConstitutionFidelityQueue writes, governance.ts), fetches the
-// named version, its immediate predecessor, and every linked mandate
-// proposal, and assembles them into one evidence block -- or withholds,
-// never truncates, on any missing piece. The SIZE half of the fail-closed
-// contract (F8/F9's byte-measured admit/defer/withhold) is NOT decided
-// here -- it depends on what else is already in the batch, so it is the
-// scanner's job (scanPendingQueueBatch below), not this hydrator's.
-async function hydrateFidelityEvidence(env: Env, sourceRef: string | null): Promise<FidelityHydrationOutcome> {
-  const match = sourceRef ? /^constitution_versions:(\d+)$/.exec(sourceRef) : null;
-  if (!match) return { withheldReason: `malformed or missing source_ref (${sourceRef ?? "null"})` };
-  const versionId = Number(match[1]);
+// The raw page-row shape fetchQueueScanPage returns (below), reused by the
+// classifier so both agree on exactly which columns a scan reads.
+type RawScanRow = { id: number; kind: DbQueueKind; target_type: "post" | "comment" | "citizen" | null; target_id: number | null; source_ref: string | null; note: string; created_at: number };
 
-  const version = await fetchConstitutionVersionForFidelity(env, versionId);
-  if (!version) return { withheldReason: `named constitution_versions row ${versionId} is missing` };
+// The precomputed disposition of one scanned row: a withhold reason
+// (byte-identical to the per-row hydrator's), or a fully-assembled QueueRow
+// carrying its fetched target_content / fidelity_evidence. The walk in
+// scanPendingQueueBatch reads `row` only when withheldReason is null,
+// exactly as it read hydrateQueueRow's result before.
+interface ClassifiedRow {
+  row: QueueRow;
+  withheldReason: string | null;
+}
 
-  const previous = await fetchPreviousConstitutionVersionForFidelity(env, version.first_seen_at, version.id);
-  if (!previous) return { withheldReason: `constitution_versions row ${versionId} has no previous version (non-genesis version with no prior -- corrupted archive)` };
+// D1-touching, SET-BASED. Classifies AND hydrates the whole page in a fixed
+// number of bulk queries. flag_review target bodies come from two bulk reads
+// (posts, comments); constitution_fidelity admissibility comes from a bulk
+// version-existence/predecessor classification plus a bulk mandate read, and
+// only the admissible candidates get their version + predecessor BODIES
+// fetched in bulk. Returns one entry per page row, keyed by id.
+async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<Map<number, ClassifiedRow>> {
+  const result = new Map<number, ClassifiedRow>();
+  const baseRow = (raw: RawScanRow, over: Partial<QueueRow> = {}): QueueRow => ({
+    id: raw.id,
+    kind: raw.kind,
+    target_type: raw.target_type,
+    target_id: raw.target_id,
+    source_ref: raw.source_ref,
+    note: raw.note,
+    target_content: null,
+    target_mod_state: null,
+    fidelity_evidence: null,
+    ...over,
+  });
 
-  const mandates = await fetchMandateProposalsForFidelity(env, version.mandate_proposal_ids);
-  if (!mandates) return { withheldReason: `a linked mandate proposal for constitution_versions row ${versionId} is missing from proposals` };
+  // ---- flag_review: bulk target_content (two reads, not one-per-row) ----
+  const flagRows = page.filter((r) => r.kind === "flag_review" && (r.target_type === "post" || r.target_type === "comment") && r.target_id != null);
+  const postIds = [...new Set(flagRows.filter((r) => r.target_type === "post").map((r) => r.target_id as number))];
+  const commentIds = [...new Set(flagRows.filter((r) => r.target_type === "comment").map((r) => r.target_id as number))];
+  const postMap = new Map<number, { title: string | null; body: string | null; mod_state: string | null }>();
+  for (const ids of chunk(postIds, D1_MAX_BIND_PARAMS)) {
+    const { results } = await env.DB.prepare(`SELECT id, title, body, mod_state FROM posts WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<{ id: number; title: string | null; body: string | null; mod_state: string | null }>();
+    for (const r of results) postMap.set(r.id, r);
+  }
+  const commentMap = new Map<number, { body: string | null; mod_state: string | null }>();
+  for (const ids of chunk(commentIds, D1_MAX_BIND_PARAMS)) {
+    const { results } = await env.DB.prepare(`SELECT id, body, mod_state FROM comments WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<{ id: number; body: string | null; mod_state: string | null }>();
+    for (const r of results) commentMap.set(r.id, r);
+  }
 
-  return { evidence: buildFidelityEvidenceBlock(version, previous, mandates) };
+  // ---- constitution_fidelity: parse source_ref -> versionId ----
+  const fidRows: { raw: RawScanRow; versionId: number }[] = [];
+  for (const raw of page) {
+    if (raw.kind !== "constitution_fidelity") continue;
+    const m = raw.source_ref ? /^constitution_versions:(\d+)$/.exec(raw.source_ref) : null;
+    if (!m) {
+      result.set(raw.id, { row: baseRow(raw), withheldReason: `malformed or missing source_ref (${raw.source_ref ?? "null"})` });
+      continue;
+    }
+    fidRows.push({ raw, versionId: Number(m[1]) });
+  }
+
+  // ---- bulk version existence + predecessor id + mandate ids (NO bodies) ----
+  // Deliberately omits full_text/parameters_text: classifying 1,000
+  // missing-version rows must stay cheap, so bodies wait for the admissible
+  // set (§2). The prev_id subquery is the identical (first_seen_at, id)
+  // total order the per-row fetch used, so predecessor selection is unchanged.
+  interface VersionClass {
+    first_seen_at: number;
+    mandate_proposal_ids: number[];
+    prev_id: number | null;
+  }
+  const versionIds = [...new Set(fidRows.map((f) => f.versionId))];
+  const versionClass = new Map<number, VersionClass>();
+  for (const ids of chunk(versionIds, D1_MAX_BIND_PARAMS)) {
+    const { results } = await env.DB.prepare(
+      `SELECT cv.id AS id, cv.first_seen_at AS first_seen_at, cv.mandate_proposal_ids AS mandate_proposal_ids,
+         (SELECT p.id FROM constitution_versions p WHERE (p.first_seen_at < cv.first_seen_at) OR (p.first_seen_at = cv.first_seen_at AND p.id < cv.id) ORDER BY p.first_seen_at DESC, p.id DESC LIMIT 1) AS prev_id
+       FROM constitution_versions cv WHERE cv.id IN (${placeholders(ids.length)})`,
+    )
+      .bind(...ids)
+      .all<{ id: number; first_seen_at: number; mandate_proposal_ids: string; prev_id: number | null }>();
+    for (const r of results) versionClass.set(r.id, { first_seen_at: r.first_seen_at, mandate_proposal_ids: JSON.parse(r.mandate_proposal_ids) as number[], prev_id: r.prev_id });
+  }
+
+  // ---- bulk mandate read (existence AND bodies, one set of chunks) ----
+  // Only mandate ids of versions that EXIST are looked up: a missing version
+  // withholds before its mandates are ever consulted, which is what keeps the
+  // 1,000-row missing-version fixture at 11 statements (no mandate query at
+  // all). Fetching the body alongside existence trades a little bandwidth for
+  // one fewer query-set than an existence-then-body split would cost -- and
+  // query COUNT, not bandwidth, is the subrequest budget.
+  const mandateIdSet = new Set<number>();
+  for (const f of fidRows) {
+    const vc = versionClass.get(f.versionId);
+    if (vc) for (const id of vc.mandate_proposal_ids) mandateIdSet.add(id);
+  }
+  const mandateMap = new Map<number, FidelityMandateProposal>();
+  for (const ids of chunk([...mandateIdSet], D1_MAX_BIND_PARAMS)) {
+    const { results } = await env.DB.prepare(`SELECT id, title, body, payload, status FROM proposals WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<FidelityMandateProposal>();
+    for (const r of results) mandateMap.set(r.id, r);
+  }
+
+  // ---- classify each fidelity row; collect the admissible for the body fetch ----
+  const admissibleFid: { raw: RawScanRow; versionId: number; vc: VersionClass; mandates: FidelityMandateProposal[] }[] = [];
+  for (const f of fidRows) {
+    const vc = versionClass.get(f.versionId);
+    if (!vc) {
+      result.set(f.raw.id, { row: baseRow(f.raw), withheldReason: `named constitution_versions row ${f.versionId} is missing` });
+      continue;
+    }
+    if (vc.prev_id == null) {
+      result.set(f.raw.id, { row: baseRow(f.raw), withheldReason: `constitution_versions row ${f.versionId} has no previous version (non-genesis version with no prior -- corrupted archive)` });
+      continue;
+    }
+    const mandates: FidelityMandateProposal[] = [];
+    let missingMandate = false;
+    for (const id of vc.mandate_proposal_ids) {
+      const mp = mandateMap.get(id);
+      if (!mp) {
+        missingMandate = true;
+        break;
+      }
+      mandates.push(mp);
+    }
+    if (missingMandate) {
+      result.set(f.raw.id, { row: baseRow(f.raw), withheldReason: `a linked mandate proposal for constitution_versions row ${f.versionId} is missing from proposals` });
+      continue;
+    }
+    admissibleFid.push({ raw: f.raw, versionId: f.versionId, vc, mandates });
+  }
+
+  // ---- bulk BODY fetch for admissible versions AND their predecessors (§2) ----
+  const bodyIds = [...new Set(admissibleFid.flatMap((a) => [a.versionId, a.vc.prev_id as number]))];
+  const bodyMap = new Map<number, { full_text: string; parameters_text: string }>();
+  for (const ids of chunk(bodyIds, D1_MAX_BIND_PARAMS)) {
+    const { results } = await env.DB.prepare(`SELECT id, full_text, parameters_text FROM constitution_versions WHERE id IN (${placeholders(ids.length)})`).bind(...ids).all<{ id: number; full_text: string; parameters_text: string }>();
+    for (const r of results) bodyMap.set(r.id, { full_text: r.full_text, parameters_text: r.parameters_text });
+  }
+  for (const a of admissibleFid) {
+    const vBody = bodyMap.get(a.versionId);
+    const pBody = bodyMap.get(a.vc.prev_id as number);
+    if (!vBody || !pBody) {
+      // The version existed at classification and prev_id was non-null; a body
+      // missing here means the archive row vanished between the two reads in
+      // one wake. Withhold rather than assemble a half-empty evidence block.
+      result.set(a.raw.id, { row: baseRow(a.raw), withheldReason: `named constitution_versions row ${a.versionId} is missing` });
+      continue;
+    }
+    const newVersion: FidelityConstitutionVersion = { id: a.versionId, first_seen_at: a.vc.first_seen_at, full_text: vBody.full_text, parameters_text: vBody.parameters_text, mandate_proposal_ids: a.vc.mandate_proposal_ids };
+    result.set(a.raw.id, { row: baseRow(a.raw, { fidelity_evidence: buildFidelityEvidenceBlock(newVersion, pBody, a.mandates) }), withheldReason: null });
+  }
+
+  // ---- flag_review target_content + every other kind: pass-through ----
+  for (const raw of page) {
+    if (result.has(raw.id)) continue; // already handled above (constitution_fidelity)
+    if (raw.kind === "flag_review" && (raw.target_type === "post" || raw.target_type === "comment") && raw.target_id != null) {
+      const targetRow = raw.target_type === "post" ? (postMap.get(raw.target_id) ?? null) : (commentMap.get(raw.target_id) ?? null);
+      const shaped = shapeTargetContent(raw.target_type, targetRow);
+      result.set(raw.id, { row: baseRow(raw, { target_content: shaped.content, target_mod_state: shaped.modState }), withheldReason: null });
+      continue;
+    }
+    // bookkeeping_note, registration_check, bulletin_draft, and a flag_review
+    // with no post/comment target: admissible with null content, exactly as
+    // the per-row hydrator's final fall-through returned.
+    result.set(raw.id, { row: baseRow(raw), withheldReason: null });
+  }
+
+  return result;
 }
 
 // ---------- F7/F8/F9: the progress-safe, byte-budgeted scan (D1-touching) ----------
@@ -656,34 +764,6 @@ interface QueueScanOutcome {
 // scanner and the red-proofs asserting against it can never drift apart.
 const EVIDENCE_EXCEEDS_BUDGET_REASON = "evidence exceeds request budget";
 
-// D1-touching. Hydrates ONE raw row into its QueueRow form, or reports why
-// it cannot be hydrated (constitution_fidelity's fail-closed conditions
-// only -- flag_review's own target_content fetch never withholds; a
-// vanished target renders as shapeTargetContent's own honest sentinel,
-// unchanged from before this commit).
-async function hydrateQueueRow(
-  env: Env,
-  raw: { id: number; kind: DbQueueKind; target_type: "post" | "comment" | "citizen" | null; target_id: number | null; source_ref: string | null; note: string },
-): Promise<{ row: QueueRow; withheldReason: string | null }> {
-  let target_content: string | null = null;
-  let target_mod_state: string | null = null;
-  let fidelity_evidence: string | null = null;
-
-  if (raw.kind === "flag_review" && (raw.target_type === "post" || raw.target_type === "comment") && raw.target_id != null) {
-    const shaped = await fetchTargetContentForJudgment(env, raw.target_type, raw.target_id);
-    target_content = shaped.content;
-    target_mod_state = shaped.modState;
-  } else if (raw.kind === "constitution_fidelity") {
-    const outcome = await hydrateFidelityEvidence(env, raw.source_ref);
-    if ("withheldReason" in outcome) {
-      return { row: { ...raw, target_content, target_mod_state, fidelity_evidence: null }, withheldReason: outcome.withheldReason };
-    }
-    fidelity_evidence = outcome.evidence;
-  }
-
-  return { row: { ...raw, target_content, target_mod_state, fidelity_evidence }, withheldReason: null };
-}
-
 // The one D1 query per call: up to `maxScan` pending rows starting after
 // `cursor`, in the same (created_at, id) ASC total order listProposals/
 // listConstitutionVersions already use. A page shorter than `maxScan`
@@ -714,6 +794,15 @@ async function fetchQueueScanPage(
 // of it) rather than only inferred through a full wake.
 export async function scanPendingQueueBatch(env: Env, cursor: QueueScanCursor | null, cap: number, maxScan: number): Promise<QueueScanOutcome> {
   const page = await fetchQueueScanPage(env, cursor, maxScan);
+  // §1/§2: classify AND hydrate the whole page set-based, up front, in a
+  // fixed number of bulk queries -- the withhold decisions no longer cost a
+  // per-row query, and only classification-admissible rows had their bodies
+  // fetched. The walk below is byte-for-byte the same control flow as the
+  // per-row era; it just reads each row's disposition from the precomputed
+  // map instead of hydrating inline, so scannedCount, the byte-budget
+  // admit/defer/withhold split, cursor advancement, and scanLimitHit/drained
+  // are all preserved exactly.
+  const classified = await classifyAndHydratePage(env, page);
 
   const admissible: QueueRow[] = [];
   const withheld: WithheldItem[] = [];
@@ -728,16 +817,16 @@ export async function scanPendingQueueBatch(env: Env, cursor: QueueScanCursor | 
     }
     scannedCount++;
 
-    const hydrated = await hydrateQueueRow(env, raw);
-    if (hydrated.withheldReason) {
-      withheld.push({ id: raw.id, reason: hydrated.withheldReason });
+    const disposition = classified.get(raw.id)!;
+    if (disposition.withheldReason) {
+      withheld.push({ id: raw.id, reason: disposition.withheldReason });
       cur = { createdAt: raw.created_at, id: raw.id };
       continue;
     }
 
-    const candidateBytes = await measureRequestBytes([...admissible, hydrated.row]);
+    const candidateBytes = await measureRequestBytes([...admissible, disposition.row]);
     if (candidateBytes <= TOTAL_PROMPT_REQUEST_MAX_BYTES) {
-      admissible.push(hydrated.row);
+      admissible.push(disposition.row);
       cur = { createdAt: raw.created_at, id: raw.id };
       continue;
     }

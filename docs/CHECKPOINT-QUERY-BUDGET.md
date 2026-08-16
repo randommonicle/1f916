@@ -99,4 +99,59 @@ re-ran:
 ```
 
 Restored → green. Full suite 578/578, typecheck clean, both files
-NUL-clean. Commit `<pending>`.
+NUL-clean. Commit `08bec68`.
+
+---
+
+## Commit 3 — §1/§2: set-based fidelity classification + bulk hydration
+
+**What it did.** Rewrote the scanner's hydration (`src/maintainer/judgment.ts`)
+from per-row to set-based. Removed the per-row helpers
+(`fetchTargetContentForJudgment`, `fetchConstitutionVersionForFidelity`,
+`fetchPreviousConstitutionVersionForFidelity`,
+`fetchMandateProposalsForFidelity`, `hydrateFidelityEvidence`,
+`hydrateQueueRow`) and added `classifyAndHydratePage`: it classifies the
+WHOLE page's admissibility in a fixed number of bulk queries (flag_review
+target reads; fidelity version-existence + predecessor-id + mandate-ids;
+bulk mandate read) and fetches version + predecessor BODIES only for the
+classification-admissible set, in bulk. `scanPendingQueueBatch`'s walk is
+byte-for-byte the same control flow; it reads each row's disposition from
+the precomputed map instead of hydrating inline, so scannedCount, the
+byte-budget admit/defer/withhold split, cursor advancement, and
+scanLimitHit/drained are all preserved.
+
+**Key decisions / latitude.**
+- §2 choice: `WHERE id IN (...)` chunked at the 100-param cap (not
+  `json_each`) -- it is the plainer read against this schema and the chunk
+  count IS the pinned regression cost. `placeholders(n)`/`chunk()` helpers.
+- Combined mandate existence + body into ONE bulk read rather than an
+  existence-then-body split: query COUNT (not bandwidth) is the budget, so
+  one fewer query-set wins; a little unused body bandwidth for a row later
+  withheld for a different reason is the accepted trade. Only mandate ids of
+  EXISTING versions are looked up, so the missing-version fixture never runs
+  a mandate query.
+- `buildFidelityEvidenceBlock` and the two evidence interfaces kept
+  byte-for-byte; mandates assembled in `mandate_proposal_ids` order, so the
+  M-1/F8/F9 byte measures are identical.
+- The prev_id subquery is the identical `(first_seen_at, id)` total order the
+  per-row fetch used -- predecessor selection unchanged.
+
+**Behaviour preserved.** All 33 existing judgment D1 red-proofs stay green
+(F4/F7 withhold-then-reach, F8 combined-budget split + lone-oversized
+withhold, F9 control-heavy + CJK byte measures, M-1 real-archive content +
+missing-mandate withhold). The withhold reason strings are byte-identical.
+
+**Red-proof (pasted).** New "§1 regression fixture: a 1,000-row
+missing-version pending head classifies in a PINNED 11 D1 statements" asserts
+`counter.d1() === 11` (1 page + 10 version-existence chunks). Mutated
+`D1_MAX_BIND_PARAMS` from 100 to 1 (== per-row hydration) and re-ran:
+
+```
+✖ §1 regression fixture ...
+  Error: subrequest budget exceeded: attempted subrequest 51 of a
+  50-subrequest invocation (this one is a d1); running totals d1=51 fetch=0
+```
+
+That is the founding error of this wave reproduced exactly: per-row
+hydration blows the 50-subrequest budget mid-scan. Restored → green. Full
+suite 579/579, typecheck clean, both files NUL-clean. Commit `<pending>`.

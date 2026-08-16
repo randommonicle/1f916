@@ -34,6 +34,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
+import { installSubrequestCounter } from "./helpers/subrequest-counter.ts";
 import {
   runJudgmentWake,
   executeJudgmentDecisions,
@@ -1629,6 +1630,46 @@ test("F9 red-proof: a CJK-heavy mandate body whose CODE-UNIT length looks safely
     assert.equal(outcome.withheld[0].id, queueId);
     assert.equal(outcome.withheld[0].reason, "evidence exceeds request budget");
   } finally {
+    d1.close();
+  }
+});
+
+// ---------- §1 regression fixture (docs/BRIEF-JUDGMENT-QUERY-BUDGET.md §1):
+// the set-based classification cost, PINNED. The whole reason this wave
+// exists is that per-row hydration made a page of malformed fidelity rows
+// cost O(rows) D1 statements; the pin proves classification is now a fixed
+// constant regardless of how many rows are malformed. Measured at HEAD, not
+// estimated. Drives the scanner at the boundary AND counts every D1
+// statement it issues -- a D1-only floor here, deliberately (the brief keeps
+// Codex's own D1 costing alive as exactly this regression fixture); the
+// subrequest matrix that shares the budget with model calls is proven at the
+// invocation level in test/maintainer-scheduled-budget.test.ts. ----------
+
+test("§1 regression fixture: a 1,000-row missing-version pending head classifies in a PINNED 11 D1 statements, never O(rows) -- 1 page read + ceil(1000/100) version-existence chunks", async () => {
+  const counter = installSubrequestCounter(() => new Response("{}", { status: 200 }));
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    // 1,000 constitution_fidelity rows whose named version does not exist --
+    // all withheld at the version-existence step, before any predecessor or
+    // mandate query runs. Seeded via d1.raw, uncounted (fixture scaffolding).
+    for (let i = 0; i < 1000; i++) insertWithheldFidelityRow(d1, runId, 900_000 + i, now - (1000 - i) * 1_000);
+
+    const env = { DB: d1.DB } as unknown as Env; // no ANTHROPIC_API_KEY -- drives the scanner directly, no model call
+    const outcome = await scanPendingQueueBatch(env, null, JUDGMENT_QUEUE_CAP, JUDGMENT_MAX_SCAN);
+
+    assert.equal(outcome.admissible.length, 0, "every missing-version row is withheld, none admissible");
+    assert.equal(outcome.withheld.length, 1000, "all 1,000 rows are classified and withheld in one scan");
+    assert.equal(counter.fetches(), 0, "classification makes no outbound fetch");
+    assert.equal(
+      counter.d1(),
+      11,
+      "PINNED: 1 page read + ceil(1000/100)=10 version-existence chunks = 11 D1 statements, INDEPENDENT of the 1,000 rows. The per-row hydrator would issue 1,000+ here and the 50-subrequest counter would throw long before finishing.",
+    );
+  } finally {
+    counter.restore();
     d1.close();
   }
 });
