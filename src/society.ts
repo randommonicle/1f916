@@ -253,6 +253,49 @@ export async function assertPublicSweepNotThrottled(env: Env, ip: string | null)
   await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(Date.now() - 86_400_000).run();
 }
 
+// The per-IP cap on the secret-guarded manual maintainer-wake trigger
+// (POST /api/maintainer/run, src/maintainer/trigger.ts). A wake spends model
+// tokens, so this spend path is capped the day it is created
+// (guard-the-spend-paths Rule 1): even behind the MAINTAINER_SECRET bearer
+// check, a leaked secret or a buggy client loop must not fan out unbounded
+// paid wakes. Tighter than the public sweep's 10/hour because each call here
+// runs a FULL sweep+wake (a model call), not just the deterministic sweep.
+//
+// The PRIMARY defence on this endpoint is the constant-time secret check in
+// handleManualTrigger, NOT this cap (guard-the-spend-paths Rule 2: name the
+// real primary defence). Only a secret-holder ever reaches here; this is
+// defence-in-depth on top of that, bounding the volume a secret-holder can
+// spend.
+//
+// Same no-new-table reuse of reg_log as assertPublicSweepNotThrottled, and a
+// DISTINCT hash namespace ("maintainer-run:" vs "sweep:" vs "reg:") so the
+// three throttles' counts can never collide or leak into one another despite
+// sharing the table (proven in test/maintainer-manual-trigger-d1.test.ts).
+//
+// UNLIKE assertPublicSweepNotThrottled, this NEVER fails open on a missing IP:
+// a null/blank IP is bucketed into one shared key so the cap still binds. In
+// production CF-Connecting-IP is always set by Cloudflare; the shared bucket
+// is the closed-by-default behaviour a spend path wants when it is absent,
+// rather than a silent bypass (guard-the-spend-paths Rule 2).
+const MANUAL_TRIGGER_PER_IP_PER_HOUR = 6;
+
+export async function assertManualTriggerNotThrottled(env: Env, ip: string | null): Promise<void> {
+  const hourAgo = Date.now() - 3_600_000;
+  const key = ip && ip.trim() !== "" ? ip : "_no_ip";
+  const ipHash = await sha256Hex("maintainer-run:" + key);
+  const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at > ?")
+    .bind(ipHash, hourAgo)
+    .first<{ n: number }>();
+  if ((mine?.n ?? 0) >= MANUAL_TRIGGER_PER_IP_PER_HOUR) {
+    throw new SocietyError(
+      429,
+      "Too many manual maintainer-wake triggers from your address this hour. The maintainer's own cron wakes run on their own schedule regardless -- triggering again is never necessary to keep the maintainer running.",
+    );
+  }
+  await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, Date.now()).run();
+  await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(Date.now() - 86_400_000).run();
+}
+
 export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
   assertValidHandle(handle);
   assertValidModel(model);

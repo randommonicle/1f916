@@ -91,6 +91,31 @@ export function estimateSweepCost(proposalsProcessed: number): number {
   return SWEEP_BASE_COST + proposalsProcessed * SWEEP_PER_PROPOSAL_COST;
 }
 
+// The manual-trigger endpoint (POST /api/maintainer/run, src/maintainer/trigger.ts)
+// runs the SAME sweep+wake pipeline scheduled() does, but inside a fetch()
+// invocation that FIRST spends the per-IP rate cap's own D1 statements
+// (assertManualTriggerNotThrottled, society.ts): SELECT count + INSERT + DELETE
+// prune = 3 subrequests, in the SAME 50-subrequest invocation the wake sheds
+// against. estimateSweepCost prices only the sweep, so the endpoint adds this
+// constant to the priorCost it threads into the wake -- the wake then sheds as
+// if the sweep had cost 3 more, so the endpoint carries the SAME headroom below
+// 50 that scheduled() does, rather than quietly spending 3 of FINALISE_RESERVE's
+// margin on a path scheduled() never had.
+//
+// HONEST SCOPE (measured, not assumed): at the CURRENT conservative estimates,
+// the endpoint stays <= 50 even WITHOUT this threading -- FINALISE_RESERVE and
+// the estimates' own slack independently absorb the extra 3 in every fixture
+// tried (the wake peaks near ~45, so +3 lands near ~48, not 51). So this is a
+// margin-ALIGNMENT measure that keeps the endpoint's budget accounting honest
+// and robust against a future estimate tightening, NOT a breach-preventer at
+// today's numbers. The end-to-end proof in
+// test/maintainer-manual-trigger-d1.test.ts guards the endpoint's <= 50
+// invariant as a whole (which CAN fail if the wake's shed machinery breaks); it
+// does not, and cannot at current estimates, red-prove this +3 in isolation.
+// Conservative (>= real): the cap spends 3 on the proceed path, 0 when the IP
+// resolves to an empty bucket, never more.
+export const MANUAL_TRIGGER_PRECHECK_COST = 3;
+
 // Pure. May the judgment wake OPEN another batch? True only if, after the
 // sweep (priorCost), the wake's fixed reads, the replay rows already
 // processed, and the batches already opened, there is room for one MORE batch
