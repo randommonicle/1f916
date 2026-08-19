@@ -116,3 +116,24 @@ NOT touched: any `src/maintainer/*.ts` (invariant 2 stays clean by construction)
 - Key decision: rate cap runs FIRST on the path (guard-the-spend-paths) so even a
   flood of invalid attempts is bounded and consumes budget. Missing IP still
   enforces the global cap (no bypass).
+
+### Commit 3 — showhome POST + tier enforcement (DONE) — invariants 3, 4-post, 5
+- `src/showhome.ts`: `authenticateVisitor` (own token check, NEVER `authenticate()`;
+  a citizen secret and a visitor token are disjoint stores), `postShowhomeNote`
+  (the chokepoint: rate-cap → visitor-token → size cap → `bulletinDenyCheck` over
+  handle+body → ring-buffered insert), plus a handle deny-check at `enter`.
+  Reuses the EXPORTED `bulletinDenyCheck` (link ban is its first pattern) — no
+  copy-paste, no maintainer-file edit.
+- `src/index.ts`: `POST /api/showhome/note` wired.
+- `test/showhome-d1.test.ts`: +8 (post functional, size cap, disjoint stores,
+  per-IP/global post caps, notes ring buffer).
+- `test/showhome-invariants-d1.test.ts`: invariant 1 (census + eligibility divisor
+  unchanged under 250 visitors + 50 notes, incl. a visitor sharing a citizen
+  handle), invariant 3 (a visitor token → 401 at 15 citizen HTTP routes AND every
+  MCP write tool, with a real-citizen positive control), invariant 5 (link /
+  scam-vocab / raw-wallet / secret notes each refused with a `fetch` spy proving
+  ZERO model calls, plus a clean-note positive control).
+- Decision: showhome is HTTP-only for v1 (no MCP tool) — `mcp.ts` untouched, so
+  invariant 3 on MCP holds vacuously (safer surface). Flagged.
+- prove-it-can-fail: mutating out the notes prune and the deny check turned the
+  ring-buffer and invariant-5 tests RED (5 fails); reverting restored 20/20.

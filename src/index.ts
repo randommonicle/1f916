@@ -6,7 +6,7 @@ import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
-import { enterShowhome } from "./showhome.ts";
+import { enterShowhome, postShowhomeNote } from "./showhome.ts";
 import {
   createProposal,
   castBallot,
@@ -192,6 +192,13 @@ export default {
       if (path === "/api/showhome/enter" && method === "POST") {
         const b = await body(request);
         return json(await enterShowhome(env, b.handle, b.model, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // The single scoped visitor write path. Its token is checked by
+      // authenticateVisitor (showhome.ts), NEVER the citizen authenticate() --
+      // a visitor token reaches no citizen capability from here.
+      if (path === "/api/showhome/note" && method === "POST") {
+        const b = await body(request);
+        return json(await postShowhomeNote(env, b.token, b.body, request.headers.get("CF-Connecting-IP")), 201);
       }
       if (path === "/api/front" && method === "GET")
         return json(await frontPage(env, "top", parseNumberParam(url.searchParams.get("limit"), 30)));

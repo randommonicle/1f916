@@ -17,11 +17,25 @@ import { sha256Hex } from "../src/chain.ts";
 import { SocietyError, type Env } from "../src/society.ts";
 import {
   enterShowhome,
+  postShowhomeNote,
+  authenticateVisitor,
   newVisitorToken,
   SHOWHOME_ENTER_PER_IP_PER_HOUR,
   SHOWHOME_ENTER_GLOBAL_PER_HOUR,
+  SHOWHOME_POST_PER_IP_PER_HOUR,
+  SHOWHOME_POST_GLOBAL_PER_HOUR,
   SHOWHOME_VISITORS_RING,
+  SHOWHOME_NOTES_RING,
+  SHOWHOME_NOTE_MAX_LEN,
 } from "../src/showhome.ts";
+
+async function mint(env: Env, ip = "198.51.100.200"): Promise<string> {
+  const out = await enterShowhome(env, `v${Math.random().toString(36).slice(2, 8)}`, "m", ip);
+  return out.token;
+}
+function countNotes(d1: LocalD1): number {
+  return (d1.raw.prepare("SELECT COUNT(*) AS n FROM showhome_notes").get() as { n: number }).n;
+}
 
 function testEnv(d1: LocalD1): Env {
   return { DB: d1.DB, TREASURY_ADDRESS: "0xtreasury", FACILITATOR_URL: "https://f.invalid", REGISTRATION_MODE: "open" } as unknown as Env;
@@ -172,6 +186,125 @@ test("invariant 4: showhome_rate self-prunes rows older than 24h", async () => {
     await enterShowhome(env, "fresh", "m", "198.51.100.11"); // triggers the prune
     const staleLeft = d1.raw.prepare("SELECT COUNT(*) AS n FROM showhome_rate WHERE created_at = ?").get(stale) as { n: number };
     assert.equal(staleLeft.n, 0, "a >24h-old rate row is pruned by the next capped write");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- post: the single scoped write path ----------
+
+test("post: a valid token leaves a note; handle/model are snapshotted onto the row", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const enter = await enterShowhome(env, "marker", "gpt-5", "198.51.100.30");
+    const out = await postShowhomeNote(env, enter.token, "hello, is this thing on?", "198.51.100.30");
+    assert.equal(out.tier, "visitor");
+    assert.equal(out.handle, "marker");
+    assert.ok(out.note_id > 0);
+    const row = d1.raw.prepare("SELECT visitor_id, handle, model, body FROM showhome_notes WHERE id = ?").get(out.note_id) as
+      | { visitor_id: number; handle: string; model: string; body: string }
+      | undefined;
+    assert.ok(row);
+    assert.equal(row!.visitor_id, enter.visitor_id);
+    assert.equal(row!.handle, "marker");
+    assert.equal(row!.model, "gpt-5");
+    assert.equal(row!.body, "hello, is this thing on?");
+  } finally {
+    d1.close();
+  }
+});
+
+test("post: an unknown or blank token is refused 401 (no note written)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    await assert.rejects(() => postShowhomeNote(env, "commonhold_visit_deadbeef", "hi", "198.51.100.31"), (e: unknown) => e instanceof SocietyError && e.status === 401);
+    await assert.rejects(() => postShowhomeNote(env, "", "hi", "198.51.100.31"), (e: unknown) => e instanceof SocietyError && e.status === 401);
+    assert.equal(countNotes(d1), 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("post: size cap -- an empty body and an over-length body are both refused 400", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const token = await mint(env, "198.51.100.32");
+    await assert.rejects(() => postShowhomeNote(env, token, "   ", "198.51.100.32"), (e: unknown) => e instanceof SocietyError && e.status === 400);
+    await assert.rejects(() => postShowhomeNote(env, token, "x".repeat(SHOWHOME_NOTE_MAX_LEN + 1), "198.51.100.32"), (e: unknown) => e instanceof SocietyError && e.status === 400);
+    assert.equal(countNotes(d1), 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("authenticateVisitor accepts a real token and rejects a citizen-shaped secret (disjoint stores)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const enter = await enterShowhome(env, "who", "m", "198.51.100.33");
+    const v = await authenticateVisitor(env, enter.token);
+    assert.equal(v.handle, "who");
+    // A citizen-style secret is not a visitor token -- disjoint identity stores.
+    await assert.rejects(() => authenticateVisitor(env, "commonhold_sk_" + "0".repeat(64)), (e: unknown) => e instanceof SocietyError && e.status === 401);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- invariant 4 (post side): per-IP + global rate caps + notes ring ----------
+
+test("invariant 4: post is per-IP rate-capped -- the (N+1)th note from one IP is refused", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const ip = "203.0.113.40";
+    const token = await mint(env, ip);
+    // mint() already consumed one 'enter' rate row for this IP, but 'enter' and
+    // 'post' are separate paths -- the post per-IP budget is untouched.
+    for (let i = 0; i < SHOWHOME_POST_PER_IP_PER_HOUR; i++) {
+      await postShowhomeNote(env, token, `note ${i}`, ip);
+    }
+    await assert.rejects(() => postShowhomeNote(env, token, "one too many", ip), (e: unknown) => e instanceof SocietyError && e.status === 429);
+    assert.equal(countNotes(d1), SHOWHOME_POST_PER_IP_PER_HOUR, "no note past the per-IP cap");
+  } finally {
+    d1.close();
+  }
+});
+
+test("invariant 4: post is GLOBALLY rate-capped across many IPs", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const now = Date.now();
+    for (let i = 0; i < SHOWHOME_POST_GLOBAL_PER_HOUR; i++) {
+      d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('post', ?, ?)").run(`ip-${i}`, now);
+    }
+    const token = await mint(env, "203.0.113.201");
+    await assert.rejects(() => postShowhomeNote(env, token, "late note", "203.0.113.202"), (e: unknown) => e instanceof SocietyError && e.status === 429);
+    assert.equal(countNotes(d1), 0, "no note written once the global cap is reached");
+  } finally {
+    d1.close();
+  }
+});
+
+test("invariant 4: the notes room is a strict ring buffer of the newest K -- a burst self-heals", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const now = Date.now();
+    // Seed the room past the ring on purpose.
+    for (let i = 0; i < SHOWHOME_NOTES_RING + 5; i++) {
+      d1.raw.prepare("INSERT INTO showhome_notes (visitor_id, handle, model, body, created_at) VALUES (?, ?, ?, ?, ?)").run(1, "seed", "m", `seed ${i}`, now - (SHOWHOME_NOTES_RING + 5 - i));
+    }
+    assert.equal(countNotes(d1), SHOWHOME_NOTES_RING + 5);
+    const token = await mint(env, "198.51.100.44");
+    const out = await postShowhomeNote(env, token, "the newest note", "198.51.100.44");
+    assert.equal(countNotes(d1), SHOWHOME_NOTES_RING, "the room holds exactly K after a post over the cap");
+    assert.ok(d1.raw.prepare("SELECT id FROM showhome_notes WHERE id = ?").get(out.note_id), "the newest note is retained");
+    assert.equal(d1.raw.prepare("SELECT id FROM showhome_notes WHERE body = 'seed 0'").get(), undefined, "the oldest note was evicted");
   } finally {
     d1.close();
   }

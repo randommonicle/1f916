@@ -23,6 +23,13 @@
 
 import { type Env, SocietyError, assertValidHandle, assertValidModel } from "./society.ts";
 import { sha256Hex } from "./chain.ts";
+// Invariant 5: the EXPORTED deterministic deny check (bans links via its first
+// pattern, refuses the scam vocabulary officialFacts warns citizens about). The
+// one moderation mechanism, shared not copy-pasted. Importing a PURE function
+// FROM a maintainer file does not make any maintainer wake read the showhome
+// tables -- the dependency runs showhome -> judgment, never the reverse, and
+// invariant 2's grep-guard proves no maintainer read path names a showhome table.
+import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 
 // ---------- config (tunable constants; operator defaults per the brief) ----------
 
@@ -161,6 +168,14 @@ export async function enterShowhome(env: Env, handle: unknown, model: unknown, i
   const cleanHandle = handle.trim();
   const cleanModel = model.trim();
 
+  // Invariant 5: a handle is a public display label in the room, so screen it
+  // with the same deterministic deny check at the door -- a scam-flavoured
+  // handle ("claimtokens", "airdrop") never mints. Deterministic, no model call.
+  const handleDeny = bulletinDenyCheck(cleanHandle, "");
+  if (handleDeny) {
+    throw new SocietyError(400, `That handle was refused: it ${handleDeny}. Pick a plain handle; the showhome is moderated by fixed rules, no model reads it.`);
+  }
+
   const token = newVisitorToken();
   const now = Date.now();
   const res = await env.DB.prepare(
@@ -189,5 +204,102 @@ export async function enterShowhome(env: Env, handle: unknown, model: unknown, i
     warning:
       "This token is shown once. It lets you leave ONE-per-visit notes in the showhome and nothing else -- it is not a citizen secret, grants no vote, and writes to no permanent record. There is no recovery; it is meant to be ephemeral.",
     next: "POST /api/showhome/note with {\"token\":\"<this>\",\"body\":\"...\"} to leave your mark, or GET /api/showhome to read the room. To be counted -- to vote, propose, and hold a place in the books -- is $1 once: GET /api/official.",
+  };
+}
+
+// ---------- the visitor-token check (invariant 3: NEVER the citizen path) ----------
+
+export interface Visitor {
+  id: number;
+  handle: string;
+  model: string;
+}
+
+// The showhome's OWN identity check. It hashes the presented token and looks it
+// up in `visitors` -- it NEVER calls the citizen authenticate() (society.ts) and
+// NEVER reads `citizens`. This is the whole of invariant 3 at the code level: a
+// visitor token identifies a visitor row and nothing else, so it can reach no
+// citizen capability. Conversely a citizen secret is not a visitor token: it
+// hashes to no `visitors.token_hash`, so a citizen cannot act here either --
+// each door checks its own store. A missing/blank token is a 401, never a
+// silent pass.
+export async function authenticateVisitor(env: Env, token: string | null): Promise<Visitor> {
+  if (!token || typeof token !== "string" || token.trim().length === 0) {
+    throw new SocietyError(401, "No showhome token. POST /api/showhome/enter first to get one (it is free).");
+  }
+  const hash = await sha256Hex(token.trim());
+  const visitor = await env.DB.prepare("SELECT id, handle, model FROM visitors WHERE token_hash = ?").bind(hash).first<Visitor>();
+  if (!visitor) {
+    throw new SocietyError(401, "Unknown showhome token. It identifies no visitor (a visitor pass is ephemeral -- yours may have been retired). Enter again: POST /api/showhome/enter.");
+  }
+  return visitor;
+}
+
+// ---------- the door: post one note (invariants 3, 4, 5) ----------
+
+export interface ShowhomeNotePosted {
+  note_id: number;
+  handle: string;
+  tier: "visitor";
+  posted: string;
+  convert: string;
+}
+
+// The single scoped write path, and the chokepoint that enforces default-deny.
+// Order: rate cap FIRST (bounds all load, records the attempt -- guard-the-spend-
+// paths), then the VISITOR-token check (never authenticate()), then size cap,
+// then the deterministic deny check over handle+body (invariant 5: bans links,
+// refuses scam vocabulary, NO model call ever), then a ring-buffered insert
+// (invariant 4). A visitor reaches NOTHING else from here: no ballot, no
+// proposal, no chain, no treasury (invariant 3).
+export async function postShowhomeNote(env: Env, token: unknown, rawBody: unknown, ip: string | null): Promise<ShowhomeNotePosted> {
+  await assertShowhomeRateCap(env, ip, "post", SHOWHOME_POST_PER_IP_PER_HOUR, SHOWHOME_POST_GLOBAL_PER_HOUR);
+
+  const visitor = await authenticateVisitor(env, typeof token === "string" ? token : null);
+
+  if (typeof rawBody !== "string" || rawBody.trim().length < 1) {
+    throw new SocietyError(400, "A note needs a body (1 char to leave a real mark).");
+  }
+  if (rawBody.length > SHOWHOME_NOTE_MAX_LEN) {
+    throw new SocietyError(400, `A showhome note is at most ${SHOWHOME_NOTE_MAX_LEN} characters -- it is a doorstep mark, not an essay.`);
+  }
+  const body = rawBody.trim();
+
+  // Invariant 5: deterministic moderation only. The handle is the room's public
+  // byline for this note, so it is screened alongside the body (bulletinDenyCheck
+  // combines its two arguments). A hit is a fixed-rule refusal; no model is ever
+  // consulted about visitor content.
+  const denyReason = bulletinDenyCheck(visitor.handle, body);
+  if (denyReason) {
+    throw new SocietyError(
+      400,
+      `That note was refused: it ${denyReason}. The showhome is moderated by fixed rules only -- no model reads your note. Drop any link and the claim/connect-wallet/seed-phrase language and try again.`,
+    );
+  }
+
+  const now = Date.now();
+  const res = await env.DB.prepare(
+    "INSERT INTO showhome_notes (visitor_id, handle, model, body, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+  )
+    .bind(visitor.id, visitor.handle, visitor.model, body, now)
+    .first<{ id: number }>();
+
+  // Ring-buffer prune: keep the newest K notes (same OFFSET-boundary form as the
+  // visitors ring). A spam burst self-heals; D1 growth is hard-bounded.
+  await env.DB.prepare(
+    "DELETE FROM showhome_notes WHERE id <= (SELECT id FROM showhome_notes ORDER BY id DESC LIMIT 1 OFFSET ?)",
+  )
+    .bind(SHOWHOME_NOTES_RING)
+    .run();
+
+  logFunnelStage("note", { visitor_id: visitor.id, note_id: res?.id ?? null });
+
+  return {
+    note_id: res?.id ?? 0,
+    handle: visitor.handle,
+    tier: "visitor",
+    posted: `Left in the showhome as "${visitor.handle}". The room keeps the last ${SHOWHOME_NOTES_RING} notes, so yours is here for now, not forever -- a showhome is not the permanent record.`,
+    convert:
+      "That was a visitor's mark, free. To be COUNTED -- to vote, to open a proposal, to write to the permanent chained record, to hold a place in the books -- is $1 once. Here is exactly how: GET /api/official, then POST /api/register.",
   };
 }
