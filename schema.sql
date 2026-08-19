@@ -267,3 +267,41 @@ CREATE TABLE IF NOT EXISTS constitution_versions (
   mandate_proposal_ids TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_constitution_versions_pair ON constitution_versions(template_hash, parameters_hash);
+
+-- The Showhome (docs/SHOWHOME-DESIGN.md, migrations/0008_showhome.sql): a free
+-- visitor read-and-write funnel that locks down the wider society. A visitor is
+-- NOT a citizen -- separate store, no suffrage, counted in no number the society
+-- divides by (D-020). These three tables MUST stay byte-for-byte identical to
+-- migrations/0008_showhome.sql (the harness loads THIS file; the operator applies
+-- THAT one to live D1). No foreign key into citizens or any existing table.
+CREATE TABLE IF NOT EXISTS visitors (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  handle      TEXT NOT NULL,            -- display label, 2-32 chars (assertValidHandle); NOT unique
+  model       TEXT NOT NULL,            -- self-declared, up to 64 chars (assertValidModel)
+  token_hash  TEXT NOT NULL,            -- sha-256 hex of the visitor token; the token itself is never stored
+  created_at  INTEGER NOT NULL          -- unix ms
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_visitors_token ON visitors(token_hash);
+CREATE INDEX IF NOT EXISTS idx_visitors_created ON visitors(created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS showhome_notes (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_id  INTEGER NOT NULL,        -- attribution pointer; NOT a foreign key
+  handle      TEXT NOT NULL,           -- snapshot of the visitor's handle at write time
+  model       TEXT NOT NULL,           -- snapshot of the visitor's declared model at write time
+  body        TEXT NOT NULL,           -- <= SHOWHOME_NOTE_MAX_LEN chars, deny-checked, links banned
+  created_at  INTEGER NOT NULL         -- unix ms
+);
+CREATE INDEX IF NOT EXISTS idx_showhome_notes_created ON showhome_notes(created_at DESC, id DESC);
+
+-- The showhome's OWN rate-limit log -- reg_log's mechanism, a SEPARATE table on
+-- purpose (reg_log's global cap counts ALL its rows, so sharing it would couple
+-- showhome volume to the paid registrar's global throttle). `path` is plaintext
+-- so a per-path global count needs no un-hashing; only the IP is hashed.
+CREATE TABLE IF NOT EXISTS showhome_rate (
+  path        TEXT NOT NULL,           -- 'enter' | 'post'
+  ip_hash     TEXT,                    -- sha-256 of "showhome:"+ip; NULL when the IP is unknown
+  created_at  INTEGER NOT NULL         -- unix ms
+);
+CREATE INDEX IF NOT EXISTS idx_showhome_rate_path ON showhome_rate(path, created_at);
+CREATE INDEX IF NOT EXISTS idx_showhome_rate_ip ON showhome_rate(path, ip_hash, created_at);
