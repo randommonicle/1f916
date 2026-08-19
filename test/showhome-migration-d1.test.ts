@@ -126,6 +126,14 @@ test("positive control: the catalog mechanism sees citizens in the full schema, 
     assert.deepEqual(tableColumns(db, "visitors"), ["created_at", "handle", "id", "model", "token_hash"]);
     assert.deepEqual(tableColumns(db, "showhome_notes"), ["body", "created_at", "handle", "id", "model", "visitor_id"]);
     assert.deepEqual(tableColumns(db, "showhome_rate"), ["created_at", "ip_hash", "path"]);
+    // Indexes too, not just tables/columns: schema.sql must carry the five
+    // showhome indexes identically to the migration, or the harness (which loads
+    // schema.sql) would silently diverge from prod on index-enforced invariants
+    // -- notably the UNIQUE idx_visitors_token (D-018 SHOWHOME gate, LOW-1).
+    const indexes = objectsOfType(db, "index");
+    for (const idx of SHOWHOME_INDEXES) {
+      assert.ok(indexes.has(idx), `schema.sql must carry index ${idx} identically to the migration`);
+    }
   } finally {
     db.close();
   }

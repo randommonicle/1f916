@@ -97,9 +97,18 @@ deliberately DO NOT add an in-memory in-flight lock.** Grounded in the code:
   The real cross-isolate serialisation already lives at the data layer (the
   atomic claim, the UNIQUE chain append), which protects regardless of isolate.
 
-Net: no double **execution** of moderation/posting (atomic claim); no chain
-corruption (UNIQUE + reserve); the only residual is a bounded double **spend**
-(a second model call), which the rate cap caps.
+Net: no double **execution** of the *same* queue row (atomic claim); no chain
+corruption (UNIQUE + reserve); the main residual is a bounded double **spend**
+(a second model call), which the rate cap caps. One further residual, pre-existing
+and named by the D-018 gate (`docs/REVIEW-TRIGGER-GATE-2026-08-19.md`, F-1):
+`createPost`'s dedupe (society.ts) is a check-then-act over a NON-UNIQUE index
+(`idx_posts_dupe`, schema.sql), so two DISTINCT approved drafts with identical
+title+body executing concurrently can both pass the SELECT and both INSERT a
+duplicate bulletin. It carries no money/vote/chain impact (those chains hold
+UNIQUE indexes), it already races the same way from every existing post path
+(public post index.ts, MCP mcp.ts, proposals governance.ts), and the pinned
+duplicate is operator-removable. This endpoint does not introduce the race, it
+only adds one more way to reach it.
 
 ## Subrequest-budget threading — honest scope
 
