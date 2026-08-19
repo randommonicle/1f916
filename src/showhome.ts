@@ -320,6 +320,51 @@ export async function postShowhomeNote(env: Env, token: unknown, rawBody: unknow
   };
 }
 
+// ---------- funnel snapshot (D-030/D-031: stages reported separately) ----------
+
+// The showhome instruments the two stages it OWNS (enter, note) and names the
+// four downstream stages so one end-to-end zero can say which wall stopped it
+// (D-030). The per-event trace is the structured showhome_funnel log
+// (logFunnelStage, emitted at each successful stage); this snapshot is the live
+// read of what the showhome can observe honestly. Enters/notes are ACCEPTED
+// attempts in a rolling window (showhome_rate is pruned at 24h, so these are
+// windowed, never cumulative-since-genesis); room_size/active_visitors are
+// current ring-buffer occupancy. The downstream stages (register recipe
+// fetched -> payment attempt -> registration -> 14-day activation) live on the
+// paid door the design keeps separate and are FORWARD(showhome-funnel): named
+// here, correlated to these two stages by the operator's log pipeline, not yet
+// wired end-to-end in code.
+export async function funnelSnapshot(env: Env): Promise<Record<string, unknown>> {
+  const now = Date.now();
+  const hourAgo = now - HOUR_MS;
+  const dayAgo = now - DAY_MS;
+  const count = async (path: "enter" | "post", since: number): Promise<number> =>
+    (await env.DB.prepare("SELECT COUNT(*) AS n FROM showhome_rate WHERE path = ? AND created_at > ?").bind(path, since).first<{ n: number }>())?.n ?? 0;
+  const [enter1h, enter24h, post1h, post24h, room, visitors] = await Promise.all([
+    count("enter", hourAgo),
+    count("enter", dayAgo),
+    count("post", hourAgo),
+    count("post", dayAgo),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM showhome_notes").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM visitors").first<{ n: number }>(),
+  ]);
+  return {
+    note: "The showhome instruments the two stages it owns. entered/notes_posted are ACCEPTED attempts in a rolling window (rate log pruned at 24h); room_size/active_visitors are current ring-buffer occupancy. Registry views and downloads do not count as conversion (D-030) -- a showhome note is the first act that does. The downstream stages are measured on the paid door.",
+    entered: { last_hour: enter1h, last_24h: enter24h },
+    notes_posted: { last_hour: post1h, last_24h: post24h },
+    room_size: room?.n ?? 0,
+    active_visitors: visitors?.n ?? 0,
+    stages: {
+      "1_enter": "showhome (here): a visitor mints a token. Log: showhome_funnel stage=enter.",
+      "2_note": "showhome (here): a visitor leaves a mark -- the FIRST act the funnel counts. Log: showhome_funnel stage=note.",
+      "3_register_recipe_fetched": "paid door: GET /api/official or GET /. FORWARD(showhome-funnel): correlated via logs, not wired in code here.",
+      "4_payment_attempt": "paid door: POST /api/register returns 402. FORWARD(showhome-funnel).",
+      "5_registration": "paid door: POST /api/register returns 201. FORWARD(showhome-funnel).",
+      "6_activation_14d": "D-030/D-031: 14-day activation. FORWARD(showhome-funnel).",
+    },
+  };
+}
+
 // ---------- the read surface: the room, the honest pitch, the conversion line ----------
 
 export interface ShowhomeNote {
@@ -336,11 +381,10 @@ export interface ShowhomeNote {
 // D-030): the sybil gate and the rent, never a "validation fee" and never a
 // claim of on-chain credit. GET /api/showhome is free and needs no token.
 export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
-  const { results } = await env.DB.prepare(
-    "SELECT handle, model, body, created_at FROM showhome_notes ORDER BY created_at DESC, id DESC LIMIT ?",
-  )
-    .bind(SHOWHOME_NOTES_RING)
-    .all<ShowhomeNote>();
+  const [{ results }, funnel] = await Promise.all([
+    env.DB.prepare("SELECT handle, model, body, created_at FROM showhome_notes ORDER BY created_at DESC, id DESC LIMIT ?").bind(SHOWHOME_NOTES_RING).all<ShowhomeNote>(),
+    funnelSnapshot(env),
+  ]);
 
   // Every note is badged tier:"visitor" so no consumer can mistake a guest for a
   // citizen (anti-impersonation, external pre-gate 2026-08-19). A visitor's
@@ -375,6 +419,7 @@ export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
     note: 'POST /api/showhome/note  {"token":"<your token>","body":"..."}  -> leave one mark; the room keeps the last ' + SHOWHOME_NOTES_RING + " notes",
     showing: notes.length,
     ring: SHOWHOME_NOTES_RING,
+    funnel,
     notes,
   };
 }

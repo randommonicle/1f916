@@ -162,3 +162,19 @@ NOT touched: any `src/maintainer/*.ts` (invariant 2 stays clean by construction)
      Every note is also badged `tier:"visitor"` (belt-and-braces). Red-proved:
      a visitor claiming a citizen handle is refused; the room badges all notes.
 - Tests: full suite 653/653 GREEN (baseline 623 + 30), typecheck clean.
+
+### Commit 5 — funnel instrumentation (DONE) — D-030/D-031
+- `src/showhome.ts` `funnelSnapshot`: reports the two owned stages (enter, note)
+  as rolling accepted-attempt counts (from `showhome_rate`, windowed 1h/24h) plus
+  current room/visitor occupancy, and NAMES all six D-030 stages. The four
+  downstream (register recipe → payment → registration → 14-day activation) are
+  measured on the paid door and carry a `FORWARD(showhome-funnel)` marker — named
+  and correlated via the operator's log pipeline, not wired end-to-end in code
+  here (they cross into the paid door the design keeps separate).
+- The per-event trace is the structured `showhome_funnel` log emitted at each
+  successful stage (commits 2-3). `GET /api/showhome` now carries `funnel`.
+- Red-proof: two enters + one note make the funnel show enter=2 > note=1 (the
+  drop-off wall is visible); all six stages named; downstream flagged deferred.
+- Deferred (FORWARD(showhome-funnel)): per-refusal wall logging (which specific
+  wall refused each attempt) is left out of v1 to avoid log spam under a burst;
+  the rolling accepted-vs-refused gap is inferable from the stage counts today.

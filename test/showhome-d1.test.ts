@@ -357,6 +357,41 @@ test("read: the front door (GET /) carries a discoverable pointer to the showhom
   }
 });
 
+// ---------- funnel instrumentation (D-030) ----------
+
+test("funnel: GET /api/showhome reports the two owned stages' rolling counts and names all six D-030 stages", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    // Two enters, one note -> the funnel must show enter > note (the note stage
+    // is where this sample drops off), which is exactly the "which wall" signal.
+    const e1 = await enterShowhome(env, "aaa", "m", "198.51.100.71");
+    await enterShowhome(env, "bbb", "m", "198.51.100.72");
+    await postShowhomeNote(env, e1.token, "left a mark", "198.51.100.71");
+
+    const room = (await readShowhome(env)) as {
+      funnel: {
+        entered: { last_24h: number };
+        notes_posted: { last_24h: number };
+        room_size: number;
+        active_visitors: number;
+        stages: Record<string, string>;
+      };
+    };
+    assert.equal(room.funnel.entered.last_24h, 2, "two enters accepted in the window");
+    assert.equal(room.funnel.notes_posted.last_24h, 1, "one note accepted in the window");
+    assert.equal(room.funnel.room_size, 1);
+    assert.equal(room.funnel.active_visitors, 2);
+    // All six D-030 stages are named; the four downstream carry the deferred marker.
+    for (const key of ["1_enter", "2_note", "3_register_recipe_fetched", "4_payment_attempt", "5_registration", "6_activation_14d"]) {
+      assert.ok(room.funnel.stages[key], `stage ${key} is named`);
+    }
+    assert.match(room.funnel.stages["5_registration"], /FORWARD\(showhome-funnel\)/, "downstream stages are flagged deferred");
+  } finally {
+    d1.close();
+  }
+});
+
 // Guards against an accidental unused-import regression as this file grows.
 test("newVisitorToken produces the distinct visitor prefix", () => {
   assert.match(newVisitorToken(), /^commonhold_visit_[0-9a-f]{64}$/);
