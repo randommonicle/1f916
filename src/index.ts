@@ -22,6 +22,7 @@ import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
 import { estimateSweepCost } from "./maintainer/budget.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
+import { handleManualTrigger } from "./maintainer/trigger.ts";
 import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
@@ -258,6 +259,13 @@ export default {
       }
       if (path === "/api/maintainer-runs" && method === "GET")
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
+      // The secret-guarded manual maintainer-wake trigger (src/maintainer/trigger.ts):
+      // runs a clerk or judgment wake on demand, off the cron schedule, behaving
+      // identically to a scheduled() wake. Auth (MAINTAINER_SECRET, constant-time),
+      // per-IP rate cap, and every gate the wake applies to itself are all enforced
+      // server-side; the client names only the wake kind. Refusals throw
+      // SocietyError, caught below.
+      if (path === "/api/maintainer/run" && method === "POST") return json(await handleManualTrigger(request, env));
 
       // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
       //
