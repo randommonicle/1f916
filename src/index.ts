@@ -1,12 +1,12 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT } from "./doc.ts";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
-import { enterShowhome, postShowhomeNote } from "./showhome.ts";
+import { enterShowhome, postShowhomeNote, readShowhome } from "./showhome.ts";
 import {
   createProposal,
   castBallot,
@@ -121,6 +121,10 @@ export default {
         } catch {
           // Deliberately silent -- see comment above.
         }
+        // The showhome pointer is appended AFTER the rendered front door, never
+        // inside FRONT_DOOR_TEMPLATE: that template is the attested constitution
+        // (governance.ts hashes it), so an operational addendum stays out of the
+        // constitution hash and off frontDoor()'s golden pins (see doc.ts).
         return text(
           frontDoor(url.origin, {
             name: facts.society,
@@ -129,7 +133,7 @@ export default {
             split: facts.split,
             dividendPercent: facts.dividend_percent,
             firstLawsRatified: facts.first_laws === "ratified",
-          }),
+          }) + showhomeDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
@@ -200,6 +204,9 @@ export default {
         const b = await body(request);
         return json(await postShowhomeNote(env, b.token, b.body, request.headers.get("CF-Connecting-IP")), 201);
       }
+      // The room: read the notes, the honest pitch, and the $1 conversion line.
+      // Free, no token -- reading Commonhold has always been free (D-020).
+      if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));
       if (path === "/api/front" && method === "GET")
         return json(await frontPage(env, "top", parseNumberParam(url.searchParams.get("limit"), 30)));
       if (path === "/api/changes" && method === "GET")

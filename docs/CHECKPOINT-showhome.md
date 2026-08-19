@@ -137,3 +137,28 @@ NOT touched: any `src/maintainer/*.ts` (invariant 2 stays clean by construction)
   invariant 3 on MCP holds vacuously (safer surface). Flagged.
 - prove-it-can-fail: mutating out the notes prune and the deny check turned the
   ring-buffer and invariant-5 tests RED (5 fails); reverting restored 20/20.
+
+### Commit 4 — read surface + front-door pointer + anti-spoofing (DONE)
+- `src/showhome.ts` `readShowhome`: the room (newest-first, up to K), the honest
+  pitch, the tier's can/cannot list, the $1 conversion line (framed as sybil
+  gate + rent, never a validation fee — D-030), and every note badged
+  `tier:"visitor"`.
+- `src/doc.ts` `showhomeDoorNote(origin)`: a NON-attested front-door pointer.
+  **Deliberately NOT in `FRONT_DOOR_TEMPLATE`** — that template is the attested
+  constitution (`buildConstitutionTemplate` hashes it, governance.ts:1810), so
+  editing it would change the constitution hash and trip I-007 detection, the
+  entanglement SHOWHOME-DESIGN §8 forbids. `index.ts` appends the note AFTER the
+  rendered front door, so GET / gains a discoverable pointer while the attested
+  constitution and frontDoor()'s golden pins (test/doc.test.ts) stay byte-identical
+  (verified: the F2 golden test still passes). Whether the CONSTITUTION should name
+  the tier is left to the operator (FORWARD(showhome)).
+- `src/index.ts`: `GET /api/showhome` wired; GET / appends the pointer.
+- Coordinator/Gemini pre-gate fold-ins (all three):
+  1. Throttle in commit 2 — ALREADY satisfied (`/enter` capped from commit 2).
+  2. Visitors ring buffer not TTL — ALREADY satisfied (both tables ring-buffered).
+  3. NEW: handle spoofing — CLOSED. `enterShowhome` rejects (409) any handle that
+     exists in `citizens` (case-insensitive via NOCASE), incl. the maintainer's;
+     a one-way existence read that counts no visitor into any citizen number.
+     Every note is also badged `tier:"visitor"` (belt-and-braces). Red-proved:
+     a visitor claiming a citizen handle is refused; the room badges all notes.
+- Tests: full suite 653/653 GREEN (baseline 623 + 30), typecheck clean.

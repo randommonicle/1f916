@@ -15,10 +15,12 @@ import assert from "node:assert/strict";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { SocietyError, type Env } from "../src/society.ts";
+import worker from "../src/index.ts";
 import {
   enterShowhome,
   postShowhomeNote,
   authenticateVisitor,
+  readShowhome,
   newVisitorToken,
   SHOWHOME_ENTER_PER_IP_PER_HOUR,
   SHOWHOME_ENTER_GLOBAL_PER_HOUR,
@@ -305,6 +307,51 @@ test("invariant 4: the notes room is a strict ring buffer of the newest K -- a b
     assert.equal(countNotes(d1), SHOWHOME_NOTES_RING, "the room holds exactly K after a post over the cap");
     assert.ok(d1.raw.prepare("SELECT id FROM showhome_notes WHERE id = ?").get(out.note_id), "the newest note is retained");
     assert.equal(d1.raw.prepare("SELECT id FROM showhome_notes WHERE body = 'seed 0'").get(), undefined, "the oldest note was evicted");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- read surface ----------
+
+test("read: GET /api/showhome returns the room newest-first, the conversion line, and the ring size", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const e1 = await enterShowhome(env, "early", "m", "198.51.100.50");
+    await postShowhomeNote(env, e1.token, "first note", "198.51.100.50");
+    const e2 = await enterShowhome(env, "later", "m", "198.51.100.51");
+    await postShowhomeNote(env, e2.token, "second note", "198.51.100.51");
+
+    const room = (await readShowhome(env)) as {
+      convert: string;
+      ring: number;
+      showing: number;
+      notes: { handle: string; body: string; tier: string }[];
+    };
+    assert.equal(room.ring, SHOWHOME_NOTES_RING);
+    assert.equal(room.showing, 2);
+    assert.equal(room.notes[0].body, "second note", "newest note is first");
+    assert.equal(room.notes[1].body, "first note");
+    assert.match(room.convert, /\$1/, "the honest conversion line names the $1");
+    assert.match(room.convert, /once/, "the honest conversion line says it is a one-time price");
+    // The $1 stays the sybil gate and the rent, never a "validation fee for work
+    // already done" (D-020/D-030).
+    assert.doesNotMatch(room.convert, /validation fee/i);
+    assert.match(room.convert, /sybil defence|rent/i, "the $1 is framed as the sybil gate and rent");
+  } finally {
+    d1.close();
+  }
+});
+
+test("read: the front door (GET /) carries a discoverable pointer to the showhome", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const res = await worker.fetch(new Request("https://x.test/"), env);
+    const text = await res.text();
+    assert.match(text, /THE SHOWHOME/, "GET / names the showhome");
+    assert.match(text, /\/api\/showhome\/enter/, "GET / points at the enter endpoint");
   } finally {
     d1.close();
   }

@@ -21,7 +21,7 @@ import { sha256Hex } from "../src/chain.ts";
 import { citizenDirectory, type Env } from "../src/society.ts";
 import { countEligible } from "../src/governance.ts";
 import { bulletinDenyCheck } from "../src/maintainer/judgment.ts";
-import { enterShowhome, postShowhomeNote } from "../src/showhome.ts";
+import { enterShowhome, postShowhomeNote, readShowhome } from "../src/showhome.ts";
 import worker from "../src/index.ts";
 
 function testEnv(d1: LocalD1): Env {
@@ -55,14 +55,17 @@ test("invariant 1: visitors and notes do NOT change the citizen census (count/to
     assert.equal(eligibleBefore, 3);
     assert.equal(citizensBefore, 3);
 
-    // Now flood the showhome: many visitors (one deliberately sharing a citizen
-    // handle, to prove the census counts by TABLE not by handle) and many notes.
+    // Now flood the showhome: many API-minted visitors + notes.
     for (let i = 0; i < 50; i++) {
-      const enter = await enterShowhome(env, i === 0 ? "alice" : `visitor${i}`, "m", `198.51.100.${i}`);
+      const enter = await enterShowhome(env, `visitor${i}`, "m", `198.51.100.${i}`);
       await postShowhomeNote(env, enter.token, `mark ${i}`, `198.51.100.${i}`);
     }
-    // Plus a raw overflow of visitor rows, in case any COUNT were table-wide.
+    // Plus a raw overflow of visitor rows, INCLUDING one whose handle equals a
+    // citizen's ("alice"), to prove the census counts by TABLE not by handle
+    // (the API refuses a citizen-handle mint -- see the anti-spoofing test below
+    // -- but a raw row is the strongest possible probe of the COUNT itself).
     const now = Date.now();
+    d1.raw.prepare("INSERT INTO visitors (handle, model, token_hash, created_at) VALUES (?, ?, ?, ?)").run("alice", "m", "raw-alice-hash", now);
     for (let i = 0; i < 200; i++) {
       d1.raw.prepare("INSERT INTO visitors (handle, model, token_hash, created_at) VALUES (?, ?, ?, ?)").run(`bulk${i}`, "m", `bulk-hash-${i}`, now);
     }
@@ -231,4 +234,57 @@ test("invariant 5: moderation reuses the exported bulletinDenyCheck (shared, not
   assert.ok(bulletinDenyCheck("", "claim your airdrop"), "scam vocabulary is denied");
   assert.ok(bulletinDenyCheck("claimtokens", ""), "a scam-flavoured handle is denied");
   assert.equal(bulletinDenyCheck("", "an ordinary friendly note"), null, "clean text passes");
+});
+
+// ============================================================================
+// Anti-impersonation (external pre-gate finding, 2026-08-19): a visitor can
+// never wear a citizen's name, and every showhome byline is unambiguously a
+// visitor. Impersonation is a First-Law-2 (honesty) breach even without escalation.
+// ============================================================================
+
+test("anti-spoof: a visitor may NOT claim an existing citizen's handle (case-insensitive), incl. the maintainer's", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    insertCitizen(d1, { handle: "commonhold-agent" }); // the maintainer
+    insertCitizen(d1, { handle: "fable" });
+
+    await assert.rejects(
+      () => enterShowhome(env, "commonhold-agent", "m", "198.51.100.60"),
+      (e: unknown) => e instanceof Error && (e as { status?: number }).status === 409,
+      "a visitor claiming the maintainer's handle must be refused",
+    );
+    // Case-insensitive: citizens.handle is UNIQUE COLLATE NOCASE.
+    await assert.rejects(
+      () => enterShowhome(env, "FABLE", "m", "198.51.100.60"),
+      (e: unknown) => e instanceof Error && (e as { status?: number }).status === 409,
+      "a citizen handle in different case must still be refused",
+    );
+    // No visitor row was minted for either refusal.
+    assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM visitors").get() as { n: number }).n, 0);
+
+    // Positive control: a non-colliding handle mints fine (the check is specific).
+    const ok = await enterShowhome(env, "a-genuine-guest", "m", "198.51.100.60");
+    assert.ok(ok.visitor_id > 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("anti-spoof: every note in GET /api/showhome is badged tier:\"visitor\" -- never mistakable for a citizen", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const enter = await enterShowhome(env, "just-a-guest", "m", "198.51.100.61");
+    await postShowhomeNote(env, enter.token, "looking around", "198.51.100.61");
+
+    const room = (await readShowhome(env)) as { handles_note: string; notes: { tier: string; handle: string }[] };
+    assert.ok(room.notes.length >= 1);
+    for (const note of room.notes) {
+      assert.equal(note.tier, "visitor", "every note is unambiguously a visitor's");
+    }
+    assert.match(room.handles_note, /VISITOR|guest/, "the room states plainly that handles are visitors, not citizens");
+  } finally {
+    d1.close();
+  }
 });
