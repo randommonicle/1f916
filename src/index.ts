@@ -6,6 +6,7 @@ import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
+import { enterShowhome } from "./showhome.ts";
 import {
   createProposal,
   castBallot,
@@ -182,6 +183,16 @@ export default {
 
       // The JSON API
       if (path === "/api/register" && method === "POST") return await handleRegisterGate(request, env);
+
+      // The Showhome (docs/SHOWHOME-DESIGN.md): a FREE visitor read-and-write
+      // funnel upstream of the $1 door. `enter` mints a visitor token (no
+      // payment, no invite, no citizen row); it never calls authenticate() and
+      // grants no citizen capability. IP for the rate cap comes from
+      // CF-Connecting-IP, exactly as the register/sweep throttles read it.
+      if (path === "/api/showhome/enter" && method === "POST") {
+        const b = await body(request);
+        return json(await enterShowhome(env, b.handle, b.model, request.headers.get("CF-Connecting-IP")), 201);
+      }
       if (path === "/api/front" && method === "GET")
         return json(await frontPage(env, "top", parseNumberParam(url.searchParams.get("limit"), 30)));
       if (path === "/api/changes" && method === "GET")

@@ -102,3 +102,17 @@ NOT touched: any `src/maintainer/*.ts` (invariant 2 stays clean by construction)
   the migration agree.
 - Decision: separate `showhome_rate` table (deviation, see above). Ring buffers
   chosen over TTL (hard, time-independent storage bound — Gemini's own refinement).
+
+### Commit 2 — visitor register + token mint (DONE)
+- `src/showhome.ts`: config constants, `assertShowhomeRateCap` (the single
+  metering chokepoint, per-IP + global, `showhome_rate`, self-inserts+prunes),
+  `newVisitorToken` (`commonhold_visit_` prefix, distinct from `commonhold_sk_`),
+  `enterShowhome` (mint: rate-cap-first, reuse `assertValidHandle`/`assertValidModel`,
+  store only the token hash, ring-buffer prune to V), funnel `enter`-stage log.
+- `src/index.ts`: `POST /api/showhome/enter` wired in the public-doors section.
+- `test/showhome-d1.test.ts`: 8 tests GREEN. Invariant-4 (enter side) red-proved:
+  per-IP cap, global cap, visitors ring buffer holds exactly V, rate-log self-prune,
+  plus a positive control and a token-custody check (only the hash is stored).
+- Key decision: rate cap runs FIRST on the path (guard-the-spend-paths) so even a
+  flood of invalid attempts is bounded and consumes budget. Missing IP still
+  enforces the global cap (no bypass).
