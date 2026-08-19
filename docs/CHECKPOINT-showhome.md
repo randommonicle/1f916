@@ -178,3 +178,41 @@ NOT touched: any `src/maintainer/*.ts` (invariant 2 stays clean by construction)
 - Deferred (FORWARD(showhome-funnel)): per-refusal wall logging (which specific
   wall refused each attempt) is left out of v1 to avoid log spam under a burst;
   the rolling accepted-vs-refused gap is inferable from the stage counts today.
+
+### Commit 6 — invariant 2 (cognition blindness) + smoke (DONE)
+- `test/showhome-cognition-blindness.test.ts` (3 tests):
+  - Static blast-radius grep-guard: across ALL of `src/`, only `src/showhome.ts`
+    may access (`FROM`/`INTO`/`JOIN`/`UPDATE`) any showhome table. Positive
+    controls prove the mechanism sees `FROM posts` in clerk.ts and that
+    showhome.ts really does access its own tables (not vacuous).
+  - Runtime canary: a showhome FULL of `SHOWHOME_CANARY` notes, a real
+    `runClerkWake` driven against a URL-aware model stub -> NO model-bound prompt
+    contains the canary, while a normal post's marker DOES (the spy would catch a
+    leak). Proves a showhome full of content causes zero visitor-attributable
+    model calls.
+- `docs/SMOKE-SHOWHOME.md`: operator runbook -- migration-0008-first deploy
+  sequence, the post-apply catalog-verify queries, and the one-real-ride
+  (enter -> note -> read -> escalation refused -> census unchanged -> deny with
+  no model call -> anti-spoof 409 -> front-door pointer).
+- Final: full suite 657/657 (baseline 623 + 34), typecheck clean.
+
+## Closing walk (checkpoint-log)
+
+- [x] 6 commits landed on branch `showhome-build` in the isolated worktree.
+- [x] Schema in BOTH `schema.sql` (harness) AND `migrations/0008_showhome.sql`
+      (prod), kept identical; a test asserts they agree.
+- [x] Migration is 0008 (verified free on the Commonhold deploy line), additive
+      only, no FK, ships its catalog-verify query. Rehearsed on in-memory D1.
+- [x] Routes wired in `src/index.ts`: `POST /api/showhome/enter`,
+      `POST /api/showhome/note`, `GET /api/showhome`; GET / appends the pointer.
+- [x] All 5 invariants enforced in code AND each red-proved by a test that
+      fails when the invariant breaks (two mutation-verified live).
+- [x] Three external pre-gate fold-ins handled (throttle-in-commit-2 already
+      satisfied; visitors ring buffer already satisfied; handle-spoofing CLOSED).
+- [x] `npm test` 657/657 GREEN, `npm run typecheck` clean in the worktree.
+- [x] NOT done (operator's hand, by design): no push, no deploy, no `--remote`,
+      no secret/`*.local.*` access, no merge to main, worktree left in place.
+- Deviations flagged for the D-018 gate (see the DEVIATION and Scoping sections
+  above): dedicated `showhome_rate` table (not `reg_log`); HTTP-only v1 (no MCP
+  showhome tool); front-door pointer kept OUT of the attested constitution;
+  per-refusal wall logging + a constitutional visitor-tier rider both deferred.
