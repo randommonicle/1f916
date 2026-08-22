@@ -33,7 +33,7 @@ import {
 // name-status fragments and the banner fragment present at once, so the
 // attested template is a strict superset of every clause frontDoor can
 // ever serve, not a sample of two states among an unbounded number.
-import { renderFrontDoor, NAME_STATUS_RATIFIED, NAME_STATUS_PROVISIONAL, FIRST_LAWS_BANNER } from "./doc.ts";
+import { renderFrontDoor, NAME_STATUS_RATIFIED, NAME_STATUS_PROVISIONAL, FIRST_LAWS_BANNER, JOIN_INVITE_ONLY, JOIN_OPEN } from "./doc.ts";
 
 // Defined in society.ts, not here: officialFacts() (society.ts) needs
 // them too, and society.ts is the base module every feature file already
@@ -1756,7 +1756,28 @@ const CANONICAL_CONSTITUTION_ORIGIN = "https://commonhold.invalid";
 // regardless of how many conditionals doc.ts ever gains.
 export function buildConstitutionTemplate(): string {
   const nameStatusSuperset = `${NAME_STATUS_RATIFIED}\n\n----NAME-STATUS-ALT----\n\n${NAME_STATUS_PROVISIONAL}`;
-  return renderFrontDoor(DEFAULT_NAME, CANONICAL_CONSTITUTION_ORIGIN, DEFAULT_CONTROL_FLOOR_PERCENT, DEFAULT_DIVIDEND_PERCENT, DEFAULT_SPLIT, nameStatusSuperset, FIRST_LAWS_BANNER);
+  // The registration-mode conditional (doc.ts JOIN_INVITE_ONLY/JOIN_OPEN) is
+  // the third conditional this function's own comment above anticipated, and
+  // it is supersetted on exactly the same principle: BOTH fragments of every
+  // field that carries distinguishing text go into the one hashed string, so
+  // no served clause escapes attestation. `transition` supersets only the
+  // invite_only branch because the open branch is "" -- absence is its whole
+  // content, the same reason FIRST_LAWS_BANNER is passed present rather than
+  // as its empty ratified branch.
+  const joinSuperset = {
+    paragraph: `${JOIN_INVITE_ONLY.paragraph}\n\n----JOIN-MODE-ALT----\n\n${JOIN_OPEN.paragraph}`,
+    // The {{REGISTER_BODY}} slot sits INDENTED two spaces in the template, so
+    // only the first line of a multi-line substitution inherits that indent --
+    // every continuation line lands at column 0. Without matching the indent
+    // here, the open-mode body line as ACTUALLY SERVED ("  {\"handle\"...") is
+    // absent from the hashed template while a column-0 twin sits in it, which
+    // is precisely the "served a clause the attestation never exercised" hole
+    // this superset exists to close. Caught by F2 superset coverage, which
+    // failed on exactly this line before the indent was added.
+    body: `${JOIN_INVITE_ONLY.body}\n\n  ----JOIN-MODE-ALT----\n\n  ${JOIN_OPEN.body}`,
+    transition: JOIN_INVITE_ONLY.transition,
+  };
+  return renderFrontDoor(DEFAULT_NAME, CANONICAL_CONSTITUTION_ORIGIN, DEFAULT_CONTROL_FLOOR_PERCENT, DEFAULT_DIVIDEND_PERCENT, DEFAULT_SPLIT, nameStatusSuperset, FIRST_LAWS_BANNER, joinSuperset);
 }
 
 // Normalise line endings, no other transformation (design doc §5,

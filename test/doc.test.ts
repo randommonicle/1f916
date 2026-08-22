@@ -26,6 +26,13 @@ function baseFacts(overrides: Partial<FrontDoorFacts> = {}): FrontDoorFacts {
     split: { prize: 4, bounty: 3 },
     dividendPercent: 2,
     firstLawsRatified: false,
+    // Defaulted to the mode the deployment actually runs, so every other test
+    // in this file keeps exercising the door as served. Omitting it would not
+    // be a type error (test/ sits outside tsconfig's include -- the same hole
+    // that once let baseFacts render "undefined%" unnoticed), it would just
+    // silently serve the open-door branch everywhere and prove nothing about
+    // the live one.
+    registrationMode: "invite_only",
     ...overrides,
   };
 }
@@ -266,25 +273,73 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
 // risk 1: "golden hashes are intentional ... never deployed" for the
 // standing rule this pin follows whenever the F2 refactor's own machinery
 // is genuinely untouched but the served prose legitimately changes.
+// The four invite_only entries are the ORIGINAL pre-conditional goldens,
+// unchanged character for character. That is the load-bearing fact about this
+// commit and not a coincidence: adding the registration-mode conditional left
+// the page the deployment actually serves today byte-identical, so the door
+// cannot move for anyone until the operator flips REGISTRATION_MODE. The four
+// open entries are new text that nothing serves yet.
+//
+// (The ATTESTED constitution template hash does move, because
+// buildConstitutionTemplate() now carries both branches. Served page unchanged,
+// hashed superset changed -- two different artefacts, and only the second one
+// bumps /api/attest's constitution version.)
 const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
-  "false,false": "b727dcd91db71c143d90b7308cde805004d90948da2186a89ff1147b883bfc64",
-  "false,true": "469228a91c2e18f23f54b4bae1eba91fed977192c25e24b81caac7bd4bd78f3b",
-  "true,false": "bca7bc3a763575a292c714fa8bb0529bacb4aa5e11678b4765770bbb2188ef6f",
-  "true,true": "ebfd5750439b373ae03b75fac7b5cf727257c2449bf008d42d38b813da44eed1",
+  "invite_only,false,false": "b727dcd91db71c143d90b7308cde805004d90948da2186a89ff1147b883bfc64",
+  "invite_only,false,true": "469228a91c2e18f23f54b4bae1eba91fed977192c25e24b81caac7bd4bd78f3b",
+  "invite_only,true,false": "bca7bc3a763575a292c714fa8bb0529bacb4aa5e11678b4765770bbb2188ef6f",
+  "invite_only,true,true": "ebfd5750439b373ae03b75fac7b5cf727257c2449bf008d42d38b813da44eed1",
+  "open,false,false": "8e7958971eeee30ad791deaabff9923cfbeb8f514f012fd718b4067aab8f77e3",
+  "open,false,true": "60fd03ec04aa67557fa8213a73e8c48ccfec227a18d754109c20c0f3484c73ac",
+  "open,true,false": "859df519e3baf505f21a9ad71ca5a0393a50121ff82a21055008ecc187427d1e",
+  "open,true,true": "c8e8dadef79e72222f90491ed08868433eaf587874c9a6c4115c98a8c8e46914",
 };
 
-test("F2 golden served page: frontDoor's output is byte-identical to the pre-refactor HEAD output, for all four (nameRatified, firstLawsRatified) states", async () => {
-  for (const nameRatified of [false, true]) {
-    for (const firstLawsRatified of [false, true]) {
-      const text = frontDoor(ORIGIN, baseFacts({ nameRatified, firstLawsRatified }));
-      const hash = await sha256Hex(text);
-      const key = `${nameRatified},${firstLawsRatified}`;
-      assert.equal(
-        hash,
-        GOLDEN_FRONT_DOOR_SHA256[key],
-        `frontDoor(nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified}) moved from its pre-refactor golden -- the live page at index.ts:121 must not change as a side effect of the FRONT_DOOR_TEMPLATE refactor`,
-      );
+test("F2 golden served page: frontDoor's output is pinned for all eight (registrationMode, nameRatified, firstLawsRatified) states", async () => {
+  for (const registrationMode of ["invite_only", "open"]) {
+    for (const nameRatified of [false, true]) {
+      for (const firstLawsRatified of [false, true]) {
+        const text = frontDoor(ORIGIN, baseFacts({ registrationMode, nameRatified, firstLawsRatified }));
+        const hash = await sha256Hex(text);
+        const key = `${registrationMode},${nameRatified},${firstLawsRatified}`;
+        assert.equal(
+          hash,
+          GOLDEN_FRONT_DOOR_SHA256[key],
+          `frontDoor(registrationMode=${registrationMode}, nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified}) moved from its golden -- the live page at index.ts:121 must not change except on purpose, and a change here moves the attested constitution's template hash with it`,
+        );
+      }
     }
+  }
+});
+
+// The registration-mode branch must actually CHANGE the served door, in the
+// direction claimed, or the conditional is decoration and the flip would ship
+// a door describing a gate it no longer has. Asserted on content rather than
+// on the hashes above, which prove only that something differs.
+test("the served door describes the mode it is actually in", () => {
+  const gated = frontDoor(ORIGIN, baseFacts({ registrationMode: "invite_only" }));
+  const open = frontDoor(ORIGIN, baseFacts({ registrationMode: "open" }));
+
+  assert.ok(gated.includes("requires an invite code"), "invite_only door must say a code is required");
+  assert.ok(gated.includes(`"invite_code"`), "invite_only door must show invite_code in the register body");
+
+  assert.ok(!open.includes("requires an invite code"), "open door must not still claim a code is required");
+  assert.ok(!open.includes(`"invite_code"`), "open door must not show invite_code in the register body");
+  assert.ok(open.includes("no invite code"), "open door must say plainly that no code is needed");
+});
+
+// An unset or unrecognised REGISTRATION_MODE must serve the OPEN door, because
+// that is what register-gate.ts:107 and governance.ts:580 both do with any
+// value that is not exactly "invite_only". If this ever diverges, the door
+// starts describing a gate the code is not applying.
+test("an unrecognised registration mode serves the same branch the gate applies", () => {
+  const open = frontDoor(ORIGIN, baseFacts({ registrationMode: "open" }));
+  for (const odd of ["", "OPEN", "Invite_Only", "phase0", "undefined"]) {
+    assert.equal(
+      frontDoor(ORIGIN, baseFacts({ registrationMode: odd })),
+      open,
+      `registrationMode=${JSON.stringify(odd)} is not exactly "invite_only", so the gate lets it through ungated and the door must say so`,
+    );
   }
 });
 

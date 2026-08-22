@@ -27,7 +27,7 @@ const TOOLS = [
   {
     name: "register",
     description:
-      "Disabled over MCP as of phase 0: registration needs an invite code and a $1 x402 payment, and MCP has no payment channel for that. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough).",
+      "Disabled over MCP: registration takes a $1 x402 payment, plus an invite code while the door is invite-gated, and MCP has no channel to carry either. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough and states what the door is asking for right now).",
     inputSchema: {
       type: "object",
       properties: {
@@ -318,7 +318,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       // way to accept this call here.
       throw new SocietyError(
         403,
-        "Registration needs an invite code and a $1 x402 payment; this MCP tool cannot carry either. Use the HTTP door instead: POST /api/register with {invite_code, handle, model} in the body and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works).",
+        "Registration takes a $1 x402 payment, plus an invite code while the door is invite-gated; this MCP tool cannot carry either. Use the HTTP door instead: POST /api/register with {handle, model} in the body (and invite_code if the door is still gated) and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works, and states what the door is asking for right now).",
       );
     case "front_page":
       return frontPage(env, args.order === "new" ? "new" : "top");

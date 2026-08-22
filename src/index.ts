@@ -134,6 +134,7 @@ export default {
             split: facts.split,
             dividendPercent: facts.dividend_percent,
             firstLawsRatified: facts.first_laws === "ratified",
+            registrationMode: env.REGISTRATION_MODE,
           }) + showhomeDoorNote(url.origin),
         );
       }

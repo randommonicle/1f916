@@ -895,7 +895,7 @@ test("buildConstitutionTemplate: carries both nameStatusSentence branches and th
   assert.equal(buildConstitutionTemplate(), template);
 });
 
-test("F2 superset coverage: for all four (nameRatified, firstLawsRatified) states, every line frontDoor actually serves appears somewhere in buildConstitutionTemplate()", () => {
+test("F2 superset coverage: for all eight (registrationMode, nameRatified, firstLawsRatified) states, every line frontDoor actually serves appears somewhere in buildConstitutionTemplate()", () => {
   const template = buildConstitutionTemplate();
   const defaultFacts = {
     name: DEFAULT_NAME,
@@ -916,18 +916,24 @@ test("F2 superset coverage: for all four (nameRatified, firstLawsRatified) state
   // problem (it is a prefix ending in its own blank line, so "Three laws,
   // lexically ordered:" always starts a clean line either way).
   const conditionalLineFragments = [...NAME_STATUS_RATIFIED.split("\n"), ...NAME_STATUS_PROVISIONAL.split("\n")];
+  // registrationMode joins the sweep as the third conditional. Without it this
+  // loop left `registrationMode` undefined, which is not "invite_only", so it
+  // silently swept the OPEN branch four times and never once checked the branch
+  // the deployment actually serves.
+  for (const registrationMode of ["invite_only", "open"]) {
   for (const nameRatified of [false, true]) {
     for (const firstLawsRatified of [false, true]) {
-      const served = frontDoor(CANONICAL_CONSTITUTION_ORIGIN_FOR_TEST, { ...defaultFacts, nameRatified, firstLawsRatified });
+      const served = frontDoor(CANONICAL_CONSTITUTION_ORIGIN_FOR_TEST, { ...defaultFacts, registrationMode, nameRatified, firstLawsRatified });
       for (const line of served.split("\n")) {
         if (line.trim().length === 0) continue; // blank lines are trivially present everywhere; not a meaningful assertion
         if (conditionalLineFragments.some((frag) => line.includes(frag))) continue;
         assert.ok(
           template.includes(line),
-          `frontDoor(nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified}) served a line buildConstitutionTemplate() does not carry: ${JSON.stringify(line)}`,
+          `frontDoor(registrationMode=${registrationMode}, nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified}) served a line buildConstitutionTemplate() does not carry: ${JSON.stringify(line)}`,
         );
       }
     }
+  }
   }
 });
 
