@@ -39,7 +39,7 @@
     // INVITE_CODES (a secret, deliberately never in this file; see
     // docs/PHASE0-PLAN.md section 5). "open" lifts the invite check at the
     // phase-1 boundary. The $1 payment gate applies either way.
-    "REGISTRATION_MODE": "invite_only"
+    "REGISTRATION_MODE": "open"
   },
   // Phase 0 runs on the free workers.dev subdomain (DECISIONS.md D-002); a
   // custom domain is a phase-1 purchase, made after the founding citizens
