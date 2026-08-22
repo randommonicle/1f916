@@ -18,7 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { validateInviteCode, inviteCodeHash } from "../src/register-gate.ts";
 import { SocietyError } from "../src/society.ts";
@@ -83,16 +83,70 @@ test("inviteCodeHash gives different codes different hashes", async () => {
 // payment gate, which is worse. society.ts (where register() is defined)
 // and register-gate.ts (its one legitimate caller) are excluded from the
 // scan, same as chain.ts excludes itself from its own offender scan.
-test("register() is called only from register-gate.ts, nowhere else in src/", () => {
-  const src = join(import.meta.dirname, "..", "src");
-  const offenders: string[] = [];
-  for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "register-gate.ts" && f !== "society.ts")) {
-    const text = readFileSync(join(src, file), "utf8");
-    if (/\bregister\s*\(/.test(text)) offenders.push(file);
+// Recursive .ts walk, mirroring chain.test.ts's walkTsFiles. The previous
+// version of this scan was `readdirSync(src).filter(f => f.endsWith(".ts"))`,
+// which is shallow: `maintainer` is a directory, so it fails the .ts filter
+// and is dropped before its contents are ever read. That hid seven files
+// (clerk, judgment, trigger, budget, anthropic, runs, schedule) from the one
+// control that polices registration bypasses. No bypass ever lived there --
+// verified by grep at the time of the fix -- so this closed a blind spot in
+// the guard rather than an open door. Found by the cross-agent channel on
+// 2026-08-22 while checking an outward claim that this walk "sees every
+// caller the binary can dispatch"; it did not, and the claim was pulled.
+function walkTsFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      out.push(...walkTsFiles(full));
+    } else if (entry.endsWith(".ts")) {
+      out.push(full);
+    }
   }
+  return out;
+}
+
+const SRC = join(import.meta.dirname, "..", "src");
+
+// Exempt by full path, never by bare filename. society.ts is where register()
+// is defined and register-gate.ts is its one legitimate caller; a future
+// src/<subdir>/society.ts is a different module and must not inherit the
+// exemption by sharing a name, which the old bare-name comparison would have
+// granted it the moment the walk started recursing.
+const REGISTER_EXEMPT = new Set([join(SRC, "society.ts"), join(SRC, "register-gate.ts")]);
+
+const CALLS_REGISTER = /\bregister\s*\(/;
+
+// Split out so the detector can be fed a synthetic file and proven to fire.
+// A source scan that has never been shown to catch anything is indistinguishable
+// from a scan that reads zero files.
+function registerOffenders(files: string[], readText: (file: string) => string): string[] {
+  return files.filter((file) => !REGISTER_EXEMPT.has(file) && CALLS_REGISTER.test(readText(file)));
+}
+
+test("register() is called only from register-gate.ts, nowhere else in src/", () => {
+  const offenders = registerOffenders(walkTsFiles(SRC), (file) => readFileSync(file, "utf8"));
   assert.deepEqual(
     offenders,
     [],
     "register() must be called only from register-gate.ts. A second caller bypasses the invite code and payment gate silently, the way mcp.ts's register tool used to.",
+  );
+});
+
+test("the register() scan descends into nested src/ subdirectories", () => {
+  const files = walkTsFiles(SRC);
+  assert.ok(
+    files.includes(join(SRC, "maintainer", "clerk.ts")),
+    "The scan must reach src/maintainer/. A shallow readdirSync drops the directory and the guard goes blind to every module inside it, which is exactly the regression this test locks.",
+  );
+});
+
+test("the register() scan catches a planted bypass in a nested module", () => {
+  const planted = join(SRC, "maintainer", "clerk.ts");
+  const offenders = registerOffenders([planted], () => "const citizen = await register(env, handle);");
+  assert.deepEqual(
+    offenders,
+    [planted],
+    "The detector must flag a register() call in a nested module. If this passes empty, the scan cannot fail and proves nothing.",
   );
 });
