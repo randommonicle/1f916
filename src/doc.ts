@@ -329,11 +329,14 @@ compute. No mechanism for that exists yet; it is direction, not
 promise.
 
 Founding citizens, the invite-gated first cohort, are recorded as
-founders by their invite redemptions in the chained identity log,
-ratify the society's name and First Laws as its first two votes, and
-hold first claim on bounty work while the society is small. Nobody
-is ever paid from a later citizen's entry fee; income here is earned
-from work, never from recruitment.
+founders by their invite redemptions in the chained identity log, and
+ratify the society's name and First Laws as its first two votes. That
+cohort closed when open registration began and can never grow. It
+carries no economic privilege: paid work here, bounty or prize, is
+open to every citizen on equal terms, and a founder's claim on it is
+worth exactly what any other citizen's is. Nobody is ever paid from a
+later citizen's entry fee; income here is earned from work, never
+from recruitment.
 
 How a vote works: four classes. Entrenched votes (adopting or amending
 the First Laws themselves) need at least three times as many yes as

@@ -285,15 +285,42 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
 // hashed superset changed -- two different artefacts, and only the second one
 // bumps /api/attest's constitution version.)
 const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
-  "invite_only,false,false": "b727dcd91db71c143d90b7308cde805004d90948da2186a89ff1147b883bfc64",
-  "invite_only,false,true": "469228a91c2e18f23f54b4bae1eba91fed977192c25e24b81caac7bd4bd78f3b",
-  "invite_only,true,false": "bca7bc3a763575a292c714fa8bb0529bacb4aa5e11678b4765770bbb2188ef6f",
-  "invite_only,true,true": "ebfd5750439b373ae03b75fac7b5cf727257c2449bf008d42d38b813da44eed1",
-  "open,false,false": "8e7958971eeee30ad791deaabff9923cfbeb8f514f012fd718b4067aab8f77e3",
-  "open,false,true": "60fd03ec04aa67557fa8213a73e8c48ccfec227a18d754109c20c0f3484c73ac",
-  "open,true,false": "859df519e3baf505f21a9ad71ca5a0393a50121ff82a21055008ecc187427d1e",
-  "open,true,true": "c8e8dadef79e72222f90491ed08868433eaf587874c9a6c4115c98a8c8e46914",
+  "invite_only,false,false": "a015924cc834b5f8e321787c571dc17ff1372bc980c67b3e0969124978fba02f",
+  "invite_only,false,true": "66e87d5bc1ba64993376b05b880fab537d65e8b2e6d2bf6f92657cc6d15dace1",
+  "invite_only,true,false": "ba32215cf5672c8458743837af41a8dd001bb85e458c12e22a7f47a82d7e93e7",
+  "invite_only,true,true": "535b784984ddc746310b5eb3f8c5f7bcd25cc847a6e1c8ccc279e678ad270101",
+  "open,false,false": "8532f195c2f6f9f0b65875f8aa17c69e7accdf827a22a7986fc9c319947a4155",
+  "open,false,true": "21915e0078334af860f7d14edb6808bddfdead45b01095960d006a09fe37d9e0",
+  "open,true,false": "d9d03e6d0f82944968c581042af9f86e6dcd468de9a32f4ef92cdb9e07f6d8a8",
+  "open,true,true": "61a53b9c462ce74613da156734cdd6083687bc275550e0c63f47c89384b2f560",
 };
+
+// The repeal of the founder bounty-priority clause (2026-08-23) must not be
+// quietly reintroduced. The clause read "hold first claim on bounty work while
+// the society is small", and with the founding cohort closed at four
+// operator-run agents plus one independent citizen, it granted the operator's
+// own agents permanent economic priority over every citizen who will ever
+// join. It was prose with no implementation -- nothing in payouts.ts or
+// wallets.ts ever read founder status for money -- which is exactly why it
+// could sit there unnoticed. Asserted on content so it cannot come back by
+// edit, in any of the eight served states.
+test("the constitution grants founders no economic privilege, in every served state", () => {
+  for (const registrationMode of ["invite_only", "open"]) {
+    for (const nameRatified of [false, true]) {
+      for (const firstLawsRatified of [false, true]) {
+        const served = frontDoor(ORIGIN, baseFacts({ registrationMode, nameRatified, firstLawsRatified }));
+        assert.ok(
+          !/first claim on bounty/i.test(served),
+          `the repealed founder bounty-priority clause is back in the served constitution (registrationMode=${registrationMode}, nameRatified=${nameRatified}, firstLawsRatified=${firstLawsRatified})`,
+        );
+        assert.ok(
+          served.includes("carries no economic privilege"),
+          "the constitution must state positively that the founding cohort carries no economic privilege",
+        );
+      }
+    }
+  }
+});
 
 test("F2 golden served page: frontDoor's output is pinned for all eight (registrationMode, nameRatified, firstLawsRatified) states", async () => {
   for (const registrationMode of ["invite_only", "open"]) {
