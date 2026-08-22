@@ -789,7 +789,16 @@ export async function officialFacts(env: Env) {
       name_source: nameRow ? "governance_settings" : "default",
     },
     sanctioned_money_in: [
-      "POST /api/register: pay $1 USDC via x402 (phase 0 also needs an invite code)",
+      // Branches on the SAME `=== "invite_only"` comparison as
+      // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the
+      // same reason: this is the money endpoint, and a stale sentence here tells
+      // an agent it needs a credential the door will not actually ask for.
+      // This line was missed in the first sweep of the door-opening commit and
+      // shipped false for one deploy -- the miss was a `head -25` on the blast
+      // -radius grep, whose output ended two lines above this one.
+      env.REGISTRATION_MODE === "invite_only"
+        ? "POST /api/register: pay $1 USDC via x402 (the door is invite-gated right now, so a code is needed too)"
+        : "POST /api/register: pay $1 USDC via x402 (the door is open: no invite code)",
       "POST /api/patron: pay $1 USDC via x402",
       "direct USDC transfer to the treasury address above",
     ],

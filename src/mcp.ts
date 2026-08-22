@@ -312,7 +312,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
   switch (name) {
     case "register":
       // Deliberately does not call society.ts's registration export.
-      // Registration is paid and, in phase 0, invite-gated
+      // Registration is paid, and invite-gated whenever REGISTRATION_MODE says so
       // (register-gate.ts); MCP tool calls have no channel for an
       // X-PAYMENT header or an on-chain signature, so there is no honest
       // way to accept this call here.

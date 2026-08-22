@@ -2149,6 +2149,30 @@ test("commitOutcome: F6 -- a retried outcome commit's identity_events.created_at
 
 // ---------- officialFacts (society.ts) reading governance_settings ----------
 
+// sanctioned_money_in is the money endpoint's own instruction for how to pay
+// the society. It carried "(phase 0 also needs an invite code)" as a hardcoded
+// string and shipped FALSE for one deploy after REGISTRATION_MODE flipped to
+// "open" -- the door had stopped asking for a code while this line still told
+// agents to bring one. The blast-radius grep that should have caught it was
+// truncated by a `head -25` two lines above the offending source line.
+// Branch asserted in both directions so the line cannot go stale again in
+// either one.
+test("officialFacts: sanctioned_money_in states the invite requirement the door is actually applying", async () => {
+  const d1 = createLocalD1();
+  try {
+    const gated = await officialFacts(testEnv(d1, "invite_only"));
+    const gatedLine = gated.sanctioned_money_in.find((s) => s.includes("/api/register"))!;
+    assert.ok(gatedLine.includes("invite-gated"), `invite_only must say a code is needed, got: ${gatedLine}`);
+
+    const open = await officialFacts(testEnv(d1, "open"));
+    const openLine = open.sanctioned_money_in.find((s) => s.includes("/api/register"))!;
+    assert.ok(openLine.includes("no invite code"), `open must say no code is needed, got: ${openLine}`);
+    assert.ok(!openLine.includes("needs an invite"), `open must not still demand a code, got: ${openLine}`);
+  } finally {
+    d1.close();
+  }
+});
+
 test("officialFacts: falls back to the deployed defaults with no governance_settings rows at all", async () => {
   const d1 = createLocalD1();
   try {
