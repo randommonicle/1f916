@@ -306,6 +306,13 @@ export function monthsFromNow(now: number, months: number): number {
 
 export interface PayloadContext {
   currentName: string;
+  // Whether currentName got there via a passed/executed set_name vote, as
+  // opposed to still being DEFAULT_NAME because no such vote has ever run
+  // -- the same governance_settings-row-presence signal officialFacts()
+  // (society.ts) reports as name_source ("governance_settings" vs
+  // "default") and FrontDoorFacts (doc.ts) carries as nameRatified. The
+  // set_name no-op guard below needs exactly this fact: see its comment.
+  currentNameRatified: boolean;
   currentControlFloorPercent: number;
 }
 
@@ -342,7 +349,19 @@ export function validatePayload(kind: ProposalKind, payload: unknown, ctx: Paylo
       if (!isPlainObject(payload) || typeof payload.name !== "string" || !NAME_PATTERN.test(payload.name)) {
         throw new SocietyError(400, "set_name needs payload {name}: 3-40 printable ASCII characters (letters, digits, punctuation, space).");
       }
-      if (payload.name === ctx.currentName) {
+      // Refuse the no-op ONLY once currentName is itself ratified. From
+      // deploy until a set_name vote actually passes, currentName is just
+      // DEFAULT_NAME standing in for "nobody has decided yet" -- and
+      // isFoundingComplete requires isFoundingRatified(env, "set_name"),
+      // so an unratified name leaves the founding gate shut for every
+      // future citizen. Confirming that provisional default is therefore
+      // NOT a no-op: it is the vote that flips name_source from "default"
+      // to "governance_settings" and opens the gate -- without this
+      // narrowing, the cohort could never ratify the name it is already
+      // using, and founding could never complete without a rename. Only a
+      // proposal that repeats a name ALREADY ratified spends a vote on
+      // nothing.
+      if (payload.name === ctx.currentName && ctx.currentNameRatified) {
         throw new SocietyError(400, `"${payload.name}" is already the current name.`);
       }
       return { name: payload.name };
@@ -786,10 +805,19 @@ export async function currentPayloadContext(env: Env): Promise<PayloadContext> {
     .bind(SETTING_KEY.name, SETTING_KEY.controlFloorPercent)
     .all<{ key: string; value: string }>();
   const map = new Map(results.map((r) => [r.key, r.value]));
+  // Row presence, not its value, is the ratified signal -- the identical
+  // fact officialFacts()'s nameRow check (society.ts) reads off the same
+  // key via its own separate query, reused here rather than asked a
+  // second way. set_name is in MACHINE_EXECUTABLE_KINDS, so it always
+  // executes atomically with passing (claimTallyAndExecuteOne below);
+  // "a set_name proposal has passed/executed" (isFoundingRatified) and
+  // "this row exists" are the same fact by construction, never a gap
+  // window where one is true and the other is not.
+  const currentNameRatified = map.has(SETTING_KEY.name);
   const currentName = map.get(SETTING_KEY.name) ?? DEFAULT_NAME;
   const floorRaw = map.get(SETTING_KEY.controlFloorPercent);
   const currentControlFloorPercent = floorRaw != null ? Number(floorRaw) : DEFAULT_CONTROL_FLOOR_PERCENT;
-  return { currentName, currentControlFloorPercent };
+  return { currentName, currentNameRatified, currentControlFloorPercent };
 }
 
 // design doc §5 point 1's rolling window, independent of VOTE_WINDOW_MS on

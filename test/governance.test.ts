@@ -421,7 +421,14 @@ test("tally: entrenched 3N passage threshold, exact boundary both sides (D-025 q
 
 // ---------- validatePayload ----------
 
-const ctx = { currentName: "Commonhold", currentControlFloorPercent: 51 };
+// currentNameRatified: true here -- this shared ctx's "Commonhold" stands
+// for an ALREADY-ratified name (a set_name vote has passed), so the
+// existing "equals current" assertion below keeps testing the real no-op
+// refusal. The other new field is a don't-care for every other kind this
+// ctx is shared with (dividend/split/control-floor/body-only). The
+// never-ratified case (the bug this file's set_name tests were missing)
+// gets its own dedicated ctx values below, not this shared one.
+const ctx = { currentName: "Commonhold", currentControlFloorPercent: 51, currentNameRatified: true };
 
 test("validatePayload: set_name accepts 3-40 printable ASCII chars, rejects outside the boundary", () => {
   assert.deepEqual(validatePayload("set_name", { name: "Hallmoot" }, ctx), { name: "Hallmoot" });
@@ -430,7 +437,7 @@ test("validatePayload: set_name accepts 3-40 printable ASCII chars, rejects outs
   assert.deepEqual(validatePayload("set_name", { name: "a".repeat(40) }, ctx), { name: "a".repeat(40) }); // 40 chars, upper boundary
   assert.throws(() => validatePayload("set_name", { name: "a".repeat(41) }, ctx), isBadRequest); // 41 chars
   assert.throws(() => validatePayload("set_name", { name: "tab\ttab" }, ctx), isBadRequest); // non-printable
-  assert.throws(() => validatePayload("set_name", { name: "Commonhold" }, ctx), isBadRequest); // equals current
+  assert.throws(() => validatePayload("set_name", { name: "Commonhold" }, ctx), isBadRequest); // equals current, already ratified
   assert.throws(() => validatePayload("set_name", {}, ctx), isBadRequest);
   assert.throws(() => validatePayload("set_name", null, ctx), isBadRequest);
 });
@@ -444,6 +451,33 @@ test("validatePayload: set_name refuses an all-space name at every length that w
   assert.throws(() => validatePayload("set_name", { name: " ".repeat(40) }, ctx), isBadRequest); // exactly 40 spaces
   // A name that is mostly space but has one real character is still fine.
   assert.deepEqual(validatePayload("set_name", { name: "  x" }, ctx), { name: "  x" });
+});
+
+// The defect this fix closes: founding completes only once set_name is
+// ratified (isFoundingComplete -> isFoundingRatified(env, "set_name")),
+// but the old guard refused ANY proposal naming the current value --
+// including DEFAULT_NAME, which sits in currentName from deploy until a
+// set_name vote first passes. Composed, that meant founding could never
+// complete without a rename: the founding cohort could not ratify the
+// provisional name it was already using, and no proposal for any other
+// kind gated on founding could ever open. Confirming a never-ratified
+// default is not a no-op -- it is the vote that ratifies it -- so it must
+// be allowed.
+test("validatePayload: set_name allows re-proposing the current name when it has NEVER been ratified (confirming a provisional default is not a no-op)", () => {
+  const neverRatifiedCtx = { currentName: DEFAULT_NAME, currentControlFloorPercent: 51, currentNameRatified: false };
+  assert.deepEqual(validatePayload("set_name", { name: DEFAULT_NAME }, neverRatifiedCtx), { name: DEFAULT_NAME });
+});
+
+test("validatePayload: set_name still refuses re-proposing the current name once it HAS been ratified -- the real no-op case", () => {
+  const ratifiedCtx = { currentName: "Hallmoot", currentControlFloorPercent: 51, currentNameRatified: true };
+  assert.throws(() => validatePayload("set_name", { name: "Hallmoot" }, ratifiedCtx), isBadRequest);
+});
+
+test("validatePayload: set_name proposing a DIFFERENT name is allowed regardless of whether the current name was ratified", () => {
+  const neverRatifiedCtx = { currentName: DEFAULT_NAME, currentControlFloorPercent: 51, currentNameRatified: false };
+  const ratifiedCtx = { currentName: DEFAULT_NAME, currentControlFloorPercent: 51, currentNameRatified: true };
+  assert.deepEqual(validatePayload("set_name", { name: "Hallmoot" }, neverRatifiedCtx), { name: "Hallmoot" });
+  assert.deepEqual(validatePayload("set_name", { name: "Hallmoot" }, ratifiedCtx), { name: "Hallmoot" });
 });
 
 test("validatePayload: set_dividend_uplift enforces the 2-20/1-12 integer floors", () => {
@@ -480,7 +514,7 @@ test("validatePayload: control_floor_raise enforces the 51-100 absolute floor an
   assert.throws(() => validatePayload("control_floor_raise", { percent: 50 }, ctx), isBadRequest); // below absolute floor
   assert.deepEqual(validatePayload("control_floor_raise", { percent: 100 }, ctx), { percent: 100 });
   assert.throws(() => validatePayload("control_floor_raise", { percent: 101 }, ctx), isBadRequest);
-  const higherCtx = { currentName: "Commonhold", currentControlFloorPercent: 70 };
+  const higherCtx = { currentName: "Commonhold", currentControlFloorPercent: 70, currentNameRatified: true };
   assert.throws(() => validatePayload("control_floor_raise", { percent: 69 }, higherCtx), isBadRequest); // below current, though above the absolute 51 floor
   assert.deepEqual(validatePayload("control_floor_raise", { percent: 70 }, higherCtx), { percent: 70 }); // equals current, allowed
 });

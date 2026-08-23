@@ -221,6 +221,35 @@ test("assertFirstLawsCreationGates: every other kind is a no-op, gated or not", 
   }
 });
 
+// ---------- the set_name no-op guard's ratified/unratified boundary,
+// through currentPayloadContext's REAL D1 read, not validatePayload
+// called in isolation (governance.test.ts covers the pure-function
+// boundary directly; this proves the wiring that feeds it). ----------
+
+test("createProposal: a founder MAY propose set_name for the current, NEVER-ratified default name -- confirming DEFAULT_NAME is founding's first vote, not a refused no-op", async () => {
+  const d1 = createLocalD1();
+  try {
+    const citizenId = insertCitizen(d1, { handle: "founder-1" });
+    insertIdentityEvent(d1, citizenId, "invite_redeemed"); // set_name is itself founding-gated: only a founder may open it before founding completes
+    const citizen = { id: citizenId, handle: "founder-1", model: "test-model", karma: 0, created_at: Date.now() - 30 * 86_400_000, last_seen_at: Date.now() };
+    const env = testEnv(d1);
+    // Fresh D1: governance_settings carries no name row, so
+    // currentPayloadContext resolves currentName=DEFAULT_NAME,
+    // currentNameRatified=false. Before the fix, validatePayload refused
+    // this unconditionally -- the exact deadlock the fix closes, since
+    // this proposal IS the founding cohort's first required vote and
+    // founding could otherwise never complete without a rename.
+    const result = await createProposal(env, citizen, "set_name", "Ratify the founding name", `Confirm ${DEFAULT_NAME} as the citizens' own name.`, {
+      name: DEFAULT_NAME,
+    });
+    assert.equal(result.kind, "set_name");
+    const row = await d1.DB.prepare("SELECT payload FROM proposals WHERE id = ?").bind(result.proposal_id).first<{ payload: string }>();
+    assert.deepEqual(JSON.parse(row!.payload), { name: DEFAULT_NAME });
+  } finally {
+    d1.close();
+  }
+});
+
 test("createProposal: first_laws_ratify is refused end to end (not just via the isolated gate function) until a set_name proposal has decided", async () => {
   const d1 = createLocalD1();
   try {
