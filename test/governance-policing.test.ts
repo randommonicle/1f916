@@ -7,9 +7,13 @@
 // such protection from chain.ts, so this is their equivalent: a
 // source-level scan of the real files, in the register-gate.test.ts /
 // chain.test.ts / maintainer-policing.test.ts style, recursing into
-// subdirectories (maintainer-policing.test.ts's own fix over
-// chain.test.ts's flat readdirSync, which predates src/maintainer/ and
-// would silently miss anything written there).
+// subdirectories. (This comment used to say chain.test.ts's walk was a
+// flat readdirSync that would silently miss src/maintainer/. That was
+// true when written and is no longer: chain.test.ts recurses, and so do
+// all six policing scans in this directory as of 2026-08-23. The flat
+// walk survived longest in register-gate.test.ts, where it hid seven
+// modules from the registration-bypass guard until the cross-agent
+// channel found it -- see L-018.)
 //
 // Run: npm test
 

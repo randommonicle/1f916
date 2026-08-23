@@ -16,9 +16,14 @@ const MAINTAINER_DIR = join(SRC, "maintainer");
 const JUDGMENT_PATH = join(MAINTAINER_DIR, "judgment.ts");
 const CLERK_PATH = join(MAINTAINER_DIR, "clerk.ts");
 
-// Recursive .ts file walker -- chain.test.ts's own scan predates
-// src/maintainer/ and is a flat readdirSync; this one has to walk into
-// subdirectories to see clerk.ts and judgment.ts at all.
+// Recursive .ts file walker -- this scan has to walk into subdirectories
+// to see clerk.ts and judgment.ts at all. (This comment used to add that
+// chain.test.ts's own scan was flat and predated src/maintainer/. True
+// when written, stale now: chain.test.ts recurses, and as of 2026-08-23
+// so does every policing scan in this directory. Do not read the old
+// claim as a live gap in chain.test.ts -- the flat walk that actually
+// mattered was register-gate.test.ts's, which went blind to seven
+// modules until it was caught; see L-018.)
 function walkTsFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
