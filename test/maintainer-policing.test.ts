@@ -15,6 +15,7 @@ const SRC = join(import.meta.dirname, "..", "src");
 const MAINTAINER_DIR = join(SRC, "maintainer");
 const JUDGMENT_PATH = join(MAINTAINER_DIR, "judgment.ts");
 const CLERK_PATH = join(MAINTAINER_DIR, "clerk.ts");
+const CONCIERGE_PATH = join(MAINTAINER_DIR, "concierge.ts");
 
 // Recursive .ts file walker -- this scan has to walk into subdirectories
 // to see clerk.ts and judgment.ts at all. (This comment used to add that
@@ -197,3 +198,119 @@ test("judgment.ts itself does contain the maintainer_queue UPDATE (the positive 
 // exactly as this file's own opening line already frames it -- these
 // tests are "enforced by a source-scan policing test", not "proven by"
 // one.
+
+// ============================================================================
+// The engagement concierge's own cage (docs/DESIGN-CONCIERGE.md §4.3): a
+// dedicated, narrower scan for concierge.ts specifically, alongside (not
+// instead of) the generic MAINTAINER_DIR scans above, which already sweep
+// concierge.ts (it lives in src/maintainer/, so the "no file... except
+// judgment.ts" test above already covers it against the 7-name BANNED_CALLS
+// list). This section is stricter: it also names castVote and flagContent,
+// never checked anywhere in this file before concierge.ts existed, because
+// neither clerk.ts nor judgment.ts ever had reason to touch voting or
+// flagging -- but "never manufactures consensus on proposals" and "never
+// votes" are named hard constraints for THIS feature specifically (design
+// doc §3, §4.3), so they are checked explicitly here rather than left to
+// the generic list's silence on them.
+// ============================================================================
+
+const CONCIERGE_BANNED_CALLS = [...BANNED_CALLS, "castVote", "flagContent"];
+
+test("concierge.ts calls createComment and nothing else from the (widened) banned-call list -- no moderation, no money movement, no voting, no flagging", () => {
+  const text = readSourceWithoutComments(CONCIERGE_PATH);
+  const offenders: string[] = [];
+  for (const name of CONCIERGE_BANNED_CALLS) {
+    const pattern = new RegExp(`\\b${name}\\s*\\(`);
+    if (pattern.test(text)) offenders.push(`concierge.ts calls ${name}(...)`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "concierge.ts's only write-capable import from society.ts is createComment (design doc §4.3) -- a call to any of these is either the clerk/judge cage breached, or the concierge casting a vote / flagging content, neither of which this feature is permitted to do.",
+  );
+});
+
+// Positive control: if concierge.ts stopped calling createComment (a
+// refactor routed it through some new wrapper, say), the test above would
+// still pass, but vacuously -- for the wrong reason ("nobody calls
+// anything banned", not "it calls exactly the one sanctioned thing").
+test("concierge.ts itself does call createComment (the positive control for the test above)", () => {
+  const text = readSourceWithoutComments(CONCIERGE_PATH);
+  assert.match(text, /\bcreateComment\s*\(/);
+});
+
+const CONCIERGE_ALLOWED_WRITE_TABLES = ["concierge_runs"];
+
+test("concierge.ts's own SQL write statements reference only concierge_runs", () => {
+  const text = readSourceWithoutComments(CONCIERGE_PATH);
+  const pattern = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+(\w+)/gi;
+  const offenders: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(text)) !== null) {
+    const [, verb, table] = m;
+    if (!CONCIERGE_ALLOWED_WRITE_TABLES.includes(table)) {
+      offenders.push(`concierge.ts writes to table "${table}" via "${verb.replace(/\s+/g, " ")} ${table}"`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "concierge.ts may write to concierge_runs only -- comments/identity_events are written through createComment/appendChained, never a raw SQL statement in this file, and any other table name here is a second, unreviewed write path.",
+  );
+});
+
+// Positive control: proves the scan above is not vacuously true because
+// concierge.ts happens to contain no SQL writes at all.
+test("concierge.ts itself does write SQL to concierge_runs (the positive control for the test above)", () => {
+  const text = readSourceWithoutComments(CONCIERGE_PATH);
+  assert.match(text, /INSERT\s+INTO\s+concierge_runs/i);
+});
+
+const SHOWHOME_TABLES = ["visitors", "showhome_notes", "showhome_rate"];
+
+// D-043's own invariant ("no paid cognition ever reads visitor content"),
+// extended to the concierge -- the one new piece of paid cognition this
+// feature adds. A string-level scan, not merely an SQL-verb scan: this
+// must catch ANY mention (a JOIN, a comment referencing the table by name
+// well enough to matter, a stray reference), not only a literal
+// FROM/INTO/JOIN clause -- readSourceWithoutComments has already stripped
+// real comments, so what remains is code text only.
+test("concierge.ts contains no reference to visitors, showhome_notes, or showhome_rate anywhere in its source", () => {
+  const text = readSourceWithoutComments(CONCIERGE_PATH);
+  const offenders: string[] = [];
+  for (const table of SHOWHOME_TABLES) {
+    if (new RegExp(`\\b${table}\\b`).test(text)) offenders.push(table);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "concierge.ts's detection queries read only posts, comments, and proposals (to exclude governance threads) -- any mention of a showhome table would be new, unreviewed paid cognition over visitor content, exactly what D-043 forecloses.",
+  );
+});
+
+// Positive control: the SAME string-level mechanism, pointed at a file that
+// legitimately DOES reference a showhome table, to prove the regex itself
+// can see a real match rather than being silently broken (e.g. a typo'd
+// table name that could never match anything).
+test("positive control: the same reference-scan mechanism finds a real showhome-table mention (src/showhome.ts itself)", () => {
+  const showhomeSrc = readSourceWithoutComments(join(SRC, "showhome.ts"));
+  const found = SHOWHOME_TABLES.some((table) => new RegExp(`\\b${table}\\b`).test(showhomeSrc));
+  assert.ok(found, "the mechanism must be able to see a real showhome-table reference -- src/showhome.ts legitimately mentions its own tables");
+});
+
+test("concierge.ts imports nothing from governance.ts -- no code path to a proposal, ballot, or tally", () => {
+  const text = readSourceWithoutComments(CONCIERGE_PATH);
+  assert.doesNotMatch(
+    text,
+    /from\s*["'][^"']*\bgovernance\b[^"']*["']/,
+    "'never manufactures consensus on proposals' is enforced by having no code path to a vote at all, not by prompting the model not to vote -- any import from governance.ts would reopen that path.",
+  );
+});
+
+// Positive control: the same import-specifier pattern used above DOES match
+// a real governance.ts import elsewhere in this codebase (clerk.ts itself),
+// proving the regex is not simply incapable of matching anything.
+test("positive control: the same import-specifier pattern finds a real governance.ts import (clerk.ts itself imports from it)", () => {
+  const clerkText = readSourceWithoutComments(CLERK_PATH);
+  assert.match(clerkText, /from\s*["'][^"']*\bgovernance\b[^"']*["']/, "clerk.ts legitimately imports detectConstitutionChange/reconcileConstitutionFidelityQueue from ../governance.ts");
+});
