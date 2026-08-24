@@ -37,6 +37,33 @@ test("payment requirements name the treasury address, USDC on Base, and the give
   assert.equal(reqs.resource, "https://example.test/api/register");
 });
 
+// docs/DESIGN-ECONOMY-V1.md §6.2/§13: buildPaymentRequirements gains an
+// OPTIONAL payTo, defaulting to the treasury -- this pair of tests is the
+// money-correctness proof that the generalisation is byte-identical for
+// every caller that predates it (handlePatron, handleRegisterGate, both of
+// which omit payTo) while genuinely honouring an explicit payTo when one is
+// given (the listings economy's funder-pays-reviewer flow, listings.ts).
+test("buildPaymentRequirements with no payTo defaults to the treasury address -- every existing caller is unaffected", () => {
+  const reqs = buildPaymentRequirements(FAKE_ENV, {
+    resource: "https://example.test/api/patron",
+    description: "no payTo given",
+    priceAtomic: "1000000",
+  });
+  assert.equal(reqs.payTo, FAKE_ENV.TREASURY_ADDRESS);
+});
+
+test("buildPaymentRequirements with an explicit payTo uses it INSTEAD of the treasury -- the one new money-path surface the listings economy adds", () => {
+  const reviewerWallet = "0x00000000000000000000000000000000000bee";
+  const reqs = buildPaymentRequirements(FAKE_ENV, {
+    resource: "https://example.test/api/listing/1/pay",
+    description: "bounty payment, not a treasury inflow",
+    priceAtomic: "10000000",
+    payTo: reviewerWallet,
+  });
+  assert.equal(reqs.payTo, reviewerWallet);
+  assert.notEqual(reqs.payTo, FAKE_ENV.TREASURY_ADDRESS, "an explicit payTo must never silently fall back to the treasury");
+});
+
 test("a request with no X-PAYMENT header is refused with 402 and the requirements", async () => {
   const reqs = testRequirements();
   const request = new Request("https://example.test/api/register", { method: "POST" });

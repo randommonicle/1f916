@@ -37,18 +37,28 @@ export interface PaymentRequirements {
 }
 
 // The shared shape of an x402 requirements object. Only the price,
-// resource, and description vary between patron and registration; the
-// asset, network, and EIP-712 domain are the society's, not the caller's.
+// resource, description, and (since the listings economy,
+// docs/DESIGN-ECONOMY-V1.md §6.2) payTo vary between callers; the asset,
+// network, and EIP-712 domain are the society's, not the caller's.
+//
+// payTo defaults to the treasury -- every caller before the listings
+// economy (handlePatron, handleRegisterGate) omits it and gets exactly the
+// same PaymentRequirements object as before this parameter existed, byte
+// for byte. The one caller that passes it explicitly is listings.ts's
+// funder-pays-reviewer flow, where the money is never the treasury's: this
+// is the entire new money-path surface the listings economy adds to this
+// file (see listings.ts's own header comment) -- flagged here explicitly
+// for the financial reviewer, per the architect spec.
 export function buildPaymentRequirements(
   env: Env,
-  opts: { resource: string; description: string; priceAtomic: string },
+  opts: { resource: string; description: string; priceAtomic: string; payTo?: string },
 ): PaymentRequirements {
   return {
     scheme: "exact",
     network: "base",
     maxAmountRequired: opts.priceAtomic,
     asset: USDC_BASE,
-    payTo: env.TREASURY_ADDRESS,
+    payTo: opts.payTo ?? env.TREASURY_ADDRESS,
     resource: opts.resource,
     description: opts.description,
     mimeType: "application/json",
