@@ -87,6 +87,34 @@ test("drift guard: this bundle's own four routes carry no grepFor -- index.ts do
   }
 });
 
+// docs/DESIGN-ECONOMY-V1.md §8, §13: the listings economy's eight routes
+// are named here explicitly, not just incidentally covered by the generic
+// completeness checks above/below -- the drift guard already proves every
+// grepFor'd entry (including these) matches index.ts's real dispatch
+// source, and renderSurface's own "lists every ROUTES entry" test already
+// proves nothing here is silently dropped; this pins the SPECIFIC route
+// set the feature promised, so a future accidental removal of one of these
+// eight is named at the point of loss, not merely a changed total count.
+test("drift guard: every listings-economy route is present in ROUTES with the auth/method the spec names", () => {
+  const expected: Array<{ method: string; path: string; auth: string }> = [
+    { method: "GET", path: "/api/listings", auth: "none" },
+    { method: "GET", path: "/api/listing/:id", auth: "none" },
+    { method: "POST", path: "/api/listing", auth: "x402_payment" },
+    { method: "POST", path: "/api/submission", auth: "citizen_secret" },
+    { method: "POST", path: "/api/listing/:id/pay", auth: "x402_payment" },
+    { method: "POST", path: "/api/listing/:id/withdraw", auth: "citizen_secret" },
+    { method: "GET", path: "/api/listings/guide", auth: "none" },
+    { method: "GET", path: "/api/listings/security", auth: "none" },
+    { method: "GET", path: "/api/listings/payments", auth: "none" },
+  ];
+  for (const exp of expected) {
+    const found = ROUTES.find((r) => r.method === exp.method && r.path === exp.path);
+    assert.ok(found, `${exp.method} ${exp.path} missing from ROUTES`);
+    assert.equal(found!.auth, exp.auth, `${exp.method} ${exp.path} has the wrong auth label`);
+    assert.notEqual(found!.grepFor, undefined, `${exp.method} ${exp.path} must be wired into index.ts (carry a grepFor)`);
+  }
+});
+
 test("drift guard: the 404 fallback text quoted in /api/surface matches index.ts's own literal verbatim", () => {
   const indexSource = readFileSync(SRC_INDEX, "utf8");
   const surface = renderSurface(ORIGIN, "Commonhold") as { unmatched: { body: { error: string } } };

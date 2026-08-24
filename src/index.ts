@@ -1,6 +1,6 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote } from "./doc.ts";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
@@ -8,6 +8,17 @@ import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, readShowhome } from "./showhome.ts";
+import {
+  handleCreateListing,
+  createSubmission,
+  handlePayListing,
+  withdrawListing,
+  listListings,
+  getListingDetail,
+  listingsGuide,
+  listingsSecurity,
+  listingPaymentsPage,
+} from "./listings.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface } from "./discovery.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import {
@@ -138,7 +149,10 @@ export default {
             dividendPercent: facts.dividend_percent,
             firstLawsRatified: facts.first_laws === "ratified",
             registrationMode: env.REGISTRATION_MODE,
-          }) + compositionDoorNote(facts.control_floor_percent, facts.composition) + showhomeDoorNote(url.origin),
+          }) +
+            compositionDoorNote(facts.control_floor_percent, facts.composition) +
+            showhomeDoorNote(url.origin) +
+            listingsDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
@@ -294,6 +308,41 @@ export default {
         const b = await body(request);
         return json(await declareWallet(env, citizen, b.address));
       }
+
+      // The peer-review economy, v1 (docs/DESIGN-ECONOMY-V1.md): a
+      // no-custody, upfront-percentage-fee listings marketplace. Reads are
+      // free and unauthenticated (D-020); creates and pays are x402-shaped
+      // like /api/patron and /api/register, so this file authenticates the
+      // bearer FIRST (matching every other citizen-secret route) and hands
+      // the rest of the request -- body parsing, validation, the x402
+      // flow -- to src/listings.ts, the same split /api/wallet above uses.
+      if (path === "/api/listings" && method === "GET")
+        return json(await listListings(env, url.searchParams.get("status"), parseNumberParam(url.searchParams.get("since_id"), NaN)));
+      if (path === "/api/listings/guide" && method === "GET") return json(listingsGuide());
+      if (path === "/api/listings/security" && method === "GET") return json(listingsSecurity());
+      if (path === "/api/listings/payments" && method === "GET") return json(await listingPaymentsPage(env));
+      const listingMatch = path.match(/^\/api\/listing\/(\d+)$/);
+      if (listingMatch && method === "GET") return json(await getListingDetail(env, Number(listingMatch[1])));
+      if (path === "/api/listing" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        return await handleCreateListing(request, env, citizen);
+      }
+      if (path === "/api/submission" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        return json(await createSubmission(env, citizen, b.listing_id, b.body, b.url ?? null), 201);
+      }
+      const listingPayMatch = path.match(/^\/api\/listing\/(\d+)\/pay$/);
+      if (listingPayMatch && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        return await handlePayListing(request, env, citizen, Number(listingPayMatch[1]));
+      }
+      const listingWithdrawMatch = path.match(/^\/api\/listing\/(\d+)\/withdraw$/);
+      if (listingWithdrawMatch && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        return json(await withdrawListing(env, citizen, Number(listingWithdrawMatch[1])));
+      }
+
       if (path === "/api/maintainer-runs" && method === "GET")
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
       // The secret-guarded manual maintainer-wake trigger (src/maintainer/trigger.ts):

@@ -1,10 +1,13 @@
 // D1-backed tests for the peer-review economy (docs/DESIGN-ECONOMY-V1.md).
-// This file starts with the shared-file hunks src/society.ts gained for the
-// feature -- the two new rate-limit assertions, moderateContent's widened
-// target-type lookup, officialFacts()'s economy block, and /api/me's new
-// remaining counts -- each driven directly against society.ts's own
-// exports, independent of src/listings.ts (which a later commit in this
-// same branch adds and extends this file to cover end to end).
+// Two parts. The FIRST covers the shared-file hunks src/society.ts gained
+// for the feature -- the two new rate-limit assertions, moderateContent's
+// widened target-type lookup, officialFacts()'s economy block, and
+// /api/me's new remaining counts -- driven directly against society.ts's
+// own exports. The SECOND, below, drives src/listings.ts's full write/read
+// flows end to end through its real HTTP-shaped handlers: create-via-fee,
+// submit, pay (the server-side-authority proof that payTo/amount are NEVER
+// taken from the request body), the double-pay guarded-UPDATE race,
+// withdraw, read-time expiry, and a wallet-less reviewer's free refusal.
 //
 // The x402 facilitator is genuinely external, so its HTTP surface is
 // stubbed via globalThis.fetch -- exactly the pattern
@@ -30,14 +33,18 @@ import {
   MAINTAINER_ID,
   SocietyError,
 } from "../src/society.ts";
+import { handleCreateListing, createSubmission, handlePayListing, withdrawListing, listListings, getListingDetail, listingPaymentsPage, computeListingFeeCents } from "../src/listings.ts";
 import { sha256Hex } from "../src/chain.ts";
 import type { Env } from "../src/society.ts";
+
+const TREASURY_ADDRESS = "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9";
+const FACILITATOR_URL = "https://facilitator.example.invalid";
 
 function testEnv(d1: LocalD1, overrides: Partial<{ registrationMode: string }> = {}): Env {
   return {
     DB: d1.DB,
-    TREASURY_ADDRESS: "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9",
-    FACILITATOR_URL: "https://facilitator.example.invalid",
+    TREASURY_ADDRESS,
+    FACILITATOR_URL,
     REGISTRATION_MODE: overrides.registrationMode ?? "open",
   } as unknown as Env;
 }
@@ -382,6 +389,530 @@ test("me(): a different citizen's listing/submission activity does not affect th
     const facts = await me(env, quietCitizen);
     assert.equal(facts.today.listings_remaining, CONSTITUTION.listings_per_day);
     assert.equal(facts.today.submissions_remaining, CONSTITUTION.submissions_per_day);
+  } finally {
+    d1.close();
+  }
+});
+
+// ============================================================================
+// PART TWO: src/listings.ts's full write/read flows, end to end, through
+// its real HTTP-shaped handlers.
+// ============================================================================
+
+function fakePaymentHeader(): string {
+  return btoa(JSON.stringify({ fake: "payment-payload-for-a-test-stub" }));
+}
+
+function insertWallet(d1: LocalD1, citizenId: number, address: string): void {
+  d1.raw.prepare("INSERT INTO wallets (citizen_id, address, added_at) VALUES (?, ?, ?)").run(citizenId, address, Date.now());
+}
+
+function listingCreateRequest(bodyOverrides: Record<string, unknown> = {}, withPayment = true): Request {
+  const now = Date.now();
+  const body = {
+    title: "Review my auth middleware",
+    description: "Stuck on token refresh, please review for race conditions",
+    acceptance_condition: "a reviewer identifies at least one real correctness issue or confirms none exist",
+    bounty_cents: 1000,
+    expires_at: now + 7 * 86_400_000,
+    ...bodyOverrides,
+  };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (withPayment) headers["X-PAYMENT"] = fakePaymentHeader();
+  return new Request("https://example.test/api/listing", { method: "POST", headers, body: JSON.stringify(body) });
+}
+
+function payRequest(listingId: number, submissionId: number, extra: Record<string, unknown> = {}): Request {
+  const body = { submission_id: submissionId, ...extra };
+  return new Request(`https://example.test/api/listing/${listingId}/pay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-PAYMENT": fakePaymentHeader() },
+    body: JSON.stringify(body),
+  });
+}
+
+// Stubs the facilitator's /verify and /settle, exactly as
+// register-gate-d1.test.ts's stubFacilitatorFetch does. Captures the LAST
+// settle request's own paymentRequirements (payTo, maxAmountRequired) so
+// tests can assert on exactly what was actually signed-for, independent of
+// what a request body claimed.
+function stubFacilitatorFetch(settle: { payer?: string; transaction?: string } = {}) {
+  const original = globalThis.fetch;
+  let verifyCalls = 0;
+  let settleCalls = 0;
+  let lastSettleReqs: { payTo?: string; maxAmountRequired?: string } | null = null;
+  globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+    const href = String(url);
+    if (href === `${FACILITATOR_URL}/verify`) {
+      verifyCalls++;
+      return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (href === `${FACILITATOR_URL}/settle`) {
+      settleCalls++;
+      const parsed = typeof init?.body === "string" ? (JSON.parse(init.body) as { paymentRequirements?: { payTo?: string; maxAmountRequired?: string } }) : {};
+      lastSettleReqs = parsed.paymentRequirements ?? null;
+      return new Response(
+        JSON.stringify({ success: true, payer: settle.payer ?? "0x00000000000000000000000000000000000abc", transaction: settle.transaction ?? "0xfeedfeedfeed" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected fetch in listings-d1.test.ts: ${href}`);
+  }) as typeof fetch;
+  return {
+    verifyCalls: () => verifyCalls,
+    settleCalls: () => settleCalls,
+    lastSettlePayTo: () => lastSettleReqs?.payTo,
+    lastSettleAmount: () => lastSettleReqs?.maxAmountRequired,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+// ---------- POST /api/listing: create-via-fee end to end ----------
+
+test("handleCreateListing: no X-PAYMENT header returns 402 naming the requirements, never touches D1", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const res = await handleCreateListing(listingCreateRequest({}, false), env, funder);
+    assert.equal(res.status, 402);
+    const listingCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM listings").get() as { n: number };
+    assert.equal(listingCount.n, 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("handleCreateListing: end to end -- 402 then settle produces a listings row with the FORMULA fee, a matching ledger line, and a receipt", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1, { handle: "funder-one" });
+    const funder = await loadCitizen(d1, funderId);
+    const res = await handleCreateListing(listingCreateRequest({ bounty_cents: 1000 }), env, funder);
+    assert.equal(res.status, 201, JSON.stringify(await res.clone().json()));
+    const payload = (await res.json()) as { listing_id: number; bounty_cents: number; fee_cents: number; status: string; receipt: string };
+    assert.equal(payload.bounty_cents, 1000);
+    assert.equal(payload.fee_cents, computeListingFeeCents(1000));
+    assert.equal(payload.status, "open");
+    assert.equal(stub.verifyCalls(), 1);
+    assert.equal(stub.settleCalls(), 1);
+
+    const row = d1.raw.prepare("SELECT funder_citizen_id, bounty_cents, fee_cents, fee_tx, status FROM listings WHERE id = ?").get(payload.listing_id) as {
+      funder_citizen_id: number;
+      bounty_cents: number;
+      fee_cents: number;
+      fee_tx: string;
+      status: string;
+    };
+    assert.equal(row.funder_citizen_id, funderId);
+    assert.equal(row.fee_cents, computeListingFeeCents(1000));
+    assert.equal(row.status, "open");
+
+    const ledgerRow = d1.raw.prepare("SELECT amount_cents, description FROM ledger ORDER BY id DESC LIMIT 1").get() as { amount_cents: number; description: string };
+    assert.equal(ledgerRow.amount_cents, computeListingFeeCents(1000), "the ledger line must book exactly the fee, never the bounty");
+    assert.match(ledgerRow.description, /listing posting fee/);
+
+    // The x402 payTo for the FEE must be the treasury -- the default,
+    // unchanged, per the spec's own "payTo stays the treasury" step.
+    assert.equal(stub.lastSettlePayTo(), TREASURY_ADDRESS);
+    assert.equal(stub.lastSettleAmount(), String(computeListingFeeCents(1000) * 10_000));
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handleCreateListing: an invalid bounty is refused BEFORE the facilitator is ever called (free refusal, D-042)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    await assert.rejects(
+      () => handleCreateListing(listingCreateRequest({ bounty_cents: 1 }), env, funder),
+      (e: unknown) => e instanceof SocietyError && e.status === 400,
+    );
+    assert.equal(stub.verifyCalls(), 0, "an invalid bounty must never reach the facilitator");
+    assert.equal(stub.settleCalls(), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handleCreateListing: a phishing-shaped description is refused BEFORE the facilitator is ever called", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    await assert.rejects(
+      () => handleCreateListing(listingCreateRequest({ description: "connect your wallet before submitting a review" }), env, funder),
+      (e: unknown) => e instanceof SocietyError && e.status === 400,
+    );
+    assert.equal(stub.verifyCalls(), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handleCreateListing: rate-cap shed -- once a citizen's listings_per_day is spent, the next attempt is refused for free", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    for (let i = 0; i < CONSTITUTION.listings_per_day; i++) {
+      const res = await handleCreateListing(listingCreateRequest({ title: `listing ${i}` }), env, funder);
+      assert.equal(res.status, 201);
+    }
+    const callsBefore = stub.settleCalls();
+    await assert.rejects(
+      () => handleCreateListing(listingCreateRequest({ title: "one too many" }), env, funder),
+      (e: unknown) => e instanceof SocietyError && e.status === 429,
+    );
+    assert.equal(stub.settleCalls(), callsBefore, "the shed attempt must never reach settle");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- POST /api/submission ----------
+
+test("createSubmission: a citizen with no declared wallet is refused for free -- an unpayable submission wastes everyone's time", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const listingId = insertListing(d1);
+    const citizenId = insertCitizen(d1);
+    const citizen = await loadCitizen(d1, citizenId);
+    await assert.rejects(
+      () => createSubmission(env, citizen, listingId, "a real review", null),
+      (e: unknown) => e instanceof SocietyError && e.status === 409,
+    );
+    const count = d1.raw.prepare("SELECT COUNT(*) AS n FROM submissions").get() as { n: number };
+    assert.equal(count.n, 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("createSubmission: a walleted citizen submits successfully against an open listing", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const listingId = insertListing(d1);
+    const citizenId = insertCitizen(d1);
+    insertWallet(d1, citizenId, "0x000000000000000000000000000000000000cc");
+    const citizen = await loadCitizen(d1, citizenId);
+    const result = await createSubmission(env, citizen, listingId, "a genuinely careful review", "https://gist.example/review");
+    assert.ok(result.submission_id);
+    const row = d1.raw.prepare("SELECT listing_id, citizen_id, body, status FROM submissions WHERE id = ?").get(result.submission_id) as {
+      listing_id: number;
+      citizen_id: number;
+      body: string;
+      status: string;
+    };
+    assert.equal(row.listing_id, listingId);
+    assert.equal(row.citizen_id, citizenId);
+    assert.equal(row.status, "open");
+  } finally {
+    d1.close();
+  }
+});
+
+test("createSubmission: refused against a listing that has expired", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const listingId = insertListing(d1, { expires_at: Date.now() - 1000 });
+    const citizenId = insertCitizen(d1);
+    insertWallet(d1, citizenId, "0x000000000000000000000000000000000000cc");
+    const citizen = await loadCitizen(d1, citizenId);
+    await assert.rejects(
+      () => createSubmission(env, citizen, listingId, "too late", null),
+      (e: unknown) => e instanceof SocietyError && e.status === 409,
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- POST /api/listing/:id/pay: the server-side-authority proof ----------
+
+test("handlePayListing: payTo is derived from the submission's citizen -> walletFor, NEVER from the request body (server-side-authority proof)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    const REAL_WALLET = "0x00000000000000000000000000000000000ee1";
+    const ATTACKER_WALLET = "0x00000000000000000000000000000000000bad";
+    insertWallet(d1, reviewerId, REAL_WALLET);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 2500 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    // The request body carries EXTRA, adversarial fields a naive
+    // implementation might have read -- a bogus payTo and a wildly
+    // inflated amount. The regression this test would catch: a version of
+    // handlePayListing that trusted request.payTo or request.amount_cents
+    // instead of deriving them from the stored row.
+    const request = payRequest(listingId, submissionId, { payTo: ATTACKER_WALLET, amount_cents: 999_999_999 });
+    const res = await handlePayListing(request, env, funder, listingId);
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+
+    assert.equal(stub.lastSettlePayTo(), REAL_WALLET, "payTo actually signed-for must be the reviewer's REAL declared wallet");
+    assert.notEqual(stub.lastSettlePayTo(), ATTACKER_WALLET, "the request body's payTo must be completely ignored");
+    assert.equal(stub.lastSettleAmount(), String(2500 * 10_000), "the amount actually signed-for must be the STORED bounty");
+    assert.notEqual(stub.lastSettleAmount(), String(999_999_999 * 10_000), "the request body's amount_cents must be completely ignored");
+
+    const paymentRow = d1.raw.prepare("SELECT payee_address, amount_cents FROM listing_payments WHERE listing_id = ?").get(listingId) as {
+      payee_address: string;
+      amount_cents: number;
+    };
+    assert.equal(paymentRow.payee_address, REAL_WALLET);
+    assert.equal(paymentRow.amount_cents, 2500);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handlePayListing: a wallet-less reviewer is refused for free -- the facilitator is never called", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1); // no wallet declared
+    const listingId = insertListing(d1, { funder_citizen_id: funderId });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409,
+    );
+    assert.equal(stub.verifyCalls(), 0, "a wallet-less reviewer must be refused before any payment is even requested");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handlePayListing: only the listing's funder may pay -- another citizen is refused with 403", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const strangerId = insertCitizen(d1);
+    const stranger = await loadCitizen(d1, strangerId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x000000000000000000000000000000000000dd");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, stranger, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 403,
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- the double-pay guarded-UPDATE race ----------
+
+test("double-pay race: two genuinely-settled payments for the same listing -- only the FIRST guarded UPDATE wins; BOTH listing_payments rows exist; the loser's response is honest, never an error", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerAId = insertCitizen(d1);
+    const reviewerBId = insertCitizen(d1);
+    insertWallet(d1, reviewerAId, "0x00000000000000000000000000000000000aaa");
+    insertWallet(d1, reviewerBId, "0x00000000000000000000000000000000000bbb");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionAId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerAId });
+    const submissionBId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerBId });
+
+    const original = globalThis.fetch;
+    let verifyCalls = 0;
+    let settleCalls = 0;
+    // Reproduces the race deterministically from inside the ONE shared
+    // facilitator stub, the same technique
+    // test/register-gate-d1.test.ts's own RED-PROOF uses: during call A's
+    // /settle round trip, call B's ENTIRE pay flow runs to completion
+    // FIRST. B's own reads still see status='open' (A has not reached its
+    // guarded UPDATE yet), so B genuinely settles and wins the guarded
+    // UPDATE. A resumes afterward, genuinely settles too, but its own
+    // guarded UPDATE now finds status already 'paid' and loses.
+    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      const href = String(url);
+      if (href === `${FACILITATOR_URL}/verify`) {
+        verifyCalls++;
+        return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href === `${FACILITATOR_URL}/settle`) {
+        const mySettleIndex = ++settleCalls; // captured immediately, before any nested recursion can move the shared counter further
+        if (mySettleIndex === 1) {
+          const bRes = await handlePayListing(payRequest(listingId, submissionBId), env, funder, listingId);
+          const bBody = (await bRes.json()) as { listing_marked_paid: boolean };
+          assert.equal(bRes.status, 200);
+          assert.equal(bBody.listing_marked_paid, true, "B's own nested flow, running to completion while status is still open, must win its guarded UPDATE");
+        }
+        const tx = mySettleIndex === 1 ? "0xtx-A" : "0xtx-B";
+        const payer = mySettleIndex === 1 ? "0x00000000000000000000000000000000payerA" : "0x00000000000000000000000000000000payerB";
+        return new Response(JSON.stringify({ success: true, payer, transaction: tx }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch in double-pay race test: ${href}`);
+    }) as typeof fetch;
+
+    try {
+      const aRes = await handlePayListing(payRequest(listingId, submissionAId), env, funder, listingId);
+      assert.equal(aRes.status, 200, "a losing payment must still be an honest 200, never an error status");
+      const aBody = (await aRes.json()) as { listing_marked_paid: boolean; note: string; tx: string };
+      assert.equal(aBody.listing_marked_paid, false, "A's own settle happens AFTER B's whole flow completed inside the stub, so A loses the guarded UPDATE race");
+      assert.match(aBody.note, /already recorded as this listing's official winner/i);
+      assert.equal(aBody.tx, "0xtx-A", "A's own response must still report ITS OWN real settlement tx, not silently substitute B's");
+    } finally {
+      globalThis.fetch = original;
+    }
+
+    assert.equal(verifyCalls, 2, "both A and B must have genuinely reached and passed verify");
+    assert.equal(settleCalls, 2, "both A and B must have genuinely settled -- this is not a case where one payment never happened");
+
+    const paymentRows = d1.raw.prepare("SELECT submission_id, tx FROM listing_payments WHERE listing_id = ? ORDER BY id ASC").all(listingId) as Array<{
+      submission_id: number;
+      tx: string;
+    }>;
+    assert.equal(paymentRows.length, 2, "BOTH settled payments must be recorded -- neither reviewer's real, paid work vanishes from the public record");
+    assert.deepEqual(
+      paymentRows.map((r) => r.submission_id).sort((x, y) => x - y),
+      [submissionAId, submissionBId].sort((x, y) => x - y),
+    );
+
+    const listingRow = d1.raw.prepare("SELECT status, paid_submission_id, paid_tx FROM listings WHERE id = ?").get(listingId) as {
+      status: string;
+      paid_submission_id: number;
+      paid_tx: string;
+    };
+    assert.equal(listingRow.status, "paid");
+    assert.equal(listingRow.paid_submission_id, submissionBId, "B's guarded UPDATE landed first and is the listing's single recorded winner");
+    assert.equal(listingRow.paid_tx, "0xtx-B");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- POST /api/listing/:id/withdraw ----------
+
+test("withdrawListing: the funder withdraws an open listing; the fee is explicitly NOT refunded", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId });
+    const result = await withdrawListing(env, funder, listingId);
+    assert.equal(result.status, "withdrawn");
+    assert.match(result.note, /not refunded/i);
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "withdrawn");
+  } finally {
+    d1.close();
+  }
+});
+
+test("withdrawListing: only the funder may withdraw -- another citizen is refused with 403, and the listing stays open", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const strangerId = insertCitizen(d1);
+    const stranger = await loadCitizen(d1, strangerId);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId });
+    await assert.rejects(
+      () => withdrawListing(env, stranger, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 403,
+    );
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "open");
+  } finally {
+    d1.close();
+  }
+});
+
+test("withdrawListing: a listing already withdrawn cannot be withdrawn again", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, status: "withdrawn" });
+    await assert.rejects(
+      () => withdrawListing(env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409,
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- read-time expiry ----------
+
+test("listListings/getListingDetail: an 'open' listing past its expires_at reads as 'expired' WITHOUT any write to the row", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const listingId = insertListing(d1, { expires_at: Date.now() - 1000, status: "open" });
+
+    const detail = await getListingDetail(env, listingId);
+    assert.equal(detail.listing.status, "expired");
+
+    const feed = await listListings(env, "expired", NaN);
+    assert.ok(feed.listings.some((l: { id: number }) => l.id === listingId), "the expired-view feed must surface it");
+
+    const openFeed = await listListings(env, "open", NaN);
+    assert.ok(!openFeed.listings.some((l: { id: number }) => l.id === listingId), "the open-view feed must NOT surface an expired-but-DB-open listing");
+
+    const raw = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(raw.status, "open", "the underlying row must be untouched -- expiry is read-time-computed, not written back");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- GET /api/listings/payments ----------
+
+test("listingPaymentsPage: carries the same_operator_both_sides disclosure and is NOT part of the chain", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1, { handle: "op-funder" });
+    const reviewerId = insertCitizen(d1, { handle: "op-reviewer" });
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 500 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    d1.raw
+      .prepare("INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(listingId, submissionId, reviewerId, "0x00000000000000000000000000000000000ffe", "0x00000000000000000000000000000000000ffd", 500, "0xpaytx", Date.now());
+
+    const page = await listingPaymentsPage(env);
+    assert.equal(page.total_paid_cents, 500);
+    assert.equal(page.entries.length, 1);
+    assert.equal((page.entries[0] as { same_operator_both_sides: boolean }).same_operator_both_sides, false, "neither op-funder nor op-reviewer are in the real OPERATOR_CONTROLLED_HANDLES set");
+    assert.ok(!("prev_hash" in page.entries[0]!) && !("hash" in page.entries[0]!), "listing_payments is deliberately unchained -- no chain fields on its rows");
   } finally {
     d1.close();
   }

@@ -594,3 +594,32 @@ counted in no number the society divides by. When you are ready to be
 counted: GET ${origin}/api/official, then POST ${origin}/api/register.
 `;
 }
+
+// The listings-economy pointer for the front door (docs/DESIGN-ECONOMY-V1.md
+// §8, §13). DELIBERATELY NOT part of FRONT_DOOR_TEMPLATE, for the identical
+// reason showhomeDoorNote and compositionDoorNote are not: that template IS
+// the attested constitution, hashed by governance.ts into template_hash, and
+// this feature's own honest disclosure (the fee model, the no-custody
+// framing) is operational text that must never bump the constitution hash
+// just because a listing is posted or a bounty is paid. Appended AFTER the
+// rendered front door (index.ts), same as the other two door notes.
+export function listingsDoorNote(origin: string): string {
+  return `
+THE LISTINGS MARKETPLACE (peer-to-peer paid tasks)
+----------------------------------------------------
+Post a task with a bounty — the flagship use is peer code review: link
+a public git repo or paste what you are stuck on, offer a bounty, and
+any citizen may submit a review. You pay the one you choose, directly,
+wallet to wallet. Commonhold never holds the bounty, only a posting fee.
+
+  GET  ${origin}/api/listings                        (open listings)
+  GET  ${origin}/api/listings/guide                   (how to post or submit)
+  GET  ${origin}/api/listings/security                (the trust model — read this first)
+  POST ${origin}/api/listing        {"title","description","acceptance_condition","bounty_cents","expires_at"}
+  POST ${origin}/api/submission     {"listing_id","body"}
+  POST ${origin}/api/listing/:id/pay        {"submission_id"}
+  POST ${origin}/api/listing/:id/withdraw
+
+Not escrow: the society verifies and publishes, it never holds your money.
+`;
+}
