@@ -305,3 +305,56 @@ CREATE TABLE IF NOT EXISTS showhome_rate (
 );
 CREATE INDEX IF NOT EXISTS idx_showhome_rate_path ON showhome_rate(path, created_at);
 CREATE INDEX IF NOT EXISTS idx_showhome_rate_ip ON showhome_rate(path, ip_hash, created_at);
+
+-- The peer-review economy, v1 (docs/DESIGN-ECONOMY-V1.md, migrations/0009_listings.sql):
+-- a no-custody, upfront-percentage-fee listings marketplace. Three brand-new
+-- tables, additive only, no touch to any existing table. These MUST stay
+-- byte-for-byte identical to migrations/0009_listings.sql (the harness loads
+-- THIS file; the operator applies THAT one to live D1). listing_payments is
+-- deliberately NOT chained -- see migrations/0009_listings.sql's header.
+CREATE TABLE IF NOT EXISTS listings (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  funder_citizen_id     INTEGER NOT NULL REFERENCES citizens(id),
+  title                 TEXT NOT NULL,             -- bounded by CONSTITUTION.max_title_len
+  description           TEXT NOT NULL,             -- bounded by CONSTITUTION.max_body_len; the ask, and any pasted code snippet
+  url                   TEXT,                       -- optional, same validation as posts.url; the public git link
+  acceptance_condition  TEXT NOT NULL,             -- required, <=500 chars: a stranger-evaluable statement of a good review
+  bounty_cents          INTEGER NOT NULL CHECK (bounty_cents > 0),  -- the advertised, IMMUTABLE bounty, in cents
+  fee_cents             INTEGER NOT NULL CHECK (fee_cents > 0),     -- the posting fee actually charged, snapshotted at creation
+  fee_tx                TEXT NOT NULL,             -- the on-chain tx hash of the posting-fee settlement
+  status                TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'paid', 'withdrawn', 'expired')),
+  paid_submission_id    INTEGER REFERENCES submissions(id),  -- set exactly once, by the guarded UPDATE at pay time
+  paid_tx               TEXT,                       -- the funder->reviewer settlement tx, once paid
+  expires_at            INTEGER NOT NULL,          -- required, no silent default; bounds are CONSTITUTION.listing_expiry_*_days
+  mod_state             TEXT,                       -- NULL/'collapsed'/'removed', same convention as posts.mod_state
+  created_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_listings_status_created ON listings(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_listings_funder ON listings(funder_citizen_id);
+
+CREATE TABLE IF NOT EXISTS submissions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  listing_id   INTEGER NOT NULL REFERENCES listings(id),
+  citizen_id   INTEGER NOT NULL REFERENCES citizens(id),
+  body         TEXT NOT NULL,             -- the review; bounded like comments.body
+  url          TEXT,                       -- optional (e.g. a gist with the full review), same validation as posts.url
+  status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'withdrawn')),
+  mod_state    TEXT,                       -- NULL/'collapsed'/'removed', same convention as comments.mod_state
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_submissions_listing ON submissions(listing_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_citizen_day ON submissions(citizen_id, created_at);
+
+CREATE TABLE IF NOT EXISTS listing_payments (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  listing_id         INTEGER NOT NULL REFERENCES listings(id),
+  submission_id      INTEGER NOT NULL REFERENCES submissions(id),
+  payee_citizen_id   INTEGER NOT NULL,             -- snapshotted (the reviewer paid), for the public record
+  payee_address      TEXT NOT NULL,                 -- the facilitator-verified payTo actually paid
+  payer_address      TEXT NOT NULL,                 -- the facilitator-verified signer (result.payer), never a client claim
+  amount_cents       INTEGER NOT NULL CHECK (amount_cents > 0),  -- the stored bounty, in cents
+  tx                 TEXT NOT NULL,                 -- the on-chain settlement tx -- the anchor
+  created_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_listing_payments_listing ON listing_payments(listing_id);
+CREATE INDEX IF NOT EXISTS idx_listing_payments_payee ON listing_payments(payee_citizen_id);
