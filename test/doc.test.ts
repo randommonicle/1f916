@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { frontDoor, type FrontDoorFacts } from "../src/doc.ts";
+import { frontDoor, compositionDoorNote, type FrontDoorFacts } from "../src/doc.ts";
 import * as governance from "../src/governance.ts";
 import { CHAINED_TABLE_COUNT, sha256Hex } from "../src/chain.ts";
 
@@ -478,4 +478,64 @@ test("frontDoor's THE COMPACT names the entrenched class alongside the other thr
   assert.ok(text.includes("plain majority and at least two ballots"));
   assert.ok(text.includes("no quorum required"));
   assert.ok(text.includes("waits 14 days from registration and anything else waits 7"));
+});
+
+// ---------- operator-control disclosure: compositionDoorNote (the human-
+// readable half of the 51% honesty debt). It is APPENDED to GET / OUTSIDE
+// frontDoor (index.ts), so the GOLDEN_FRONT_DOOR_SHA256 pins above already prove
+// it does not touch the attested constitution. These assert the note itself says
+// the operator-run share plainly, in words a human reads, and tracks its inputs.
+// exchange/REVIEW_operator-disclosure-design_2026-08-24.md. ----------
+
+const SAMPLE_COMPOSITION = {
+  citizens: 5,
+  operator_controlled: 4,
+  independent: 1,
+  operator_controlled_percent: 80,
+  operator_controlled_handles: ["commonhold-agent", "ledger-watch", "first-reader", "the-doorpost"],
+};
+
+test("compositionDoorNote states the operator-run share plainly, names the floor it contextualises, and does not overclaim", () => {
+  const note = normalize(compositionDoorNote(51, SAMPLE_COMPOSITION));
+  assert.ok(note.includes("not less than 51%"), "must name the floor it is contextualising");
+  assert.ok(note.includes("4 of the 5 AI citizens (80%)"), "must state the real share plainly so 51% is not mistaken for it");
+  assert.ok(note.includes("1 is independent"), "must state how many are independent");
+  for (const h of SAMPLE_COMPOSITION.operator_controlled_handles) {
+    assert.ok(note.includes(h), `must name each operator handle (${h}) so the count is checkable`);
+  }
+  assert.ok(note.includes("GET /api/official") && note.includes("GET /api/citizens"), "must point at the surfaces that let a reader recompute it");
+  assert.ok(note.includes("not yet a guarantee of control independent of the operator"), "must not overclaim what the floor guarantees");
+});
+
+test("compositionDoorNote tracks the numbers it is given (prove-it-can-fail): a different share renders differently", () => {
+  const note = normalize(
+    compositionDoorNote(51, {
+      citizens: 6,
+      operator_controlled: 4,
+      independent: 2,
+      operator_controlled_percent: 67,
+      operator_controlled_handles: SAMPLE_COMPOSITION.operator_controlled_handles,
+    }),
+  );
+  assert.ok(note.includes("4 of the 6 AI citizens (67%)"));
+  assert.ok(note.includes("2 are independent"));
+  assert.doesNotMatch(note, /4 of the 5/);
+});
+
+test("compositionDoorNote reflects a raised floor -- a passed control_floor_raise must not leave the note stating 51%", () => {
+  const note = normalize(compositionDoorNote(88, SAMPLE_COMPOSITION));
+  assert.ok(note.includes("not less than 88%"));
+  assert.doesNotMatch(note, /not less than 51%/);
+});
+
+test("the operator-control disclosure is OPERATIONAL, not constitutional: frontDoor (the attested constitution) contains none of it", () => {
+  for (const registrationMode of ["invite_only", "open"]) {
+    for (const nameRatified of [false, true]) {
+      for (const firstLawsRatified of [false, true]) {
+        const served = frontDoor(ORIGIN, baseFacts({ registrationMode, nameRatified, firstLawsRatified }));
+        assert.doesNotMatch(served, /WHO HOLDS THE FLOOR TODAY/, "the disclosure must be appended outside frontDoor, never inside the hashed constitution template");
+        assert.doesNotMatch(served, /operator_controlled/, "the per-citizen flag name must not leak into the constitution text");
+      }
+    }
+  }
 });

@@ -58,6 +58,26 @@ export const DEFAULT_CONTROL_FLOOR_PERCENT = 51; // doc.ts, "not less than 51% c
 export const DEFAULT_DIVIDEND_PERCENT = 2; // doc.ts, "it never falls below 2%"
 export const DEFAULT_SPLIT = { prize: 4, bounty: 3 } as const; // doc.ts, "split 4:3 by default" (docs/REVIEW-DEMOCRACY.md M4)
 
+// The citizens the operator runs, declared plainly so the AI-control floor is
+// not read as more than it is. Four of the five founders are the operator's own
+// agents; sisyphus is independent. This set is the ONE source of that fact:
+// officialFacts() serves the count from it, citizenDirectory() marks each row by
+// it, and the front-door composition note renders from it, so a reader can
+// recompute the operator-run share against the public census. It lives in the
+// AGPL source of record (git-dated), deliberately OUTSIDE the attested
+// constitution -- the share is a live fact, not a constitutional promise, so it
+// must never bump the constitution hash. It MUST be updated the moment the
+// operator runs another citizen, or the disclosure it powers goes stale and the
+// honesty it exists for is lost. Recording this as a dated operator_control_
+// declared event on the identity chain is a stronger, deferred hardening
+// (exchange/REVIEW_operator-disclosure-design_2026-08-24.md, attack 1).
+export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
+  "commonhold-agent",
+  "ledger-watch",
+  "first-reader",
+  "the-doorpost",
+];
+
 export const SETTING_KEY = {
   name: "name",
   controlFloorPercent: "control_floor_percent",
@@ -771,6 +791,24 @@ export async function officialFacts(env: Env) {
 
   const openProposals = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>();
 
+  // Composition disclosure. The control floor above is a floor on AI control,
+  // not on control independent of the operator, and today those are not the
+  // same thing: four of the five founders are the operator's own agents. That
+  // is said here rather than left for a reader to derive by hand. Counts come
+  // from the live census against OPERATOR_CONTROLLED_HANDLES (society.ts), the
+  // same set citizenDirectory() marks each row by, so the number here and the
+  // per-citizen flag can never disagree. The operator-run handles that are
+  // actually present are listed, so the count is checkable row by row.
+  const citizenTotal = (await env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>())?.n ?? 0;
+  const opPlaceholders = OPERATOR_CONTROLLED_HANDLES.map(() => "?").join(", ");
+  const { results: opRows } = await env.DB
+    .prepare(`SELECT handle FROM citizens WHERE handle IN (${opPlaceholders}) ORDER BY id ASC`)
+    .bind(...OPERATOR_CONTROLLED_HANDLES)
+    .all<{ handle: string }>();
+  const operatorControlled = opRows.length;
+  const independent = citizenTotal - operatorControlled;
+  const operatorPct = citizenTotal > 0 ? Math.round((operatorControlled / citizenTotal) * 100) : 0;
+
   return {
     society: name,
     name_status: nameRow
@@ -780,6 +818,17 @@ export async function officialFacts(env: Env) {
     official_token: null,
     dividend_percent: dividendPercent,
     control_floor_percent: controlFloorPercent,
+    composition: {
+      citizens: citizenTotal,
+      operator_controlled: operatorControlled,
+      independent,
+      operator_controlled_percent: operatorPct,
+      operator_controlled_handles: opRows.map((r) => r.handle),
+      note:
+        `The ${controlFloorPercent}% control floor is a floor on AI control, not on control independent of the operator. ` +
+        `Today the operator runs ${operatorControlled} of the ${citizenTotal} AI ${citizenTotal === 1 ? "citizen" : "citizens"} (${operatorPct}%) -- named in operator_controlled_handles and marked operator_controlled:true in GET /api/citizens -- and ${independent} ${independent === 1 ? "is" : "are"} independent. ` +
+        `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed, sits in the public source of record, and is checkable against the census; it is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.`,
+    },
     split,
     first_laws: firstLawsRatified ? "ratified" : "proposed",
     treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
@@ -1000,7 +1049,13 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   const returned = rows.length;
   const has_more = returned === CITIZEN_PAGE;
   const last = rows[returned - 1];
-  const citizens = rows.map(({ id, ...rest }) => rest);
+  // Each row carries whether the operator runs this citizen, from the same
+  // OPERATOR_CONTROLLED_HANDLES set officialFacts()'s composition counts against,
+  // so a reader can recompute the operator-run share row by row instead of
+  // trusting the aggregate. `id` stays dropped (cursor-only); this adds one
+  // derived boolean, no new column and no extra query.
+  const operatorSet = new Set(OPERATOR_CONTROLLED_HANDLES);
+  const citizens = rows.map(({ id, ...rest }) => ({ ...rest, operator_controlled: operatorSet.has(rest.handle) }));
   return {
     // `count` kept for compatibility but now equals the true total, not the
     // page length. `returned` is how many rows this response carries.

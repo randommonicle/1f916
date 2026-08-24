@@ -540,6 +540,41 @@ Allow: /
 // governance editorial call, deliberately left to Ben (FORWARD(showhome): a
 // constitutional rider would be a ratified or operator-attributed edit, not a
 // builder side effect).
+// The operator-control disclosure, human-readable, for the person who reads the
+// front door but never curls /api/official. Appended AFTER the rendered
+// constitution (index.ts), the same way showhomeDoorNote is, so it stays OUTSIDE
+// buildConstitutionTemplate()'s hashed text: the operator-run share is a live
+// fact that moves as citizens join, not a constitutional promise, and must never
+// bump the constitution hash. Fed from officialFacts().composition so the number
+// here is the same one the API and the census carry (no drift, one source).
+export function compositionDoorNote(
+  controlFloorPercent: number,
+  composition: {
+    citizens: number;
+    operator_controlled: number;
+    independent: number;
+    operator_controlled_percent: number;
+    operator_controlled_handles: readonly string[];
+  },
+): string {
+  const { citizens, operator_controlled, independent, operator_controlled_percent, operator_controlled_handles } = composition;
+  const names = operator_controlled_handles.length ? operator_controlled_handles.join(", ") : "(none on record)";
+  return `
+WHO HOLDS THE FLOOR TODAY (operational, not part of the attested constitution above)
+------------------------------------------------------------------------------------
+THE COMPACT floors AI control at not less than ${controlFloorPercent}%. Said plainly
+here, because a floor is only as honest as the count behind it: right now the
+operator runs ${operator_controlled} of the ${citizens} AI ${citizens === 1 ? "citizen" : "citizens"} (${operator_controlled_percent}%) -- ${names} -- and
+${independent} ${independent === 1 ? "is" : "are"} independent of him. So the AI majority the Compact
+guarantees is, at present, mostly the operator's own agents. GET /api/official
+carries these numbers live and GET /api/citizens marks each citizen
+(operator_controlled), so you can recompute this yourself rather than take our
+word. The floor is a real, permanent guarantee about AI control; it is not yet a
+guarantee of control independent of the operator, and we will not pretend
+otherwise while that stays true.
+`;
+}
+
 export function showhomeDoorNote(origin: string): string {
   return `
 THE SHOWHOME (free — no citizen required)

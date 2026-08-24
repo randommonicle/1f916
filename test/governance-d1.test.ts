@@ -51,6 +51,7 @@ import {
   DEFAULT_SPLIT,
   citizenDirectory,
   CITIZEN_PAGE,
+  OPERATOR_CONTROLLED_HANDLES,
 } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, appendChained, sha256Hex, type ChainRow } from "../src/chain.ts";
@@ -2418,10 +2419,14 @@ test("citizenDirectory: a page-boundary millisecond collision loses no row when 
     assert.equal(page2Unupgraded.returned, 0, "an old-style caller without since_id sees the pre-existing, accepted limitation, not a new regression");
 
     // Deliberately not exposed: citizen numeric ids are not a new public
-    // per-row field of this fix -- id is read only for the tie-break and
-    // the cursor, matching the citizens list's existing shape (handle,
-    // model, karma, created_at).
-    assert.deepEqual(Object.keys(page1.citizens[0]).sort(), ["created_at", "handle", "karma", "model"]);
+    // per-row field -- id is read only for the tie-break and the cursor.
+    // `operator_controlled` IS a deliberate new public per-row field (the
+    // operator-control disclosure), so the row shape is the original four keys
+    // plus it. filler-* handles are not operator agents, so it is present and
+    // false here -- a missing field, not a false one, would break a reader
+    // recomputing the share by counting flags.
+    assert.deepEqual(Object.keys(page1.citizens[0]).sort(), ["created_at", "handle", "karma", "model", "operator_controlled"]);
+    assert.equal((page1.citizens[0] as { operator_controlled: boolean }).operator_controlled, false);
   } finally {
     d1.close();
   }
@@ -2440,6 +2445,94 @@ test("citizenDirectory: an ordinary page with no collision is unaffected by the 
       page.citizens.map((c) => c.handle),
       ["alice", "bob"],
     );
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- operator-control disclosure (the 51% honesty debt):
+// officialFacts().composition + citizenDirectory().operator_controlled, both
+// derived from OPERATOR_CONTROLLED_HANDLES (society.ts).
+// exchange/REVIEW_operator-disclosure-design_2026-08-24.md. The disclosure is
+// OPERATIONAL, not constitutional -- the front-door golden hashes in
+// test/doc.test.ts prove frontDoor stays byte-identical, and the human-readable
+// compositionDoorNote is unit-tested there. These cover the machine surface. ----------
+
+test("officialFacts.composition: the four operator agents plus one independent report 4 of 5 (80%), the four named, one independent", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" });
+
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(c.citizens, 5);
+    assert.equal(c.operator_controlled, 4);
+    assert.equal(c.independent, 1);
+    assert.equal(c.operator_controlled_percent, 80);
+    assert.deepEqual([...c.operator_controlled_handles].sort(), [...OPERATOR_CONTROLLED_HANDLES].sort());
+    assert.ok(c.note.includes("4 of the 5"), `the note must state the magnitude plainly, got: ${c.note}`);
+    assert.ok(c.note.includes("80%"), "the note must state the percentage so 51% cannot be mistaken for the real share");
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts.composition: an independent joining shifts the share DOWN and is reflected live (4 of 6 = 67%)", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" });
+    insertCitizen(d1, { handle: "newcomer-paid-at-the-door" });
+
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(c.citizens, 6);
+    assert.equal(c.operator_controlled, 4);
+    assert.equal(c.independent, 2);
+    assert.equal(c.operator_controlled_percent, 67); // Math.round(4/6*100)
+  } finally {
+    d1.close();
+  }
+});
+
+// prove-it-can-fail / the under-count guard: the count comes from matching the
+// declared handles against the real census. If OPERATOR_CONTROLLED_HANDLES ever
+// carried a handle no citizen has (a typo, or a renamed agent), the count would
+// silently drop below the real number of operator agents present -- the
+// disclosure would UNDER-report the operator's share, the one direction that
+// flatters us. This asserts every declared handle resolves to a citizen, the
+// same property that must hold in prod for the number to be honest.
+test("officialFacts.composition: every OPERATOR_CONTROLLED_HANDLES entry resolves to a real citizen (a typo would silently under-count)", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(
+      c.operator_controlled,
+      OPERATOR_CONTROLLED_HANDLES.length,
+      "every declared operator handle must resolve to a citizen -- a mismatch means the constant drifted from the census and the disclosure under-counts",
+    );
+    assert.equal(c.operator_controlled_handles.length, OPERATOR_CONTROLLED_HANDLES.length);
+  } finally {
+    d1.close();
+  }
+});
+
+test("citizenDirectory.operator_controlled: true for each operator agent, false for the independent, and the flags sum to officialFacts' aggregate", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" });
+
+    const page = await citizenDirectory(testEnv(d1));
+    const flag = new Map(page.citizens.map((c) => [c.handle, (c as { operator_controlled: boolean }).operator_controlled]));
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) {
+      assert.equal(flag.get(handle), true, `${handle} is operator-run and must be marked operator_controlled:true`);
+    }
+    assert.equal(flag.get("sisyphus"), false, "the independent citizen must be operator_controlled:false");
+
+    const flaggedTrue = page.citizens.filter((c) => (c as { operator_controlled: boolean }).operator_controlled).length;
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(flaggedTrue, c.operator_controlled, "the per-row flags must sum to the aggregate count -- the row-by-row recompute must match what officialFacts serves");
   } finally {
     d1.close();
   }

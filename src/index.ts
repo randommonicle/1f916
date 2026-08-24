@@ -1,6 +1,6 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote } from "./doc.ts";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
@@ -135,7 +135,7 @@ export default {
             dividendPercent: facts.dividend_percent,
             firstLawsRatified: facts.first_laws === "ratified",
             registrationMode: env.REGISTRATION_MODE,
-          }) + showhomeDoorNote(url.origin),
+          }) + compositionDoorNote(facts.control_floor_percent, facts.composition) + showhomeDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
