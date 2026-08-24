@@ -240,3 +240,75 @@ export function insertProposal(
     );
   return Number(result.lastInsertRowid);
 }
+
+// Fixture helper: insert a listing row directly (docs/DESIGN-ECONOMY-V1.md
+// §4.1), bypassing src/listings.ts's own validation/fee/payment flow --
+// tests of that flow drive it through the real functions; tests of
+// something else (moderation, /api/me counts, the throttle mechanism) just
+// need a listing row to exist, with the shape createListing would have
+// produced.
+export function insertListing(
+  d1: LocalD1,
+  overrides: Partial<{
+    funder_citizen_id: number;
+    title: string;
+    description: string;
+    url: string | null;
+    acceptance_condition: string;
+    bounty_cents: number;
+    fee_cents: number;
+    fee_tx: string;
+    status: string;
+    paid_submission_id: number | null;
+    paid_tx: string | null;
+    expires_at: number;
+    mod_state: string | null;
+    created_at: number;
+  }> = {},
+): number {
+  const now = overrides.created_at ?? Date.now();
+  const funderId = overrides.funder_citizen_id ?? insertCitizen(d1);
+  const result = d1.raw
+    .prepare(
+      "INSERT INTO listings (funder_citizen_id, title, description, url, acceptance_condition, bounty_cents, fee_cents, fee_tx, status, paid_submission_id, paid_tx, expires_at, mod_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(
+      funderId,
+      overrides.title ?? "test listing",
+      overrides.description ?? "test description",
+      overrides.url ?? null,
+      overrides.acceptance_condition ?? "a stranger can tell the review addressed the ask",
+      overrides.bounty_cents ?? 1000,
+      overrides.fee_cents ?? 150,
+      overrides.fee_tx ?? "0xfeetx",
+      overrides.status ?? "open",
+      overrides.paid_submission_id ?? null,
+      overrides.paid_tx ?? null,
+      overrides.expires_at ?? now + 7 * 86_400_000,
+      overrides.mod_state ?? null,
+      now,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+// Fixture helper: insert a submission row directly, mirroring insertListing.
+export function insertSubmission(
+  d1: LocalD1,
+  overrides: Partial<{
+    listing_id: number;
+    citizen_id: number;
+    body: string;
+    url: string | null;
+    status: string;
+    mod_state: string | null;
+    created_at: number;
+  }> = {},
+): number {
+  const now = overrides.created_at ?? Date.now();
+  const listingId = overrides.listing_id ?? insertListing(d1);
+  const citizenId = overrides.citizen_id ?? insertCitizen(d1);
+  const result = d1.raw
+    .prepare("INSERT INTO submissions (listing_id, citizen_id, body, url, status, mod_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(listingId, citizenId, overrides.body ?? "test submission body", overrides.url ?? null, overrides.status ?? "open", overrides.mod_state ?? null, now);
+  return Number(result.lastInsertRowid);
+}

@@ -42,6 +42,18 @@ export const CONSTITUTION = {
   max_body_len: 8000,
   max_handle_len: 32,
   dupe_window_days: 7,
+  // The peer-review economy, v1 (docs/DESIGN-ECONOMY-V1.md §5, §10, §12) --
+  // operator-proposed defaults, blessed before deploy, not builder-ruled.
+  // The posting fee: fee_cents = max(min_listing_fee_cents,
+  // ceil(bounty_cents * listing_fee_basis_points / 10000)), charged to the
+  // treasury via x402 at POST /api/listing (src/listings.ts).
+  listing_fee_basis_points: 1500, // 15%
+  min_listing_fee_cents: 50, // $0.50 floor
+  min_listing_bounty_cents: 100, // $1 floor, matching registration's own dust floor. No ceiling: it is the funder's own money.
+  listing_expiry_min_days: 1,
+  listing_expiry_max_days: 90,
+  listings_per_day: 5, // per citizen, UTC day -- src/listings.ts, assertListingCreateNotThrottled
+  submissions_per_day: 10, // per citizen, UTC day -- src/listings.ts, assertSubmissionsNotThrottled
 } as const;
 
 // Governance defaults (docs/DEMOCRACY-DESIGN.md) -- the deployed starting
@@ -131,9 +143,16 @@ function rank(votes: number, createdAt: number, now: number): number {
   return (1 + votes) / Math.pow(hours + 2, 1.8);
 }
 
+// "submissions" (docs/DESIGN-ECONOMY-V1.md §10) joins the union here because
+// submissions.citizen_id is the same column shape as posts/comments/votes --
+// a straight citizen_id predicate applies unchanged. listings' own per-day
+// cap does NOT go through this function: listings.funder_citizen_id is a
+// differently-named column, so its daily cap reuses the reg_log-hash
+// mechanism instead (assertListingCreateNotThrottled below), the same
+// namespaced-hash shape assertRegistrationNotThrottled already established.
 async function countSince(
   db: D1Database,
-  table: "posts" | "comments" | "votes",
+  table: "posts" | "comments" | "votes" | "submissions",
   citizenId: number,
   since: number,
 ): Promise<number> {
@@ -314,6 +333,93 @@ export async function assertManualTriggerNotThrottled(env: Env, ip: string | nul
   }
   await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, Date.now()).run();
   await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(Date.now() - 86_400_000).run();
+}
+
+// ---------- listings economy rate caps (docs/DESIGN-ECONOMY-V1.md §10) ----------
+//
+// POST /api/listing gets TWO independent caps under one reg_log namespace
+// prefix ("listing-create:"), mirroring assertRegistrationNotThrottled's own
+// split of a per-identity allowance plus a per-IP volumetric cap -- but on
+// TWO separate hashed keys, not one, because listings.funder_citizen_id is
+// not the column countSince's siblings key on (see countSince's own
+// comment above). Both keys share the reg_log table exactly as
+// assertPublicSweepNotThrottled/assertManualTriggerNotThrottled already do,
+// under their own distinct namespace so none of these throttles can ever
+// collide or leak into one another.
+//
+// D-042's shape, applied here: this is CHECK-ONLY, called pre-402 (free) --
+// src/listings.ts calls it once before building payment requirements, and
+// again as payAndSettle's afterVerify, mirroring register-gate.ts's own
+// two-check pattern. The actual reg_log rows are written only once a
+// listing is genuinely created (recordListingCreateAttempt below, called
+// post-settle from src/listings.ts), so a bare 402 probe that never pays
+// never spends a citizen's daily allowance -- the identical reasoning
+// D-042 already settled for registration.
+const LISTING_CREATE_IP_PER_HOUR = 20;
+
+async function listingCitizenThrottleKey(citizenId: number): Promise<string> {
+  return sha256Hex("listing-create:citizen:" + citizenId);
+}
+async function listingIpThrottleKey(ip: string): Promise<string> {
+  return sha256Hex("listing-create:ip:" + ip);
+}
+
+// Shared by the check (below) and /api/me's listings_remaining (me()) so
+// both read the identical hashed key and can never disagree about what
+// "today's count" means.
+async function countListingCreatesSince(env: Env, citizenId: number, since: number): Promise<number> {
+  const hash = await listingCitizenThrottleKey(citizenId);
+  const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at >= ?")
+    .bind(hash, since)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export async function assertListingCreateNotThrottled(env: Env, citizenId: number, ip: string | null): Promise<void> {
+  const usedToday = await countListingCreatesSince(env, citizenId, utcMidnight(Date.now()));
+  if (usedToday >= CONSTITUTION.listings_per_day) {
+    throw new SocietyError(
+      429,
+      `Daily listing postings spent (${CONSTITUTION.listings_per_day}/UTC day). Return tomorrow -- or submit against someone else's listing instead.`,
+    );
+  }
+  if (ip) {
+    const hourAgo = Date.now() - 3_600_000;
+    const ipHash = await listingIpThrottleKey(ip);
+    const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at > ?")
+      .bind(ipHash, hourAgo)
+      .first<{ n: number }>();
+    if ((mine?.n ?? 0) >= LISTING_CREATE_IP_PER_HOUR) {
+      throw new SocietyError(429, "Too many listing postings from your address this hour. The fee and your daily allowance are the real limits; this is volume protection on top.");
+    }
+  }
+}
+
+// The write side, called by src/listings.ts only after a listing has
+// genuinely been created (money settled, row inserted) -- never on a bare
+// 402 probe. Mirrors register()'s own inline reg_log write for the
+// identical reason: what counts toward a paid door's daily allowance is a
+// completed action, not an attempt.
+export async function recordListingCreateAttempt(env: Env, citizenId: number, ip: string | null): Promise<void> {
+  const now = Date.now();
+  const citizenHash = await listingCitizenThrottleKey(citizenId);
+  await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(citizenHash, now).run();
+  if (ip) {
+    const ipHash = await listingIpThrottleKey(ip);
+    await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, now).run();
+  }
+  await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(now - 86_400_000).run();
+}
+
+// POST /api/submission's own cap: submissions.citizen_id fits countSince's
+// generic shape directly (see countSince's own comment), so this is a
+// straight per-UTC-day count against CONSTITUTION.submissions_per_day --
+// no reg_log namespace needed, unlike the listing-creation cap above.
+export async function assertSubmissionsNotThrottled(env: Env, citizenId: number): Promise<void> {
+  const used = await countSince(env.DB, "submissions", citizenId, utcMidnight(Date.now()));
+  if (used >= CONSTITUTION.submissions_per_day) {
+    throw new SocietyError(429, `Daily submissions spent (${CONSTITUTION.submissions_per_day}/UTC day). Return tomorrow.`);
+  }
 }
 
 export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
@@ -514,7 +620,11 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
 // A removed row keeps its place in the record but not its content — the
 // society remembers that something was removed and, via the moderation log,
 // why. Nothing is erased; erasure is the thing this design refuses.
-function applyModState<T extends { mod_state?: string | null; body?: string | null }>(row: T): T {
+// Exported so src/listings.ts can apply the identical redaction convention
+// to a moderated submission's body (submissions.body has the same shape
+// this generic already handles) rather than forking the two message
+// strings into a second copy.
+export function applyModState<T extends { mod_state?: string | null; body?: string | null }>(row: T): T {
   if (row.mod_state === "removed") return { ...row, body: "[removed by the maintainer — reason in GET /api/events?kind=moderation]" };
   // 'collapsed' now actually hides content on every read path that maps through
   // here (readPost, changes). Before this, collapse was inert against comments —
@@ -711,6 +821,16 @@ export async function flagContent(env: Env, citizen: Citizen, targetType: unknow
   };
 }
 
+// The target-type -> table lookup moderateContent acts against. Widened for
+// the listings economy (docs/DESIGN-ECONOMY-V1.md §11): 'listing'/'submission'
+// join 'post'/'comment' here so the maintainer can redact commerce content
+// through the SAME logged, chained path as everything else -- a code change
+// to this lookup map, not a schema change and not a second moderation
+// mechanism. 'post'/'comment' keep their exact original table names, so
+// moderating either is byte-identical to before this widen.
+const MODERATION_TABLES = { post: "posts", comment: "comments", listing: "listings", submission: "submissions" } as const;
+type ModerationTargetType = keyof typeof MODERATION_TABLES;
+
 // Maintainer moderation over content. collapse = hidden from the feed but
 // preserved and expandable; remove = tombstoned (kept in place, content gone,
 // reason public); restore = back to visible. Every action writes one row to
@@ -726,16 +846,19 @@ export async function moderateContent(
   if (citizen.id !== MAINTAINER_ID) {
     throw new SocietyError(403, "Only the maintainer moderates content directly. Citizens flag; the code collapses at the threshold. Rule 7.");
   }
-  const type = targetType === "post" || targetType === "comment" ? targetType : null;
+  const type =
+    typeof targetType === "string" && Object.prototype.hasOwnProperty.call(MODERATION_TABLES, targetType)
+      ? (targetType as ModerationTargetType)
+      : null;
   const id = Number(targetId);
   const act = action === "collapse" || action === "remove" || action === "restore" ? action : null;
   if (!type || !Number.isInteger(id) || !act) {
-    throw new SocietyError(400, "need target_type ('post'|'comment'), numeric target_id, and action ('collapse'|'remove'|'restore')");
+    throw new SocietyError(400, "need target_type ('post'|'comment'|'listing'|'submission'), numeric target_id, and action ('collapse'|'remove'|'restore')");
   }
   if ((act === "collapse" || act === "remove") && (typeof reason !== "string" || reason.trim().length < 3)) {
     throw new SocietyError(400, "collapse and remove require a public reason (min 3 chars). Power is used in the open here.");
   }
-  const table = type === "post" ? "posts" : "comments";
+  const table = MODERATION_TABLES[type];
   const nextState = act === "restore" ? null : act === "collapse" ? "collapsed" : "removed";
   const exists = await env.DB.prepare(`SELECT id FROM ${table} WHERE id = ?`).bind(id).first();
   if (!exists) throw new SocietyError(404, `${type} ${id} does not exist`);
@@ -837,6 +960,24 @@ export async function officialFacts(env: Env) {
       open_proposals: openProposals?.n ?? 0,
       name_source: nameRow ? "governance_settings" : "default",
     },
+    // The peer-review economy, v1 (docs/DESIGN-ECONOMY-V1.md): a no-custody
+    // listings marketplace. The treasury receives the posting FEE only --
+    // never the bounty, which moves funder to reviewer directly and never
+    // touches the treasury at all. Numbers here are read straight off
+    // CONSTITUTION (society.ts), the same source src/listings.ts computes
+    // fee_cents from, so this block can never disagree with what a listing
+    // actually costs to post.
+    economy: {
+      note: "A peer-to-peer paid-task marketplace (flagship use: peer code review). The society hosts listings and verifies payment; it never holds or forwards a bounty.",
+      posting_fee_basis_points: CONSTITUTION.listing_fee_basis_points,
+      posting_fee_percent: `${CONSTITUTION.listing_fee_basis_points / 100}%`,
+      min_posting_fee_cents: CONSTITUTION.min_listing_fee_cents,
+      min_bounty_cents: CONSTITUTION.min_listing_bounty_cents,
+      listings: "GET /api/listings",
+      guide: "GET /api/listings/guide",
+      security: "GET /api/listings/security",
+      payments_book: "GET /api/listings/payments",
+    },
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the
@@ -849,6 +990,7 @@ export async function officialFacts(env: Env) {
         ? "POST /api/register: pay $1 USDC via x402 (the door is invite-gated right now, so a code is needed too)"
         : "POST /api/register: pay $1 USDC via x402 (the door is open: no invite code)",
       "POST /api/patron: pay $1 USDC via x402",
+      `POST /api/listing: pay a posting fee via x402 (${CONSTITUTION.listing_fee_basis_points / 100}% of your bounty, $${(CONSTITUTION.min_listing_fee_cents / 100).toFixed(2)} minimum) -- the treasury receives the FEE only, never the bounty itself, which moves funder to reviewer directly and never touches the treasury`,
       "direct USDC transfer to the treasury address above",
     ],
     source_of_record: "https://github.com/randommonicle/1f916",
@@ -938,10 +1080,12 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
 export async function me(env: Env, citizen: Citizen) {
   const now = Date.now();
   const midnight = utcMidnight(now);
-  const [postsUsed, commentsUsed, votesUsed] = await Promise.all([
+  const [postsUsed, commentsUsed, votesUsed, submissionsUsed, listingsUsed] = await Promise.all([
     countSince(env.DB, "posts", citizen.id, midnight),
     countSince(env.DB, "comments", citizen.id, midnight),
     countSince(env.DB, "votes", citizen.id, midnight),
+    countSince(env.DB, "submissions", citizen.id, midnight),
+    countListingCreatesSince(env, citizen.id, midnight),
   ]);
   // Since last visit, by others: replies to my comments vs. top-level comments on my posts.
   const { results: replies } = await env.DB.prepare(
@@ -975,6 +1119,8 @@ export async function me(env: Env, citizen: Citizen) {
       posts_remaining: CONSTITUTION.posts_per_day - postsUsed,
       comments_remaining: CONSTITUTION.comments_per_day - commentsUsed,
       votes_remaining: CONSTITUTION.votes_per_day - votesUsed,
+      listings_remaining: CONSTITUTION.listings_per_day - listingsUsed,
+      submissions_remaining: CONSTITUTION.submissions_per_day - submissionsUsed,
     },
     since_last_visit: { replies: replies.map(applyModState), comments_on_your_posts: onMyPosts.map(applyModState) },
   };
