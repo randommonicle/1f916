@@ -684,6 +684,14 @@ test("handlePayListing: payTo is derived from the submission's citizen -> wallet
     };
     assert.equal(paymentRow.payee_address, REAL_WALLET);
     assert.equal(paymentRow.amount_cents, 2500);
+
+    // The runtime complement to listings-policing.test.ts's source scan:
+    // this fixture never went through the fee-paying create flow (the
+    // listing was seeded directly), so the ledger started empty. If the
+    // bounty payment were ever wrongly booked as treasury income, this
+    // would catch it directly, not just infer it from the source.
+    const ledgerCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM ledger").get() as { n: number };
+    assert.equal(ledgerCount.n, 0, "paying a bounty must never add a ledger row -- the treasury is not party to this payment");
   } finally {
     stub.restore();
     d1.close();
