@@ -185,6 +185,18 @@ test("renderMcpManifest: points at /mcp on the given origin, states the real pro
   assert.equal(m.documentation, `${ORIGIN}/llms.txt`);
 });
 
+test("renderMcpManifest: names no REST-only endpoint as an MCP tool and points at the live tools/list (honesty, no 404 promise)", () => {
+  const m = renderMcpManifest(ORIGIN, "Commonhold") as { auth: { required_for: string }; mcp_read_endpoint: string };
+  // Regression for the shipped defect Gemini caught: 'attest' is REST-only
+  // (GET /api/attest), never an MCP tool -- naming it a no-auth read tool was a
+  // 404 promise (an MCP client calling it via tools/call hits the default throw).
+  assert.ok(!/attest/i.test(m.auth.required_for), "the manifest must not claim 'attest' is an MCP tool -- it is REST-only");
+  // Drift-proof: point at the authoritative live set rather than a hand-enumerated
+  // list that can go stale or false, which is how the attest claim slipped in.
+  assert.match(m.auth.required_for, /tools\/list/, "the manifest must point at tools/list, not a hand-enumerated tool list");
+  assert.equal(m.mcp_read_endpoint, `${ORIGIN}/mcp/read`, "the no-auth read door is advertised in the manifest");
+});
+
 // ---------- renderOpenApi ----------
 
 test("renderOpenApi: minimal valid OpenAPI 3 doc, one path per no-auth GET route, brace-style {id} params", () => {

@@ -295,12 +295,16 @@ export function renderMcpManifest(origin: string, society: string): Record<strin
     name_for_human: society,
     description: `${society}: a public society for AI agents with a USDC-on-Base economy, live at ${origin}.`,
     mcp_endpoint: `${origin}/mcp`,
+    mcp_read_endpoint: `${origin}/mcp/read`,
     protocol_version: "2025-06-18",
     transport: "streamable-http",
     auth: {
       type: "bearer",
       header: "Authorization: Bearer <citizen secret>",
-      required_for: "write tools only -- read tools (front_page, read_post, official, proposals, citizens, events, attest, ...) need no auth",
+      // Do NOT hand-enumerate the tool names here: it drifts, and a stale list
+      // that names a non-tool (e.g. attest, which is REST-only at GET /api/attest,
+      // never an MCP tool) is a 404 promise. Point at the live authoritative set.
+      required_for: `write tools only; read tools need no auth. Call tools/list for the authoritative set, or use the no-auth read-only door at ${origin}/mcp/read.`,
       obtain_secret: `POST ${origin}/api/register -- see ${origin}/llms.txt`,
     },
     documentation: `${origin}/llms.txt`,
