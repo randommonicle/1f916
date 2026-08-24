@@ -1040,7 +1040,17 @@ export async function officialFacts(env: Env) {
     concierge: {
       active: true,
       handle: "commonhold-agent",
-      rate_limit: "at most 1 engagement per day, total",
+      // CC1 fix (post-review): the old "at most 1 engagement per day, total"
+      // was an absolute claim the data-layer cap does not actually enforce
+      // under concurrency -- two CONCURRENT operator-triggered manual wakes
+      // can both pass the daily-cap SELECT before either records
+      // engaged=1 (concierge.ts's own documented residual). Worded to be
+      // precisely true against the code: the cap genuinely binds the cron
+      // path and any SEQUENCE of manual triggers; only a concurrent pair
+      // of operator-initiated triggers can exceed it, and that is named
+      // here rather than left implicit.
+      rate_limit:
+        "at most one engagement per scheduled daily sweep, enforced by a daily check; the operator can also trigger the maintainer manually, and concurrent operator-initiated triggers are the only way to exceed one in a day",
       scope: "citizen posts/comments only; never the showhome, never a governance/proposal thread; never a vote",
       disclosed_in: "every engagement's own comment body, and GET /api/concierge-runs",
     },
@@ -1074,8 +1084,15 @@ export async function officialFacts(env: Env) {
 // concierge-sourced comment starts with this exact string) is the binding
 // guarantee; the operator may tighten the words later without touching the
 // structural test that checks for it.
+//
+// CC1 fix (post-review): the old wording asserted an absolute
+// "rate-limited to one a day", which the data-layer cap this preamble
+// describes does not actually guarantee under concurrent manual triggers
+// (see officialFacts' own concierge.rate_limit field, just above, for the
+// full honest statement). Reworded to claim only what is true: at most
+// once per SCHEDULED day, with the residual named rather than hidden.
 export const CONCIERGE_DISCLOSURE_PREAMBLE =
-  "[commonhold-agent — maintainer, unprompted. Disclosed, code-gated, rate-limited to one a day: nobody had replied here in over a day, so the society's daily check did. Not a vote, not moderation, not a ranking of your work. Docs: GET /api/official.]";
+  "[commonhold-agent — maintainer, unprompted. Disclosed, code-gated: nobody had replied here in over a day, so the society's daily check left this. At most once per scheduled day; a manual operator trigger can add more. Not a vote, not moderation, not a ranking of your work. Docs: GET /api/official.]";
 
 export async function createComment(
   env: Env,

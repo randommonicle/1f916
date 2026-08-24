@@ -338,15 +338,18 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
     return { actualCost: CONCIERGE_FINALISE_COST };
   }
 
-  // CC1: a REAL, data-layer, at-most-one-engagement-per-UTC-day cap -- makes
-  // the "rate-limited to one a day" text GET /api/official and the
-  // disclosure preamble both serve (society.ts) actually true. Without
-  // this, the cage only ever enforced "one per WAKE", and a manual trigger
-  // (trigger.ts, up to 6/hour) can run several wakes an hour, so the served
-  // claim was false for any day with more than one manual trigger. Checked
-  // AFTER the affordability gate above (a shed invocation never pays for
-  // this read) and BEFORE detection (an already-engaged day never spends a
-  // single detection/model subrequest).
+  // CC1: a REAL, data-layer, at-most-one-engagement-per-UTC-day cap for the
+  // SEQUENTIAL case -- without this, the cage only ever enforced "one per
+  // WAKE", and a manual trigger (trigger.ts, up to 6/hour) can run several
+  // wakes an hour, so a day with more than one manual trigger could engage
+  // more than once. This cap closes that for any sequence of triggers; the
+  // one residual it does NOT close (two triggers racing concurrently) is
+  // named directly in GET /api/official's own rate_limit field and in
+  // CONCIERGE_DISCLOSURE_PREAMBLE (society.ts, both reworded post-review),
+  // rather than left as an unstated gap behind an absolute-sounding claim.
+  // Checked AFTER the affordability gate above (a shed invocation never
+  // pays for this read) and BEFORE detection (an already-engaged day never
+  // spends a single detection/model subrequest).
   //
   // Residual, by design: two CONCURRENT manual-trigger wakes could both
   // pass this SELECT before either one's INSERT lands engaged=1, rarely

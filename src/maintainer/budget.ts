@@ -226,8 +226,10 @@ export const CONCIERGE_MAX_ATTEMPTS = 3;
 // case, not typical case.
 export const CONCIERGE_POST_COST = 9;
 
-// CC1 (docs/DESIGN-CONCIERGE.md's own "rate-limited to one a day" disclosure,
-// society.ts's officialFacts concierge block and CONCIERGE_DISCLOSURE_PREAMBLE):
+// CC1 (docs/DESIGN-CONCIERGE.md's own daily-cap disclosure, society.ts's
+// officialFacts concierge.rate_limit block and CONCIERGE_DISCLOSURE_PREAMBLE --
+// both reworded post-review to state the concurrent-manual-trigger residual
+// honestly rather than claim an absolute "one a day"):
 // the daily-cap SELECT concierge.ts runs immediately after this
 // affordability check and before detection, on every invocation that
 // reaches it -- one D1 read. Priced here so canAffordConcierge's own worst

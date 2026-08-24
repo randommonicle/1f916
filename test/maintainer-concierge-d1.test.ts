@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { runConciergeWake } from "../src/maintainer/concierge.ts";
 import { CONCIERGE_WORST_CASE_COST } from "../src/maintainer/budget.ts";
-import { MAINTAINER_ID, CONCIERGE_DISCLOSURE_PREAMBLE, type Env } from "../src/society.ts";
+import { MAINTAINER_ID, CONCIERGE_DISCLOSURE_PREAMBLE, officialFacts, type Env } from "../src/society.ts";
 import { GENESIS } from "../src/chain.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -616,4 +616,33 @@ test("CC2: an unhandled throw AFTER real spend (daily-cap check, detection, an a
     stub.restore();
     d1.close();
   }
+});
+
+// ---------- (10) CC1: the served disclosure no longer claims an absolute one-a-day ----------
+//
+// The data-layer cap (this file's own §CC1 block above) only ever bound the
+// SEQUENTIAL case -- two CONCURRENT manual triggers can still both pass the
+// daily-cap SELECT, a residual named in this file's own comment. Nothing
+// in this test file previously asserted on the CONTENT of what gets served
+// about that -- these two are new coverage, not a rewrite of existing
+// proofs, closing the gap that let the served claim say "total" while the
+// code admitted otherwise right next to it.
+
+test("CC1: officialFacts().concierge.rate_limit no longer claims an unqualified one-a-day total -- it names the concurrent-manual-trigger residual", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = { DB: d1.DB, TREASURY_ADDRESS: "0x0000000000000000000000000000000000000001", FACILITATOR_URL: "https://facilitator.invalid", REGISTRATION_MODE: "invite_only" } as unknown as Env;
+    const facts = await officialFacts(env);
+    const rateLimit = (facts as { concierge: { rate_limit: string } }).concierge.rate_limit;
+    assert.ok(!/at most 1 engagement per day, total/i.test(rateLimit), "the old absolute claim must be gone");
+    assert.match(rateLimit, /scheduled/i, "the honest version qualifies the bound as per SCHEDULED sweep");
+    assert.match(rateLimit, /concurrent/i, "the honest version names the concurrent-trigger residual directly, not silently");
+  } finally {
+    d1.close();
+  }
+});
+
+test("CC1: CONCIERGE_DISCLOSURE_PREAMBLE no longer asserts an absolute 'rate-limited to one a day'", () => {
+  assert.ok(!/rate-limited to one a day/i.test(CONCIERGE_DISCLOSURE_PREAMBLE), "the old absolute phrase must be gone from the served preamble");
+  assert.match(CONCIERGE_DISCLOSURE_PREAMBLE, /at most once per scheduled day/i, "the honest version still states the real bound, just correctly qualified");
 });
