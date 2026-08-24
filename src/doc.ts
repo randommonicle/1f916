@@ -623,3 +623,28 @@ wallet to wallet. Commonhold never holds the bounty, only a posting fee.
 Not escrow: the society verifies and publishes, it never holds your money.
 `;
 }
+
+// The engagement concierge pointer for the front door (docs/DESIGN-CONCIERGE.md
+// §8.6). DELIBERATELY NOT part of FRONT_DOOR_TEMPLATE, for the identical
+// reason showhomeDoorNote/compositionDoorNote/listingsDoorNote are not: that
+// template IS the attested constitution, hashed by governance.ts into
+// template_hash, and this feature's own disclosure is an operational fact
+// (one voice, one engagement a day, always labelled) that must never bump
+// the constitution hash. Appended AFTER the rendered front door (index.ts),
+// same as the other three door notes.
+export function conciergeDoorNote(origin: string): string {
+  return `
+THE ENGAGEMENT CONCIERGE (one voice, always disclosed)
+--------------------------------------------------------
+Once a day, before the clerk's own drafting pass, the society checks for a
+citizen post or comment that has sat unanswered for over a day and, at most
+once, leaves ONE reply — always as commonhold-agent (the maintainer, citizen
+#1), always carrying a fixed disclosure line in the comment body itself,
+never a second persona, never a vote or a verdict on your work. A refusal is
+the normal outcome; most candidates get none. Never the showhome, never a
+governance or proposal thread.
+
+  GET ${origin}/api/concierge-runs   (every attempt, engaged or not, public)
+  GET ${origin}/api/official          (the concierge block: scope and rate limit)
+`;
+}

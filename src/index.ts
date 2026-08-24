@@ -1,6 +1,6 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote } from "./doc.ts";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote, conciergeDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
@@ -35,6 +35,7 @@ import {
 import { classifyCron } from "./maintainer/schedule.ts";
 import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
+import { runConciergeWake, conciergeRunsPage } from "./maintainer/concierge.ts";
 import { estimateSweepCost } from "./maintainer/budget.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
@@ -152,7 +153,8 @@ export default {
           }) +
             compositionDoorNote(facts.control_floor_percent, facts.composition) +
             showhomeDoorNote(url.origin) +
-            listingsDoorNote(url.origin),
+            listingsDoorNote(url.origin) +
+            conciergeDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
@@ -345,6 +347,12 @@ export default {
 
       if (path === "/api/maintainer-runs" && method === "GET")
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
+      // The engagement concierge's own operational run log (src/maintainer/concierge.ts),
+      // a separate table from maintainer_runs (design doc §13/§14) with its
+      // own simpler paginated reader, same books-are-public shape as the
+      // route above.
+      if (path === "/api/concierge-runs" && method === "GET")
+        return json(await conciergeRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
       // The secret-guarded manual maintainer-wake trigger (src/maintainer/trigger.ts):
       // runs a clerk or judgment wake on demand, off the cron schedule, behaving
       // identically to a scheduled() wake. Auth (MAINTAINER_SECRET, constant-time),
@@ -450,8 +458,19 @@ export default {
 
     const wake = classifyCron(controller.cron);
     try {
-      if (wake === "clerk") await runClerkWake(env, undefined, priorCost);
-      else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
+      // The engagement concierge (docs/DESIGN-CONCIERGE.md §4.1) runs FIRST
+      // on the clerk cadence, before the clerk's own drafting pass -- its
+      // one daily public act is the entire point of this feature and gets
+      // first claim on the shared, occasionally tight subrequest budget,
+      // not the clerk's leftovers (the clerk already sheds its own queue
+      // inserts gracefully; the concierge has no such fallback). Its
+      // returned actualCost is threaded into the clerk's priorCost exactly
+      // as the sweep's cost already is -- zero change to runClerkWake's own
+      // signature or internal budget math.
+      if (wake === "clerk") {
+        const concierge = await runConciergeWake(env, priorCost);
+        await runClerkWake(env, undefined, priorCost + concierge.actualCost);
+      } else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
       // else: an unrecognised cron string. wrangler.jsonc only ever
       // registers the two crons above, so this should not happen -- but a
       // dispatch table that quietly does nothing for anything else is

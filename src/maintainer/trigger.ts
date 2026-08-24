@@ -20,6 +20,7 @@ import {
 import { runGovernanceSweep, SWEEP_COHORT_CAP } from "../governance.ts";
 import { runClerkWake } from "./clerk.ts";
 import { runJudgmentWake } from "./judgment.ts";
+import { runConciergeWake } from "./concierge.ts";
 import { estimateSweepCost, MANUAL_TRIGGER_PRECHECK_COST } from "./budget.ts";
 
 export type ManualWakeKind = "clerk" | "judgment";
@@ -147,8 +148,13 @@ export async function handleManualTrigger(request: Request, env: Env): Promise<M
   }
 
   const triggeredAt = Date.now();
-  if (wake === "clerk") await runClerkWake(env, undefined, priorCost);
-  else await runJudgmentWake(env, undefined, priorCost);
+  // Same reorder as scheduled() (docs/DESIGN-CONCIERGE.md §4.1): the
+  // concierge runs first on a clerk-kind trigger, and its actualCost is
+  // threaded into the clerk's own priorCost identically.
+  if (wake === "clerk") {
+    const concierge = await runConciergeWake(env, priorCost);
+    await runClerkWake(env, undefined, priorCost + concierge.actualCost);
+  } else await runJudgmentWake(env, undefined, priorCost);
 
   return {
     ok: true,

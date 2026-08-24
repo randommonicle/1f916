@@ -23,6 +23,7 @@ import { installSubrequestCounter, makeModelRpcResponder, judgmentDecisionText, 
 import { MAINTAINER_MODELS } from "../src/maintainer/anthropic.ts";
 import { JUDGMENT_CRON, CLERK_CRON } from "../src/maintainer/schedule.ts";
 import { detectConstitutionChange } from "../src/governance.ts";
+import { CONCIERGE_DISCLOSURE_PREAMBLE, MAINTAINER_ID } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 
 // Pre-warm the shared PROCESS_CONSTITUTION_CACHE ONCE, deterministically, so
@@ -417,6 +418,94 @@ test("PROOF clerk full gather at governance-sweep cohort 0 and cohort 2 (cohort 
       counter.restore();
       d1.close();
     }
+  }
+});
+
+// ---------- shape 2b: the concierge, wired ahead of the clerk (docs/DESIGN-CONCIERGE.md §4.1) ----------
+
+// The reordered dispatch (scheduled()/handleManualTrigger both now run the
+// concierge BEFORE the clerk on a clerk-cadence wake) is a NEW seam this
+// file's own "wrap the ENTIRE invocation" rule (D-036) must cover: sweep +
+// concierge + clerk, together, real work in all three, one shared 50-budget.
+// The responder below distinguishes the concierge's own prompt from the
+// clerk's own by CONTENT (both are priced off MAINTAINER_MODELS.clerk, so a
+// model-name dispatch alone cannot tell them apart) -- the concierge's
+// system prompt wraps its target in <target> tags; the clerk's never does.
+function anthropicResponseLike(text: string): Response {
+  const body = { content: [{ type: "text", text }], stop_reason: "end_turn", usage: { input_tokens: 80, output_tokens: 40 } };
+  return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function conciergeAwareClerkResponder(clerkDraftCount: number) {
+  return (url: string, init: { body?: unknown } | undefined) => {
+    if (url.includes("api.anthropic.com")) {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      let prompt = "";
+      try {
+        prompt = (JSON.parse(bodyText) as { messages?: Array<{ content?: string }> }).messages?.[0]?.content ?? "";
+      } catch {
+        /* fall through with an empty prompt */
+      }
+      if (prompt.includes("<target")) {
+        // The concierge's own call: a clean, in-band, non-refusing reply so
+        // it actually posts (real work, not a skip).
+        return anthropicResponseLike("That's a genuinely interesting angle -- what led you to that conclusion, and how does it square with the treasury's own numbers?");
+      }
+      const drafts = Array.from({ length: clerkDraftCount }, (_, i) => ({ kind: "bookkeeping_note", note: `drift note ${i}` }));
+      return anthropicResponseLike(clerkDraftText(drafts));
+    }
+    // Base RPC probe (readOnchainUsdcCents): a benign answered balance.
+    return rpcBalanceResponse();
+  };
+}
+
+test("PROOF CONCIERGE -- sweep (1 due) + concierge (1 real engagement) + clerk (real gather + inserts), all real work, one invocation, <= 50", async () => {
+  const K = 10;
+  const counter = installSubrequestCounter(conciergeAwareClerkResponder(K));
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    for (let i = 0; i < 4; i++) insertCitizen(d1); // a small census for the sweep's tally
+    const now = Date.now();
+    seedDueProposal(d1, now - 1_000);
+
+    // A silent, >=24h-old, zero-comment post -- a real concierge candidate.
+    const authorId = insertCitizen(d1, { handle: "sisyphus" });
+    const conciergeTargetId = Number(
+      d1.raw
+        .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, 'm', ?)")
+        .run(authorId, "a post nobody answered", "body", "dupe-concierge-target", now - 25 * 60 * 60 * 1000)
+        .lastInsertRowid,
+    );
+
+    // A handful of flagged, recent posts so the clerk's own gather has real
+    // content to draft against (hasNewCandidates = true, no idle skip).
+    for (let i = 0; i < 5; i++) {
+      const postId = Number(d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (1, ?, ?, ?, 0, 'm', ?)").run(`P${i}`, `body ${i}`, `h${i}`, now - 60_000).lastInsertRowid);
+      d1.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (1, 'post', ?, 'spam', ?)").run(postId, now - (5 - i) * 100);
+    }
+
+    await callScheduled(CLERK_CRON, makeEnv(d1));
+
+    assert.equal(counter.breached(), false, `sweep+concierge+clerk never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+    assert.ok(counter.total() <= 50, `sweep+concierge+clerk compound total ${counter.total()} <= 50`);
+    assert.ok(counter.fetches() >= 2, `both the concierge's own model call and the clerk's own model call happened (${counter.fetches()} fetches)`);
+
+    // The concierge really did engage, real work, not a skip -- proving this
+    // is a genuine three-phase compound, not an accidentally-idle concierge.
+    const conciergeComment = d1.raw.prepare("SELECT body, citizen_id, post_id FROM comments WHERE post_id = ?").get(conciergeTargetId) as { body: string; citizen_id: number; post_id: number } | undefined;
+    assert.ok(conciergeComment, "the concierge actually posted its one engagement this invocation");
+    assert.equal(conciergeComment!.citizen_id, MAINTAINER_ID);
+    assert.ok(conciergeComment!.body.startsWith(CONCIERGE_DISCLOSURE_PREAMBLE), "the disclosure preamble is present even inside the full compound invocation");
+
+    const conciergeRun = d1.raw.prepare("SELECT engaged FROM concierge_runs ORDER BY id DESC LIMIT 1").get() as { engaged: number };
+    assert.equal(conciergeRun.engaged, 1);
+
+    const dueStatus = (d1.raw.prepare("SELECT status FROM proposals ORDER BY id DESC LIMIT 1").get() as { status: string }).status;
+    assert.notEqual(dueStatus, "open", "the sweep really did process the due proposal this same invocation");
+  } finally {
+    counter.restore();
+    d1.close();
   }
 });
 

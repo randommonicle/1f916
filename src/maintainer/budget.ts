@@ -194,3 +194,47 @@ export function affordableClerkInserts(priorCost: number, ceiling: number): numb
   const affordable = INVOCATION_SUBREQUEST_BUDGET - priorCost - CLERK_WAKE_FIXED_COST - FINALISE_RESERVE;
   return Math.max(0, Math.min(ceiling, affordable));
 }
+
+// The engagement concierge (docs/DESIGN-CONCIERGE.md §12, docs/BUILD-CONCIERGE-ADDENDUM.md).
+// Runs BEFORE the clerk on every clerk-cadence wake (src/index.ts scheduled(),
+// src/maintainer/trigger.ts handleManualTrigger); its own returned actualCost
+// is threaded into the clerk's priorCost exactly as the sweep's is, so the two
+// phases share one invocation's budget honestly -- a busy concierge attempt
+// leaves the clerk affording fewer inserts, never the other way round.
+
+// The two detection reads (§6) -- always run when affordable, D1-only. Priced
+// separately from the generation/post cost below because they are the fixed,
+// cheap part; the model call is the part that actually costs money.
+export const CONCIERGE_DETECTION_COST = 2;
+
+// One Anthropic fetch per candidate attempted, up to this many candidates
+// tried before the wake gives up for the day (not how many it may POST --
+// that ceiling is 1, enforced by stopping at the first successful post).
+export const CONCIERGE_ATTEMPT_COST = 1;
+export const CONCIERGE_MAX_ATTEMPTS = 3;
+
+// One successful post: createComment's post-exists check (1) + parent-exists
+// check (1, comment targets only -- conservatively priced as always-present)
+// + countSince (1, always runs even though capExempt skips the cap comparison
+// -- society.ts) + the INSERT (1) = 4, plus the identity_events disclosure
+// append (head-hash read + insert, ~2, up to ~4 conservatively if a
+// UNIQUE-collision retry is modelled the way commitWithModLog's own comment
+// prices one, society.ts) = 8, conservative (>= real), matching the
+// D-041/D-045 house discipline of pricing worst case, not typical case.
+export const CONCIERGE_POST_COST = 8;
+
+// Pure. May the concierge phase run at all this invocation, given what the
+// co-resident governance sweep (priorCost) has already spent? Reuses the
+// existing FINALISE_RESERVE (this phase's own outcome write must always
+// land) and INVOCATION_SUBREQUEST_BUDGET -- no new ceiling constant, the same
+// shared 50 the rest of budget.ts prices against. Checked ONCE, before
+// detection runs, using the worst-case estimate -- simpler than the
+// judgment batch loop's incremental per-batch check, and safe: the
+// concierge's worst case is small and tightly bounded, so a single
+// conservative up-front check costs little in false shedding.
+//
+// Arithmetic: 2 + 3*1 + 8 = 13, so this passes whenever priorCost <= 35.
+export function canAffordConcierge(priorCost: number): boolean {
+  const worstCase = CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST;
+  return priorCost + worstCase + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
+}
