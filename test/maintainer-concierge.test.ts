@@ -27,6 +27,7 @@ import {
   CONCIERGE_POST_COST,
   CONCIERGE_DAILY_CAP_CHECK_COST,
   CONCIERGE_FINALISE_COST,
+  CONCIERGE_WORST_CASE_COST,
 } from "../src/maintainer/budget.ts";
 
 // ---------- candidate ranking (oldest-first merge) ----------
@@ -153,8 +154,15 @@ test("buildConciergeUserPrompt: a top-level comment (no parent comment) falls ba
 // ---------- canAffordConcierge arithmetic (mirrors maintainer-budget.test.ts's own boundary style) ----------
 
 test("canAffordConcierge: worst case is 16 (1 daily-cap check + 2 detection + 3 attempts + 9 post + 1 finalise), so priorCost 32 passes and 33 refuses", () => {
+  // Recomputed from the five INDIVIDUAL constituent constants, independently
+  // of CONCIERGE_WORST_CASE_COST's own definition -- so this still catches
+  // budget.ts's exported constant drifting away from the sum of the parts
+  // it is supposed to equal (the single-source-of-truth CC2 fixes), not
+  // merely comparing the export to itself.
   const worstCase = CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST + CONCIERGE_FINALISE_COST;
   assert.equal(worstCase, 16, "sanity: matches canAffordConcierge's own stated arithmetic (CC1 + CC2 + C2, this wave)");
+  assert.equal(CONCIERGE_WORST_CASE_COST, worstCase, "the exported single-source-of-truth constant must equal the sum of its own priced parts");
+  assert.equal(CONCIERGE_WORST_CASE_COST, 16);
   assert.equal(canAffordConcierge(32), true, "32 + 16 + 2 (FINALISE_RESERVE) = 50 -- exactly at the ceiling, passes");
   assert.equal(canAffordConcierge(33), false, "33 + 16 + 2 = 51 -- one over, refuses");
 });

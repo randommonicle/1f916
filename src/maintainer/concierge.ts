@@ -33,6 +33,7 @@ import {
   CONCIERGE_POST_COST,
   CONCIERGE_DAILY_CAP_CHECK_COST,
   CONCIERGE_FINALISE_COST,
+  CONCIERGE_WORST_CASE_COST,
   canAffordConcierge,
 } from "./budget.ts";
 
@@ -309,7 +310,17 @@ export async function runConciergeWake(env: Env, priorCost = 0): Promise<Concier
       // Even the failure-record insert failed; the structured log above is
       // the last resort -- this function must still never throw.
     }
-    return { actualCost: 0 };
+    // CC2 (post-review): an unhandled throw from runConciergeWakeInner can
+    // land AFTER any subset of the daily-cap read, detection reads, model
+    // fetches, or the finalise write already ran -- the true spend is
+    // unknown at this point, not zero. Returning 0 here understated what
+    // this phase threaded into the clerk's own priorCost on every failure
+    // path, letting the clerk overspend the shared invocation budget on
+    // the strength of an error this function itself swallowed. Return the
+    // full priced worst case instead: conservative (>= any real spend this
+    // path could possibly have made), so the clerk under-affords rather
+    // than over-affords when this phase's own true cost is unknowable.
+    return { actualCost: CONCIERGE_WORST_CASE_COST };
   }
 }
 

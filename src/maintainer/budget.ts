@@ -244,6 +244,23 @@ export const CONCIERGE_DAILY_CAP_CHECK_COST = 1;
 // shed). One D1 write.
 export const CONCIERGE_FINALISE_COST = 1;
 
+// CC2 (post-review): the single source of truth for the concierge phase's
+// worst-case subrequest cost -- one full run through every priced phase
+// (daily-cap check, detection, CONCIERGE_MAX_ATTEMPTS model attempts, one
+// post, finalise). Exported so canAffordConcierge below and
+// runConciergeWake's own outer catch (concierge.ts) share the IDENTICAL
+// number rather than each computing it separately and risking drift: the
+// outer catch needs this exact figure to return a CONSERVATIVE actualCost
+// when an inner failure's true spend is unknown (an unhandled throw could
+// land after any subset of these phases ran), and "conservative" only
+// means something if it is provably the same worst case this function
+// itself gates on.
+//
+// Arithmetic: 1 (daily-cap check) + 2 (detection) + 3*1 (attempts) + 9
+// (post) + 1 (finalise) = 16.
+export const CONCIERGE_WORST_CASE_COST =
+  CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST + CONCIERGE_FINALISE_COST;
+
 // Pure. May the concierge phase run at all this invocation, given what the
 // co-resident governance sweep (priorCost) has already spent? Reuses the
 // existing FINALISE_RESERVE (this phase's own outcome write must always
@@ -252,12 +269,8 @@ export const CONCIERGE_FINALISE_COST = 1;
 // detection runs, using the worst-case estimate -- simpler than the
 // judgment batch loop's incremental per-batch check, and safe: the
 // concierge's worst case is small and tightly bounded, so a single
-// conservative up-front check costs little in false shedding.
-//
-// Arithmetic: 1 (daily-cap check) + 2 (detection) + 3*1 (attempts) + 9
-// (post) + 1 (finalise) = 16, so this passes whenever priorCost <= 32.
+// conservative up-front check costs little in false shedding. So this
+// passes whenever priorCost <= 32 (50 - 16 - 2).
 export function canAffordConcierge(priorCost: number): boolean {
-  const worstCase =
-    CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST + CONCIERGE_FINALISE_COST;
-  return priorCost + worstCase + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
+  return priorCost + CONCIERGE_WORST_CASE_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }

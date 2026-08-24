@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { runConciergeWake } from "../src/maintainer/concierge.ts";
+import { CONCIERGE_WORST_CASE_COST } from "../src/maintainer/budget.ts";
 import { MAINTAINER_ID, CONCIERGE_DISCLOSURE_PREAMBLE, type Env } from "../src/society.ts";
 import { GENESIS } from "../src/chain.ts";
 
@@ -539,6 +540,78 @@ test("honesty fallback: a comment that posted but whose disclosure-log append fa
     assert.equal(run.engaged, 1, "the run still reports the engagement -- it DID happen");
     assert.equal(run.comment_id, c.id);
     assert.match(run.error ?? "", /disclosure-log append failed/, "the failure is recorded loudly in the run's own error field, never silently dropped");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- (9) CC2: the outer catch's actualCost on an unhandled failure ----------
+
+test("CC2: an unhandled throw AFTER real spend (daily-cap check, detection, an attempt, a genuine post) still returns the full priced worst case, never 0", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropic(); // the default engaging reply -- so this run genuinely spends detection + one model attempt + a real post, not just the two fixed reads
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    const now = Date.now();
+    insertPost(d1, authorId, { created_at: now - DAY_MS - 1000 });
+
+    // Wrap env.DB so EVERY `INSERT INTO concierge_runs` throws -- both the
+    // one runConciergeWakeInner would write at the very end of a normal
+    // run, and the SECOND attempt runConciergeWake's own outer catch makes
+    // to record the failure (concierge.ts:307-311). Everything else
+    // (detection reads, the comment INSERT via createComment, the
+    // identity_events append) passes through to the real local-D1
+    // unchanged, so this run genuinely spends real subrequests and a real
+    // model fetch BEFORE the finalise write is what fails -- not a
+    // day-one, zero-spend failure.
+    const real = d1.DB;
+    const failingEnv = {
+      ...makeEnv(d1),
+      DB: {
+        prepare: (sql: string) => {
+          if (/INSERT INTO concierge_runs/i.test(sql)) {
+            return {
+              bind: () => ({
+                run: async () => {
+                  throw new Error("simulated: concierge_runs insert failed");
+                },
+              }),
+            };
+          }
+          return real.prepare(sql);
+        },
+        batch: (real as unknown as { batch: (s: unknown[]) => Promise<unknown> }).batch.bind(real),
+      },
+    } as unknown as Env;
+
+    const originalConsoleLog = console.log;
+    const logged: string[] = [];
+    console.log = (msg: string) => logged.push(msg);
+    let result: { actualCost: number };
+    try {
+      result = await runConciergeWake(failingEnv);
+    } finally {
+      console.log = originalConsoleLog;
+    }
+
+    assert.equal(result.actualCost, CONCIERGE_WORST_CASE_COST, "the outer catch must return the CONSERVATIVE worst case (16), not 0 -- this run genuinely spent real subrequests before the finalise write failed");
+    assert.notEqual(result.actualCost, 0, "the old bug: returning 0 understated real spend to the clerk's own priorCost on every failure path");
+
+    // Genuinely never throws, matching runConciergeWake's own header
+    // guarantee -- the caller (index.ts's scheduled(), trigger.ts) must
+    // never see this failure as an exception.
+    assert.ok(result, "runConciergeWake must resolve, never reject, even when its own finalise write fails twice over");
+
+    // Both insertConciergeRun attempts (the inner one, and the outer
+    // catch's own retry) genuinely failed -- so no row landed this run at
+    // all, which is the honest reflection of what actually happened.
+    const rows = d1.raw.prepare("SELECT COUNT(*) AS n FROM concierge_runs").get() as { n: number };
+    assert.equal(rows.n, 0, "both the inner and the outer catch's own insertConciergeRun attempts genuinely failed -- zero rows, not a fabricated one");
+
+    // Still logged loudly, even though the caller only sees the returned cost.
+    assert.ok(logged.some((l) => l.includes("concierge_run_failed")), "the unhandled failure must still be logged loudly");
   } finally {
     stub.restore();
     d1.close();
