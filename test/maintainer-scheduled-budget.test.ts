@@ -509,6 +509,95 @@ test("PROOF CONCIERGE -- sweep (1 due) + concierge (1 real engagement) + clerk (
   }
 });
 
+// CC2 (the concierge subrequest-accounting fix, this wave): the compound
+// proof above already covers sweep+concierge+clerk with the concierge's
+// CHEAPEST real-engagement shape (one attempt, immediate success). This is
+// the boundary proof Codex asked for: the concierge spending its OWN
+// priced WORST CASE -- CONCIERGE_MAX_ATTEMPTS (3) tries, two declined
+// before the third survives and posts -- stacked on top of a co-resident
+// sweep and a full clerk gather, still real work in all three phases, one
+// shared 50-subrequest invocation. Before CC1/CC2 this wave, the
+// concierge's own worst-case accounting UNDERSTATED what it actually
+// spent (missing the daily-cap check and its own finalise write, C2's
+// maintainer-row fetch on top) -- exactly the class of gap that let a
+// compound invocation quietly approach 50 without the code's own shed
+// logic ever seeing it coming. This proves the corrected accounting still
+// keeps the REAL measured total under 50, never the refused 51st
+// subrequest.
+test("PROOF CONCIERGE-BOUNDARY (CC2) -- sweep (1 due) + concierge AT ITS OWN PRICED WORST CASE (3 attempts, 2 declined then 1 engages) + clerk (full gather), one invocation, never crosses 50", async () => {
+  const K = 20;
+  let conciergeCalls = 0;
+  const responder = (url: string, init: { body?: unknown } | undefined) => {
+    if (url.includes("api.anthropic.com")) {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      let prompt = "";
+      try {
+        prompt = (JSON.parse(bodyText) as { messages?: Array<{ content?: string }> }).messages?.[0]?.content ?? "";
+      } catch {
+        /* fall through with an empty prompt */
+      }
+      if (prompt.includes("<target")) {
+        conciergeCalls++;
+        // First two attempts decline (NO_ENGAGEMENT) -- CONCIERGE_MAX_ATTEMPTS'
+        // own worst case -- the third engages for real.
+        if (conciergeCalls < 3) return anthropicResponseLike("NO_ENGAGEMENT");
+        return anthropicResponseLike("That's a genuinely interesting angle -- what led you to that conclusion, and how does it square with the treasury's own numbers?");
+      }
+      const drafts = Array.from({ length: K }, (_, i) => ({ kind: "bookkeeping_note", note: `drift note ${i}` }));
+      return anthropicResponseLike(clerkDraftText(drafts));
+    }
+    // Base RPC probe (readOnchainUsdcCents): a benign answered balance.
+    return rpcBalanceResponse();
+  };
+  const counter = installSubrequestCounter(responder);
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    for (let i = 0; i < 4; i++) insertCitizen(d1); // a small census for the sweep's tally
+    const now = Date.now();
+    seedDueProposal(d1, now - 1_000);
+
+    // THREE stale, silent, zero-comment posts, oldest first -- so the
+    // concierge genuinely spends all CONCIERGE_MAX_ATTEMPTS tries (two
+    // declines, one engage), its own priced worst case, not the cheap
+    // one-attempt shape PROOF CONCIERGE above already covers.
+    for (let i = 0; i < 3; i++) {
+      const authorId = insertCitizen(d1, { handle: `sisyphus-${i}` });
+      d1.raw
+        .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, 'm', ?)")
+        .run(authorId, `silent post ${i}`, "body", `dupe-boundary-${i}`, now - 25 * 60 * 60 * 1000 - (3 - i) * 1000);
+    }
+
+    // A full clerk gather: 50 flagged, recent posts (the CLERK_INPUT_CAP
+    // worst case), same shape as PROOF C1's own full-gather fixture.
+    for (let i = 0; i < 50; i++) {
+      const postId = Number(
+        d1.raw
+          .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (1, ?, ?, ?, 0, 'm', ?)")
+          .run(`P${i}`, `body ${i}`, `h${i}`, now - 1_000_000)
+          .lastInsertRowid,
+      );
+      d1.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (1, 'post', ?, 'spam', ?)").run(postId, now - (50 - i) * 100);
+    }
+
+    await callScheduled(CLERK_CRON, makeEnv(d1));
+
+    assert.equal(counter.breached(), false, `sweep+concierge(worst-case attempts)+clerk never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+    assert.ok(counter.total() <= 50, `CC2 boundary compound total ${counter.total()} <= 50 -- never the refused 51st subrequest`);
+    assert.equal(conciergeCalls, 3, "the concierge really did spend all three attempts (its own priced worst case), not the cheap one-attempt shape");
+
+    const conciergeRun = d1.raw.prepare("SELECT engaged, attempts_made FROM concierge_runs ORDER BY id DESC LIMIT 1").get() as { engaged: number; attempts_made: number };
+    assert.equal(conciergeRun.engaged, 1, "the third attempt survived every gate and engaged for real");
+    assert.equal(conciergeRun.attempts_made, 3);
+
+    const dueStatus = (d1.raw.prepare("SELECT status FROM proposals ORDER BY id DESC LIMIT 1").get() as { status: string }).status;
+    assert.notEqual(dueStatus, "open", "the co-resident sweep really did process the due proposal this same invocation");
+  } finally {
+    counter.restore();
+    d1.close();
+  }
+});
+
 // ---------- shapes 3 & 4: costed, stated (no repair expected on 3; 4's repair IS §8) ----------
 
 test("PROOF shape 4 -- POST /api/governance/sweep at zero/one/cap due each stays a small bounded cost (the permissionless public surface)", async () => {

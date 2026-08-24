@@ -213,15 +213,36 @@ export const CONCIERGE_DETECTION_COST = 2;
 export const CONCIERGE_ATTEMPT_COST = 1;
 export const CONCIERGE_MAX_ATTEMPTS = 3;
 
-// One successful post: createComment's post-exists check (1) + parent-exists
-// check (1, comment targets only -- conservatively priced as always-present)
-// + countSince (1, always runs even though capExempt skips the cap comparison
-// -- society.ts) + the INSERT (1) = 4, plus the identity_events disclosure
-// append (head-hash read + insert, ~2, up to ~4 conservatively if a
-// UNIQUE-collision retry is modelled the way commitWithModLog's own comment
-// prices one, society.ts) = 8, conservative (>= real), matching the
-// D-041/D-045 house discipline of pricing worst case, not typical case.
-export const CONCIERGE_POST_COST = 8;
+// One successful post: the maintainer citizen row fetch (1, C2 -- replaces a
+// fabricated identity object with a real SELECT, so createComment is never
+// handed a citizen that does not exist) + createComment's post-exists check
+// (1) + parent-exists check (1, comment targets only -- conservatively
+// priced as always-present) + countSince (1, always runs even though
+// capExempt skips the cap comparison -- society.ts) + the INSERT (1) = 5,
+// plus the identity_events disclosure append (head-hash read + insert, ~2,
+// up to ~4 conservatively if a UNIQUE-collision retry is modelled the way
+// commitWithModLog's own comment prices one, society.ts) = 9, conservative
+// (>= real), matching the D-041/D-045 house discipline of pricing worst
+// case, not typical case.
+export const CONCIERGE_POST_COST = 9;
+
+// CC1 (docs/DESIGN-CONCIERGE.md's own "rate-limited to one a day" disclosure,
+// society.ts's officialFacts concierge block and CONCIERGE_DISCLOSURE_PREAMBLE):
+// the daily-cap SELECT concierge.ts runs immediately after this
+// affordability check and before detection, on every invocation that
+// reaches it -- one D1 read. Priced here so canAffordConcierge's own worst
+// case accounts for it; without this, an invocation could pass the
+// affordability check and then still be the one that pushes a later phase
+// over budget on the strength of a read this function never charged for.
+export const CONCIERGE_DAILY_CAP_CHECK_COST = 1;
+
+// CC2: the concierge_runs row EVERY path writes, exactly once, as its last
+// act (insertConciergeRun) -- previously unpriced anywhere, so the
+// actualCost this phase returned understated what it threaded into the
+// clerk's own priorCost by exactly this much, on every single path,
+// including the ones that spend nothing else at all (no api key, budget
+// shed). One D1 write.
+export const CONCIERGE_FINALISE_COST = 1;
 
 // Pure. May the concierge phase run at all this invocation, given what the
 // co-resident governance sweep (priorCost) has already spent? Reuses the
@@ -233,8 +254,10 @@ export const CONCIERGE_POST_COST = 8;
 // concierge's worst case is small and tightly bounded, so a single
 // conservative up-front check costs little in false shedding.
 //
-// Arithmetic: 2 + 3*1 + 8 = 13, so this passes whenever priorCost <= 35.
+// Arithmetic: 1 (daily-cap check) + 2 (detection) + 3*1 (attempts) + 9
+// (post) + 1 (finalise) = 16, so this passes whenever priorCost <= 32.
 export function canAffordConcierge(priorCost: number): boolean {
-  const worstCase = CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST;
+  const worstCase =
+    CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST + CONCIERGE_FINALISE_COST;
   return priorCost + worstCase + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }

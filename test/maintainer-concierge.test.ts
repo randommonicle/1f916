@@ -19,7 +19,15 @@ import {
 } from "../src/maintainer/concierge.ts";
 import { bulletinDenyCheck } from "../src/maintainer/judgment.ts";
 import { CONCIERGE_DISCLOSURE_PREAMBLE } from "../src/society.ts";
-import { canAffordConcierge, CONCIERGE_DETECTION_COST, CONCIERGE_MAX_ATTEMPTS, CONCIERGE_POST_COST } from "../src/maintainer/budget.ts";
+import {
+  canAffordConcierge,
+  CONCIERGE_DETECTION_COST,
+  CONCIERGE_ATTEMPT_COST,
+  CONCIERGE_MAX_ATTEMPTS,
+  CONCIERGE_POST_COST,
+  CONCIERGE_DAILY_CAP_CHECK_COST,
+  CONCIERGE_FINALISE_COST,
+} from "../src/maintainer/budget.ts";
 
 // ---------- candidate ranking (oldest-first merge) ----------
 
@@ -144,11 +152,11 @@ test("buildConciergeUserPrompt: a top-level comment (no parent comment) falls ba
 
 // ---------- canAffordConcierge arithmetic (mirrors maintainer-budget.test.ts's own boundary style) ----------
 
-test("canAffordConcierge: worst case is 13 (2 detection + 3 attempts + 8 post), so priorCost 35 passes and 36 refuses", () => {
-  const worstCase = CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * 1 + CONCIERGE_POST_COST;
-  assert.equal(worstCase, 13, "sanity: matches the design doc's own stated arithmetic");
-  assert.equal(canAffordConcierge(35), true, "35 + 13 + 2 (FINALISE_RESERVE) = 50 -- exactly at the ceiling, passes");
-  assert.equal(canAffordConcierge(36), false, "36 + 13 + 2 = 51 -- one over, refuses");
+test("canAffordConcierge: worst case is 16 (1 daily-cap check + 2 detection + 3 attempts + 9 post + 1 finalise), so priorCost 32 passes and 33 refuses", () => {
+  const worstCase = CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST + CONCIERGE_POST_COST + CONCIERGE_FINALISE_COST;
+  assert.equal(worstCase, 16, "sanity: matches canAffordConcierge's own stated arithmetic (CC1 + CC2 + C2, this wave)");
+  assert.equal(canAffordConcierge(32), true, "32 + 16 + 2 (FINALISE_RESERVE) = 50 -- exactly at the ceiling, passes");
+  assert.equal(canAffordConcierge(33), false, "33 + 16 + 2 = 51 -- one over, refuses");
 });
 
 test("canAffordConcierge: a quiet invocation (priorCost 0) affords the concierge comfortably", () => {

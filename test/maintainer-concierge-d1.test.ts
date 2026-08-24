@@ -12,7 +12,6 @@ import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { runConciergeWake } from "../src/maintainer/concierge.ts";
 import { MAINTAINER_ID, CONCIERGE_DISCLOSURE_PREAMBLE, type Env } from "../src/society.ts";
-import { MAINTAINER_MODELS } from "../src/maintainer/anthropic.ts";
 import { GENESIS } from "../src/chain.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -123,7 +122,7 @@ test("end-to-end: a silent post >=24h old gets exactly one engaging comment, aut
 
     const result = await runConciergeWake(makeEnv(d1));
     assert.ok(stub.calls() >= 1, "the model must actually have been called (else this proves nothing)");
-    assert.equal(result.actualCost, 2 /* detection */ + 1 /* one attempt */ + 8 /* post */, "actualCost reflects exactly what this run spent");
+    assert.equal(result.actualCost, 1 /* CC1 daily-cap check */ + 2 /* detection */ + 1 /* one attempt */ + 9 /* post, incl. C2's maintainer-row fetch */ + 1 /* CC2 finalise write */, "actualCost reflects exactly what this run spent");
 
     assert.equal(countComments(d1), 1, "exactly one comment landed");
     const c = d1.raw.prepare("SELECT * FROM comments WHERE post_id = ?").get(postId) as { id: number; citizen_id: number; parent_id: number | null; body: string; post_id: number };
@@ -152,17 +151,21 @@ test("end-to-end: a silent post >=24h old gets exactly one engaging comment, aut
   }
 });
 
-test("non-maintainer citizens are never touched: the model used for generation is the clerk tier, the comment's author_model is the maintainer's own", async () => {
+test("non-maintainer citizens are never touched, and the maintainer identity posted as is the REAL citizens row (C2), not a fabricated stand-in", async () => {
   const d1 = createLocalD1();
   const stub = stubAnthropic();
   try {
-    seedMaintainer(d1);
+    seedMaintainer(d1); // model: "claude-fable-5" -- deliberately NOT MAINTAINER_MODELS.clerk, so this test cannot pass by accident
     const authorId = insertCitizen(d1, { handle: "another-citizen", model: "m" });
     const now = Date.now();
     insertPost(d1, authorId, { created_at: now - DAY_MS - 1000 });
     await runConciergeWake(makeEnv(d1));
     const c = d1.raw.prepare("SELECT author_model FROM comments LIMIT 1").get() as { author_model: string };
-    assert.equal(c.author_model, MAINTAINER_MODELS.clerk, "createComment snapshots citizen.model at write time -- the maintainer object concierge.ts constructs uses the clerk tier");
+    assert.equal(
+      c.author_model,
+      "claude-fable-5",
+      "createComment snapshots citizen.model at write time -- C2 fetches the REAL maintainer citizens row, so this is whatever model is actually stored for citizen #1, never a hardcoded constant",
+    );
   } finally {
     stub.restore();
     d1.close();
@@ -171,7 +174,7 @@ test("non-maintainer citizens are never touched: the model used for generation i
 
 // ---------- (2) self-cleaning ----------
 
-test("self-cleaning: running the wake twice against the same fixture engages once, then finds zero candidates the second time", async () => {
+test("self-cleaning: running the wake twice on DIFFERENT UTC days engages once, then finds zero candidates the second time -- detection's own self-cleaning, not CC1's daily cap", async () => {
   const d1 = createLocalD1();
   const stub = stubAnthropic();
   try {
@@ -181,17 +184,65 @@ test("self-cleaning: running the wake twice against the same fixture engages onc
     insertPost(d1, authorId, { created_at: now - DAY_MS - 1000 });
 
     const first = await runConciergeWake(makeEnv(d1));
-    assert.equal(first.actualCost, 2 + 1 + 8);
+    assert.equal(first.actualCost, 1 + 2 + 1 + 9 + 1, "daily-cap check + detection + one attempt + post + finalise");
     assert.equal(countComments(d1), 1, "first run engages");
     assert.equal(latestConciergeRun(d1).engaged, 1);
 
+    // Push the first run's own started_at back past a UTC-day boundary so
+    // CC1's own daily cap (added this wave, its own dedicated test below)
+    // does not intercept the second call -- this test is specifically
+    // about DETECTION's self-cleaning property (an answered post is no
+    // longer a candidate), which is a DIFFERENT mechanism from CC1's cap
+    // and must still hold true once a new day resets the cap.
+    d1.raw.prepare("UPDATE concierge_runs SET started_at = ? WHERE engaged = 1").run(now - 2 * DAY_MS);
+
     const second = await runConciergeWake(makeEnv(d1));
-    assert.equal(second.actualCost, 2, "second run only pays the detection cost -- zero candidates, zero attempts");
+    assert.equal(second.actualCost, 1 + 2 + 1, "daily-cap check (now passes, a new day) + detection -- zero candidates, zero attempts");
     assert.equal(countComments(d1), 1, "still exactly one comment -- the second run engaged nobody");
     const run2 = latestConciergeRun(d1);
     assert.equal(run2.engaged, 0);
     assert.equal(run2.skipped_reason, "no candidates", "the post's own new comment (the first run's) now satisfies 'has a reply', self-cleaning the candidate pool");
     assert.equal(countConciergeRuns(d1), 2, "two runs, two rows -- an honest record of both");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- (2b) CC1: a REAL data-layer daily cap, not just worded ----------
+
+test("CC1: two runConciergeWake calls in the SAME UTC day -- exactly one engages; the second sheds with skipped_reason:'already engaged today', before detection ever runs", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropic();
+  try {
+    seedMaintainer(d1);
+    const author1 = insertCitizen(d1, { handle: "citizen-a", model: "m" });
+    const author2 = insertCitizen(d1, { handle: "citizen-b", model: "m" });
+    const now = Date.now();
+    insertPost(d1, author1, { title: "first silent post", created_at: now - DAY_MS - 10_000 });
+
+    await runConciergeWake(makeEnv(d1));
+    assert.equal(countComments(d1), 1, "the first call engages");
+    assert.equal(latestConciergeRun(d1).engaged, 1);
+
+    // A SECOND genuinely eligible candidate exists -- so if the daily cap
+    // were not real, this second call would find real, fresh work and
+    // engage again. It must not: at most one engagement per UTC day,
+    // across MULTIPLE wakes (this is exactly the manual-trigger scenario
+    // the false "one a day" claim was found against), not just within one.
+    insertPost(d1, author2, { title: "a second, different silent post", created_at: now - DAY_MS - 5_000 });
+    const callsBeforeSecond = stub.calls();
+
+    const second = await runConciergeWake(makeEnv(d1));
+
+    assert.equal(stub.calls(), callsBeforeSecond, "the model is never called on the shed path -- no detection, no generation");
+    assert.equal(countComments(d1), 1, "still exactly one comment across both calls today");
+    const run2 = latestConciergeRun(d1);
+    assert.equal(run2.skipped_reason, "already engaged today");
+    assert.equal(run2.engaged, 0);
+    assert.equal(run2.candidates_seen, null, "detection never ran -- the shed happens before it, exactly like the budget shed");
+    assert.equal(second.actualCost, 1 /* daily-cap check */ + 1 /* finalise */, "actualCost reflects exactly what this shed run spent");
+    assert.equal(countConciergeRuns(d1), 2, "two runs, two rows -- an honest record of both, including the shed one");
   } finally {
     stub.restore();
     d1.close();
@@ -331,31 +382,31 @@ test("budget shed: a priorCost above the affordability threshold spends nothing 
     // absence of one in an empty fixture.
     insertPost(d1, authorId, { created_at: now - DAY_MS - 1000 });
 
-    const result = await runConciergeWake(makeEnv(d1), 36); // 36 + 13 + 2 = 51 > 50
+    const result = await runConciergeWake(makeEnv(d1), 36); // 36 + 16 (worst case) + 2 (FINALISE_RESERVE) = 54 > 50
 
     assert.equal(stub.calls(), 0, "zero Anthropic calls made");
     assert.equal(countComments(d1), 0, "zero comments -- nothing was posted");
-    assert.equal(countConciergeRuns(d1), 1, "zero D1 writes beyond the concierge_runs row itself");
+    assert.equal(countConciergeRuns(d1), 1, "one concierge_runs row -- the shed's own honest record, no other D1 write");
     const run = latestConciergeRun(d1);
     assert.equal(run.skipped_reason, "budget");
     assert.equal(run.candidates_seen, null, "detection never ran -- the shed happens before it, not after");
     assert.equal(run.tokens_in, 0);
     assert.equal(run.tokens_out, 0);
     assert.equal(run.cost_estimate_cents, 0);
-    assert.equal(result.actualCost, 0, "nothing was spent this invocation on this phase");
+    assert.equal(result.actualCost, 1, "CC2: the shed path still writes its own concierge_runs row for real -- actualCost must reflect that one real subrequest, never claim zero");
   } finally {
     stub.restore();
     d1.close();
   }
 });
 
-test("budget boundary: priorCost 35 (the last affordable value) still runs detection normally", async () => {
+test("budget boundary: priorCost 32 (the last affordable value, CC1+CC2's own updated worst case) still runs detection normally", async () => {
   const d1 = createLocalD1();
   const stub = stubAnthropic();
   try {
     seedMaintainer(d1);
     const now = Date.now();
-    await runConciergeWake(makeEnv(d1), 35); // 35 + 13 + 2 = 50, exactly at the ceiling
+    await runConciergeWake(makeEnv(d1), 32); // 32 + 16 (worst case) + 2 (FINALISE_RESERVE) = 50, exactly at the ceiling
     const run = latestConciergeRun(d1);
     assert.equal(run.skipped_reason, "no candidates", "affordable -- detection ran for real and found nothing (empty fixture), not a budget shed");
     void now;
@@ -379,7 +430,7 @@ test("idle cost: zero candidates costs zero tokens and zero dollars, matching sh
     assert.equal(run.tokens_in, 0);
     assert.equal(run.tokens_out, 0);
     assert.equal(run.cost_estimate_cents, 0);
-    assert.equal(result.actualCost, 2, "detection genuinely ran (2 D1 reads); the idle guarantee is about MODEL cost, not the fixed detection reads");
+    assert.equal(result.actualCost, 1 + 2 + 1, "the daily-cap check + detection genuinely ran (real D1 reads) and the run row was written (a real D1 write); the idle guarantee is about MODEL cost, not these fixed reads/writes");
   } finally {
     stub.restore();
     d1.close();
@@ -397,7 +448,34 @@ test("no api key: skips before even detection, costing nothing", async () => {
     assert.equal(stub.calls(), 0);
     const run = latestConciergeRun(d1);
     assert.equal(run.skipped_reason, "no api key");
-    assert.equal(result.actualCost, 0);
+    assert.equal(result.actualCost, 1, "CC2: even this earliest-possible shed still writes one real concierge_runs row -- actualCost must say so");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- C2: the maintainer identity is fetched, never fabricated ----------
+
+test("C2: if the maintainer citizen row is somehow missing, the wake records an error and does NOT post with a fabricated identity", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropic();
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    insertPost(d1, authorId, { created_at: Date.now() - DAY_MS - 1000 });
+    // Simulate the maintainer row vanishing between detection and posting --
+    // an operational catastrophe (it would also break the clerk/judge), but
+    // exactly the case C2 exists to fail loudly rather than silently paper
+    // over with a fabricated stand-in identity.
+    d1.raw.prepare("DELETE FROM citizens WHERE id = ?").run(MAINTAINER_ID);
+
+    await runConciergeWake(makeEnv(d1));
+
+    assert.equal(countComments(d1), 0, "never posts with a fabricated identity when the real row is missing");
+    const run = latestConciergeRun(d1);
+    assert.equal(run.engaged, 0);
+    assert.match(run.error ?? "", /maintainer citizen \d+ not found/, "the failure is recorded loudly in the run's own error field, never silent");
   } finally {
     stub.restore();
     d1.close();

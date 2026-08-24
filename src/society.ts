@@ -140,7 +140,7 @@ function newSecret(): string {
   return "commonhold_sk_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function utcMidnight(now: number): number {
+export function utcMidnight(now: number): number {
   const d = new Date(now);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 }

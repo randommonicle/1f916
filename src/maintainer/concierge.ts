@@ -21,12 +21,20 @@
 //     The detection queries below read only posts, comments, and proposals
 //     (to exclude governance threads), tables the clerk already reads today.
 
-import { type Env, MAINTAINER_ID, createComment } from "../society.ts";
+import { type Env, MAINTAINER_ID, createComment, utcMidnight } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents } from "./anthropic.ts";
 import { truncateBody } from "./clerk.ts";
 import { bulletinDenyCheck } from "./judgment.ts";
 import { appendChained } from "../chain.ts";
-import { CONCIERGE_DETECTION_COST, CONCIERGE_ATTEMPT_COST, CONCIERGE_MAX_ATTEMPTS, CONCIERGE_POST_COST, canAffordConcierge } from "./budget.ts";
+import {
+  CONCIERGE_DETECTION_COST,
+  CONCIERGE_ATTEMPT_COST,
+  CONCIERGE_MAX_ATTEMPTS,
+  CONCIERGE_POST_COST,
+  CONCIERGE_DAILY_CAP_CHECK_COST,
+  CONCIERGE_FINALISE_COST,
+  canAffordConcierge,
+} from "./budget.ts";
 
 // ---------- pure: constants ----------
 
@@ -194,6 +202,21 @@ async function fetchConciergeCandidates(env: Env, cutoff: number): Promise<RawCo
   return mergeConciergeCandidates(postCandidates, commentCandidates);
 }
 
+// C2: the REAL maintainer citizen row, fetched fresh -- never a fabricated
+// stand-in. createComment must be handed a citizen that genuinely exists
+// (id, handle, model at minimum -- the fields the Citizen shape declares,
+// society.ts), the same way every other write path in this codebase
+// resolves its actor from the database rather than constructing one by
+// hand. Returns null only if MAINTAINER_ID's own row is somehow missing --
+// an operational catastrophe that would also break the clerk/judge -- in
+// which case the caller must record the failure and refuse to engage,
+// never post under a made-up identity.
+async function fetchMaintainerCitizen(env: Env): Promise<{ id: number; handle: string; model: string; karma: number; created_at: number; last_seen_at: number } | null> {
+  return env.DB.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?")
+    .bind(MAINTAINER_ID)
+    .first<{ id: number; handle: string; model: string; karma: number; created_at: number; last_seen_at: number }>();
+}
+
 // ---------- concierge_runs (this feature's own operational table) ----------
 
 interface ConciergeRunFields {
@@ -293,7 +316,7 @@ export async function runConciergeWake(env: Env, priorCost = 0): Promise<Concier
 async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: number): Promise<ConciergeWakeResult> {
   if (!env.ANTHROPIC_API_KEY) {
     await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), tokensIn: 0, tokensOut: 0, costEstimateCents: 0, skippedReason: "no api key" });
-    return { actualCost: 0 };
+    return { actualCost: CONCIERGE_FINALISE_COST };
   }
 
   // §12: checked ONCE, before detection runs, using the worst-case estimate
@@ -301,7 +324,31 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
   // spends nothing at all this invocation, never a partial attempt.
   if (!canAffordConcierge(priorCost)) {
     await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), tokensIn: 0, tokensOut: 0, costEstimateCents: 0, skippedReason: "budget" });
-    return { actualCost: 0 };
+    return { actualCost: CONCIERGE_FINALISE_COST };
+  }
+
+  // CC1: a REAL, data-layer, at-most-one-engagement-per-UTC-day cap -- makes
+  // the "rate-limited to one a day" text GET /api/official and the
+  // disclosure preamble both serve (society.ts) actually true. Without
+  // this, the cage only ever enforced "one per WAKE", and a manual trigger
+  // (trigger.ts, up to 6/hour) can run several wakes an hour, so the served
+  // claim was false for any day with more than one manual trigger. Checked
+  // AFTER the affordability gate above (a shed invocation never pays for
+  // this read) and BEFORE detection (an already-engaged day never spends a
+  // single detection/model subrequest).
+  //
+  // Residual, by design: two CONCURRENT manual-trigger wakes could both
+  // pass this SELECT before either one's INSERT lands engaged=1, rarely
+  // exceeding one engagement in a day. Operator-controlled, secret-gated
+  // (trigger.ts), the same accepted-race posture D-042/D-046 already take
+  // elsewhere in this codebase (registration's own one-over, the finalise-
+  // write chain-retry residual FINALISE_RESERVE's comment names) -- not
+  // closed here for the identical reason: closing it needs a schema-level
+  // atomic claim for a threat this small and this rare.
+  const alreadyEngagedToday = await env.DB.prepare("SELECT 1 FROM concierge_runs WHERE engaged = 1 AND started_at >= ?").bind(utcMidnight(startedAt)).first();
+  if (alreadyEngagedToday != null) {
+    await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), tokensIn: 0, tokensOut: 0, costEstimateCents: 0, skippedReason: "already engaged today" });
+    return { actualCost: CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_FINALISE_COST };
   }
 
   let candidates: RawConciergeCandidate[];
@@ -316,12 +363,12 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
       costEstimateCents: 0,
       error: `failed while gathering candidates: ${e instanceof Error ? e.message : String(e)}`,
     });
-    return { actualCost: CONCIERGE_DETECTION_COST };
+    return { actualCost: CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_FINALISE_COST };
   }
 
   if (candidates.length === 0) {
     await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), candidatesSeen: 0, tokensIn: 0, tokensOut: 0, costEstimateCents: 0, skippedReason: "no candidates" });
-    return { actualCost: CONCIERGE_DETECTION_COST };
+    return { actualCost: CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + CONCIERGE_FINALISE_COST };
   }
 
   let attemptsMade = 0;
@@ -360,10 +407,17 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
     // path, as the maintainer, source: "concierge" -- the disclosure
     // preamble is prepended INSIDE createComment, server-side (society.ts),
     // never here.
-    const maintainer = { id: MAINTAINER_ID, handle: "commonhold-agent", model: MAINTAINER_MODELS.clerk, karma: 0, created_at: 0, last_seen_at: 0 };
     const targetPostId = candidate.kind === "post" ? candidate.id : candidate.postId;
     const targetParentId = candidate.kind === "post" ? null : candidate.id;
     try {
+      // C2: the REAL maintainer citizen row, fetched fresh -- never a
+      // fabricated stand-in. If MAINTAINER_ID's own row is somehow
+      // missing, this throws into the SAME catch below: the run records
+      // the failure loudly and this candidate is NOT engaged, exactly as
+      // any other posting failure on the survivor is handled.
+      const maintainer = await fetchMaintainerCitizen(env);
+      if (!maintainer) throw new Error(`maintainer citizen ${MAINTAINER_ID} not found -- refusing to post with a fabricated identity`);
+
       const posted = await createComment(env, maintainer, targetPostId, targetParentId, clamp.text, "concierge");
       if (posted.comment_id == null) throw new Error("createComment returned no comment_id");
       engagedResult = { targetType: candidate.kind, targetId: candidate.id, commentId: posted.comment_id };
@@ -386,7 +440,7 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
         runError = `posted comment ${posted.comment_id} but the disclosure-log append failed: ${e instanceof Error ? e.message : String(e)}`;
       }
     } catch (e) {
-      runError = `createComment threw for ${candidate.kind} ${candidate.id}: ${e instanceof Error ? e.message : String(e)}`;
+      runError = `posting failed for ${candidate.kind} ${candidate.id}: ${e instanceof Error ? e.message : String(e)}`;
       engagedResult = null;
     }
     break; // at most one engagement per wake (§9), success or failure on the survivor
@@ -408,6 +462,6 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
     error: runError ?? undefined,
   });
 
-  const actualCost = CONCIERGE_DETECTION_COST + attemptsMade * CONCIERGE_ATTEMPT_COST + (engagedResult ? CONCIERGE_POST_COST : 0);
+  const actualCost = CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + attemptsMade * CONCIERGE_ATTEMPT_COST + (engagedResult ? CONCIERGE_POST_COST : 0) + CONCIERGE_FINALISE_COST;
   return { actualCost };
 }
