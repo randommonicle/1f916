@@ -464,20 +464,32 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // any retry against an already-paying/paid/withdrawn/expired listing) is
   // refused right here, for free, before any money moves. Two concurrent
   // settles for the same listing can now never both happen.
+  // F5 (GPT-OSS 120B round 1): the release below MUST be scoped to the request
+  // that actually acquired the lock. A concurrent request that fails BEFORE
+  // afterVerify (no X-PAYMENT, or an invalid signature) never reserves, yet an
+  // UNCONDITIONAL release would still run and steal a DIFFERENT in-flight
+  // payer's 'paying' lock -- flipping the listing back to 'open' while that
+  // payer is mid-settle, re-opening the exact double-pay this reservation
+  // exists to prevent. Only the request whose own afterVerify won the reserve
+  // may release it.
+  let reservedByMe = false;
   const result = await payAndSettle(env, request, reqs, async () => {
     const reserved = await env.DB.prepare("UPDATE listings SET status = 'paying' WHERE id = ? AND status = 'open'").bind(listingId).run();
     if (reserved.meta.changes !== 1) {
       throw new SocietyError(409, "This listing is no longer open -- already being paid, paid, withdrawn, or expired.");
     }
+    reservedByMe = true;
   });
   if (!result.ok) {
-    // Either the reserve above never ran at all (no X-PAYMENT header, or an
-    // invalid signature -- payAndSettle returns before afterVerify in both
-    // cases), or it ran and then settle itself failed. Releasing
-    // 'paying' -> 'open' is a harmless 0-row UPDATE in the first case and a
-    // genuine release in the second, so a funder whose settle failed can
-    // retry without our own reservation permanently locking them out.
-    await env.DB.prepare("UPDATE listings SET status = 'open' WHERE id = ? AND status = 'paying'").bind(listingId).run();
+    // Release ONLY if THIS request is the one that reserved. If the reserve
+    // never ran (no X-PAYMENT / invalid signature -- payAndSettle returns
+    // before afterVerify), reservedByMe is false and we must NOT touch the
+    // row: another request may legitimately hold 'paying' and be mid-settle
+    // right now. If we did reserve and settle then failed, release our OWN
+    // lock so the funder can retry.
+    if (reservedByMe) {
+      await env.DB.prepare("UPDATE listings SET status = 'open' WHERE id = ? AND status = 'paying'").bind(listingId).run();
+    }
     return result.response;
   }
 

@@ -1067,6 +1067,49 @@ test("concurrent double-click: two truly-interleaved pay attempts for the same l
   }
 });
 
+test("handlePayListing: a request that fails BEFORE reserving must NOT release a concurrent payer's 'paying' lock (F5 lock-steal)", async () => {
+  const d1 = createLocalD1();
+  const original = globalThis.fetch;
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ccc");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    // Attacker B carries an INVALID signature, so payAndSettle returns before
+    // afterVerify -- B never reserves. B passed loadPayableListing while the
+    // listing was still 'open'; we simulate a concurrent legitimate payer A
+    // winning the reservation ('open' -> 'paying') DURING B's /verify, i.e.
+    // after B's own loadPayableListing but before B's rollback. The bug (F5):
+    // B's UNCONDITIONAL release would flip A's 'paying' back to 'open',
+    // stealing A's in-flight lock and re-opening the double-pay. The fix
+    // scopes the release to reservedByMe, which B is not.
+    globalThis.fetch = (async (url: unknown) => {
+      const href = String(url);
+      if (href === `${FACILITATOR_URL}/verify`) {
+        d1.raw.prepare("UPDATE listings SET status = 'paying' WHERE id = ?").run(listingId);
+        return new Response(JSON.stringify({ isValid: false, invalidReason: "bad signature" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href === `${FACILITATOR_URL}/settle`) {
+        throw new Error("B must never reach /settle -- its signature was invalid");
+      }
+      throw new Error(`unexpected fetch in F5 lock-steal test: ${href}`);
+    }) as typeof fetch;
+
+    const res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    assert.equal(res.status, 402, "B's invalid payment is refused");
+
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "paying", "B did NOT reserve, so it must NOT release the 'paying' lock a concurrent payer holds -- F5 lock-steal");
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
+
 test("handlePayListing: a pay attempt against a listing already reserved by a concurrent pay ('paying') is refused 409 for FREE -- never reaches the facilitator", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitatorFetch();
