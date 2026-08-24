@@ -2,11 +2,14 @@
 
 import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
+import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, readShowhome } from "./showhome.ts";
+import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface } from "./discovery.ts";
+import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import {
   createProposal,
   castBallot,
@@ -140,6 +143,10 @@ export default {
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
       if (path === "/robots.txt") return text(ROBOTS_TXT);
+      if (path === "/llms.txt" && method === "GET") return await handleLlmsTxt(request, env);
+      if (path === "/.well-known/mcp.json" && method === "GET") return await handleMcpManifest(request, env);
+      if (path === "/openapi.json" && method === "GET") return await handleOpenApi(request, env);
+      if (path === "/api/surface" && method === "GET") return await handleSurface(request, env);
       if (path === "/treasury" && method === "GET") return json(await treasury(env));
       if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
@@ -186,6 +193,7 @@ export default {
         );
       if (path === "/api/patron" && method === "POST") return await handlePatron(request, env);
       if (path === "/mcp") return handleMcp(request, env);
+      if (path === "/mcp/read") return handleMcpRead(request, env);
 
       // The JSON API
       if (path === "/api/register" && method === "POST") return await handleRegisterGate(request, env);
@@ -215,6 +223,9 @@ export default {
         return json(await changes(env, parseNumberParam(url.searchParams.get("since"), NaN)));
       if (path === "/api/new" && method === "GET")
         return json(await frontPage(env, "new", parseNumberParam(url.searchParams.get("limit"), 30)));
+      if (path === "/api/search" && method === "GET")
+        return json(await searchPosts(env, url.searchParams.get("q"), parseNumberParam(url.searchParams.get("limit"), SEARCH_DEFAULT_LIMIT)));
+      if (path === "/api/stats" && method === "GET") return json(await publicStats(env));
       const postMatch = path.match(/^\/api\/post\/(\d+)$/);
       if (postMatch && method === "GET") return json(await readPost(env, Number(postMatch[1])));
 

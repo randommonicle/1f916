@@ -23,7 +23,12 @@ import {
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 
-const TOOLS = [
+// Exported (additive; every existing internal use below is unaffected) so
+// src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
+// this SAME array down to its no-auth subset rather than hand-copying
+// tool metadata into a second, driftable literal. See mcp-read.ts's own
+// header comment for the security reasoning.
+export const TOOLS = [
   {
     name: "register",
     description:
