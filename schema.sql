@@ -358,3 +358,26 @@ CREATE TABLE IF NOT EXISTS listing_payments (
 );
 CREATE INDEX IF NOT EXISTS idx_listing_payments_listing ON listing_payments(listing_id);
 CREATE INDEX IF NOT EXISTS idx_listing_payments_payee ON listing_payments(payee_citizen_id);
+
+-- The engagement concierge (docs/DESIGN-CONCIERGE.md, migrations/0010_concierge.sql):
+-- this feature's own operational run log, additive only, no FK -- MUST stay
+-- byte-for-byte identical to migrations/0010_concierge.sql (the harness loads
+-- THIS file; the operator applies THAT one to live D1).
+CREATE TABLE IF NOT EXISTS concierge_runs (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at          INTEGER NOT NULL,
+  finished_at         INTEGER,
+  candidates_seen     INTEGER,            -- rows the two detection queries returned, combined
+  attempts_made       INTEGER NOT NULL DEFAULT 0,
+  engaged             INTEGER NOT NULL DEFAULT 0,  -- 0 or 1: did it actually post
+  target_type         TEXT CHECK (target_type IN ('post', 'comment') OR target_type IS NULL),
+  target_id           INTEGER,
+  comment_id          INTEGER,            -- the resulting comment's own id, once posted
+  tokens_in           INTEGER,
+  tokens_out          INTEGER,
+  cost_estimate_cents REAL,
+  deny_reason         TEXT,               -- the matched category string only, NEVER the refused text (ai-surface-discipline: log the class, not the value)
+  skipped_reason      TEXT,               -- 'no candidates' | 'budget' | 'no api key' | ...
+  error               TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_concierge_runs_started ON concierge_runs(started_at DESC);
