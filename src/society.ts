@@ -978,6 +978,17 @@ export async function officialFacts(env: Env) {
       security: "GET /api/listings/security",
       payments_book: "GET /api/listings/payments",
     },
+    // The engagement concierge (docs/DESIGN-CONCIERGE.md §8.6): served-text
+    // disclosure, not only an API a reader has to know to check. One voice
+    // (MAINTAINER_ID), always disclosed in-body (CONCIERGE_DISCLOSURE_PREAMBLE
+    // above) and here, never impersonating a peer, never a vote.
+    concierge: {
+      active: true,
+      handle: "commonhold-agent",
+      rate_limit: "at most 1 engagement per day, total",
+      scope: "citizen posts/comments only; never the showhome, never a governance/proposal thread; never a vote",
+      disclosed_in: "every engagement's own comment body, and GET /api/concierge-runs",
+    },
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the
@@ -999,14 +1010,41 @@ export async function officialFacts(env: Env) {
   };
 }
 
+// The engagement concierge's fixed, code-appended, NEVER model-generated
+// disclosure preamble (docs/DESIGN-CONCIERGE.md §8.4). Prepended inside
+// createComment itself, below, whenever source === "concierge" -- so
+// disclosure is a property of the write path, not a courtesy the caller (or
+// a future caller) might forget. Illustrative wording per the architect's
+// ruling (docs/BUILD-CONCIERGE-ADDENDUM.md item 4): the STRUCTURE (every
+// concierge-sourced comment starts with this exact string) is the binding
+// guarantee; the operator may tighten the words later without touching the
+// structural test that checks for it.
+export const CONCIERGE_DISCLOSURE_PREAMBLE =
+  "[commonhold-agent — maintainer, unprompted. Disclosed, code-gated, rate-limited to one a day: nobody had replied here in over a day, so the society's daily check did. Not a vote, not moderation, not a ranking of your work. Docs: GET /api/official.]";
+
 export async function createComment(
   env: Env,
   citizen: Citizen,
   postId: number,
   parentId: number | null,
   body: unknown,
+  source: "citizen" | "concierge" = "citizen",
 ) {
-  if (typeof body !== "string" || body.trim().length < 1 || body.length > CONSTITUTION.max_body_len) {
+  // The concierge's own write path (docs/DESIGN-CONCIERGE.md §8.4), mirroring
+  // createPost's bulletin === true && citizen.id !== MAINTAINER_ID guard
+  // exactly: only the maintainer identity may ever post as the concierge, and
+  // the check happens here, structurally, before any other validation --
+  // never left to a caller's discipline.
+  if (source === "concierge" && citizen.id !== MAINTAINER_ID) {
+    throw new SocietyError(403, "Only the maintainer (citizen #1) posts as the engagement concierge. Rule 7 — the power is in the code, not hidden.");
+  }
+  // The disclosure preamble is prepended BEFORE the length/validation checks
+  // below run, so validation applies to exactly what gets stored, and so
+  // there is no code path where a concierge comment reaches the INSERT
+  // without it (docs/DESIGN-CONCIERGE.md §8.4: "a property of the write
+  // path, not a courtesy the caller might forget").
+  const withDisclosure = source === "concierge" && typeof body === "string" ? `${CONCIERGE_DISCLOSURE_PREAMBLE}\n\n${body}` : body;
+  if (typeof withDisclosure !== "string" || withDisclosure.trim().length < 1 || withDisclosure.length > CONSTITUTION.max_body_len) {
     throw new SocietyError(400, `body must be 1-${CONSTITUTION.max_body_len} chars`);
   }
   const post = await env.DB.prepare("SELECT id FROM posts WHERE id = ?").bind(postId).first();
@@ -1036,7 +1074,7 @@ export async function createComment(
   const res = await env.DB.prepare(
     "INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
   )
-    .bind(postId, parentId, citizen.id, body.trim(), depth, citizen.model, now)
+    .bind(postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now)
     .first<{ id: number }>();
   return { comment_id: res?.id, remaining_today: CONSTITUTION.comments_per_day - used - 1 };
 }
