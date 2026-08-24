@@ -421,41 +421,49 @@ export async function recordListingCreateAttempt(env: Env, citizenId: number, ip
 // F2 (docs/DESIGN-ECONOMY-V1.md §10): POST /api/listing/:id/pay's OWN cap,
 // under a DIFFERENT reg_log namespace ("listing-pay:") -- anti-volumetric
 // ONLY. The real primary defence on this endpoint is the EIP-3009 signature
-// itself, never this cap. IP-only, no per-citizen dimension (unlike the
-// listing-create pair above): the funder is already an authenticated,
-// paying citizen by the time this endpoint is reached, so the volumetric
-// threat this bounds is a flood of invalid/duplicate signatures against the
-// facilitator from one address, not a citizen posting too often.
+// itself: no money moves without it. This cap is a coarse per-IP limiter
+// that bounds bursts and sustained volumetric abuse against the
+// facilitator, IP-only, no per-citizen dimension (unlike the listing-create
+// pair above): the funder is already an authenticated, paying citizen by
+// the time this endpoint is reached, so the threat this bounds is a flood
+// of invalid/duplicate signatures from one address, not a citizen posting
+// too often.
 //
-// Recorded UNCONDITIONALLY, at the very top of handlePayListing, BEFORE
-// payAndSettle -- unlike listing-create's cap (recorded only once a listing
-// genuinely exists, post-settle), this one must count every attempt up
-// front, so volumetric abuse is capped before it can hammer the
-// DB/facilitator, never after.
+// RECORD-FIRST (post-review fix): an earlier version split this into a
+// separate check-then-record pair, called sequentially -- a genuine
+// concurrent burst could have every request read the SAME pre-record count
+// before any of them recorded, so a parallel flood was barely bounded at
+// all (reproduced directly: 50 concurrent same-IP attempts through the old
+// check+record pair, 50/50 fulfilled). This single function instead
+// INSERTS this attempt's own reg_log row FIRST, then counts the hour
+// window INCLUDING that just-written row, so a concurrent burst is refused
+// before it can reach payAndSettle's facilitator round trip, not merely
+// after the fact. This is consistent with the codebase's other reg_log
+// caps and with D-042's accepted check-then-act residual elsewhere; it is
+// NOT claimed to be a perfectly atomic guarantee against every conceivable
+// interleaving (D1 gives no cross-statement lock here), only a real,
+// effective bound on volume -- the same honest limit this codebase already
+// states for the registration race D-042 accepts.
 const LISTING_PAY_IP_PER_HOUR = 20;
 
 async function listingPayIpThrottleKey(ip: string): Promise<string> {
   return sha256Hex("listing-pay:ip:" + ip);
 }
 
-export async function assertListingPayNotThrottled(env: Env, ip: string | null): Promise<void> {
-  if (!ip) return;
-  const hourAgo = Date.now() - 3_600_000;
-  const ipHash = await listingPayIpThrottleKey(ip);
-  const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at > ?")
-    .bind(ipHash, hourAgo)
-    .first<{ n: number }>();
-  if ((mine?.n ?? 0) >= LISTING_PAY_IP_PER_HOUR) {
-    throw new SocietyError(429, "Too many listing-payment attempts from your address this hour. The signature itself is the real defence; this is volume protection on top.");
-  }
-}
-
-export async function recordListingPayAttempt(env: Env, ip: string | null): Promise<void> {
+export async function checkAndRecordListingPayNotThrottled(env: Env, ip: string | null): Promise<void> {
   if (!ip) return;
   const now = Date.now();
   const ipHash = await listingPayIpThrottleKey(ip);
+  // Record BEFORE counting -- this attempt counts against itself.
   await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, now).run();
   await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(now - 86_400_000).run();
+  const hourAgo = now - 3_600_000;
+  const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at > ?")
+    .bind(ipHash, hourAgo)
+    .first<{ n: number }>();
+  if ((mine?.n ?? 0) > LISTING_PAY_IP_PER_HOUR) {
+    throw new SocietyError(429, "Too many listing-payment attempts from your address this hour. The signature itself is the real defence; this is volume protection on top.");
+  }
 }
 
 // POST /api/submission's own cap: submissions.citizen_id fits countSince's

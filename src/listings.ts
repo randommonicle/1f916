@@ -35,8 +35,7 @@ import {
   applyModState,
   assertListingCreateNotThrottled,
   recordListingCreateAttempt,
-  assertListingPayNotThrottled,
-  recordListingPayAttempt,
+  checkAndRecordListingPayNotThrottled,
   assertSubmissionsNotThrottled,
 } from "./society.ts";
 
@@ -409,15 +408,16 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   const origin = new URL(request.url).origin;
 
   // F2 (docs/DESIGN-ECONOMY-V1.md §10): the 20/hour/IP anti-volumetric cap,
-  // checked AND recorded at the very TOP of the function -- before the body
-  // is even parsed, and long before payAndSettle's facilitator round trip.
-  // Unlike listing-create's cap, this one records EVERY attempt up front:
-  // the real threat here is volumetric abuse via invalid/duplicate
-  // signatures against the facilitator, which a post-settle record would
-  // never see coming.
+  // RECORD-FIRST -- this attempt's own reg_log row lands BEFORE the count
+  // that decides whether to refuse, at the very TOP of the function, before
+  // the body is even parsed and long before payAndSettle's facilitator
+  // round trip. The real primary defence on this endpoint is the EIP-3009
+  // signature itself; this cap is a coarse, honest bound on volumetric
+  // abuse (see checkAndRecordListingPayNotThrottled's own comment,
+  // society.ts, for why record-first replaces the old separate check+record
+  // pair).
   const ip = request.headers.get("CF-Connecting-IP");
-  await assertListingPayNotThrottled(env, ip);
-  await recordListingPayAttempt(env, ip);
+  await checkAndRecordListingPayNotThrottled(env, ip);
 
   const b = await parseJsonObjectBody(request);
   const submissionId = Number(b.submission_id);

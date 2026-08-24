@@ -24,8 +24,7 @@ import { createLocalD1, insertCitizen, insertListing, insertSubmission, type Loc
 import {
   assertListingCreateNotThrottled,
   recordListingCreateAttempt,
-  assertListingPayNotThrottled,
-  recordListingPayAttempt,
+  checkAndRecordListingPayNotThrottled,
   assertSubmissionsNotThrottled,
   assertRegistrationNotThrottled,
   moderateContent,
@@ -212,59 +211,85 @@ test("recordListingCreateAttempt prunes rows older than 24h without ever eating 
   }
 });
 
-// ---------- F2: assertListingPayNotThrottled / recordListingPayAttempt ----------
+// ---------- F2: checkAndRecordListingPayNotThrottled (record-first) ----------
+//
+// F2 fix (post-review): the old assertListingPayNotThrottled/
+// recordListingPayAttempt pair was check-then-record, called sequentially
+// -- a genuine concurrent burst could have every request read the count
+// BEFORE any of them recorded (Codex's own reproduction: 50 concurrent
+// same-IP attempts through the old pair, 50/50 fulfilled). This single
+// function records first, so the D-042 "a bare check never consumes the
+// allowance" shape the OLD tests below pinned no longer applies here BY
+// DESIGN -- every call, including one that goes on to refuse, writes its
+// own reg_log row. That is the whole point: a concurrent burst is refused
+// before it can reach payAndSettle's facilitator round trip, not merely
+// after the fact.
 
-test("assertListingPayNotThrottled: passes under the cap, and a null IP is never throttled", async () => {
+test("checkAndRecordListingPayNotThrottled: passes under the cap; a null IP is never throttled AND never recorded", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
-    await assert.doesNotReject(() => assertListingPayNotThrottled(env, "203.0.113.91"));
-    await assert.doesNotReject(() => assertListingPayNotThrottled(env, null));
+    await assert.doesNotReject(() => checkAndRecordListingPayNotThrottled(env, "203.0.113.91"));
+    await assert.doesNotReject(() => checkAndRecordListingPayNotThrottled(env, null));
+    const row = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log").get() as { n: number };
+    assert.equal(row.n, 1, "only the real-IP call recorded -- the null-IP call must be a complete no-op, never writing a row");
   } finally {
     d1.close();
   }
 });
 
-test("assertListingPayNotThrottled: a check with no matching recorded attempt NEVER consumes the allowance -- D-042's check-only shape", async () => {
+// Only proves the under-cap case (10 < 20, every call passes); the refused-
+// call-still-records case is proven separately and more precisely by the
+// count-includes-the-just-recorded-row boundary test below (its own
+// rowsAfter21 assertion is exactly that: the 21st, REFUSED, call still left
+// a row). Titled to match only what this test body actually drives.
+test("checkAndRecordListingPayNotThrottled: every under-cap call records its own row immediately -- there is no such thing as a free check on this cap (record-first, not D-042's check-only shape)", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
+    const ip = "203.0.113.94";
     for (let i = 0; i < 10; i++) {
-      await assertListingPayNotThrottled(env, "203.0.113.94");
+      await checkAndRecordListingPayNotThrottled(env, ip);
     }
     const row = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log").get() as { n: number };
-    assert.equal(row.n, 0, "a check-only call must never write to reg_log");
+    assert.equal(row.n, 10, "every call must record its own row immediately -- record-first, not check-then-record");
   } finally {
     d1.close();
   }
 });
 
-test("assertListingPayNotThrottled: refuses once an IP's recorded attempts reach the 20/hour volumetric cap", async () => {
+test("checkAndRecordListingPayNotThrottled: the count INCLUDES the just-recorded row -- the 20th call still passes (count 20), the 21st is refused (count 21 > 20)", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
     const ip = "203.0.113.90";
     for (let i = 0; i < 20; i++) {
-      await recordListingPayAttempt(env, ip);
+      await assert.doesNotReject(() => checkAndRecordListingPayNotThrottled(env, ip), `attempt ${i + 1} (count ${i + 1}) must still pass -- the cap is 20, not 19`);
     }
+    const rowsAfter20 = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ?").get(await sha256Hex("listing-pay:ip:" + ip)) as { n: number };
+    assert.equal(rowsAfter20.n, 20, "sanity: exactly 20 rows recorded so far");
+
     await assert.rejects(
-      () => assertListingPayNotThrottled(env, ip),
+      () => checkAndRecordListingPayNotThrottled(env, ip),
       (e: unknown) => e instanceof SocietyError && e.status === 429,
+      "the 21st attempt (count 21, including its own just-recorded row) must be refused",
     );
+    const rowsAfter21 = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ?").get(await sha256Hex("listing-pay:ip:" + ip)) as { n: number };
+    assert.equal(rowsAfter21.n, 21, "the 21st attempt still recorded its own row even though it was refused -- record-first, not record-on-success");
   } finally {
     d1.close();
   }
 });
 
-test("assertListingPayNotThrottled: a DIFFERENT IP's recorded attempts do not count against this one", async () => {
+test("checkAndRecordListingPayNotThrottled: a DIFFERENT IP's recorded attempts do not count against this one", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
     const busyIp = "203.0.113.95";
     const quietIp = "203.0.113.96";
-    for (let i = 0; i < 20; i++) await recordListingPayAttempt(env, busyIp);
-    await assert.rejects(() => assertListingPayNotThrottled(env, busyIp), SocietyError);
-    await assert.doesNotReject(() => assertListingPayNotThrottled(env, quietIp));
+    for (let i = 0; i < 20; i++) await checkAndRecordListingPayNotThrottled(env, busyIp);
+    await assert.rejects(() => checkAndRecordListingPayNotThrottled(env, busyIp), SocietyError);
+    await assert.doesNotReject(() => checkAndRecordListingPayNotThrottled(env, quietIp));
   } finally {
     d1.close();
   }
@@ -273,12 +298,12 @@ test("assertListingPayNotThrottled: a DIFFERENT IP's recorded attempts do not co
 // Namespace isolation, mirroring the identical listing-create proof above:
 // listing-pay's own reg_log rows must never leak into a DIFFERENT throttle's
 // count, in EITHER direction.
-test("recordListingPayAttempt's reg_log rows never leak into assertListingCreateNotThrottled's own count (distinct hash namespace)", async () => {
+test("checkAndRecordListingPayNotThrottled's reg_log rows never leak into assertListingCreateNotThrottled's own count (distinct hash namespace)", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
     const ip = "203.0.113.92";
-    for (let i = 0; i < 20; i++) await recordListingPayAttempt(env, ip);
+    for (let i = 0; i < 20; i++) await checkAndRecordListingPayNotThrottled(env, ip);
     const citizenId = insertCitizen(d1);
     await assert.doesNotReject(() => assertListingCreateNotThrottled(env, citizenId, ip), "listing-create's own throttle must be blind to listing-pay's rows");
   } finally {
@@ -286,14 +311,14 @@ test("recordListingPayAttempt's reg_log rows never leak into assertListingCreate
   }
 });
 
-test("recordListingPayAttempt prunes rows older than 24h without ever eating into the current hour's count", async () => {
+test("checkAndRecordListingPayNotThrottled prunes rows older than 24h without ever eating into the current hour's count", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
     const ip = "203.0.113.97";
     const hash = await sha256Hex("listing-pay:ip:" + ip);
     d1.raw.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").run(hash, Date.now() - 25 * 3_600_000);
-    await recordListingPayAttempt(env, ip);
+    await checkAndRecordListingPayNotThrottled(env, ip);
     const stale = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at < ?").get(hash, Date.now() - 24 * 3_600_000) as { n: number };
     assert.equal(stale.n, 0, "a 25h-old row must be pruned");
     const fresh = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ?").get(hash) as { n: number };
@@ -933,7 +958,7 @@ test("handlePayListing: the 21st pay attempt from one IP within an hour is refus
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     const ip = "203.0.113.93";
-    for (let i = 0; i < 20; i++) await recordListingPayAttempt(env, ip);
+    for (let i = 0; i < 20; i++) await checkAndRecordListingPayNotThrottled(env, ip);
 
     const verifyCallsBefore = stub.verifyCalls();
     const settleCallsBefore = stub.settleCalls();
