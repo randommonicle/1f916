@@ -35,6 +35,8 @@ import {
   applyModState,
   assertListingCreateNotThrottled,
   recordListingCreateAttempt,
+  assertListingPayNotThrottled,
+  recordListingPayAttempt,
   assertSubmissionsNotThrottled,
 } from "./society.ts";
 
@@ -93,15 +95,37 @@ function assertValidOptionalUrl(v: unknown, field = "url"): string | null {
   return v;
 }
 
+// E3: fractional input is REFUSED, never silently rounded -- a citizen who
+// sends 1050.5 gets told so, not charged (or credited) a rounded figure
+// that does not match what they typed. Number.isSafeInteger is required
+// (not just Number.isInteger) so a value technically "integer-shaped" but
+// outside +-2^53-1 -- where float precision can no longer represent every
+// whole number exactly -- is refused too, before it ever reaches the
+// atomic-unit multiplication below. A ceiling (CONSTITUTION.
+// max_listing_bounty_cents) joins the existing floor for the same
+// arithmetic-safety reason: bounty_cents * 10_000 (x402.ts's atomic-unit
+// conversion) must stay comfortably inside Number.MAX_SAFE_INTEGER.
 function assertValidBountyCents(v: unknown): number {
-  const cents = Math.round(Number(v));
-  if (!Number.isFinite(cents) || cents < CONSTITUTION.min_listing_bounty_cents) {
+  const n = Number(v);
+  if (!Number.isInteger(n)) {
+    throw new SocietyError(400, "bounty_cents must be a whole number of cents -- a fractional value is refused, never silently rounded");
+  }
+  if (!Number.isSafeInteger(n)) {
+    throw new SocietyError(400, "bounty_cents is outside JavaScript's safe integer range");
+  }
+  if (n < CONSTITUTION.min_listing_bounty_cents) {
     throw new SocietyError(
       400,
-      `bounty_cents must be an integer of at least ${CONSTITUTION.min_listing_bounty_cents} (the $${(CONSTITUTION.min_listing_bounty_cents / 100).toFixed(2)} floor). No maximum -- it is the funder's own money.`,
+      `bounty_cents must be at least ${CONSTITUTION.min_listing_bounty_cents} (the $${(CONSTITUTION.min_listing_bounty_cents / 100).toFixed(2)} floor).`,
     );
   }
-  return cents;
+  if (n > CONSTITUTION.max_listing_bounty_cents) {
+    throw new SocietyError(
+      400,
+      `bounty_cents must be at most ${CONSTITUTION.max_listing_bounty_cents} (the $${(CONSTITUTION.max_listing_bounty_cents / 100).toFixed(2)} ceiling).`,
+    );
+  }
+  return n;
 }
 
 export function assertValidExpiresAt(v: unknown, now: number): number {
@@ -383,6 +407,18 @@ async function loadPayableSubmission(env: Env, submissionId: number, listingId: 
 
 export async function handlePayListing(request: Request, env: Env, citizen: Citizen, listingId: number): Promise<Response> {
   const origin = new URL(request.url).origin;
+
+  // F2 (docs/DESIGN-ECONOMY-V1.md §10): the 20/hour/IP anti-volumetric cap,
+  // checked AND recorded at the very TOP of the function -- before the body
+  // is even parsed, and long before payAndSettle's facilitator round trip.
+  // Unlike listing-create's cap, this one records EVERY attempt up front:
+  // the real threat here is volumetric abuse via invalid/duplicate
+  // signatures against the facilitator, which a post-settle record would
+  // never see coming.
+  const ip = request.headers.get("CF-Connecting-IP");
+  await assertListingPayNotThrottled(env, ip);
+  await recordListingPayAttempt(env, ip);
+
   const b = await parseJsonObjectBody(request);
   const submissionId = Number(b.submission_id);
   if (!Number.isInteger(submissionId)) {
@@ -433,18 +469,53 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // named the same way D-042 accepts registration's own race). The
   // listing_payments row is ALWAYS written, win or lose the race: the money
   // genuinely reached a real submitter for real work either way.
+  //
+  // F1: the two writes commit as ONE atomic batch, not two independent
+  // .run() calls -- a batch failure between them (recording failed AFTER
+  // the money already settled) must never leave the guarded UPDATE's own
+  // effect standing without its matching listing_payments row, and must
+  // never silently drop the payment record either. Mirrors
+  // handleCreateListing's own paid-but-failed handler above: there is no
+  // refund path once real money has moved, so a batch throw here is logged
+  // loudly and surfaced as an honest 500, never swallowed.
   const now = Date.now();
-  const update = await env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ? WHERE id = ? AND status = 'open'")
-    .bind(submissionId, result.tx, listingId)
-    .run();
-
-  await env.DB.prepare(
+  const updateStmt = env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ? WHERE id = ? AND status = 'open'").bind(
+    submissionId,
+    result.tx,
+    listingId,
+  );
+  const insertStmt = env.DB.prepare(
     "INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  )
-    .bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now)
-    .run();
+  ).bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now);
 
-  const wonRace = update.meta.changes === 1;
+  let wonRace: boolean;
+  try {
+    const [updateRes] = await env.DB.batch([updateStmt, insertStmt]);
+    // Optional chaining is load-bearing, mirroring governance.ts's own
+    // commitOutcome read of a batch result (gate finding 3,
+    // docs/REVIEW-HARDENING2-GATE-2026-08-10.md): an absent changes count
+    // must read as "did not win", never throw and never be assumed to mean
+    // "won" -- under-claiming is the safe direction in both branches.
+    wonRace = updateRes?.meta?.changes === 1;
+  } catch (e) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        event: "listing_pay_settled_but_unrecorded",
+        payer: result.payer,
+        tx: result.tx,
+        amount_cents: listing.bounty_cents,
+        listing_id: listingId,
+        submission_id: submissionId,
+        reason: e instanceof Error ? e.message : String(e),
+      }),
+    );
+    throw new SocietyError(
+      500,
+      `Your payment settled (tx ${result.tx}) but recording it failed. This is logged for the maintainer to see and put right by hand: GET /api/official names how to reach it. Verify your payment independently on Base.`,
+    );
+  }
+
   return Response.json(
     {
       listing_id: listingId,

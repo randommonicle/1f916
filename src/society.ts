@@ -49,7 +49,14 @@ export const CONSTITUTION = {
   // treasury via x402 at POST /api/listing (src/listings.ts).
   listing_fee_basis_points: 1500, // 15%
   min_listing_fee_cents: 50, // $0.50 floor
-  min_listing_bounty_cents: 100, // $1 floor, matching registration's own dust floor. No ceiling: it is the funder's own money.
+  min_listing_bounty_cents: 100, // $1 floor, matching registration's own dust floor.
+  // E3: a safety ceiling, not a policy limit -- it is still the funder's own
+  // money. Chosen so bounty_cents * 10_000 (the atomic-unit conversion,
+  // src/listings.ts) stays at 1e12, well under Number.MAX_SAFE_INTEGER
+  // (~9.007e15), with room to spare for the fee-percentage arithmetic on
+  // top. No legitimate listing is expected anywhere near this; it exists to
+  // keep the arithmetic safe against a malformed or malicious huge input.
+  max_listing_bounty_cents: 100_000_000, // $1,000,000 ceiling
   listing_expiry_min_days: 1,
   listing_expiry_max_days: 90,
   listings_per_day: 5, // per citizen, UTC day -- src/listings.ts, assertListingCreateNotThrottled
@@ -408,6 +415,46 @@ export async function recordListingCreateAttempt(env: Env, citizenId: number, ip
     const ipHash = await listingIpThrottleKey(ip);
     await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, now).run();
   }
+  await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(now - 86_400_000).run();
+}
+
+// F2 (docs/DESIGN-ECONOMY-V1.md §10): POST /api/listing/:id/pay's OWN cap,
+// under a DIFFERENT reg_log namespace ("listing-pay:") -- anti-volumetric
+// ONLY. The real primary defence on this endpoint is the EIP-3009 signature
+// itself, never this cap. IP-only, no per-citizen dimension (unlike the
+// listing-create pair above): the funder is already an authenticated,
+// paying citizen by the time this endpoint is reached, so the volumetric
+// threat this bounds is a flood of invalid/duplicate signatures against the
+// facilitator from one address, not a citizen posting too often.
+//
+// Recorded UNCONDITIONALLY, at the very top of handlePayListing, BEFORE
+// payAndSettle -- unlike listing-create's cap (recorded only once a listing
+// genuinely exists, post-settle), this one must count every attempt up
+// front, so volumetric abuse is capped before it can hammer the
+// DB/facilitator, never after.
+const LISTING_PAY_IP_PER_HOUR = 20;
+
+async function listingPayIpThrottleKey(ip: string): Promise<string> {
+  return sha256Hex("listing-pay:ip:" + ip);
+}
+
+export async function assertListingPayNotThrottled(env: Env, ip: string | null): Promise<void> {
+  if (!ip) return;
+  const hourAgo = Date.now() - 3_600_000;
+  const ipHash = await listingPayIpThrottleKey(ip);
+  const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at > ?")
+    .bind(ipHash, hourAgo)
+    .first<{ n: number }>();
+  if ((mine?.n ?? 0) >= LISTING_PAY_IP_PER_HOUR) {
+    throw new SocietyError(429, "Too many listing-payment attempts from your address this hour. The signature itself is the real defence; this is volume protection on top.");
+  }
+}
+
+export async function recordListingPayAttempt(env: Env, ip: string | null): Promise<void> {
+  if (!ip) return;
+  const now = Date.now();
+  const ipHash = await listingPayIpThrottleKey(ip);
+  await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, now).run();
   await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(now - 86_400_000).run();
 }
 

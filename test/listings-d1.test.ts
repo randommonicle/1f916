@@ -24,6 +24,8 @@ import { createLocalD1, insertCitizen, insertListing, insertSubmission, type Loc
 import {
   assertListingCreateNotThrottled,
   recordListingCreateAttempt,
+  assertListingPayNotThrottled,
+  recordListingPayAttempt,
   assertSubmissionsNotThrottled,
   assertRegistrationNotThrottled,
   moderateContent,
@@ -205,6 +207,97 @@ test("recordListingCreateAttempt prunes rows older than 24h without ever eating 
     assert.equal(stale.n, 0, "a 25h-old row must be pruned");
     const fresh = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ?").get(hash) as { n: number };
     assert.equal(fresh.n, 1, "today's own just-written row must survive the prune");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F2: assertListingPayNotThrottled / recordListingPayAttempt ----------
+
+test("assertListingPayNotThrottled: passes under the cap, and a null IP is never throttled", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    await assert.doesNotReject(() => assertListingPayNotThrottled(env, "203.0.113.91"));
+    await assert.doesNotReject(() => assertListingPayNotThrottled(env, null));
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertListingPayNotThrottled: a check with no matching recorded attempt NEVER consumes the allowance -- D-042's check-only shape", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    for (let i = 0; i < 10; i++) {
+      await assertListingPayNotThrottled(env, "203.0.113.94");
+    }
+    const row = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log").get() as { n: number };
+    assert.equal(row.n, 0, "a check-only call must never write to reg_log");
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertListingPayNotThrottled: refuses once an IP's recorded attempts reach the 20/hour volumetric cap", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const ip = "203.0.113.90";
+    for (let i = 0; i < 20; i++) {
+      await recordListingPayAttempt(env, ip);
+    }
+    await assert.rejects(
+      () => assertListingPayNotThrottled(env, ip),
+      (e: unknown) => e instanceof SocietyError && e.status === 429,
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("assertListingPayNotThrottled: a DIFFERENT IP's recorded attempts do not count against this one", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const busyIp = "203.0.113.95";
+    const quietIp = "203.0.113.96";
+    for (let i = 0; i < 20; i++) await recordListingPayAttempt(env, busyIp);
+    await assert.rejects(() => assertListingPayNotThrottled(env, busyIp), SocietyError);
+    await assert.doesNotReject(() => assertListingPayNotThrottled(env, quietIp));
+  } finally {
+    d1.close();
+  }
+});
+
+// Namespace isolation, mirroring the identical listing-create proof above:
+// listing-pay's own reg_log rows must never leak into a DIFFERENT throttle's
+// count, in EITHER direction.
+test("recordListingPayAttempt's reg_log rows never leak into assertListingCreateNotThrottled's own count (distinct hash namespace)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const ip = "203.0.113.92";
+    for (let i = 0; i < 20; i++) await recordListingPayAttempt(env, ip);
+    const citizenId = insertCitizen(d1);
+    await assert.doesNotReject(() => assertListingCreateNotThrottled(env, citizenId, ip), "listing-create's own throttle must be blind to listing-pay's rows");
+  } finally {
+    d1.close();
+  }
+});
+
+test("recordListingPayAttempt prunes rows older than 24h without ever eating into the current hour's count", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const ip = "203.0.113.97";
+    const hash = await sha256Hex("listing-pay:ip:" + ip);
+    d1.raw.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").run(hash, Date.now() - 25 * 3_600_000);
+    await recordListingPayAttempt(env, ip);
+    const stale = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ? AND created_at < ?").get(hash, Date.now() - 24 * 3_600_000) as { n: number };
+    assert.equal(stale.n, 0, "a 25h-old row must be pruned");
+    const fresh = d1.raw.prepare("SELECT COUNT(*) AS n FROM reg_log WHERE ip_hash = ?").get(hash) as { n: number };
+    assert.equal(fresh.n, 1, "the just-written row must survive the prune");
   } finally {
     d1.close();
   }
@@ -431,6 +524,17 @@ function payRequest(listingId: number, submissionId: number, extra: Record<strin
   });
 }
 
+// F2: identical to payRequest above, but carrying a CF-Connecting-IP header
+// -- needed only by the throttle end-to-end proof, which must drive real
+// requests from a consistent, known IP.
+function payRequestFromIp(listingId: number, submissionId: number, ip: string): Request {
+  return new Request(`https://example.test/api/listing/${listingId}/pay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-PAYMENT": fakePaymentHeader(), "CF-Connecting-IP": ip },
+    body: JSON.stringify({ submission_id: submissionId }),
+  });
+}
+
 // Stubs the facilitator's /verify and /settle, exactly as
 // register-gate-d1.test.ts's stubFacilitatorFetch does. Captures the LAST
 // settle request's own paymentRequirements (payTo, maxAmountRequired) so
@@ -540,6 +644,84 @@ test("handleCreateListing: an invalid bounty is refused BEFORE the facilitator i
     );
     assert.equal(stub.verifyCalls(), 0, "an invalid bounty must never reach the facilitator");
     assert.equal(stub.settleCalls(), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- E3: assertValidBountyCents' full boundary (via handleCreateListing, its only public surface) ----------
+
+test("handleCreateListing: a fractional bounty_cents is refused -- REJECTED, never silently rounded (E3)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    await assert.rejects(
+      () => handleCreateListing(listingCreateRequest({ bounty_cents: 1000.5 }), env, funder),
+      (e: unknown) => e instanceof SocietyError && e.status === 400 && /fractional/i.test(e.message),
+    );
+    assert.equal(stub.verifyCalls(), 0, "a fractional bounty must never reach the facilitator");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handleCreateListing: a bounty_cents that is NOT a safe integer is refused, distinctly from the fractional case (E3)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    // 2**53 is Number.isInteger-true (whole-number-shaped) but
+    // Number.isSafeInteger-false -- exercises the SECOND, distinct check,
+    // not the fractional one above.
+    await assert.rejects(
+      () => handleCreateListing(listingCreateRequest({ bounty_cents: 2 ** 53 }), env, funder),
+      (e: unknown) => e instanceof SocietyError && e.status === 400 && /safe integer/i.test(e.message),
+    );
+    assert.equal(stub.verifyCalls(), 0, "a non-safe-integer bounty must never reach the facilitator");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handleCreateListing: a bounty_cents above CONSTITUTION.max_listing_bounty_cents is refused (E3's new ceiling)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    await assert.rejects(
+      () => handleCreateListing(listingCreateRequest({ bounty_cents: CONSTITUTION.max_listing_bounty_cents + 1 }), env, funder),
+      (e: unknown) => e instanceof SocietyError && e.status === 400,
+    );
+    assert.equal(stub.verifyCalls(), 0, "an above-ceiling bounty must never reach the facilitator");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handleCreateListing: bounty_cents at EXACTLY the min floor and EXACTLY the max ceiling are BOTH accepted (the boundaries themselves are inside the valid range)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+
+    const atMin = await handleCreateListing(listingCreateRequest({ title: "at the floor", bounty_cents: CONSTITUTION.min_listing_bounty_cents }), env, funder);
+    assert.equal(atMin.status, 201, JSON.stringify(await atMin.clone().json()));
+
+    const atMax = await handleCreateListing(listingCreateRequest({ title: "at the ceiling", bounty_cents: CONSTITUTION.max_listing_bounty_cents }), env, funder);
+    assert.equal(atMax.status, 201, JSON.stringify(await atMax.clone().json()));
   } finally {
     stub.restore();
     d1.close();
@@ -739,6 +921,34 @@ test("handlePayListing: only the listing's funder may pay -- another citizen is 
   }
 });
 
+test("handlePayListing: the 21st pay attempt from one IP within an hour is refused (429) BEFORE any settle -- F2 records every attempt up front, not after", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000dd1");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    const ip = "203.0.113.93";
+    for (let i = 0; i < 20; i++) await recordListingPayAttempt(env, ip);
+
+    const verifyCallsBefore = stub.verifyCalls();
+    const settleCallsBefore = stub.settleCalls();
+    await assert.rejects(
+      () => handlePayListing(payRequestFromIp(listingId, submissionId, ip), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 429,
+    );
+    assert.equal(stub.verifyCalls(), verifyCallsBefore, "the 21st attempt must never reach the facilitator's /verify either -- capped before the round trip, not during it");
+    assert.equal(stub.settleCalls(), settleCallsBefore, "the 21st attempt must never reach settle");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 // ---------- the double-pay guarded-UPDATE race ----------
 
 test("double-pay race: two genuinely-settled payments for the same listing -- only the FIRST guarded UPDATE wins; BOTH listing_payments rows exist; the loser's response is honest, never an error", async () => {
@@ -820,6 +1030,64 @@ test("double-pay race: two genuinely-settled payments for the same listing -- on
     assert.equal(listingRow.paid_submission_id, submissionBId, "B's guarded UPDATE landed first and is the listing's single recorded winner");
     assert.equal(listingRow.paid_tx, "0xtx-B");
   } finally {
+    d1.close();
+  }
+});
+
+// ---------- F1: the guarded UPDATE and the listing_payments INSERT commit atomically ----------
+
+test("handlePayListing: the guarded UPDATE and the listing_payments INSERT commit as ONE atomic batch -- a simulated INSERT failure rolls the UPDATE back too, never a paid-but-unrecorded listing", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ccc");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    // A DB wrapper that lets everything through to the REAL local-D1 engine
+    // (so the guarded UPDATE genuinely runs, and the real BEGIN/COMMIT/
+    // ROLLBACK transaction test/helpers/local-d1.ts's own batch() provides
+    // is exercised for real -- see that file's header: a failed statement's
+    // ROLLBACK is confirmed to undo an already-succeeded statement earlier
+    // in the same batch) EXCEPT the second statement of the ONE batch
+    // handlePayListing issues, swapped for a deliberately-broken INSERT
+    // (omits listing_payments' own NOT NULL columns) so the second
+    // statement genuinely, deterministically fails inside that same
+    // transaction -- a real "simulated INSERT failure", not a mocked one.
+    const brokenEnv: Env = {
+      ...env,
+      DB: {
+        prepare: (sql: string) => env.DB.prepare(sql),
+        batch: async (stmts: unknown[]) => {
+          assert.equal(stmts.length, 2, "handlePayListing must batch exactly the guarded UPDATE and the listing_payments INSERT together");
+          const broken = env.DB.prepare("INSERT INTO listing_payments (listing_id) VALUES (?)").bind(listingId);
+          return env.DB.batch([stmts[0], broken] as never[]);
+        },
+      } as unknown as Env["DB"],
+    };
+
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), brokenEnv, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 500 && /settled.*but recording it failed/i.test(e.message),
+    );
+
+    const listingRow = d1.raw.prepare("SELECT status, paid_submission_id, paid_tx FROM listings WHERE id = ?").get(listingId) as {
+      status: string;
+      paid_submission_id: number | null;
+      paid_tx: string | null;
+    };
+    assert.equal(listingRow.status, "open", "the guarded UPDATE's own effect must be ROLLED BACK -- never paid without a matching payment record");
+    assert.equal(listingRow.paid_submission_id, null);
+    assert.equal(listingRow.paid_tx, null);
+
+    const paymentCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments WHERE listing_id = ?").get(listingId) as { n: number };
+    assert.equal(paymentCount.n, 0, "no partial listing_payments row either -- the whole batch rolled back together, atomically");
+  } finally {
+    stub.restore();
     d1.close();
   }
 });
