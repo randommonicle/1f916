@@ -452,51 +452,53 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     payTo: reviewerWallet,
   });
 
-  // Step 4: settle. afterVerify re-checks status==='open' -- the free exit
-  // before an irreversible settle, closing the same window
-  // register-gate.ts closes for handle availability.
+  // Step 4: settle. afterVerify RESERVES the listing atomically --
+  // 'open' -> 'paying' -- the free exit before an irreversible settle,
+  // closing the same window register-gate.ts closes for handle
+  // availability. F1: this REPLACES the old read-only status re-SELECT. A
+  // read can never close a race between two concurrent payers; only a
+  // conditional WRITE that just one of them can win can. Because
+  // payAndSettle never calls settle() if afterVerify throws, only the
+  // single caller who actually flips 'open'->'paying' ever reaches the
+  // facilitator for THIS listing -- every other concurrent attempt (and
+  // any retry against an already-paying/paid/withdrawn/expired listing) is
+  // refused right here, for free, before any money moves. Two concurrent
+  // settles for the same listing can now never both happen.
   const result = await payAndSettle(env, request, reqs, async () => {
-    const fresh = await env.DB.prepare("SELECT status FROM listings WHERE id = ?").bind(listingId).first<{ status: string }>();
-    if (!fresh || fresh.status !== "open") {
-      throw new SocietyError(409, "This listing is no longer open -- it may already be paid, withdrawn, or expired.");
+    const reserved = await env.DB.prepare("UPDATE listings SET status = 'paying' WHERE id = ? AND status = 'open'").bind(listingId).run();
+    if (reserved.meta.changes !== 1) {
+      throw new SocietyError(409, "This listing is no longer open -- already being paid, paid, withdrawn, or expired.");
     }
   });
-  if (!result.ok) return result.response;
+  if (!result.ok) {
+    // Either the reserve above never ran at all (no X-PAYMENT header, or an
+    // invalid signature -- payAndSettle returns before afterVerify in both
+    // cases), or it ran and then settle itself failed. Releasing
+    // 'paying' -> 'open' is a harmless 0-row UPDATE in the first case and a
+    // genuine release in the second, so a funder whose settle failed can
+    // retry without our own reservation permanently locking them out.
+    await env.DB.prepare("UPDATE listings SET status = 'open' WHERE id = ? AND status = 'paying'").bind(listingId).run();
+    return result.response;
+  }
 
   // Step 5: money has moved, funder to reviewer -- the society was never
-  // party to it. Guarded UPDATE: only the first settled pay wins the
-  // listing's single "paid" slot (the double-pay race, §6.2, accepted and
-  // named the same way D-042 accepts registration's own race). The
-  // listing_payments row is ALWAYS written, win or lose the race: the money
-  // genuinely reached a real submitter for real work either way.
-  //
-  // F1: the two writes commit as ONE atomic batch, not two independent
-  // .run() calls -- a batch failure between them (recording failed AFTER
-  // the money already settled) must never leave the guarded UPDATE's own
-  // effect standing without its matching listing_payments row, and must
-  // never silently drop the payment record either. Mirrors
-  // handleCreateListing's own paid-but-failed handler above: there is no
-  // refund path once real money has moved, so a batch throw here is logged
-  // loudly and surfaced as an honest 500, never swallowed.
+  // party to it, and there is no refund path once it has. The reserve
+  // above already guarantees this caller is the SOLE winner (only one
+  // request could ever flip 'open'->'paying' for this listing), so the old
+  // guarded-UPDATE / "wonRace" honesty branch is gone: this is no longer a
+  // race to record, just the one already-decided winner recording
+  // durably. Both writes commit as ONE atomic batch: a batch failure
+  // between them (recording failed AFTER the money already settled) must
+  // never leave a paid listing without its matching listing_payments row,
+  // and must never silently drop the payment record either.
   const now = Date.now();
-  const updateStmt = env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ? WHERE id = ? AND status = 'open'").bind(
-    submissionId,
-    result.tx,
-    listingId,
-  );
   const insertStmt = env.DB.prepare(
     "INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now);
+  const updateStmt = env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ? WHERE id = ?").bind(submissionId, result.tx, listingId);
 
-  let wonRace: boolean;
   try {
-    const [updateRes] = await env.DB.batch([updateStmt, insertStmt]);
-    // Optional chaining is load-bearing, mirroring governance.ts's own
-    // commitOutcome read of a batch result (gate finding 3,
-    // docs/REVIEW-HARDENING2-GATE-2026-08-10.md): an absent changes count
-    // must read as "did not win", never throw and never be assumed to mean
-    // "won" -- under-claiming is the safe direction in both branches.
-    wonRace = updateRes?.meta?.changes === 1;
+    await env.DB.batch([insertStmt, updateStmt]);
   } catch (e) {
     console.log(
       JSON.stringify({
@@ -510,6 +512,11 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
         reason: e instanceof Error ? e.message : String(e),
       }),
     );
+    // Do NOT release the reservation here: the listing stays 'paying', a
+    // durable tombstone a retry's own reserve (WHERE status='open') always
+    // refuses -- never a double-pay, even though the public payments book
+    // is temporarily incomplete. The maintainer reconciles from the
+    // on-chain tx (result.tx, logged above) by hand.
     throw new SocietyError(
       500,
       `Your payment settled (tx ${result.tx}) but recording it failed. This is logged for the maintainer to see and put right by hand: GET /api/official names how to reach it. Verify your payment independently on Base.`,
@@ -525,14 +532,8 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
       payer_address: result.payer,
       amount_cents: listing.bounty_cents,
       tx: result.tx,
-      listing_marked_paid: wonRace,
-      // Mirrors register-gate.ts:179-181's honest paid-but-failed pattern:
-      // a lost race is not a failure of THIS payment (it settled, and is
-      // fully recorded above) -- only the listing's own single "winner"
-      // slot was already taken by a concurrent payer.
-      note: wonRace
-        ? "Payment settled and this listing is now marked paid to this submission."
-        : "Your payment settled and is fully recorded above (see tx) -- but another payment was already recorded as this listing's official winner. Your money still reached a real submitter for real work; only the listing's own single 'paid' slot was taken first. Verify your own payment independently on Base.",
+      listing_marked_paid: true,
+      note: "Payment settled and this listing is now marked paid to this submission.",
       verify: "GET /api/listings/payments",
     },
     { status: 200, headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": btoa(JSON.stringify(result.settlement)) } },
@@ -585,6 +586,15 @@ interface RawListingRow {
   submission_count: number;
 }
 
+// F1: 'paying' (the transient reservation state) is deliberately absent from
+// LISTING_STATUS_FILTERS and from every branch below -- a listing mid-payment
+// is not open for new submissions, so it must never surface in the "open"
+// feed. This holds by construction, not by a special case: every branch
+// matches l.status by exact string equality ('open', or whatever `status`
+// resolved to), and 'paying' !== 'open', so a reserved listing simply never
+// matches any WHERE clause here. An unrecognised ?status=paying request
+// falls through the ternary above to the "open" default, which still
+// excludes it for the same reason.
 export async function listListings(env: Env, statusParam: string | null, sinceId: number) {
   const status: ListingStatusFilter = (LISTING_STATUS_FILTERS as readonly string[]).includes(statusParam ?? "") ? (statusParam as ListingStatusFilter) : "open";
   const now = Date.now();

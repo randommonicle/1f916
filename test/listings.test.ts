@@ -87,6 +87,14 @@ test("effectiveStatus: 'paid'/'withdrawn' are never reinterpreted as 'expired', 
   assert.equal(effectiveStatus("withdrawn", NOW - 1, NOW), "withdrawn");
 });
 
+// F1: 'paying' (the transient atomic-reservation state) gets the identical
+// treatment -- a listing mid-payment must never read as 'expired' just
+// because its expires_at happens to have lapsed while a payment was in
+// flight; only a literal 'open' status is ever reinterpreted.
+test("effectiveStatus: 'paying' is never reinterpreted as 'expired' either (F1)", () => {
+  assert.equal(effectiveStatus("paying", NOW - 1, NOW), "paying");
+});
+
 // ---------- deny-check integration (docs/DESIGN-ECONOMY-V1.md §11) ----------
 
 test("listingDenyCheck: a wallet-connect phishing shape in the description is refused, naming the matched category", () => {

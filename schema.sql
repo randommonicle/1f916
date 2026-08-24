@@ -322,8 +322,8 @@ CREATE TABLE IF NOT EXISTS listings (
   bounty_cents          INTEGER NOT NULL CHECK (bounty_cents > 0),  -- the advertised, IMMUTABLE bounty, in cents
   fee_cents             INTEGER NOT NULL CHECK (fee_cents > 0),     -- the posting fee actually charged, snapshotted at creation
   fee_tx                TEXT NOT NULL,             -- the on-chain tx hash of the posting-fee settlement
-  status                TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'paid', 'withdrawn', 'expired')),
-  paid_submission_id    INTEGER REFERENCES submissions(id),  -- set exactly once, by the guarded UPDATE at pay time
+  status                TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'paying', 'paid', 'withdrawn', 'expired')),  -- 'paying' is the transient atomic-reservation state (F1): set by handlePayListing's afterVerify before an irreversible settle, so only one concurrent payer can ever hold it
+  paid_submission_id    INTEGER REFERENCES submissions(id),  -- set exactly once, once the sole reserver (status='paying') settles
   paid_tx               TEXT,                       -- the funder->reviewer settlement tx, once paid
   expires_at            INTEGER NOT NULL,          -- required, no silent default; bounds are CONSTITUTION.listing_expiry_*_days
   mod_state             TEXT,                       -- NULL/'collapsed'/'removed', same convention as posts.mod_state

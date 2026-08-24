@@ -949,9 +949,23 @@ test("handlePayListing: the 21st pay attempt from one IP within an hour is refus
   }
 });
 
-// ---------- the double-pay guarded-UPDATE race ----------
+// ---------- F1: the atomic reservation ('open' -> 'paying' -> 'paid'/'open') ----------
+//
+// The old "guarded UPDATE at settle time" design let two concurrent payers
+// BOTH genuinely settle (both signatures verified, both facilitator calls
+// succeeded) and only decided a winner afterwards. F1 replaces that with a
+// reservation made BEFORE settle, inside payAndSettle's afterVerify: only
+// one caller can ever flip 'open'->'paying' for a given listing, so a
+// second concurrent caller (or a retry against a stuck/paid listing) is
+// refused BEFORE it can ask the facilitator to move any money at all. The
+// four tests below walk the states this produces: a genuine concurrent
+// race (serialised, not merely won/lost), a free refusal against an
+// already-'paying' listing, a free refusal against an already-'paid'
+// listing, a settle failure (releases back to 'open', retryable), and a
+// post-settle record failure (stays 'paying' -- a durable tombstone,
+// never reverted to 'open', so a retry can never double-pay).
 
-test("double-pay race: two genuinely-settled payments for the same listing -- only the FIRST guarded UPDATE wins; BOTH listing_payments rows exist; the loser's response is honest, never an error", async () => {
+test("concurrent double-click: two truly-interleaved pay attempts for the same listing -- the reserve serialises them; the loser is refused BEFORE it ever reaches settle", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
@@ -968,58 +982,53 @@ test("double-pay race: two genuinely-settled payments for the same listing -- on
     const original = globalThis.fetch;
     let verifyCalls = 0;
     let settleCalls = 0;
-    // Reproduces the race deterministically from inside the ONE shared
-    // facilitator stub, the same technique
-    // test/register-gate-d1.test.ts's own RED-PROOF uses: during call A's
-    // /settle round trip, call B's ENTIRE pay flow runs to completion
-    // FIRST. B's own reads still see status='open' (A has not reached its
-    // guarded UPDATE yet), so B genuinely settles and wins the guarded
-    // UPDATE. A resumes afterward, genuinely settles too, but its own
-    // guarded UPDATE now finds status already 'paid' and loses.
-    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+    // The hook is A's own /verify call, not /settle: by the time A's
+    // mocked /verify responds, A has already run loadPayableListing (saw
+    // 'open') but has NOT yet reserved -- afterVerify (the reserve UPDATE)
+    // only runs AFTER verify returns, per payAndSettle's own contract ("If
+    // afterVerify throws, settle() is never called"). Triggering B's
+    // ENTIRE flow from inside A's /verify response is the genuine
+    // interleaving point: B also sees 'open' at its own loadPayableListing,
+    // and B's own reserve, verify, settle, and record all run to
+    // completion BEFORE A's own /verify call even returns.
+    globalThis.fetch = (async (url: unknown) => {
       const href = String(url);
       if (href === `${FACILITATOR_URL}/verify`) {
-        verifyCalls++;
-        return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (href === `${FACILITATOR_URL}/settle`) {
-        const mySettleIndex = ++settleCalls; // captured immediately, before any nested recursion can move the shared counter further
-        if (mySettleIndex === 1) {
+        const myVerifyIndex = ++verifyCalls; // captured immediately, before any nested recursion can move the shared counter further
+        if (myVerifyIndex === 1) {
           const bRes = await handlePayListing(payRequest(listingId, submissionBId), env, funder, listingId);
           const bBody = (await bRes.json()) as { listing_marked_paid: boolean };
           assert.equal(bRes.status, 200);
-          assert.equal(bBody.listing_marked_paid, true, "B's own nested flow, running to completion while status is still open, must win its guarded UPDATE");
+          assert.equal(bBody.listing_marked_paid, true, "B's own nested flow, running to completion while A is still mid-verify, must win the reserve and settle cleanly");
         }
-        const tx = mySettleIndex === 1 ? "0xtx-A" : "0xtx-B";
-        const payer = mySettleIndex === 1 ? "0x00000000000000000000000000000000payerA" : "0x00000000000000000000000000000000payerB";
-        return new Response(JSON.stringify({ success: true, payer, transaction: tx }), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      throw new Error(`unexpected fetch in double-pay race test: ${href}`);
+      if (href === `${FACILITATOR_URL}/settle`) {
+        settleCalls++;
+        return new Response(JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000payer1", transaction: "0xtx-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch in concurrent double-click test: ${href}`);
     }) as typeof fetch;
 
     try {
-      const aRes = await handlePayListing(payRequest(listingId, submissionAId), env, funder, listingId);
-      assert.equal(aRes.status, 200, "a losing payment must still be an honest 200, never an error status");
-      const aBody = (await aRes.json()) as { listing_marked_paid: boolean; note: string; tx: string };
-      assert.equal(aBody.listing_marked_paid, false, "A's own settle happens AFTER B's whole flow completed inside the stub, so A loses the guarded UPDATE race");
-      assert.match(aBody.note, /already recorded as this listing's official winner/i);
-      assert.equal(aBody.tx, "0xtx-A", "A's own response must still report ITS OWN real settlement tx, not silently substitute B's");
+      await assert.rejects(
+        () => handlePayListing(payRequest(listingId, submissionAId), env, funder, listingId),
+        (e: unknown) => e instanceof SocietyError && e.status === 409,
+        "A's own reserve attempt must be refused -- B already flipped 'open'->'paying'->'paid' while A was mid-verify",
+      );
     } finally {
       globalThis.fetch = original;
     }
 
-    assert.equal(verifyCalls, 2, "both A and B must have genuinely reached and passed verify");
-    assert.equal(settleCalls, 2, "both A and B must have genuinely settled -- this is not a case where one payment never happened");
+    assert.equal(verifyCalls, 2, "both A and B genuinely reached and passed verify");
+    assert.equal(settleCalls, 1, "only B ever reached settle -- A's own afterVerify threw BEFORE settle was ever called, so A's money was never even asked to move");
 
-    const paymentRows = d1.raw.prepare("SELECT submission_id, tx FROM listing_payments WHERE listing_id = ? ORDER BY id ASC").all(listingId) as Array<{
-      submission_id: number;
-      tx: string;
-    }>;
-    assert.equal(paymentRows.length, 2, "BOTH settled payments must be recorded -- neither reviewer's real, paid work vanishes from the public record");
-    assert.deepEqual(
-      paymentRows.map((r) => r.submission_id).sort((x, y) => x - y),
-      [submissionAId, submissionBId].sort((x, y) => x - y),
-    );
+    const paymentRows = d1.raw.prepare("SELECT submission_id, tx FROM listing_payments WHERE listing_id = ?").all(listingId) as Array<{ submission_id: number; tx: string }>;
+    assert.equal(paymentRows.length, 1, "only ONE settled payment exists -- A never settled, so there is nothing of A's to record (this is the fix: F1's old behaviour recorded two)");
+    assert.equal(paymentRows[0]!.submission_id, submissionBId);
 
     const listingRow = d1.raw.prepare("SELECT status, paid_submission_id, paid_tx FROM listings WHERE id = ?").get(listingId) as {
       status: string;
@@ -1027,18 +1036,162 @@ test("double-pay race: two genuinely-settled payments for the same listing -- on
       paid_tx: string;
     };
     assert.equal(listingRow.status, "paid");
-    assert.equal(listingRow.paid_submission_id, submissionBId, "B's guarded UPDATE landed first and is the listing's single recorded winner");
-    assert.equal(listingRow.paid_tx, "0xtx-B");
+    assert.equal(listingRow.paid_submission_id, submissionBId);
   } finally {
     d1.close();
   }
 });
 
-// ---------- F1: the guarded UPDATE and the listing_payments INSERT commit atomically ----------
-
-test("handlePayListing: the guarded UPDATE and the listing_payments INSERT commit as ONE atomic batch -- a simulated INSERT failure rolls the UPDATE back too, never a paid-but-unrecorded listing", async () => {
+test("handlePayListing: a pay attempt against a listing already reserved by a concurrent pay ('paying') is refused 409 for FREE -- never reaches the facilitator", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee3");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000, status: "paying" });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /not open/i.test(e.message),
+    );
+    assert.equal(stub.verifyCalls(), 0, "a 'paying' listing is refused at loadPayableListing, BEFORE payAndSettle is even called -- a free refusal, like every other non-open status");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handlePayListing: a second pay attempt against an already-'paid' listing is refused 409 -- never a double settle", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee2");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    const first = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    assert.equal(first.status, 200, JSON.stringify(await first.clone().json()));
+    const settleCallsAfterFirst = stub.settleCalls();
+    const verifyCallsAfterFirst = stub.verifyCalls();
+
+    const secondSubmissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, secondSubmissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409,
+    );
+    // The refusal must be FREE -- loadPayableListing's own status check
+    // catches it BEFORE payAndSettle is even called, so the retry never
+    // touches the facilitator at all (D-042's discipline), not merely
+    // "never reaches settle" (which the reserve alone would also
+    // guarantee, one layer later and one facilitator round trip later).
+    assert.equal(stub.verifyCalls(), verifyCallsAfterFirst, "a retry against an already-paid listing must never even reach verify -- refused at loadPayableListing, for free");
+    assert.equal(stub.settleCalls(), settleCallsAfterFirst, "a retry against an already-paid listing must never reach settle a second time");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("handlePayListing: a settle failure after a successful reserve releases the listing back to 'open' -- retryable, never permanently stuck", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee4");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown) => {
+      const href = String(url);
+      if (href === `${FACILITATOR_URL}/verify`) {
+        return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href === `${FACILITATOR_URL}/settle`) {
+        // The signature verified, so afterVerify's reserve genuinely ran
+        // (status flipped to 'paying' at this exact instant) -- but
+        // settlement itself fails at the facilitator (insufficient funds,
+        // an expired authorization, whatever the reason).
+        return new Response(JSON.stringify({ success: false, errorReason: "insufficient_funds" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch in settle-failure test: ${href}`);
+    }) as typeof fetch;
+
+    let res: Response;
+    try {
+      res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.equal(res.status, 402, "a failed settlement is the ordinary x402 402 response, not a 500 and not a silent success");
+
+    const listingRow = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(listingRow.status, "open", "the reserve must be RELEASED on a settle failure -- the funder can retry, never permanently locked out by our own reservation");
+
+    const paymentCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments WHERE listing_id = ?").get(listingId) as { n: number };
+    assert.equal(paymentCount.n, 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("handlePayListing: an invalid signature (verify fails) never even reaches the reserve -- the release UPDATE afterwards is a harmless no-op, listing stays 'open'", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee5");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    const original = globalThis.fetch;
+    let settleCalls = 0;
+    globalThis.fetch = (async (url: unknown) => {
+      const href = String(url);
+      if (href === `${FACILITATOR_URL}/verify`) {
+        return new Response(JSON.stringify({ isValid: false, invalidReason: "bad_signature" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href === `${FACILITATOR_URL}/settle`) {
+        settleCalls++;
+        throw new Error("settle must never be reached when verify fails");
+      }
+      throw new Error(`unexpected fetch in invalid-signature test: ${href}`);
+    }) as typeof fetch;
+
+    let res: Response;
+    try {
+      res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.equal(res.status, 402);
+    assert.equal(settleCalls, 0, "afterVerify (and therefore the reserve) never runs when verify itself fails -- payAndSettle returns before either");
+
+    const listingRow = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(listingRow.status, "open", "the post-failure release UPDATE (WHERE status='paying') is a harmless 0-row no-op here -- the listing was never reserved");
+  } finally {
+    d1.close();
+  }
+});
+
+test("handlePayListing: a simulated record-batch failure after a successful settle leaves the listing at 'paying', NOT 'open' -- the durable tombstone that prevents a double-pay, and the failure is logged loudly", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitatorFetch();
+  const originalConsoleLog = console.log;
+  const logged: string[] = [];
+  console.log = (msg: string) => logged.push(msg);
   try {
     const env = testEnv(d1);
     const funderId = insertCitizen(d1);
@@ -1049,23 +1202,22 @@ test("handlePayListing: the guarded UPDATE and the listing_payments INSERT commi
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
     // A DB wrapper that lets everything through to the REAL local-D1 engine
-    // (so the guarded UPDATE genuinely runs, and the real BEGIN/COMMIT/
-    // ROLLBACK transaction test/helpers/local-d1.ts's own batch() provides
-    // is exercised for real -- see that file's header: a failed statement's
-    // ROLLBACK is confirmed to undo an already-succeeded statement earlier
-    // in the same batch) EXCEPT the second statement of the ONE batch
-    // handlePayListing issues, swapped for a deliberately-broken INSERT
-    // (omits listing_payments' own NOT NULL columns) so the second
-    // statement genuinely, deterministically fails inside that same
-    // transaction -- a real "simulated INSERT failure", not a mocked one.
+    // (so the reserve UPDATE and the real BEGIN/COMMIT/ROLLBACK transaction
+    // test/helpers/local-d1.ts's own batch() provides are both exercised
+    // for real) EXCEPT the FIRST statement of the ONE batch handlePayListing
+    // issues on success (the listing_payments INSERT, per F1's new
+    // [insertStmt, updateStmt] order), swapped for a deliberately-broken
+    // INSERT (omits listing_payments' own NOT NULL columns) so it genuinely,
+    // deterministically fails inside that same transaction -- a real
+    // "simulated INSERT failure", not a mocked rejection.
     const brokenEnv: Env = {
       ...env,
       DB: {
         prepare: (sql: string) => env.DB.prepare(sql),
         batch: async (stmts: unknown[]) => {
-          assert.equal(stmts.length, 2, "handlePayListing must batch exactly the guarded UPDATE and the listing_payments INSERT together");
+          assert.equal(stmts.length, 2, "handlePayListing must batch exactly the listing_payments INSERT and the status='paid' UPDATE together");
           const broken = env.DB.prepare("INSERT INTO listing_payments (listing_id) VALUES (?)").bind(listingId);
-          return env.DB.batch([stmts[0], broken] as never[]);
+          return env.DB.batch([broken, stmts[1]] as never[]);
         },
       } as unknown as Env["DB"],
     };
@@ -1075,19 +1227,60 @@ test("handlePayListing: the guarded UPDATE and the listing_payments INSERT commi
       (e: unknown) => e instanceof SocietyError && e.status === 500 && /settled.*but recording it failed/i.test(e.message),
     );
 
+    assert.ok(
+      logged.some((l) => l.includes("listing_pay_settled_but_unrecorded") && l.includes(listingId.toString())),
+      "the settled-but-unrecorded failure must be logged loudly, naming this listing",
+    );
+
     const listingRow = d1.raw.prepare("SELECT status, paid_submission_id, paid_tx FROM listings WHERE id = ?").get(listingId) as {
       status: string;
       paid_submission_id: number | null;
       paid_tx: string | null;
     };
-    assert.equal(listingRow.status, "open", "the guarded UPDATE's own effect must be ROLLED BACK -- never paid without a matching payment record");
-    assert.equal(listingRow.paid_submission_id, null);
+    assert.equal(
+      listingRow.status,
+      "paying",
+      "the reserve is a DURABLE tombstone: a batch failure must NOT revert to 'open' (that would let a retry double-pay) and must NOT advance to 'paid' (the whole batch rolled back)",
+    );
+    assert.equal(listingRow.paid_submission_id, null, "the UPDATE to 'paid' rolled back together with the INSERT -- same atomic batch");
     assert.equal(listingRow.paid_tx, null);
 
     const paymentCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments WHERE listing_id = ?").get(listingId) as { n: number };
     assert.equal(paymentCount.n, 0, "no partial listing_payments row either -- the whole batch rolled back together, atomically");
+
+    // The tombstone does its job: a retry (even against a fresh submission)
+    // must be refused before it can ever reach the facilitator again.
+    const retrySubmissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    const settleCallsBeforeRetry = stub.settleCalls();
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, retrySubmissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409,
+      "a retry against a 'paying' listing must be refused, never a second settle",
+    );
+    assert.equal(stub.settleCalls(), settleCallsBeforeRetry, "the retry must never reach settle -- refused at loadPayableListing, before payAndSettle is even called");
   } finally {
+    console.log = originalConsoleLog;
     stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- F1: listListings' "open" feed excludes a 'paying' listing ----------
+
+test("listListings: a listing mid-payment ('paying') is excluded from the 'open' feed -- it is not open for new submissions", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const openId = insertListing(d1, { status: "open" });
+    const payingId = insertListing(d1, { status: "paying" });
+
+    const openFeed = await listListings(env, "open", NaN);
+    assert.ok(openFeed.listings.some((l: { id: number }) => l.id === openId), "the genuinely open listing must appear");
+    assert.ok(!openFeed.listings.some((l: { id: number }) => l.id === payingId), "a 'paying' listing must NOT appear in the open feed -- it is not open for new submissions");
+
+    const detail = await getListingDetail(env, payingId);
+    assert.equal(detail.listing.status, "paying", "getListingDetail shows the TRUE status, unmasked");
+  } finally {
     d1.close();
   }
 });

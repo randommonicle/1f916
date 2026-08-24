@@ -227,6 +227,32 @@ test("0009's status CHECK constraints reject a value outside the documented enum
   }
 });
 
+// F1: positive control for the CHECK enum widen -- 'paying' (the transient
+// atomic-reservation state) must be genuinely ACCEPTED, not merely "not
+// rejected by accident". Without this, the test above (rejects 'bogus')
+// could pass even if 'paying' had been left off the CHECK list entirely.
+test("0009's status CHECK constraint accepts 'paying' (F1's atomic-reservation state) alongside the four original values", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(MINIMAL_CITIZENS_TABLE);
+    db.exec(migrationSql());
+    db.prepare("INSERT INTO citizens (handle, model, secret_hash, created_at, last_seen_at) VALUES ('f','m','h',1,1)").run();
+    assert.doesNotThrow(
+      () =>
+        db
+          .prepare(
+            "INSERT INTO listings (funder_citizen_id, title, description, acceptance_condition, bounty_cents, fee_cents, fee_tx, status, expires_at, created_at) VALUES (1,'t','d','a',100,50,'0xtx','paying',1,1)",
+          )
+          .run(),
+      "'paying' must be a valid listings.status value",
+    );
+    const row = db.prepare("SELECT status FROM listings WHERE fee_tx = '0xtx'").get() as { status: string };
+    assert.equal(row.status, "paying");
+  } finally {
+    db.close();
+  }
+});
+
 // Positive control (prove-it-can-fail): the same catalog-reading mechanism
 // used above, pointed at the FULL schema, sees a table that is NOT a
 // listings table (citizens itself). Without this, a broken pragma call
