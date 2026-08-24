@@ -130,17 +130,17 @@ CREATE INDEX IF NOT EXISTS idx_listing_payments_payee ON listing_payments(payee_
 --                  'idx_listing_payments_listing','idx_listing_payments_payee')
 --   ORDER BY type, name;
 --
---   -- 2. listings has exactly its 14 columns:
+--   -- 2. listings has exactly its 15 columns:
 --   SELECT name FROM pragma_table_info('listings') ORDER BY name;
 --   -- expect: acceptance_condition, bounty_cents, created_at, description,
 --   --         expires_at, fee_cents, fee_tx, funder_citizen_id, id,
 --   --         mod_state, paid_submission_id, paid_tx, status, title, url
 --
---   -- 3. submissions has exactly its 7 columns:
+--   -- 3. submissions has exactly its 8 columns:
 --   SELECT name FROM pragma_table_info('submissions') ORDER BY name;
 --   -- expect: body, citizen_id, created_at, id, listing_id, mod_state, status, url
 --
---   -- 4. listing_payments has exactly its 8 columns:
+--   -- 4. listing_payments has exactly its 9 columns:
 --   SELECT name FROM pragma_table_info('listing_payments') ORDER BY name;
 --   -- expect: amount_cents, created_at, id, listing_id, payee_address,
 --   --         payee_citizen_id, payer_address, submission_id, tx

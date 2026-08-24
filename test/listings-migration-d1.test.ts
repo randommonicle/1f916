@@ -232,7 +232,7 @@ test("0009's status CHECK constraints reject a value outside the documented enum
 // listings table (citizens itself). Without this, a broken pragma call
 // could make every "table exists" assertion pass or fail for the wrong
 // reason.
-test("positive control: the catalog mechanism sees citizens in the full schema, and schema.sql already carries the listings tables identically", () => {
+test("positive control: the catalog mechanism sees citizens in the full schema, and schema.sql already carries the listings tables and indexes", () => {
   const db = new DatabaseSync(":memory:");
   try {
     db.exec(schemaSql());
@@ -241,13 +241,44 @@ test("positive control: the catalog mechanism sees citizens in the full schema, 
     for (const t of LISTINGS_TABLES) {
       assert.ok(tables.has(t), `schema.sql must carry ${t} identically to the migration (harness loads schema.sql)`);
     }
-    assert.deepEqual(tableColumns(db, "listings").sort(), tableColumns(db, "listings").sort());
     const indexes = objectsOfType(db, "index");
     for (const idx of LISTINGS_INDEXES) {
       assert.ok(indexes.has(idx), `schema.sql must carry index ${idx} identically to the migration`);
     }
   } finally {
     db.close();
+  }
+});
+
+// E4: the test above USED to also assert
+// `tableColumns(db, "listings") deepEqual tableColumns(db, "listings")` --
+// comparing one schema's own table against ITSELF, from a single DB that
+// only ever loaded schema.sql. That is vacuous: it passes even if
+// migrations/0009_listings.sql and schema.sql have drifted apart entirely,
+// because the migration file is never loaded into the comparison at all.
+// This test is the real check: TWO separate in-memory databases, one built
+// from the migration file (plus the minimal citizens fixture its FKs need),
+// the other from schema.sql, with the column sets of all three listings
+// tables compared ACROSS them. A genuine drift between the two files --
+// schema.sql gaining a column the migration lacks, or the reverse -- fails
+// this test; the old version could never have caught that.
+test("schema.sql and migrations/0009_listings.sql build IDENTICAL columns for listings/submissions/listing_payments (the real drift detector)", () => {
+  const migrationDb = new DatabaseSync(":memory:");
+  const schemaDb = new DatabaseSync(":memory:");
+  try {
+    migrationDb.exec(MINIMAL_CITIZENS_TABLE);
+    migrationDb.exec(migrationSql());
+    schemaDb.exec(schemaSql());
+    for (const t of LISTINGS_TABLES) {
+      assert.deepEqual(
+        tableColumns(migrationDb, t),
+        tableColumns(schemaDb, t),
+        `${t}'s columns must be IDENTICAL between migrations/0009_listings.sql and schema.sql -- they must never drift apart`,
+      );
+    }
+  } finally {
+    migrationDb.close();
+    schemaDb.close();
   }
 });
 
