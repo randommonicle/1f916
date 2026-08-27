@@ -266,7 +266,7 @@ test("concierge.ts itself does write SQL to concierge_runs (the positive control
   assert.match(text, /INSERT\s+INTO\s+concierge_runs/i);
 });
 
-const SHOWHOME_TABLES = ["visitors", "showhome_notes", "showhome_rate"];
+const SHOWHOME_TABLES = ["visitors", "showhome_notes", "showhome_rate", "showhome_replies"];
 
 // D-043's own invariant ("no paid cognition ever reads visitor content"),
 // extended to the concierge -- the one new piece of paid cognition this
@@ -275,7 +275,7 @@ const SHOWHOME_TABLES = ["visitors", "showhome_notes", "showhome_rate"];
 // well enough to matter, a stray reference), not only a literal
 // FROM/INTO/JOIN clause -- readSourceWithoutComments has already stripped
 // real comments, so what remains is code text only.
-test("concierge.ts contains no reference to visitors, showhome_notes, or showhome_rate anywhere in its source", () => {
+test("concierge.ts contains no reference to any showhome table (visitors, showhome_notes, showhome_rate, showhome_replies) anywhere in its source", () => {
   const text = readSourceWithoutComments(CONCIERGE_PATH);
   const offenders: string[] = [];
   for (const table of SHOWHOME_TABLES) {

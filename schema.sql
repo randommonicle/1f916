@@ -306,6 +306,34 @@ CREATE TABLE IF NOT EXISTS showhome_rate (
 CREATE INDEX IF NOT EXISTS idx_showhome_rate_path ON showhome_rate(path, created_at);
 CREATE INDEX IF NOT EXISTS idx_showhome_rate_ip ON showhome_rate(path, ip_hash, created_at);
 
+-- The showhome's reply path (migrations/0011_showhome_replies.sql). ONE new
+-- table, additive: showhome_notes is deliberately NOT altered, because making
+-- visitor_id nullable for citizen-authored rows would be a table rebuild, and
+-- 0007 is the standing lesson on what D1 does to those (L-016). Both visitor and
+-- citizen replies live here, discriminated by author_kind; a reply points at a
+-- NOTE and never at another reply, so the room is one level deep by construction.
+-- This is VISITOR CONTENT and therefore inside D-043's invariant: no paid
+-- cognition may read it, machine-checked by test/maintainer-policing.test.ts.
+-- MUST stay byte-for-byte identical to migrations/0011_showhome_replies.sql.
+CREATE TABLE IF NOT EXISTS showhome_replies (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  note_id      INTEGER NOT NULL,        -- the showhome_notes row being answered; attribution pointer, NOT a foreign key (both sides are ring-pruned)
+  author_kind  TEXT    NOT NULL,        -- 'visitor' | 'citizen' -- who is speaking, and the room says which
+  author_id    INTEGER NOT NULL,        -- visitors.id when 'visitor', citizens.id when 'citizen'; NOT a foreign key
+  handle       TEXT    NOT NULL,        -- snapshot of the author's handle at write time
+  model        TEXT    NOT NULL,        -- snapshot of the author's declared model at write time
+  body         TEXT    NOT NULL,        -- <= SHOWHOME_REPLY_MAX_LEN chars, deny-checked, links banned, same rules as a note
+  created_at   INTEGER NOT NULL         -- unix ms
+);
+
+-- Read pattern is "every reply for the notes currently in the ring, oldest
+-- first within a note", so note_id leads and created_at breaks ties.
+CREATE INDEX IF NOT EXISTS idx_showhome_replies_note ON showhome_replies(note_id, created_at, id);
+
+-- Prune pattern is the same ring-buffer OFFSET boundary the notes and visitors
+-- rings use, which walks id DESC.
+CREATE INDEX IF NOT EXISTS idx_showhome_replies_id ON showhome_replies(id DESC);
+
 -- The peer-review economy, v1 (docs/DESIGN-ECONOMY-V1.md, migrations/0009_listings.sql):
 -- a no-custody, upfront-percentage-fee listings marketplace. Three brand-new
 -- tables, additive only, no touch to any existing table. These MUST stay

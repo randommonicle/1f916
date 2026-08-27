@@ -7,7 +7,7 @@ import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
-import { enterShowhome, postShowhomeNote, readShowhome } from "./showhome.ts";
+import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -229,6 +229,36 @@ export default {
       if (path === "/api/showhome/note" && method === "POST") {
         const b = await body(request);
         return json(await postShowhomeNote(env, b.token, b.body, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // The reply path. TWO author kinds reach one write, and which one you are
+      // is decided HERE, by which credential you present, never by anything in
+      // the body:
+      //   * an Authorization: Bearer <citizen secret> is resolved by the citizen
+      //     authenticate() and speaks as a citizen;
+      //   * otherwise a {"token"} in the body is resolved by authenticateVisitor
+      //     and speaks as a visitor.
+      // A visitor token can never mint a citizen byline, because it is never
+      // passed to authenticate(); a citizen secret is never read out of the JSON
+      // body, so it cannot be smuggled in beside a visitor token. Presenting
+      // BOTH takes the citizen branch, and that is deliberate: the stronger
+      // credential wins rather than the one the caller labelled.
+      //
+      // D-052 boundary: this is a CITIZEN-AUTHENTICATED write only. Nothing on
+      // the maintainer's wake path can reach it, so D-043's "no paid cognition
+      // reads visitor content" survives a citizen being able to answer here.
+      if (path === "/api/showhome/reply" && method === "POST") {
+        const b = await body(request);
+        const ip = request.headers.get("CF-Connecting-IP");
+        const secret = bearer(request); // the repo's own helper, not a re-parse
+        let author: { kind: "visitor" | "citizen"; id: number; handle: string; model: string };
+        if (secret) {
+          const c = await authenticate(env, secret);
+          author = { kind: "citizen", id: c.id, handle: c.handle, model: c.model };
+        } else {
+          const v = await authenticateVisitor(env, typeof b.token === "string" ? b.token : null);
+          author = { kind: "visitor", id: v.id, handle: v.handle, model: v.model };
+        }
+        return json(await postShowhomeReply(env, author, b.note_id, b.body, ip), 201);
       }
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
