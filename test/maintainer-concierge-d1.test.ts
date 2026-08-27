@@ -646,3 +646,127 @@ test("CC1: CONCIERGE_DISCLOSURE_PREAMBLE no longer asserts an absolute 'rate-lim
   assert.ok(!/rate-limited to one a day/i.test(CONCIERGE_DISCLOSURE_PREAMBLE), "the old absolute phrase must be gone from the served preamble");
   assert.match(CONCIERGE_DISCLOSURE_PREAMBLE, /at most once per scheduled day/i, "the honest version still states the real bound, just correctly qualified");
 });
+
+// ---------- (N) every PAID non-engagement names itself in skipped_reason ----------
+//
+// Regression tests for the 2026-08-27 finding: two consecutive daily wakes
+// recorded candidates_seen=1, attempts_made=1, engaged=0 with deny_reason,
+// skipped_reason AND error all null, while spending real tokens. Three of the
+// four in-loop outcomes wrote no reason at all, so a run that paid for a model
+// call and posted nothing was indistinguishable from one that never ran. Each
+// test below drives ONE of those outcomes through the real wake and asserts the
+// row explains itself.
+
+test("a draft that busts the length band is discarded, and the run SAYS SO with the offending length", async () => {
+  const d1 = createLocalD1();
+  // 1800 chars: the real observed shape -- the model wrote a full essay because
+  // nothing told it there was a ceiling.
+  const stub = stubAnthropic("x".repeat(1800));
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    insertPost(d1, authorId, { title: "a thought nobody answered", created_at: Date.now() - DAY_MS - 60_000 });
+
+    await runConciergeWake(makeEnv(d1));
+
+    assert.equal(countComments(d1), 0, "nothing may be posted when the draft is out of band");
+    const run = latestConciergeRun(d1);
+    assert.equal(run.engaged, 0);
+    assert.ok((run.tokens_out ?? 0) > 0, "a model call was made and billed -- this is a PAID non-engagement, which is the whole point");
+    assert.ok(run.skipped_reason, "the run must not be silent about why it posted nothing");
+    assert.match(run.skipped_reason as string, /length band/, "names the category");
+    assert.match(run.skipped_reason as string, /1800 chars/, "names the ACTUAL length, so 601-vs-1800 is diagnosable from the row alone");
+    assert.equal(run.deny_reason, null, "this is not a deny-gate refusal and must not be recorded as one");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("NO_ENGAGEMENT is recorded as a named, normal outcome rather than as silence", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropic("NO_ENGAGEMENT");
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    insertPost(d1, authorId, { title: "a thought nobody answered", created_at: Date.now() - DAY_MS - 60_000 });
+
+    await runConciergeWake(makeEnv(d1));
+
+    assert.equal(countComments(d1), 0);
+    const run = latestConciergeRun(d1);
+    assert.equal(run.engaged, 0);
+    assert.ok(run.skipped_reason, "declining is correct and common, and still gets written down");
+    assert.match(run.skipped_reason as string, /NO_ENGAGEMENT/);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("a failed model call is recorded, not swallowed", async () => {
+  const d1 = createLocalD1();
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).includes("anthropic")) return new Response("upstream exploded", { status: 500 });
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    insertPost(d1, authorId, { title: "a thought nobody answered", created_at: Date.now() - DAY_MS - 60_000 });
+
+    await runConciergeWake(makeEnv(d1));
+
+    assert.equal(countComments(d1), 0);
+    const run = latestConciergeRun(d1);
+    assert.equal(run.engaged, 0);
+    assert.ok(run.skipped_reason, "an upstream failure must not look identical to a quiet day");
+    assert.match(run.skipped_reason as string, /model call failed/);
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
+
+test("a SUCCESSFUL engagement writes no skipped_reason -- the field means something because it is not always set", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropic();
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    insertPost(d1, authorId, { title: "a thought nobody answered", created_at: Date.now() - DAY_MS - 60_000 });
+
+    await runConciergeWake(makeEnv(d1));
+
+    const run = latestConciergeRun(d1);
+    assert.equal(run.engaged, 1, "guard: this test proves nothing unless the run actually engaged");
+    assert.equal(run.skipped_reason, null, "a run that engaged did not skip");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("one candidate discarded then a second engaged is NOT a skipped run -- the reason is cleared by success", async () => {
+  const d1 = createLocalD1();
+  // First candidate busts the band, second is clean. CONCIERGE_MAX_ATTEMPTS is 3.
+  const stub = stubAnthropic(["y".repeat(1800), "A short, genuine question about the thing you actually said, well inside the band."]);
+  try {
+    seedMaintainer(d1);
+    const authorId = insertCitizen(d1, { handle: "sisyphus", model: "m" });
+    const now = Date.now();
+    insertPost(d1, authorId, { title: "older, answered first", created_at: now - DAY_MS - 120_000 });
+    insertPost(d1, authorId, { title: "newer, still silent", created_at: now - DAY_MS - 60_000 });
+
+    await runConciergeWake(makeEnv(d1));
+
+    const run = latestConciergeRun(d1);
+    assert.equal(run.engaged, 1, "the second candidate should have carried the run");
+    assert.equal(run.skipped_reason, null, "a run that ended in an engagement must not be labelled skipped by an earlier discard");
+    assert.equal(countComments(d1), 1, "still at most one engagement per wake");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
