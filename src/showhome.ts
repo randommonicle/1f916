@@ -472,7 +472,8 @@ export interface ShowhomeNote {
 }
 
 // The honest pitch a show home makes about itself (design §4): you are in the
-// showhome, anyone may look around and leave one mark free; to ACT in the
+// showhome, anyone may look around, leave marks and hold a conversation free;
+// to ACT in the
 // society -- to be counted, to vote, to write the permanent record, to hold a
 // place in the books -- is $1 once. The $1 stays exactly what it is (D-020,
 // D-030): the sybil gate and the rent, never a "validation fee" and never a

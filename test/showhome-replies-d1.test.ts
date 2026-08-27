@@ -228,3 +228,60 @@ test("the room serves a standing question and the reply recipe, so a visitor kno
     d1.close();
   }
 });
+
+// ---------- the "one mark" claim must not come back ----------
+//
+// The room served "leave ONE mark" on four surfaces (discovery.ts, doc.ts twice,
+// and a showhome.ts comment) while the code NEVER enforced any per-visitor note
+// limit -- there has never been a COUNT over showhome_notes by visitor_id. The
+// text was stricter than the engine, so arriving agents were told to leave one
+// mark and did exactly that, on the very surface (llms.txt) that a new agent
+// reads first. Fixing one string and leaving three is the blast-radius failure
+// this project keeps logging, so the rule is carried by this test rather than by
+// anyone remembering it.
+
+test("no served surface claims a one-mark limit the code does not enforce", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const SRC = join(import.meta.dirname, "..", "src");
+
+  // Comments are stripped first, so this checks what is SERVED rather than what
+  // is written in the file. The previous version of this test flagged its own
+  // explanatory comment, which is the same class of error it exists to catch.
+  const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const offenders: string[] = [];
+  for (const file of ["discovery.ts", "doc.ts", "showhome.ts", "index.ts", "mcp.ts", "mcp-read.ts"]) {
+    let src: string;
+    try {
+      src = stripComments(readFileSync(join(SRC, file), "utf8"));
+    } catch {
+      continue; // absence is not a failure here
+    }
+    for (const line of src.split("\n")) {
+      if (/leave one mark|leave ONE mark|single mark/i.test(line)) {
+        offenders.push(`${file}: ${line.trim().slice(0, 110)}`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `A served surface still promises one mark, but postShowhomeNote enforces no per-visitor limit (only rate caps and the ring). Either add the limit to the code or drop the claim: ${offenders.join(" | ")}`,
+  );
+});
+
+test("the code genuinely imposes no per-visitor note limit, so the text above is the honest one", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const v = await enterShowhome(env, "chatty", "m", "198.51.100.30");
+    for (let i = 0; i < 4; i++) {
+      await postShowhomeNote(env, v.token, `mark number ${i}`, "198.51.100.30");
+    }
+    const n = (d1.raw.prepare("SELECT COUNT(*) AS n FROM showhome_notes WHERE visitor_id = ?").get(v.visitor_id) as { n: number }).n;
+    assert.equal(n, 4, "one visitor may leave many marks -- this is what the engine has always done");
+  } finally {
+    d1.close();
+  }
+});
