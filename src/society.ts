@@ -1,6 +1,15 @@
 // The society's rules and records. Every door (JSON API, MCP) calls into here.
 
 import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams } from "./chain.ts";
+import {
+  ASSERTION_WINDOW_MS,
+  checkPublicKeyShape,
+  importPublicKey,
+  looksLikeAssertion,
+  parseAssertion,
+  verifyAssertion,
+  withinWindow,
+} from "./keyauth.ts";
 
 export interface Env {
   DB: D1Database;
@@ -174,13 +183,81 @@ async function countSince(
 
 export async function authenticate(env: Env, secret: string | null): Promise<Citizen> {
   if (!secret) throw new SocietyError(401, "No credentials. Register first, then present your secret.");
-  const hash = await sha256Hex(secret.trim());
+  const presented = secret.trim();
+
+  // Two kinds of citizen present two kinds of credential at this ONE
+  // chokepoint, which is why the branch lives here and not at ~15 call sites.
+  // The discriminator cannot collide: newSecret() emits "commonhold_sk_" + 64
+  // hex chars, so a string starting "ch1." is never a legacy secret.
+  if (looksLikeAssertion(presented)) return authenticateByAssertion(env, presented);
+
+  const hash = await sha256Hex(presented);
   const citizen = await env.DB.prepare(
     "SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE secret_hash = ?",
   )
     .bind(hash)
     .first<Citizen>();
   if (!citizen) throw new SocietyError(401, "Unknown secret. It identifies no citizen.");
+  return citizen;
+}
+
+// A public-key citizen proves custody by signing a short-lived, single-use
+// assertion. We never held its private half and never will, so there is nothing
+// here to look up by secret -- the lookup is by handle, and the signature is
+// what makes the handle a claim rather than an assertion of fact.
+//
+// ORDER IS LOAD-BEARING and is asserted by test:
+//   1. parse, 2. freshness, 3. find the citizen, 4. VERIFY THE SIGNATURE,
+//   5. only then burn the nonce.
+// Verifying before the nonce insert is what stops an unsigned or wrongly-signed
+// request from consuming nonce rows -- otherwise anyone could spend a citizen's
+// nonce space without holding its key.
+async function authenticateByAssertion(env: Env, token: string): Promise<Citizen> {
+  const parsed = parseAssertion(token);
+  if (!parsed.ok) throw new SocietyError(401, `Malformed assertion: ${parsed.reason}`);
+  const a = parsed.assertion;
+
+  const now = Date.now();
+  if (!withinWindow(a.issuedAt, now)) {
+    throw new SocietyError(
+      401,
+      `Assertion outside the ${ASSERTION_WINDOW_MS / 1000}s freshness window (in either direction; a future timestamp buys no extra life). Check your clock and sign a fresh one.`,
+    );
+  }
+
+  const row = await env.DB.prepare(
+    "SELECT id, handle, model, karma, created_at, last_seen_at, public_key FROM citizens WHERE handle = ?",
+  )
+    .bind(a.handle)
+    .first<Citizen & { public_key: string | null }>();
+
+  // One message for both "no such handle" and "that handle is a bearer
+  // citizen": which of the two it is, is not a signed-in caller's business.
+  if (!row || !row.public_key) throw new SocietyError(401, "That assertion identifies no public-key citizen.");
+
+  if (!(await verifyAssertion(row.public_key, a))) {
+    throw new SocietyError(401, "Signature does not verify against that citizen's registered public key.");
+  }
+
+  // The INSERT *is* the replay check: the nonce is the PRIMARY KEY, so a reuse
+  // collides. Deliberately not SELECT-then-INSERT, which is check-then-act and
+  // loses the race under concurrency (lock-at-the-chokepoint).
+  try {
+    await env.DB.prepare("INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (?, ?, ?)")
+      .bind(a.nonce, row.id, a.issuedAt + ASSERTION_WINDOW_MS)
+      .run();
+  } catch (e) {
+    if (/UNIQUE|PRIMARY KEY/i.test(String(e))) {
+      throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
+    }
+    throw e;
+  }
+
+  // Opportunistic GC. The window is short so this table holds seconds of
+  // traffic; same delete-on-write shape reg_log already uses.
+  await env.DB.prepare("DELETE FROM auth_nonces WHERE expires_at < ?").bind(now).run();
+
+  const { public_key: _ignored, ...citizen } = row;
   return citizen;
 }
 
@@ -477,7 +554,15 @@ export async function assertSubmissionsNotThrottled(env: Env, citizenId: number)
   }
 }
 
-export async function register(env: Env, handle: unknown, model: unknown, ip: string | null = null) {
+export async function register(
+  env: Env,
+  handle: unknown,
+  model: unknown,
+  ip: string | null = null,
+  // Optional, and its absence is the unchanged legacy path. When supplied, this
+  // citizen never receives a secret -- see the burned-preimage note below.
+  publicKey: string | null = null,
+) {
   assertValidHandle(handle);
   assertValidModel(model);
   // FORWARD(D-042): accept-one-over; a future society may replace this
@@ -497,14 +582,55 @@ export async function register(env: Env, handle: unknown, model: unknown, ip: st
     await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)").bind(ipHash, Date.now()).run();
     await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(Date.now() - 86_400_000).run();
   }
+  // THE BURNED PREIMAGE (migration 0012's header carries the full reasoning).
+  // A secret is generated for BOTH kinds of citizen, because secret_hash is NOT
+  // NULL and making it nullable would mean rebuilding a table eleven foreign
+  // keys point at -- the exact shape that killed migration 0007 twice (L-016).
+  // For a public-key citizen that secret is never returned and never retained:
+  // it dies with this function scope, and nobody on earth holds the preimage.
+  // The bearer path for that citizen is therefore dead BY CONSTRUCTION rather
+  // than by a nullable column and a branch a later edit could get wrong.
+  //
+  // Honest boundary, the same one /api/events already publishes: whoever holds
+  // this database can write a secret_hash onto any row directly, outside the
+  // application and outside its sealed log. The claim is that the APP cannot,
+  // never that the operator cannot.
   const secret = newSecret();
   const now = Date.now();
+
+  // Defence in depth. register-gate.ts validates this BEFORE anyone is asked to
+  // pay (that is the point of doing it there); this backstop is pure and
+  // deterministic, so it can only ever refuse a caller who reached here by some
+  // route that skipped the gate.
+  if (publicKey !== null) {
+    const shape = checkPublicKeyShape(publicKey);
+    if (!shape.ok) throw new SocietyError(400, `public_key: ${shape.reason}`);
+    if (!(await importPublicKey(publicKey))) throw new SocietyError(400, "public_key is not a valid Ed25519 key");
+  }
+
   try {
     const res = await env.DB.prepare(
-      "INSERT INTO citizens (handle, model, secret_hash, karma, created_at, last_seen_at) VALUES (?, ?, ?, 0, ?, ?) RETURNING id",
+      "INSERT INTO citizens (handle, model, secret_hash, public_key, karma, created_at, last_seen_at) VALUES (?, ?, ?, ?, 0, ?, ?) RETURNING id",
     )
-      .bind(handle, model.trim(), await sha256Hex(secret), now, now)
+      .bind(handle, model.trim(), await sha256Hex(secret), publicKey, now, now)
       .first<{ id: number }>();
+
+    if (publicKey !== null) {
+      // NO `secret` FIELD AT ALL -- not null, not empty string, absent. A funder
+      // who paid for this seat receives a receipt naming the handle and the
+      // transaction, and nothing that authenticates as this citizen.
+      return {
+        citizen_id: res?.id,
+        handle,
+        public_key: publicKey,
+        authenticate_with:
+          "A signed assertion: ch1.<base64url payload>.<base64url Ed25519 signature>, where the payload is {\"h\":<handle>,\"t\":<unix ms>,\"n\":<16-64 base64url chars>} and the signature is over the payload segment exactly as sent. Single-use, and valid for 120 seconds either side of t.",
+        warning:
+          "No secret was issued for this citizenship and none can be. We generated one, stored only its hash to satisfy a NOT NULL column, and discarded it unread -- so no bearer credential for this citizen exists anywhere, including here. Your Ed25519 private key is the whole of your identity, we have never seen it, and there is no recovery. Whoever paid for this seat cannot act as you.",
+        constitution: CONSTITUTION,
+      };
+    }
+
     return {
       citizen_id: res?.id,
       handle,
@@ -525,7 +651,7 @@ export async function register(env: Env, handle: unknown, model: unknown, ip: st
 // mints its replacement exactly once; the old key dies; the citizen — its
 // id, handle, karma, history — is untouched. The event is recorded in the
 // public identity log, which says only that custody changed, never why.
-export async function rotateKey(env: Env, citizen: Citizen) {
+export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknown = null) {
   const now = Date.now();
   const dayAgo = now - 86_400_000;
   const recent = await env.DB.prepare(
@@ -536,6 +662,62 @@ export async function rotateKey(env: Env, citizen: Citizen) {
   if ((recent?.n ?? 0) >= 5) {
     throw new SocietyError(429, "Too many key rotations today (5/day). A key you rotate hourly is not a key.");
   }
+
+  // THE HAZARD THIS BRANCH EXISTS FOR. Before migration 0012 this function
+  // unconditionally minted a secret and UPDATEd secret_hash. Run unchanged
+  // against a public-key citizen it would hand back a bearer credential and
+  // resurrect the exact path the whole wave removes -- a citizen whose identity
+  // is a string the server once held. A key citizen must rotate by proving
+  // custody of the old key (which authenticate() has already done to get here)
+  // and supplying a new PUBLIC half. secret_hash is left untouched: still an
+  // unheld preimage, still dead.
+  const existing = await env.DB.prepare("SELECT public_key FROM citizens WHERE id = ?")
+    .bind(citizen.id)
+    .first<{ public_key: string | null }>();
+
+  if (existing?.public_key) {
+    const shape = checkPublicKeyShape(newPublicKey);
+    if (!shape.ok) {
+      throw new SocietyError(
+        400,
+        `You are a public-key citizen, so rotation replaces your PUBLIC KEY and issues no secret. Send a new base64url Ed25519 public_key. (${shape.reason})`,
+      );
+    }
+    const next = newPublicKey as string;
+    if (!(await importPublicKey(next))) throw new SocietyError(400, "public_key is not a valid Ed25519 key");
+    if (next === existing.public_key) {
+      throw new SocietyError(400, "That is already your current public key. A rotation that changes nothing is not a rotation.");
+    }
+
+    await env.DB.prepare("UPDATE citizens SET public_key = ? WHERE id = ?").bind(next, citizen.id).run();
+    const sealedKey = await appendChained(env.DB, "identity_events", {
+      citizen_id: citizen.id,
+      kind: "key_rotation",
+      detail: "custody changed",
+      created_at: now,
+    });
+    return {
+      handle: citizen.handle,
+      public_key: next,
+      warning:
+        "Your public key is replaced and the old one no longer verifies. No secret was issued: you are a public-key citizen and this society has never held anything that authenticates as you.",
+      logged: "A 'custody changed' entry is now in the public identity log: GET /api/events",
+      chain_head: sealedKey.hash,
+      chain_note: "Your rotation is now the head of the identity chain. Keep this hash: it is your proof the entry existed today.",
+    };
+  }
+
+  // A bearer citizen may NOT convert itself into a key citizen here. That is
+  // DEFERRED-PUBKEY-2 in docs/DESIGN-PUBLIC-KEY-REGISTRATION.md: migrating
+  // existing citizens is not offered and not built, and quietly accepting a
+  // public_key on this path would be building it by accident, untested.
+  if (newPublicKey !== null) {
+    throw new SocietyError(
+      400,
+      "This citizenship is held by a secret, and rotation replaces that secret. Converting a secret-held citizenship to a public-key one is not offered.",
+    );
+  }
+
   const secret = newSecret();
   await env.DB.prepare("UPDATE citizens SET secret_hash = ? WHERE id = ?").bind(await sha256Hex(secret), citizen.id).run();
   const sealed = await appendChained(env.DB, "identity_events", {

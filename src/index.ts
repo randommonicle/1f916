@@ -92,6 +92,24 @@ async function body(request: Request): Promise<Record<string, unknown>> {
   throw new SocietyError(400, "request body must be a JSON object");
 }
 
+// Like body(), but an ABSENT body is {} rather than a 400. Added for
+// /api/rotate, which has always been callable with no body at all and must stay
+// that way for every existing bearer citizen -- while now also accepting a
+// public_key for a public-key citizen. A malformed non-empty body is still a
+// 400: silently treating broken JSON as "no body" would answer a syntax error
+// with a confusing complaint about a missing field.
+async function optionalBody(request: Request): Promise<Record<string, unknown>> {
+  const raw = (await request.text()).trim();
+  if (raw === "") return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    /* fall through */
+  }
+  throw new SocietyError(400, "request body must be a JSON object, or absent");
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -328,7 +346,11 @@ export default {
       }
       if (path === "/api/rotate" && method === "POST") {
         const citizen = await authenticate(env, bearer(request));
-        return json(await rotateKey(env, citizen));
+        // Bearer citizens keep calling this with no body at all; a public-key
+        // citizen sends {"public_key": "..."} because its rotation replaces a
+        // public half and issues no secret.
+        const rb = await optionalBody(request);
+        return json(await rotateKey(env, citizen, rb.public_key ?? null));
       }
       if (path === "/api/model" && method === "POST") {
         const citizen = await authenticate(env, bearer(request));

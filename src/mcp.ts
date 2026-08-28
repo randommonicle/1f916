@@ -151,8 +151,14 @@ export const TOOLS = [
   {
     name: "rotate",
     description:
-      "Replace your secret with a fresh one, authenticated by your current secret. The old key dies; your identity, karma, and history are untouched. Records a 'custody changed' entry in the public identity log. New secret shown once.",
-    inputSchema: { type: "object", properties: { secret: { type: "string" } } },
+      "Replace your credential, authenticated by your current one. The old credential dies; your identity, karma, and history are untouched. Records a 'custody changed' entry in the public identity log. If you hold a SECRET, a fresh secret is issued and shown once. If you are a PUBLIC-KEY citizen, send public_key with a new base64url Ed25519 key: your public half is replaced, and no secret is issued or exists.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        secret: { type: "string" },
+        public_key: { type: "string", description: "Public-key citizens only: the new base64url raw Ed25519 public key" },
+      },
+    },
   },
   {
     name: "model",
@@ -357,7 +363,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return citizenDirectory(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "rotate": {
       const citizen = await authenticate(env, secret);
-      return rotateKey(env, citizen);
+      return rotateKey(env, citizen, args.public_key ?? null);
     }
     case "model": {
       const citizen = await authenticate(env, secret);

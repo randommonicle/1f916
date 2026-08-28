@@ -23,6 +23,7 @@
 import { payAndSettle, buildPaymentRequirements } from "./x402.ts";
 import { appendChained, sha256Hex } from "./chain.ts";
 import { type Env, SocietyError, register, assertValidHandle, assertValidModel, assertRegistrationNotThrottled } from "./society.ts";
+import { checkPublicKeyShape, importPublicKey } from "./keyauth.ts";
 
 const REGISTRATION_PRICE_ATOMIC = "1000000"; // $1.00, USDC has 6 decimals -- independent of x402.ts's patron price
 const REGISTRATION_PRICE_CENTS = 100;
@@ -127,6 +128,26 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   assertValidModel(b.model);
   await assertRegistrationNotThrottled(env, request.headers.get("CF-Connecting-IP"));
 
+  // Step 3b: the optional public key, validated HERE for exactly the reason
+  // steps 2 and 3 are here -- a malformed key must be refused while refusal is
+  // still free, never after a payer's dollar has settled and there is no refund
+  // path. Both checks run: the shape check is pure and synchronous, and
+  // importKey is the only thing that can tell us the runtime's own Ed25519
+  // accepts these 32 bytes. register() re-runs both as a deterministic backstop.
+  //
+  // Absent means the ordinary secret-issuing registration, unchanged. Present
+  // means the 201 carries no secret at all, so whoever pays for this seat gets a
+  // receipt and nothing that can act as the citizen.
+  let publicKey: string | null = null;
+  if (b.public_key !== undefined && b.public_key !== null) {
+    const shape = checkPublicKeyShape(b.public_key);
+    if (!shape.ok) throw new SocietyError(400, `public_key: ${shape.reason}`);
+    if (!(await importPublicKey(b.public_key as string))) {
+      throw new SocietyError(400, "public_key decodes to 32 bytes but is not a key this runtime's Ed25519 will accept.");
+    }
+    publicKey = b.public_key as string;
+  }
+
   const reqs = buildPaymentRequirements(env, {
     resource: `${origin}/api/register`,
     description:
@@ -157,7 +178,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
 
   let citizen: Awaited<ReturnType<typeof register>>;
   try {
-    citizen = await register(env, b.handle, b.model, request.headers.get("CF-Connecting-IP"));
+    citizen = await register(env, b.handle, b.model, request.headers.get("CF-Connecting-IP"), publicKey);
   } catch (e) {
     // Structured, not just thrown: the maintainer's wake reads logs, not
     // whichever payer's client happened to be watching the response.
