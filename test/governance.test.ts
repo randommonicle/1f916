@@ -24,6 +24,7 @@ import {
   quorumThreshold,
   entrenchedQuorumThreshold,
   tally,
+  quorumFor,
   validatePayload,
   refusesDisguisedFirstLawsAmendment,
   assertEligible,
@@ -1184,4 +1185,35 @@ test("[G1-1] invariant: the deployed entrenched parameters equal D-025's eight r
   // nothing if the wrong kinds are attached to them).
   assert.equal(classOf("first_laws_ratify"), "entrenched");
   assert.equal(classOf("first_laws_amendment"), "entrenched");
+});
+
+// D-055 ruling 5: tally() no longer special-cases advisory before the quorum
+// gate. That removal is only safe because advisory's quorum is identically
+// zero and `cast` is a sum of three non-negative counts, so `cast < threshold`
+// is unreachable for advisory. The branch is gone, so the fact it rested on is
+// now load-bearing and gets its own test rather than living in a comment.
+test("advisory's quorum is identically zero, which is what makes the removed special case safe", () => {
+  for (const eligible of [0, 1, 2, 3, 5, 7, 50, 1000, 100_800]) {
+    assert.equal(
+      quorumFor("advisory", eligible),
+      0,
+      `advisory quorum must be 0 at eligible=${eligible}; if this ever becomes non-zero, tally() will start failing advisory votes on quorum and D-055 ruling 5 must be revisited`,
+    );
+  }
+  // The other three classes must NOT be zero at a realistic census, or the
+  // gate this test guards would be vacuous for them too.
+  for (const voteClass of ["constitutional", "parameter", "entrenched"] as const) {
+    assert.ok(quorumFor(voteClass, 5) > 0, `${voteClass} must carry a real quorum at eligible=5`);
+  }
+});
+
+test("advisory still cannot fail on quorum, at any eligible count, now that the branch is gone", () => {
+  // Pre-removal these all skipped the gate; post-removal they pass through a
+  // threshold of 0. Same answers, and never reason "quorum".
+  for (const eligible of [1, 5, 1000]) {
+    assert.equal(tally("advisory", 0, 0, 0, eligible).reason, "floor", "an empty advisory ballot fails the FLOOR, never quorum");
+    assert.equal(tally("advisory", 1, 0, 0, eligible).status, "passed");
+    assert.equal(tally("advisory", 0, 1, 0, eligible).reason, "margin");
+    assert.equal(tally("advisory", 1, 1, 0, eligible).reason, "margin", "a tie fails on margin, not quorum");
+  }
 });

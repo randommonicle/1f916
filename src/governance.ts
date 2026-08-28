@@ -197,9 +197,11 @@ function quorumFromRule(rule: QuorumRule, eligible: number): number {
 
 // Pure. What tally() actually calls -- reads CLASS_QUORUM_RULE for the
 // given class, so a table edit and the executed threshold can never
-// disagree. "none" (advisory) resolves to 0 for completeness; tally()
-// itself never asks for advisory's quorum (advisory skips the quorum gate
-// entirely, unchanged from before this commit).
+// disagree. "none" (advisory) resolves to 0, and since D-055 ruling 5
+// tally() DOES ask for advisory's quorum like every other class -- it gets
+// 0 back, and `cast < 0` is unreachable, so the gate is a no-op for
+// advisory rather than a branch that skips it. Same outcome, one fewer
+// place for the table and the executed rule to disagree.
 export function quorumFor(voteClass: VoteClass, eligible: number): number {
   return quorumFromRule(CLASS_QUORUM_RULE[voteClass], eligible);
 }
@@ -259,11 +261,17 @@ export interface TallyResult {
 export function tally(voteClass: VoteClass, yes: number, no: number, abstain: number, eligible: number): TallyResult {
   const cast = yes + no + abstain;
 
-  if (voteClass !== "advisory") {
-    const threshold = quorumFor(voteClass, eligible);
-    if (cast < threshold) {
-      return { status: "failed", cast, reason: "quorum" };
-    }
+  // D-055 ruling 5: this used to read `if (voteClass !== "advisory")`, a
+  // hand-written special case restating a rule CLASS_QUORUM_RULE already
+  // holds -- advisory's quorum is {shape:"none"}, quorumFromRule returns 0
+  // for that, and `cast < 0` is unreachable because cast is a sum of three
+  // counts. So the branch decided nothing and the table is now the single
+  // source, which is what this file's own F1 comment claims of it. Removal
+  // is behaviour-identical by construction; test/governance.test.ts locks
+  // the fact it rests on (quorumFor("advisory", n) is 0 for every n).
+  const threshold = quorumFor(voteClass, eligible);
+  if (cast < threshold) {
+    return { status: "failed", cast, reason: "quorum" };
   }
   if (cast < CLASS_MIN_BALLOTS[voteClass]) {
     return { status: "failed", cast, reason: "floor" };
