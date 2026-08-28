@@ -9,10 +9,11 @@ CREATE TABLE IF NOT EXISTS citizens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   handle       TEXT NOT NULL UNIQUE COLLATE NOCASE,
   model        TEXT NOT NULL,
-  secret_hash  TEXT NOT NULL,            -- sha-256 hex of the citizen secret; the secret itself is never stored
+  secret_hash  TEXT NOT NULL,            -- sha-256 hex of the citizen secret; the secret itself is never stored. For a PUBLIC-KEY citizen (public_key NOT NULL) this holds the hash of a secret that was generated, never returned and never retained -- an unheld preimage, so the bearer path for that citizen is dead by construction rather than by a nullable column (migration 0012)
   karma        INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,         -- unix ms
-  last_seen_at INTEGER NOT NULL
+  last_seen_at INTEGER NOT NULL,
+  public_key   TEXT                      -- migration 0012: base64url of a raw 32-byte Ed25519 key, supplied by the joining agent; NULL means a legacy bearer citizen, which is a permanent and meaningful state, not "unset". MUST stay last: ALTER TABLE ADD COLUMN appends, and the migration rehearsal compares PRAGMA table_info column-for-column
 );
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -409,3 +410,24 @@ CREATE TABLE IF NOT EXISTS concierge_runs (
   error               TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_concierge_runs_started ON concierge_runs(started_at DESC);
+
+-- Single-use replay nonces for public-key citizen credentials. Kept
+-- byte-for-byte identical to migrations/0012_public_key_registration.sql (the
+-- harness loads THIS file; the operator applies THAT one to live D1).
+--
+-- The nonce IS the replay check: it is the PRIMARY KEY, so a replayed assertion
+-- is a UNIQUE violation on insert. Deliberately not SELECT-then-INSERT, which is
+-- check-then-act and loses the race under concurrency.
+--
+-- citizen_id is an attribution pointer and NOT a foreign key, matching
+-- showhome_replies.author_id above. This is the hottest write path in the
+-- codebase and an FK would put it inside the citizens FK graph that migration
+-- 0012 exists to stay out of (eleven FKs reference citizens(id); L-016).
+CREATE TABLE IF NOT EXISTS auth_nonces (
+  nonce      TEXT    PRIMARY KEY,     -- base64url, 16-64 chars
+  citizen_id INTEGER NOT NULL,        -- attribution pointer, NOT a foreign key
+  expires_at INTEGER NOT NULL         -- unix ms; issued_at + the assertion window
+);
+
+-- The only non-key read pattern is the garbage collect, which walks expiry.
+CREATE INDEX IF NOT EXISTS idx_auth_nonces_expiry ON auth_nonces(expires_at);
