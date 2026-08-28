@@ -6,17 +6,23 @@
 // runtime's own crypto.subtle. Nothing here is mocked, and no signature is a
 // fixture -- see test/keyauth.test.ts's header for why that matters.
 //
-// The property under test, stated once: a citizen registered with its own
-// public key has NO credential this society has ever held, so the funder who
-// paid for the seat cannot act as it. Everything below is a way of trying to
-// break that.
+// The property under test, stated once and stated ACCURATELY: through this
+// application, a citizen registered with its own public key is issued no secret
+// and none is returned, so the registration response hands the payer nothing
+// that authenticates. That is a real reduction in the handoff trust surface. It
+// is NOT "the funder cannot act as you" -- an earlier version of this header and
+// of the served warning said that, and CODEX's round 1 killed it: a funder who
+// generated the key it submitted already holds the private half, and no code
+// here can tell the difference. The remedy is publication, not a stronger
+// sentence: GET /api/citizens now carries the public key on record so the
+// intended citizen can check which key was installed against its handle.
 //
 // Run: npm test
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
-import { authenticate, register, rotateKey, SocietyError, type Env } from "../src/society.ts";
+import { authenticate, citizenDirectory, register, rotateKey, SocietyError, type Env } from "../src/society.ts";
 import { ASSERTION_PREFIX, buildPayloadSegment, encodeBase64Url, newNonce } from "../src/keyauth.ts";
 
 function testEnv(d1: LocalD1): Env {
@@ -34,8 +40,14 @@ async function realKeypair() {
   return { kp, publicKeyB64: encodeBase64Url(raw) };
 }
 
-async function sign(kp: CryptoKeyPair, handle: string, issuedAt = Date.now(), nonce = newNonce()): Promise<string> {
-  const payload = buildPayloadSegment(handle, issuedAt, nonce);
+async function sign(
+  kp: CryptoKeyPair,
+  handle: string,
+  issuedAt = Date.now(),
+  nonce = newNonce(),
+  binding: string | null = null,
+): Promise<string> {
+  const payload = buildPayloadSegment(handle, issuedAt, nonce, binding);
   const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(payload)));
   return `${ASSERTION_PREFIX}${payload}.${encodeBase64Url(sig)}`;
 }
@@ -60,7 +72,19 @@ test("registering with a public key returns NO secret field at all", async () =>
 
     assert.equal("secret" in out, false, "absent, not null and not empty string -- a funder must receive nothing that authenticates");
     assert.equal(out.public_key, publicKeyB64);
-    assert.match(String(out.warning), /no bearer credential for this citizen exists anywhere/i);
+    // The warning must make a claim this application can actually keep, AND
+    // state its boundary at the same prominence. CODEX's round 1 killed the
+    // first version for asserting two things that were false in reachable
+    // cases: that no bearer credential exists anywhere (the operator can write
+    // one directly) and that the funder cannot act as you (a funder who
+    // generated the key already holds the private half).
+    const warning = String(out.warning);
+    assert.match(warning, /Through this application/i, "the claim must be scoped to what the app enforces");
+    assert.match(warning, /does not make you independent of the operator/i, "the boundary must be stated, not implied");
+    assert.match(warning, /replace your stored public key directly/i, "direct database mutation must be named");
+    assert.match(warning, /they hold your private half/i, "the funder-supplied-key case must be named, because it is the one a reader would otherwise be misled about");
+    assert.match(warning, /GET \/api\/citizens/i, "the reader must be told how to CHECK, or the claim is unverifiable");
+    assert.doesNotMatch(warning, /cannot act as you/i, "the killed overclaim must not return");
   } finally {
     d1.close();
   }
@@ -258,8 +282,9 @@ test("a public-key citizen rotates its PUBLIC half, gets no secret, and its secr
     const before = (d1.raw.prepare("SELECT secret_hash FROM citizens WHERE handle = ?").get("keyholder") as { secret_hash: string })
       .secret_hash;
 
-    const citizen = await authenticate(env, await sign(first.kp, "keyholder"));
-    const out = (await rotateKey(env, citizen, second.publicKeyB64)) as Record<string, unknown>;
+    const cred = await sign(first.kp, "keyholder", Date.now(), newNonce(), second.publicKeyB64);
+    const citizen = await authenticate(env, cred);
+    const out = (await rotateKey(env, citizen, second.publicKeyB64, cred)) as Record<string, unknown>;
 
     assert.equal("secret" in out, false, "rotation must NOT hand a key citizen a bearer credential -- that would undo the whole wave");
     assert.equal(out.public_key, second.publicKeyB64);
@@ -283,8 +308,9 @@ test("after rotation the OLD key no longer verifies and the new one does", async
     const second = await realKeypair();
     await register(env, "keyholder", "claude-fable-5", null, first.publicKeyB64);
 
-    const citizen = await authenticate(env, await sign(first.kp, "keyholder"));
-    await rotateKey(env, citizen, second.publicKeyB64);
+    const cred = await sign(first.kp, "keyholder", Date.now(), newNonce(), second.publicKeyB64);
+    const citizen = await authenticate(env, cred);
+    await rotateKey(env, citizen, second.publicKeyB64, cred);
 
     assert.equal(await status(async () => authenticate(env, await sign(first.kp, "keyholder"))), 401, "the old key is dead");
     assert.equal((await authenticate(env, await sign(second.kp, "keyholder"))).handle, "keyholder", "the new key works");
@@ -327,6 +353,136 @@ test("a bearer citizen's rotation is unchanged, and it cannot convert itself to 
     assert.equal(await status(() => rotateKey(env, again, publicKeyB64)), 400);
     const row = d1.raw.prepare("SELECT public_key FROM citizens WHERE handle = ?").get("bearer-citizen") as { public_key: null };
     assert.equal(row.public_key, null, "a bearer citizen must not acquire a public key through the rotation door");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- CODEX round 1, the HIGH: capture-and-race action substitution ----------
+//
+// Authenticating proves the caller holds the current key. It does NOT prove the
+// caller meant to rotate, or meant to install a PARTICULAR key, because the
+// assertion committed to neither. Before the fix, a captured assertion intended
+// for any harmless call could be raced into rotation carrying an attacker's
+// public key, and the citizenship changed hands permanently. That was
+// demonstrated as a working takeover against this codebase, not theorised.
+//
+// The nonce cannot help: it picks a winner between two uses of one token, it
+// cannot pick the request the signer meant. Only signed intent can.
+
+test("CODEX HIGH: a captured assertion that committed to nothing CANNOT rotate the key", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const victim = await realKeypair();
+    const attacker = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, victim.publicKeyB64);
+
+    // The victim signs one ordinary, unbound assertion.
+    const captured = await sign(victim.kp, "keyholder");
+
+    // It still authenticates -- it is a genuine credential.
+    const citizen = await authenticate(env, captured);
+    assert.equal(citizen.handle, "keyholder");
+
+    // But it authorises no rotation, because it committed to no key.
+    assert.equal(await status(() => rotateKey(env, citizen, attacker.publicKeyB64, captured)), 400);
+
+    const row = d1.raw.prepare("SELECT public_key FROM citizens WHERE handle = ?").get("keyholder") as { public_key: string };
+    assert.equal(row.public_key, victim.publicKeyB64, "the citizenship did NOT change hands");
+  } finally {
+    d1.close();
+  }
+});
+
+test("an assertion bound to key A cannot install key B", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const victim = await realKeypair();
+    const intended = await realKeypair();
+    const attacker = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, victim.publicKeyB64);
+
+    // The victim genuinely intends to rotate -- to ITS OWN new key.
+    const cred = await sign(victim.kp, "keyholder", Date.now(), newNonce(), intended.publicKeyB64);
+    const citizen = await authenticate(env, cred);
+
+    // An attacker who captures that assertion cannot redirect it.
+    assert.equal(await status(() => rotateKey(env, citizen, attacker.publicKeyB64, cred)), 400);
+    const row = d1.raw.prepare("SELECT public_key FROM citizens WHERE handle = ?").get("keyholder") as { public_key: string };
+    assert.equal(row.public_key, victim.publicKeyB64, "a substituted key must not be installed");
+  } finally {
+    d1.close();
+  }
+});
+
+test("a bearer secret carries no signed intent, so it can never satisfy the rotation binding", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+    const row = d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE handle = ?").get(
+      "keyholder",
+    ) as never;
+    const next = await realKeypair();
+    assert.equal(
+      await status(() => rotateKey(env, row, next.publicKeyB64, "commonhold_sk_" + "a".repeat(64))),
+      400,
+      "a bearer-shaped credential has no b claim, so it commits to nothing and cannot rotate a public key",
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- CODEX round 1: the bearer lookup now excludes key citizens structurally ----------
+
+test("the bearer query excludes public-key citizens by SQL, not merely by an unheld preimage", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+
+    // Simulate the one case the unheld preimage cannot defend against: a KNOWN
+    // hash placed on a key citizen's row. Before the `AND public_key IS NULL`
+    // exclusion this authenticated; now the query itself refuses.
+    const known = "known-secret-value";
+    const hashed = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(known)))]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    d1.raw.prepare("UPDATE citizens SET secret_hash = ? WHERE handle = ?").run(hashed, "keyholder");
+
+    assert.equal(
+      await status(() => authenticate(env, known)),
+      401,
+      "a key citizen must not be bearer-authenticable even when its stored hash IS known -- that is the difference between a property of the data and a property of the code",
+    );
+  } finally {
+    d1.close();
+  }
+});
+
+test("the citizen directory PUBLISHES the public key on record, so the claim is checkable", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+    insertCitizen(d1, { handle: "bearer-citizen" });
+
+    const dir = (await citizenDirectory(env)) as { citizens: Array<{ handle: string; public_key: string | null }> };
+    const key = dir.citizens.find((c) => c.handle === "keyholder");
+    const bearer = dir.citizens.find((c) => c.handle === "bearer-citizen");
+
+    assert.equal(
+      key?.public_key,
+      publicKeyB64,
+      "without this a citizen registered by a third-party funder cannot check WHICH key was installed against its handle, and every custody claim the feature makes is unverifiable by the one party it matters to",
+    );
+    assert.equal(bearer?.public_key, null, "a bearer citizen reads as NULL, plainly");
   } finally {
     d1.close();
   }

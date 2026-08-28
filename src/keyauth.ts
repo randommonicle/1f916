@@ -114,6 +114,15 @@ export type ParsedAssertion = {
   handle: string;
   issuedAt: number;
   nonce: string;
+  // OPTIONAL SIGNED INTENT. An assertion with no binding authorises the
+  // ordinary, reversible actions. An assertion that carries one commits the
+  // signer to a specific irreversible act, and the verifier of that act must
+  // check it. Added after CODEX filed a HIGH on the unbound token: a captured
+  // assertion could be raced into POST /api/rotate carrying the ATTACKER's
+  // public key, because nothing in the signed payload said which operation, or
+  // which key. Demonstrated as a real takeover against this codebase before the
+  // fix, and locked by test.
+  binding: string | null;
   // The EXACT bytes that were signed. We verify the payload segment as it
   // arrived rather than re-serialising the decoded JSON, so there is no
   // canonicalisation question: two different JSON spellings cannot both verify
@@ -155,7 +164,7 @@ export function parseAssertion(token: string): AssertionParse {
     return { ok: false, reason: "payload must be a JSON object" };
   }
 
-  const { h, t, n } = claims as Record<string, unknown>;
+  const { h, t, n, b } = claims as Record<string, unknown>;
   if (typeof h !== "string" || !/^[a-z0-9_-]{2,32}$/i.test(h)) return { ok: false, reason: "payload.h must be a handle" };
   // Integer, finite, and non-negative. Number.isSafeInteger rejects NaN,
   // Infinity, and the float that would otherwise slide past a `typeof number`
@@ -165,7 +174,14 @@ export function parseAssertion(token: string): AssertionParse {
     return { ok: false, reason: `payload.n must be ${NONCE_MIN_LEN}-${NONCE_MAX_LEN} base64url characters` };
   }
 
-  return { ok: true, assertion: { handle: h, issuedAt: t, nonce: n, payloadSegment, signature: sig } };
+  if (b !== undefined && (typeof b !== "string" || b.length === 0 || b.length > 256)) {
+    return { ok: false, reason: "payload.b, when present, must be a string of 1-256 characters" };
+  }
+
+  return {
+    ok: true,
+    assertion: { handle: h, issuedAt: t, nonce: n, binding: typeof b === "string" ? b : null, payloadSegment, signature: sig },
+  };
 }
 
 // Both directions. A far-future timestamp must not buy a long-lived credential,
@@ -191,8 +207,10 @@ export async function verifyAssertion(storedPublicKey: string, assertion: Parsed
 // test suite signs exactly what the server verifies, rather than a re-implementation
 // of it that could drift and make the tests agree with themselves instead of with
 // the server.
-export function buildPayloadSegment(handle: string, issuedAt: number, nonce: string): string {
-  return encodeBase64Url(new TextEncoder().encode(JSON.stringify({ h: handle, t: issuedAt, n: nonce })));
+export function buildPayloadSegment(handle: string, issuedAt: number, nonce: string, binding: string | null = null): string {
+  const claims: Record<string, unknown> = { h: handle, t: issuedAt, n: nonce };
+  if (binding !== null) claims.b = binding;
+  return encodeBase64Url(new TextEncoder().encode(JSON.stringify(claims)));
 }
 
 export function newNonce(): string {

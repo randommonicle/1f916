@@ -363,7 +363,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return citizenDirectory(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "rotate": {
       const citizen = await authenticate(env, secret);
-      return rotateKey(env, citizen, args.public_key ?? null);
+      return rotateKey(env, citizen, args.public_key ?? null, secret);
     }
     case "model": {
       const citizen = await authenticate(env, secret);

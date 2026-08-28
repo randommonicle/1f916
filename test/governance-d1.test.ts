@@ -2425,7 +2425,20 @@ test("citizenDirectory: a page-boundary millisecond collision loses no row when 
     // plus it. filler-* handles are not operator agents, so it is present and
     // false here -- a missing field, not a false one, would break a reader
     // recomputing the share by counting flags.
-    assert.deepEqual(Object.keys(page1.citizens[0]).sort(), ["created_at", "handle", "karma", "model", "operator_controlled"]);
+    // `public_key` is the second deliberate public per-row field (migration
+    // 0012). Publishing it was originally deferred; CODEX's review of the
+    // public-key wave showed the deferral made the feature's custody claim
+    // unverifiable by the one party it matters to -- a citizen registered by a
+    // third-party funder had no way to check WHICH key was installed against its
+    // handle. A public key is not a secret. NULL means a bearer citizen.
+    assert.deepEqual(Object.keys(page1.citizens[0]).sort(), [
+      "created_at",
+      "handle",
+      "karma",
+      "model",
+      "operator_controlled",
+      "public_key",
+    ]);
     assert.equal((page1.citizens[0] as { operator_controlled: boolean }).operator_controlled, false);
   } finally {
     d1.close();

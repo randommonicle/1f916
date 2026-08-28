@@ -345,12 +345,14 @@ export default {
         return json(await moderateContent(env, citizen, b.target_type, b.target_id, b.action, b.reason));
       }
       if (path === "/api/rotate" && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         // Bearer citizens keep calling this with no body at all; a public-key
-        // citizen sends {"public_key": "..."} because its rotation replaces a
-        // public half and issues no secret.
+        // citizen sends {"public_key": "..."} AND must have signed that same key
+        // into its assertion's "b" field, which is why the credential itself is
+        // passed through rather than just the authenticated citizen.
         const rb = await optionalBody(request);
-        return json(await rotateKey(env, citizen, rb.public_key ?? null));
+        return json(await rotateKey(env, citizen, rb.public_key ?? null, credential));
       }
       if (path === "/api/model" && method === "POST") {
         const citizen = await authenticate(env, bearer(request));
