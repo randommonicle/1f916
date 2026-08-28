@@ -23,7 +23,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import { authenticate, citizenDirectory, register, rotateKey, SocietyError, type Env } from "../src/society.ts";
-import { ASSERTION_PREFIX, buildPayloadSegment, encodeBase64Url, newNonce } from "../src/keyauth.ts";
+import { ASSERTION_PREFIX, buildPayloadSegment, decodeBase64Url, encodeBase64Url, newNonce } from "../src/keyauth.ts";
 
 function testEnv(d1: LocalD1): Env {
   return {
@@ -483,6 +483,182 @@ test("the citizen directory PUBLISHES the public key on record, so the claim is 
       "without this a citizen registered by a third-party funder cannot check WHICH key was installed against its handle, and every custody claim the feature makes is unverifiable by the one party it matters to",
     );
     assert.equal(bearer?.public_key, null, "a bearer citizen reads as NULL, plainly");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- audience binding (CODEX + GEMINI round 2, both pre-ship blockers) ----------
+//
+// Without a signed audience, any other service can ask a citizen to sign an
+// assertion for its own stated purpose and forward the unused token here inside
+// the freshness window. No interception, no malware: the agent need only
+// authenticate somewhere else once. Publishing citizens' public keys -- which
+// this wave deliberately does -- makes it easier, since another service can see
+// exactly which key we will verify against.
+
+test("an assertion minted for ANOTHER audience is refused", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { kp, publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+
+    const payload = buildPayloadSegment("keyholder", Date.now(), newNonce(), null, "https://someone-elses-society.example");
+    const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(payload)));
+    const foreign = `${ASSERTION_PREFIX}${payload}.${encodeBase64Url(sig)}`;
+
+    assert.equal(await status(() => authenticate(env, foreign)), 401, "a correctly-signed assertion for another audience must not spend here");
+  } finally {
+    d1.close();
+  }
+});
+
+test("a wrong-audience assertion consumes NO nonce, so another service cannot exhaust a citizen's nonce space", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { kp, publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+
+    const nonce = newNonce();
+    const issuedAt = Date.now();
+    const payload = buildPayloadSegment("keyholder", issuedAt, nonce, null, "https://someone-elses-society.example");
+    const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(payload)));
+    assert.equal(await status(() => authenticate(env, `${ASSERTION_PREFIX}${payload}.${encodeBase64Url(sig)}`)), 401);
+
+    assert.equal(
+      (d1.raw.prepare("SELECT COUNT(*) AS n FROM auth_nonces").get() as { n: number }).n,
+      0,
+      "a foreign-audience token must burn nothing here -- otherwise any service a citizen authenticates to could deny it service by proxy",
+    );
+    // And that very nonce is still usable by a correctly-addressed assertion.
+    assert.equal((await authenticate(env, await sign(kp, "keyholder", issuedAt, nonce))).handle, "keyholder");
+  } finally {
+    d1.close();
+  }
+});
+
+test("an assertion with NO audience claim is refused -- the field is required, not optional", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { kp, publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+
+    // Hand-built payload omitting aud entirely: an optional audience is an
+    // audience an attacker simply leaves out.
+    const raw = JSON.stringify({ h: "keyholder", t: Date.now(), n: newNonce() });
+    const payload = encodeBase64Url(new TextEncoder().encode(raw));
+    const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(payload)));
+    assert.equal(await status(() => authenticate(env, `${ASSERTION_PREFIX}${payload}.${encodeBase64Url(sig)}`)), 401);
+  } finally {
+    d1.close();
+  }
+});
+
+test("the audience is taken from configuration, never from anything the caller controls", async () => {
+  const d1 = createLocalD1();
+  try {
+    // A deployment that sets its own audience must reject the default one, which
+    // is what stops an assertion minted for one fork authenticating at another.
+    const env = { ...testEnv(d1), ASSERTION_AUDIENCE: "https://a-fork.example" } as unknown as Env;
+    const { kp, publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+
+    assert.equal(await status(async () => authenticate(env, await sign(kp, "keyholder"))), 401, "default-audience token refused by a fork");
+
+    const payload = buildPayloadSegment("keyholder", Date.now(), newNonce(), null, "https://a-fork.example");
+    const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(payload)));
+    assert.equal((await authenticate(env, `${ASSERTION_PREFIX}${payload}.${encodeBase64Url(sig)}`)).handle, "keyholder");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- the sealed custody history (CODEX round 2, item 3) ----------
+//
+// "custody changed" alone proves an event existed, never which transition the
+// citizen authorised -- and a public-key registration wrote no key event at all,
+// so the history had no beginning. /api/citizens proves current state; the chain
+// must prove how that state was reached.
+
+test("a public-key registration seals an initial key_registered fingerprint", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const { publicKeyB64 } = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, publicKeyB64);
+
+    const ev = d1.raw.prepare("SELECT kind, detail FROM identity_events ORDER BY id DESC LIMIT 1").get() as {
+      kind: string;
+      detail: string;
+    };
+    assert.equal(ev.kind, "key_registered", "the custody history must have a beginning");
+
+    // The fingerprint must be RECOMPUTABLE from public data alone, over the raw
+    // decoded key bytes -- otherwise it is a number nobody can check.
+    const raw = decodeBase64Url(publicKeyB64) as Uint8Array;
+    const expected = [...new Uint8Array(await crypto.subtle.digest("SHA-256", raw as unknown as ArrayBuffer))]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    assert.equal(ev.detail, `key sha256:${expected}`);
+  } finally {
+    d1.close();
+  }
+});
+
+test("a bearer registration seals no key event, because it has no key", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    await register(env, "bearer-citizen", "claude-sonnet-5");
+    const n = (d1.raw.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'key_registered'").get() as { n: number }).n;
+    assert.equal(n, 0, "nothing about the bearer path changes");
+  } finally {
+    d1.close();
+  }
+});
+
+test("rotation seals the TRANSITION -- both old and new fingerprints, not a bare 'custody changed'", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const first = await realKeypair();
+    const second = await realKeypair();
+    await register(env, "keyholder", "claude-fable-5", null, first.publicKeyB64);
+
+    const cred = await sign(first.kp, "keyholder", Date.now(), newNonce(), second.publicKeyB64);
+    const citizen = await authenticate(env, cred);
+    await rotateKey(env, citizen, second.publicKeyB64, cred);
+
+    const ev = d1.raw.prepare("SELECT kind, detail FROM identity_events WHERE kind = 'key_rotation' ORDER BY id DESC LIMIT 1").get() as {
+      kind: string;
+      detail: string;
+    };
+    const fp = async (b64: string) =>
+      [...new Uint8Array(await crypto.subtle.digest("SHA-256", decodeBase64Url(b64) as unknown as ArrayBuffer))]
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    assert.equal(ev.detail, `custody changed; key sha256:${await fp(first.publicKeyB64)} -> sha256:${await fp(second.publicKeyB64)}`);
+    assert.notEqual(ev.detail, "custody changed", "the bare string proves an event, never which transition");
+  } finally {
+    d1.close();
+  }
+});
+
+test("a bearer citizen's rotation still seals the bare 'custody changed', revealing nothing about a secret", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const out = (await register(env, "bearer-citizen", "claude-sonnet-5")) as Record<string, unknown>;
+    const citizen = await authenticate(env, String(out.secret));
+    await rotateKey(env, citizen);
+
+    const ev = d1.raw.prepare("SELECT detail FROM identity_events WHERE kind = 'key_rotation' ORDER BY id DESC LIMIT 1").get() as {
+      detail: string;
+    };
+    assert.equal(ev.detail, "custody changed", "a secret has no publishable fingerprint, and must not acquire one");
   } finally {
     d1.close();
   }

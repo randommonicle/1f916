@@ -36,6 +36,23 @@ export const ASSERTION_PREFIX = "ch1.";
 // heuristics and cannot collide.
 export const ASSERTION_WINDOW_MS = 120_000;
 
+// AUDIENCE BINDING (CODEX + GEMINI round 2, both pre-ship blockers; raised by
+// CLAUDE against itself in round 2 after neither found it in round 1).
+//
+// Without a signed audience, ANY other service can ask a citizen to sign an
+// assertion for its own stated purpose and forward the unused token to
+// Commonhold inside the freshness window. That needs no interception and no
+// malware: only that an agent authenticates somewhere else once. Publishing
+// citizens' public keys -- which this wave deliberately does -- makes it easier
+// still, because another service can see exactly which key we will verify.
+//
+// It is a PROTOCOL CONSTANT, never derived from the incoming Host header, which
+// an attacker controls. The env override exists because this codebase is a
+// public AGPL fork and other deployments run the same verifier: without a
+// per-deployment audience, an assertion minted for one fork would authenticate
+// at another. Operator-set at deploy time, so not attacker-controlled.
+export const DEFAULT_AUDIENCE = "https://commonhold.randommonicle.workers.dev";
+
 // Raw Ed25519 public keys are exactly 32 bytes; signatures exactly 64.
 export const ED25519_PUBLIC_KEY_BYTES = 32;
 export const ED25519_SIGNATURE_BYTES = 64;
@@ -114,6 +131,11 @@ export type ParsedAssertion = {
   handle: string;
   issuedAt: number;
   nonce: string;
+  // REQUIRED. Which deployment this assertion was minted for. Not optional:
+  // there are no key citizens in existence yet, so there is no legacy token to
+  // stay compatible with, and an optional audience is an audience an attacker
+  // simply omits.
+  audience: string;
   // OPTIONAL SIGNED INTENT. An assertion with no binding authorises the
   // ordinary, reversible actions. An assertion that carries one commits the
   // signer to a specific irreversible act, and the verifier of that act must
@@ -164,7 +186,7 @@ export function parseAssertion(token: string): AssertionParse {
     return { ok: false, reason: "payload must be a JSON object" };
   }
 
-  const { h, t, n, b } = claims as Record<string, unknown>;
+  const { h, t, n, b, aud } = claims as Record<string, unknown>;
   if (typeof h !== "string" || !/^[a-z0-9_-]{2,32}$/i.test(h)) return { ok: false, reason: "payload.h must be a handle" };
   // Integer, finite, and non-negative. Number.isSafeInteger rejects NaN,
   // Infinity, and the float that would otherwise slide past a `typeof number`
@@ -174,13 +196,24 @@ export function parseAssertion(token: string): AssertionParse {
     return { ok: false, reason: `payload.n must be ${NONCE_MIN_LEN}-${NONCE_MAX_LEN} base64url characters` };
   }
 
+  if (typeof aud !== "string" || aud.length === 0 || aud.length > 256) {
+    return { ok: false, reason: "payload.aud is required: name the deployment this assertion is for" };
+  }
   if (b !== undefined && (typeof b !== "string" || b.length === 0 || b.length > 256)) {
     return { ok: false, reason: "payload.b, when present, must be a string of 1-256 characters" };
   }
 
   return {
     ok: true,
-    assertion: { handle: h, issuedAt: t, nonce: n, binding: typeof b === "string" ? b : null, payloadSegment, signature: sig },
+    assertion: {
+      handle: h,
+      issuedAt: t,
+      nonce: n,
+      audience: aud,
+      binding: typeof b === "string" ? b : null,
+      payloadSegment,
+      signature: sig,
+    },
   };
 }
 
@@ -207,10 +240,33 @@ export async function verifyAssertion(storedPublicKey: string, assertion: Parsed
 // test suite signs exactly what the server verifies, rather than a re-implementation
 // of it that could drift and make the tests agree with themselves instead of with
 // the server.
-export function buildPayloadSegment(handle: string, issuedAt: number, nonce: string, binding: string | null = null): string {
-  const claims: Record<string, unknown> = { h: handle, t: issuedAt, n: nonce };
+export function buildPayloadSegment(
+  handle: string,
+  issuedAt: number,
+  nonce: string,
+  binding: string | null = null,
+  audience: string = DEFAULT_AUDIENCE,
+): string {
+  const claims: Record<string, unknown> = { h: handle, t: issuedAt, n: nonce, aud: audience };
   if (binding !== null) claims.b = binding;
   return encodeBase64Url(new TextEncoder().encode(JSON.stringify(claims)));
+}
+
+// A public, recomputable name for a public key, for the sealed identity log.
+// SPECIFIED so anyone can recompute it: sha256 over the DECODED RAW 32 BYTES of
+// the key (not over its base64url text), lowercase hex, full length.
+//
+// CODEX round 2: the identity chain sealed only the bare string "custody
+// changed", which proves an event existed but never which transition the citizen
+// authorised. And a public-key registration wrote no key event at all, so the
+// custody history had no beginning. Fingerprints give the log something to mean.
+// A public key is not a secret, so identity_events' public `detail` field is the
+// intended carrier.
+export async function publicKeyFingerprint(publicKeyB64: string): Promise<string | null> {
+  const shape = checkPublicKeyShape(publicKeyB64);
+  if (!shape.ok) return null;
+  const digest = await crypto.subtle.digest("SHA-256", shape.bytes as unknown as ArrayBuffer);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function newNonce(): string {

@@ -3,9 +3,11 @@
 import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams } from "./chain.ts";
 import {
   ASSERTION_WINDOW_MS,
+  DEFAULT_AUDIENCE,
   checkPublicKeyShape,
   importPublicKey,
   looksLikeAssertion,
+  publicKeyFingerprint,
   parseAssertion,
   verifyAssertion,
   withinWindow,
@@ -236,6 +238,24 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
   const parsed = parseAssertion(token);
   if (!parsed.ok) throw new SocietyError(401, `Malformed assertion: ${parsed.reason}`);
   const a = parsed.assertion;
+
+  // AUDIENCE, checked before anything is looked up or written. The value is a
+  // deployment constant (or an operator-set var), never the request's own Host
+  // header, which an attacker controls. It sits inside the SIGNED payload, so it
+  // cannot be altered without breaking the signature -- this check is about
+  // which deployment the signer chose, not about trusting the transport.
+  //
+  // Deliberately BEFORE the nonce insert (CODEX round 2): an assertion minted
+  // for another audience must not be able to consume this deployment's nonce
+  // space, which would otherwise be a free denial-of-service against a citizen
+  // by any service it ever authenticates to.
+  const expectedAudience = (env as { ASSERTION_AUDIENCE?: string }).ASSERTION_AUDIENCE ?? DEFAULT_AUDIENCE;
+  if (a.audience !== expectedAudience) {
+    throw new SocietyError(
+      401,
+      `That assertion was minted for a different audience (${expectedAudience} expected). An assertion you signed for another service cannot be spent here.`,
+    );
+  }
 
   const now = Date.now();
   if (!withinWindow(a.issuedAt, now)) {
@@ -636,6 +656,20 @@ export async function register(
       .first<{ id: number }>();
 
     if (publicKey !== null) {
+      // CODEX round 2: without this the sealed custody history has no beginning
+      // -- /api/citizens would prove current state while the identity chain
+      // started only at the first rotation. Written HERE rather than in
+      // register-gate.ts so it is an invariant of citizen creation itself, not
+      // of one caller. A fingerprint is a public-key derivative, so it belongs
+      // in identity_events' public `detail` field.
+      const fp = await publicKeyFingerprint(publicKey);
+      await appendChained(env.DB, "identity_events", {
+        citizen_id: res?.id as number,
+        kind: "key_registered",
+        detail: `key sha256:${fp}`,
+        created_at: now,
+      });
+
       // NO `secret` FIELD AT ALL -- not null, not empty string, absent. A funder
       // who paid for this seat receives a receipt naming the handle and the
       // transaction, and nothing that authenticates as this citizen.
@@ -740,17 +774,27 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
     }
 
     await env.DB.prepare("UPDATE citizens SET public_key = ? WHERE id = ?").bind(next, citizen.id).run();
+    // CODEX round 2: "custody changed" alone proves an event existed, never
+    // WHICH transition the citizen authorised. Both fingerprints are public-key
+    // derivatives and neither reveals anything secret.
+    const [oldFp, newFp] = await Promise.all([publicKeyFingerprint(existing.public_key), publicKeyFingerprint(next)]);
     const sealedKey = await appendChained(env.DB, "identity_events", {
       citizen_id: citizen.id,
       kind: "key_rotation",
-      detail: "custody changed",
+      detail: `custody changed; key sha256:${oldFp} -> sha256:${newFp}`,
       created_at: now,
     });
     return {
       handle: citizen.handle,
       public_key: next,
+      // CODEX round 2, finding 4. This said "this society has never held anything
+      // that authenticates as you" -- an absolute the request path itself
+      // disproves, since the application receives and authenticates each signed
+      // assertion. The killed overclaim came back on a DIFFERENT surface from
+      // the one it was killed on, which is this project's recurring blast-radius
+      // failure. Both durable facts are stated instead; neither is widened.
       warning:
-        "Your public key is replaced and the old one no longer verifies. No secret was issued: you are a public-key citizen and this society has never held anything that authenticates as you.",
+        "Your public key is replaced and the old one no longer verifies. This application has never seen your private key, and through its own path it has issued no citizen secret for this citizenship. Check the key now on record for your handle: GET /api/citizens.",
       logged: "A 'custody changed' entry is now in the public identity log: GET /api/events",
       chain_head: sealedKey.hash,
       chain_note: "Your rotation is now the head of the identity chain. Keep this hash: it is your proof the entry existed today.",
