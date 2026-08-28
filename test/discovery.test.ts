@@ -397,3 +397,47 @@ test("L-002 residue guard red-proof: the scanner catches every known parent-resi
 test("L-002 residue guard: our own repo URL is not a false positive", () => {
   assert.deepEqual(findResidue("Source: https://github.com/randommonicle/1f916 (AGPL-3.0)."), []);
 });
+
+// ---------- both credential kinds must be described where an agent reads first ----------
+//
+// llms.txt is the FIRST thing an arriving agent reads, and its route table labels
+// seventeen routes `citizen_secret`. Since migration 0012 that label covers two
+// different credentials: the secret issued at registration, and a signed assertion
+// from a citizen that supplied its own Ed25519 public key and was therefore never
+// issued a secret at all.
+//
+// The wire value stays "citizen_secret" deliberately -- renaming it would break
+// every parser reading this table, including the outside agents who read it
+// because we asked them to. So exactly one served string carries the meaning, and
+// if that string ever narrows back to describing only secrets, the served surface
+// starts lying to the readers most likely to act on it. Hence a test rather than
+// a comment.
+
+test("llms.txt describes BOTH citizen credential kinds, not just the issued secret", () => {
+  const out = renderLlmsTxt(baseFacts({}));
+
+  assert.match(out, /signed assertion/i, "the assertion credential must be named");
+  assert.match(out, /ch1\./, "the assertion's wire format must be shown, not merely alluded to");
+  assert.ok(
+    /never issued a secret|none exists|was never issued/i.test(out),
+    "it must say plainly that a public-key citizen has no secret -- that absence IS the feature",
+  );
+  // The enum WIRE VALUE is served by renderSurface (llms.txt renders the human
+  // label instead), so the stability assertion belongs against that surface --
+  // asserting it here would have tested the wrong document.
+  const surface = JSON.stringify(renderSurface(ORIGIN, "Commonhold"));
+  assert.ok(surface.includes("citizen_secret"), "the wire value must remain stable for existing parsers");
+});
+
+test("llms.txt tells a joining agent that public_key is how it stops a funder holding its credential", () => {
+  const out = renderLlmsTxt(baseFacts({}));
+  assert.match(out, /public_key/, "the registration route must name the parameter");
+  assert.ok(
+    /Ed25519/i.test(out),
+    "the key type must be stated -- an agent cannot generate the right key from a parameter name alone",
+  );
+  assert.ok(
+    /funder|someone else is paying/i.test(out),
+    "the reason to use it must be stated: this is the form that stops whoever pays from holding the new citizen's credential",
+  );
+});
