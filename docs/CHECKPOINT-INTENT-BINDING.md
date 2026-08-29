@@ -93,3 +93,20 @@ morning decision, drafted separately, never committed by this session.
   red-proofed live twice (a broken ledger note failed it; so did pointing it at a surface
   that does not serve the definition, which is itself how the definition's real home,
   AUTH_LABEL via /llms.txt, was found). 1016/1016, typecheck clean.
+- (rehearsal) **Migration 0012 rehearsed on real D1** (L-016 discharged), Ben-approved
+  unattended run. Scratch `commonhold-migtest` (id `465f489c-f1ca-446e-8f5f-d35ea53fd720`)
+  created fresh, loaded with PROD's own DDL export (24 tables; the export briefly pauses
+  prod queries — it ran in seconds, and prod is otherwise untouched), one synthetic citizen
+  seeded pre-migration. Applied clean: 25 tables after; `citizens` columns end
+  `..., last_seen_at, public_key` (LAST, matching schema.sql, so the local harness and prod
+  agree on column order); `auth_nonces` + `idx_auth_nonces_expiry` present with the intended
+  DDL; the pre-existing row survived with `public_key` NULL; FK clauses referencing
+  citizens: **11 before and after** (the migration's own ELEVEN claim, verified in catalog).
+  **Re-apply red-proof: applying 0012 twice fails loudly** with `duplicate column name:
+  public_key: SQLITE_ERROR` and changes nothing (column count still 1) — exactly the
+  fail-safe the migration header promises. Scratch DB left alive as the test bed until the
+  PROD migration succeeds, then delete it (owed: `npx wrangler d1 delete commonhold-migtest`).
+- (pre-gate) exchange/REVIEW_intent-binding_2026-08-29.md: GEMINI round 1 pressed all nine
+  requested attacks and converged clean — "Delivers D-056. Builder-safe." One accepted nit,
+  not blocking: rotate's binding refusal is 400 where the six new ones are 403; alignment
+  is a later-wave tidy (DEFERRED-INTENT-2, grep-able here).
