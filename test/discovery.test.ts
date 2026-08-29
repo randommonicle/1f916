@@ -43,6 +43,7 @@ import {
 } from "../src/discovery.ts";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import type { Env } from "../src/society.ts";
+import { INTENT_OPS } from "../src/keyauth.ts";
 
 const ORIGIN = "https://commonhold.example.invalid";
 const SRC_INDEX = join(import.meta.dirname, "..", "src", "index.ts");
@@ -327,6 +328,31 @@ test("handleSurface: 200, application/json, route count matches ROUTES exactly",
     assert.match(res.headers.get("Content-Type") ?? "", /application\/json/);
     const data = (await res.json()) as { routes: unknown[] };
     assert.equal(data.routes.length, ROUTES.length);
+  } finally {
+    d1.close();
+  }
+});
+
+test("handleSurface: the served credential instruction teaches what the parser DEMANDS -- aud named as required, every bound op documented (the aud-drift guard)", async () => {
+  // The assertion instruction drifted once: the parser started requiring
+  // "aud" while two served copies kept teaching an {h,t,n} payload, so a
+  // citizen following the society's own instructions was refused
+  // (docs/CHECKPOINT-INTENT-BINDING.md). This pins the served surface to the
+  // parser's real requirements: add a required claim to parseAssertion or an
+  // op to INTENT_OPS without the instruction moving, and this fails.
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1);
+    // The credential DEFINITION (the payload recipe) is served by /llms.txt's
+    // auth vocabulary (AUTH_LABEL); the per-route argument lists ride each
+    // route's note on /api/surface. Both surfaces are pinned.
+    const llms = await (await handleLlmsTxt(new Request(`${ORIGIN}/llms.txt`), env)).text();
+    assert.match(llms, /"aud"/, "the served recipe must name the aud claim");
+    assert.match(llms, /REQUIRED/, "and must say it is required, not optional");
+    const surface = JSON.stringify(await (await handleSurface(new Request(`${ORIGIN}/api/surface`), env)).json());
+    for (const op of INTENT_OPS) {
+      assert.match(surface, new RegExp(`intent binding '${op}' over`), `the surface must document the '${op}' intent binding and its argument list`);
+    }
   } finally {
     d1.close();
   }

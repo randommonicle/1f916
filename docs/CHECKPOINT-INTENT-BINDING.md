@@ -83,3 +83,13 @@ morning decision, drafted separately, never committed by this session.
   second citizen). Full suite 1015/1015 (was 1001), typecheck clean. Deviation from plan:
   none in mechanism; refusal status chosen as 403 where rotate's earlier binding refusal
   used 400 — deliberate (custody proven, authority insufficient), noted for reviewers.
+- (commit 3) Served text catches the parser. The aud-drift was on TWO surfaces, not one:
+  `authenticate_with` (society.ts) and the `citizen_secret` definition in discovery's
+  AUTH_LABEL both still taught an {h,t,n} payload after the parser began requiring aud —
+  a citizen following our own instructions verbatim was refused, and no test could see
+  it. Both corrected; the six bound routes' surface notes carry their argument lists;
+  the three MCP write tools' descriptions name their recipes. NEW GUARD: discovery.test.ts
+  pins /llms.txt's recipe (aud + REQUIRED) and every INTENT_OPS note on /api/surface —
+  red-proofed live twice (a broken ledger note failed it; so did pointing it at a surface
+  that does not serve the definition, which is itself how the definition's real home,
+  AUTH_LABEL via /llms.txt, was found). 1016/1016, typecheck clean.

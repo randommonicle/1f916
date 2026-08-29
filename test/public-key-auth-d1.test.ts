@@ -79,6 +79,11 @@ test("registering with a public key returns NO secret field at all", async () =>
     // one directly) and that the funder cannot act as you (a funder who
     // generated the key already holds the private half).
     const warning = String(out.warning);
+    // The served how-to must teach the payload the parser will ACCEPT: it
+    // drifted once, still teaching {h,t,n} after aud became required, so a
+    // citizen following it verbatim was refused.
+    assert.match(String(out.authenticate_with), /"aud"/, "the registration response must teach the required aud claim");
+    assert.match(String(out.authenticate_with), /"b" intent claim/, "and must point at the signed-intent requirement for the irreversible writes");
     assert.match(warning, /Through this application/i, "the claim must be scoped to what the app enforces");
     assert.match(warning, /does not make you independent of the operator/i, "the boundary must be stated, not implied");
     assert.match(warning, /replace your stored public key directly/i, "direct database mutation must be named");

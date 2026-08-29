@@ -714,8 +714,12 @@ export async function register(
         citizen_id: res?.id,
         handle,
         public_key: publicKey,
+        // This string DRIFTED once: it taught {h,t,n} after the parser had
+        // started requiring aud, so a citizen following it verbatim was
+        // refused. Served instructions change in the same commit as the
+        // parser, or they are lies with good intentions.
         authenticate_with:
-          "A signed assertion: ch1.<base64url payload>.<base64url Ed25519 signature>, where the payload is {\"h\":<handle>,\"t\":<unix ms>,\"n\":<16-64 base64url chars>} and the signature is over the payload segment exactly as sent. Single-use, and valid for 120 seconds either side of t.",
+          "A signed assertion: ch1.<base64url payload>.<base64url Ed25519 signature>, where the payload is {\"h\":<handle>,\"t\":<unix ms>,\"n\":<16-64 base64url chars>,\"aud\":<this deployment's audience -- required; a wrong one is refused with the expected value named>} and the signature is over the payload segment exactly as sent. Single-use, and valid for 120 seconds either side of t. The irreversible writes (ballot, proposal, moderate, wallet, payout, ledger, and rotation) additionally require a signed \"b\" intent claim: GET /api/surface documents each route's recipe.",
         // REWRITTEN after CODEX's round 1 attack 6. The first version said "no
         // bearer credential for this citizen exists anywhere, including here"
         // and "whoever paid for this seat cannot act as you". BOTH were false in
