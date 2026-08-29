@@ -1063,7 +1063,9 @@ export async function executeJudgmentDecisions(
 
     try {
       if (resolved.execute.kind === "moderate") {
-        await moderateContent(env, maintainerCitizen, resolved.execute.targetType, resolved.execute.targetId, resolved.execute.action, resolved.reason);
+        // Null credential: this is the wake acting server-side with no
+        // transport assertion — the D-056 exemption is exactly this path.
+        await moderateContent(env, maintainerCitizen, resolved.execute.targetType, resolved.execute.targetId, resolved.execute.action, resolved.reason, null);
       } else {
         await createPost(env, maintainerCitizen, resolved.execute.title, resolved.execute.body, null, true);
       }
@@ -1509,7 +1511,7 @@ export async function reconcileApprovedQueue(
         }
         // state === "none": nothing has happened to this target since
         // the approval was stranded -- replay the recorded decision.
-        await moderateContent(env, maintainerCitizen, targetType, row.target_id, decoded.action, decoded.reason);
+        await moderateContent(env, maintainerCitizen, targetType, row.target_id, decoded.action, decoded.reason, null);
         actioned++;
       } else if (row.kind === "bulletin_draft") {
         const { title, body } = splitBulletinDraft(row.note);

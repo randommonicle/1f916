@@ -13,7 +13,7 @@
 // (schema.sql: "Positive amount_cents = money in, negative = money out").
 
 import { appendChainedStmt } from "./chain.ts";
-import { type Env, SocietyError, MAINTAINER_ID } from "./society.ts";
+import { type Env, SocietyError, MAINTAINER_ID, requireSignedIntent } from "./society.ts";
 import { walletFor } from "./wallets.ts";
 
 // Pure, no D1. A code-level check gives a named error; the CHECK
@@ -72,6 +72,7 @@ export async function recordPayout(
   amountCents: unknown,
   reason: unknown,
   tx: unknown,
+  credential: string | null,
 ) {
   if (citizen.id !== MAINTAINER_ID) {
     throw new SocietyError(403, "Only the maintainer records payouts, approved against a claimed bounty or prize. Rule 7.");
@@ -90,6 +91,12 @@ export async function recordPayout(
       "tx must be the on-chain transaction hash: a payouts row is written after the transfer settles, not before",
     );
   }
+
+  // D-056: a payout seals into two chains at once (payouts + ledger), so a
+  // key-credential maintainer signs the exact payment record. Parts:
+  // citizen_id and amount_cents in canonical decimal, reason and tx AS
+  // SUPPLIED (pre-trim).
+  await requireSignedIntent(credential, "payout", [String(targetId), String(Number(amountCents)), reason, tx]);
 
   // The payout row and nowhere for it to have gone is a worse failure than
   // a rejected request: money recorded as paid with no address behind it.

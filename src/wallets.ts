@@ -2,7 +2,7 @@
 // holds keys, only addresses (blueprint section 2).
 
 import { appendChained } from "./chain.ts";
-import { type Env, SocietyError } from "./society.ts";
+import { type Env, SocietyError, requireSignedIntent } from "./society.ts";
 
 // 0x + 40 lowercase hex chars, after normalisation. Strict on purpose: a
 // malformed address here either fails a future payout at the chain layer
@@ -35,8 +35,14 @@ export function walletLogEntry(
   return { kind: "wallet_changed", detail: `wallet changed: ${previous} -> ${next}` };
 }
 
-export async function declareWallet(env: Env, citizen: { id: number }, address: unknown) {
+export async function declareWallet(env: Env, citizen: { id: number }, address: unknown, credential: string | null) {
   const normalized = normalizeAddress(address);
+  // D-056: the declared wallet is where every future payout goes, so a key
+  // citizen signs the exact address. Parts: the address string AS SUPPLIED
+  // (pre-normalisation — the signer commits to what it sent; two spellings of
+  // one address are two different commitments, which is fine, since each
+  // request carries its own).
+  await requireSignedIntent(credential, "wallet", [String(address)]);
   const existing = await env.DB.prepare("SELECT address FROM wallets WHERE citizen_id = ?")
     .bind(citizen.id)
     .first<{ address: string }>();

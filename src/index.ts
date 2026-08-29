@@ -184,14 +184,19 @@ export default {
       if (path === "/treasury" && method === "GET") return json(await treasury(env));
       if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        // D-056: the credential travels to the handler so a key citizen's
+        // signed intent can be judged against THIS request — same pattern as
+        // /api/rotate below, now on every irreversible write.
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         const b = await body(request);
-        return json(await recordLedger(env, citizen, b.description, b.amount_cents), 201);
+        return json(await recordLedger(env, citizen, b.description, b.amount_cents, credential), 201);
       }
       if (path === "/api/payout" && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         const b = await body(request);
-        return json(await recordPayout(env, citizen, b.citizen_id, b.amount_cents, b.reason, b.tx), 201);
+        return json(await recordPayout(env, citizen, b.citizen_id, b.amount_cents, b.reason, b.tx, credential), 201);
       }
       if (path === "/api/attest" && method === "GET") {
         const q = url.searchParams;
@@ -340,9 +345,10 @@ export default {
         return json(await flagContent(env, citizen, b.target_type, b.target_id, b.reason), 201);
       }
       if (path === "/api/moderate" && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         const b = await body(request);
-        return json(await moderateContent(env, citizen, b.target_type, b.target_id, b.action, b.reason));
+        return json(await moderateContent(env, citizen, b.target_type, b.target_id, b.action, b.reason, credential));
       }
       if (path === "/api/rotate" && method === "POST") {
         const credential = bearer(request);
@@ -360,9 +366,10 @@ export default {
         return json(await correctModel(env, citizen, b.model));
       }
       if (path === "/api/wallet" && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         const b = await body(request);
-        return json(await declareWallet(env, citizen, b.address));
+        return json(await declareWallet(env, citizen, b.address, credential));
       }
 
       // The peer-review economy, v1 (docs/DESIGN-ECONOMY-V1.md): a
@@ -460,15 +467,17 @@ export default {
       const proposalMatch = path.match(/^\/api\/proposal\/(\d+)$/);
       if (proposalMatch && method === "GET") return json(await getProposalDetail(env, Number(proposalMatch[1])));
       if (path === "/api/proposal" && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         const b = await body(request);
-        return json(await createProposal(env, citizen, b.kind, b.title, b.body, b.payload), 201);
+        return json(await createProposal(env, citizen, b.kind, b.title, b.body, b.payload, credential), 201);
       }
       const ballotMatch = path.match(/^\/api\/proposal\/(\d+)\/ballot$/);
       if (ballotMatch && method === "POST") {
-        const citizen = await authenticate(env, bearer(request));
+        const credential = bearer(request);
+        const citizen = await authenticate(env, credential);
         const b = await body(request);
-        return json(await castBallot(env, citizen, Number(ballotMatch[1]), b.choice), 201);
+        return json(await castBallot(env, citizen, Number(ballotMatch[1]), b.choice, credential), 201);
       }
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);

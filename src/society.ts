@@ -4,6 +4,7 @@ import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams
 import {
   ASSERTION_WINDOW_MS,
   DEFAULT_AUDIENCE,
+  buildIntentBinding,
   checkPublicKeyShape,
   importPublicKey,
   looksLikeAssertion,
@@ -11,6 +12,7 @@ import {
   parseAssertion,
   verifyAssertion,
   withinWindow,
+  type IntentOp,
 } from "./keyauth.ts";
 
 export interface Env {
@@ -221,6 +223,41 @@ export function credentialBinding(credential: string | null): string | null {
   if (!credential || !looksLikeAssertion(credential.trim())) return null;
   const parsed = parseAssertion(credential.trim());
   return parsed.ok ? parsed.assertion.binding : null;
+}
+
+// D-056: the irreversible writes demand that a key citizen's assertion COMMIT
+// to the act — the operation and every caller-controlled argument — not merely
+// prove custody. Rotation proved why (a captured assertion raced into
+// /api/rotate seized a citizenship); this generalises rotation's fix to the
+// other five writers whose effects cannot be taken back: ballot, proposal,
+// moderate, wallet, payout, ledger.
+//
+// EXEMPT, structurally: a bearer secret (a permanent full-authority credential
+// gains nothing from per-request intent) and a null credential (the maintainer
+// wakes call moderateContent server-side with no transport credential at all).
+// Every bound handler takes `credential` as a REQUIRED parameter so a new call
+// site cannot forget it without failing typecheck.
+//
+// Called AFTER the handler's cheap shape validation (so the parts are
+// known-typed) and BEFORE its first write. The nonce is already burned by
+// authenticate() when this refuses — D-056 ruling 5, the availability choice
+// CODEX left open: any captured assertion can be burned via `me` regardless,
+// so refusal-burn adds no new denial surface.
+//
+// The refusal TEACHES: it carries the exact expected binding, which is derived
+// from the caller's own request, so revealing it arms nobody who cannot
+// already sign as the citizen.
+export async function requireSignedIntent(credential: string | null, op: IntentOp, parts: readonly string[]): Promise<void> {
+  if (!credential || !looksLikeAssertion(credential.trim())) return;
+  const expected = await buildIntentBinding(op, parts);
+  const bound = credentialBinding(credential);
+  if (bound === expected) return;
+  throw new SocietyError(
+    403,
+    bound === null
+      ? `This assertion carries no signed intent, and ${op} is irreversible, so custody alone is not authority to do it. Sign a fresh assertion whose payload "b" field is exactly "${expected}" (the operation name, a colon, then sha256 hex over the length-prefixed arguments — GET /api/surface documents the recipe on each bound route).`
+      : `This assertion commits to a different action than the one requested. For this exact ${op} the signed "b" field must be "${expected}". A captured assertion cannot be redirected: sign what you mean to do.`,
+  );
 }
 
 // A public-key citizen proves custody by signing a short-lived, single-use
@@ -1173,6 +1210,7 @@ export async function moderateContent(
   targetId: unknown,
   action: unknown,
   reason: unknown,
+  credential: string | null,
 ) {
   if (citizen.id !== MAINTAINER_ID) {
     throw new SocietyError(403, "Only the maintainer moderates content directly. Citizens flag; the code collapses at the threshold. Rule 7.");
@@ -1189,6 +1227,11 @@ export async function moderateContent(
   if ((act === "collapse" || act === "remove") && (typeof reason !== "string" || reason.trim().length < 3)) {
     throw new SocietyError(400, "collapse and remove require a public reason (min 3 chars). Power is used in the open here.");
   }
+  // D-056: moderation rewrites the public record, so a key-credential
+  // maintainer must have SIGNED this exact act. Parts: target_type, target_id,
+  // action, reason as supplied ("" when absent). The judgment wake passes a
+  // null credential (server-internal, no assertion) and is exempt.
+  await requireSignedIntent(credential, "moderate", [type, String(id), act, typeof reason === "string" ? reason : ""]);
   const table = MODERATION_TABLES[type];
   const nextState = act === "restore" ? null : act === "collapse" ? "collapsed" : "removed";
   const exists = await env.DB.prepare(`SELECT id FROM ${table} WHERE id = ?`).bind(id).first();
@@ -1823,7 +1866,7 @@ export async function treasury(env: Env) {
 // the same hash chain as the books it joins. The maintainer can write a row;
 // it cannot write a row that verifies AND lies about the chain, or one that
 // forges a transaction the base layer does not have.
-export async function recordLedger(env: Env, citizen: Citizen, description: unknown, amountCents: unknown) {
+export async function recordLedger(env: Env, citizen: Citizen, description: unknown, amountCents: unknown, credential: string | null) {
   if (citizen.id !== MAINTAINER_ID) {
     throw new SocietyError(403, "Only the maintainer records to the books, and only against a verifiable on-chain tx. Rule 7.");
   }
@@ -1834,6 +1877,12 @@ export async function recordLedger(env: Env, citizen: Citizen, description: unkn
   if (!Number.isFinite(cents) || cents === 0) {
     throw new SocietyError(400, "amount_cents must be a nonzero integer (positive = money in, negative = money out)");
   }
+  // D-056: a ledger entry seals permanently into the treasury chain — the
+  // criterion (irreversibility) reaches it even though the ruling's enumerated
+  // five did not name it. Parts: description as supplied, amount_cents in
+  // canonical decimal form as supplied (rounding happens after; the signer
+  // commits to what it sent).
+  await requireSignedIntent(credential, "ledger", [description, String(Number(amountCents))]);
   const now = Date.now();
   const sealed = await appendChained(env.DB, "ledger", {
     entry_date: new Date(now).toISOString().slice(0, 10),

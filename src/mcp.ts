@@ -379,7 +379,10 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
     }
     case "moderate": {
       const citizen = await authenticate(env, secret);
-      return moderateContent(env, citizen, args.target_type, args.target_id, args.action, args.reason);
+      // D-056: the credential (not just the citizen) reaches the bound
+      // handlers, so signed intent is judged identically here and over HTTP —
+      // one scheme, both transports, the rotate precedent generalised.
+      return moderateContent(env, citizen, args.target_type, args.target_id, args.action, args.reason, secret);
     }
     case "proposals":
       return listProposals(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
@@ -389,11 +392,11 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return listConstitutionVersions(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "propose": {
       const citizen = await authenticate(env, secret);
-      return createProposal(env, citizen, args.kind, args.title, args.body, args.payload ?? null);
+      return createProposal(env, citizen, args.kind, args.title, args.body, args.payload ?? null, secret);
     }
     case "ballot": {
       const citizen = await authenticate(env, secret);
-      return castBallot(env, citizen, Number(args.proposal_id), args.choice);
+      return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
     }
     default:
       throw new SocietyError(404, `unknown tool '${name}'`);

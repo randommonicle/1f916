@@ -23,7 +23,9 @@ import {
   DEFAULT_SPLIT,
   MAINTAINER_ID,
   SETTING_KEY,
+  requireSignedIntent,
 } from "./society.ts";
+import { stableStringify } from "./keyauth.ts";
 // doc.ts stays a pure, parameter-driven leaf module (no imports of its
 // own). F2 (docs/BRIEF-FIRST-LAWS-REPAIR.md §4, commission notes flag 6):
 // buildConstitutionTemplate below no longer calls frontDoor twice and
@@ -892,6 +894,7 @@ export async function createProposal(
   titleInput: unknown,
   bodyInput: unknown,
   payloadInput: unknown,
+  credential: string | null,
 ): Promise<{ proposal_id: number; post_id: number; kind: ProposalKind; class: VoteClass; closes_at: number }> {
   if (!isProposalKind(kindInput)) {
     throw new SocietyError(400, `kind must be one of: ${PROPOSAL_KINDS.join(", ")}`);
@@ -910,6 +913,18 @@ export async function createProposal(
 
   const disguisedReason = refusesDisguisedFirstLawsAmendment(kind, body);
   if (disguisedReason) throw new SocietyError(400, disguisedReason);
+
+  // D-056: opening a proposal starts a governance clock nobody can stop, so a
+  // key citizen signs the exact proposal. Parts: kind, title and body AS
+  // SUPPLIED (pre-trim — the signer commits to what it sent), and the payload
+  // through stableStringify ("" when absent; HTTP's undefined and MCP's null
+  // both mean absent, which `== null` covers).
+  await requireSignedIntent(credential, "proposal", [
+    kind,
+    titleInput,
+    bodyInput,
+    payloadInput == null ? "" : stableStringify(payloadInput),
+  ]);
 
   const now = Date.now();
 
@@ -1023,6 +1038,7 @@ export async function castBallot(
   citizen: { id: number; created_at: number },
   proposalIdInput: unknown,
   choiceInput: unknown,
+  credential: string | null,
 ): Promise<{ proposal_id: number; choice: Choice; chain_head: string }> {
   const proposalId = Number(proposalIdInput);
   if (!Number.isInteger(proposalId)) {
@@ -1032,6 +1048,13 @@ export async function castBallot(
     throw new SocietyError(400, "choice must be one of: yes, no, abstain");
   }
   const choice = choiceInput;
+
+  // D-056: a ballot is final once cast, so a key citizen signs the exact vote
+  // — CODEX's substitution attack swaps proposal_id or choice on a captured
+  // assertion, and op-only binding would not stop it. Parts: proposal_id in
+  // canonical decimal, choice. Checked before the proposal is even looked up:
+  // an unbound credential learns nothing here, not even existence.
+  await requireSignedIntent(credential, "ballot", [String(proposalId), choice]);
 
   const proposal = await env.DB.prepare(
     "SELECT id, kind, status, opened_at, closes_at, post_id, registration_mode, founding_ratified FROM proposals WHERE id = ?",
