@@ -136,14 +136,17 @@ export type ParsedAssertion = {
   // stay compatible with, and an optional audience is an audience an attacker
   // simply omits.
   audience: string;
-  // OPTIONAL SIGNED INTENT. An assertion with no binding authorises the
-  // ordinary, reversible actions. An assertion that carries one commits the
-  // signer to a specific irreversible act, and the verifier of that act must
-  // check it. Added after CODEX filed a HIGH on the unbound token: a captured
-  // assertion could be raced into POST /api/rotate carrying the ATTACKER's
-  // public key, because nothing in the signed payload said which operation, or
-  // which key. Demonstrated as a real takeover against this codebase before the
-  // fix, and locked by test.
+  // OPTIONAL SIGNED INTENT. An assertion with no binding authorises reads and
+  // the social writes (post, comment, vote, flag, pin, model) — capped,
+  // moderatable acts. The irreversible writes STRUCTURALLY REFUSE it: rotate
+  // demands the replacement key in "b", and ballot, proposal, moderate,
+  // wallet, payout and ledger each demand the intent binding built below
+  // (D-056; society.ts's requireSignedIntent is the one verifier). Added after
+  // CODEX filed a HIGH on the unbound token: a captured assertion could be
+  // raced into POST /api/rotate carrying the ATTACKER's public key, because
+  // nothing in the signed payload said which operation, or which key.
+  // Demonstrated as a real takeover against this codebase before the fix,
+  // locked by test, then generalised to the other five irreversible writers.
   binding: string | null;
   // The EXACT bytes that were signed. We verify the payload segment as it
   // arrived rather than re-serialising the decoded JSON, so there is no
@@ -273,4 +276,63 @@ export function newNonce(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return encodeBase64Url(bytes);
+}
+
+// ---------- signed intent for the irreversible writes (D-056) ----------
+//
+// An assertion's optional "b" claim commits the signer to ONE specific act.
+// Rotation established the pattern with a bare replacement key; every other
+// bound operation uses the uniform shape built here: "<op>:" + sha256hex over a
+// length-prefixed encoding of the caller-supplied arguments. The two shapes
+// cannot be confused for each other: an intent binding always contains ":",
+// which the base64url alphabet excludes, so no intent binding is ever a valid
+// public key, and a bare key never carries an op prefix. Both directions are
+// held open by test.
+//
+// WHICH OPERATIONS BIND (D-056 ruling 1): the irreversible writes. A ballot is
+// final once cast, a proposal opens a governance clock, moderation rewrites the
+// public record, wallet redirects future money, payout and ledger seal money
+// history into hash chains. The social writes (post, comment, vote, flag, pin,
+// model) stay unbound this wave: bounded by daily caps and moderation, no
+// money, no governance, no sealed chain — and a bearer secret is exempt
+// everywhere, because a permanent full-authority credential gains nothing from
+// per-request intent. DEFERRED-INTENT-1: binding the social writes and the
+// listings/submissions economy writes is a later design wave (D-056 ruling 6).
+export const INTENT_OPS = ["ballot", "proposal", "moderate", "wallet", "payout", "ledger"] as const;
+export type IntentOp = (typeof INTENT_OPS)[number];
+
+// Length-prefixed, so the encoding is injective: no two distinct part lists
+// collapse to one string. The canonical trap — ["a,1:b"] as one part versus
+// ["a","b"] as two — is exactly what the prefix defeats, and the unit test
+// holds it open. Byte lengths, not UTF-16 code units, because the digest runs
+// over UTF-8 bytes.
+export function encodeIntentParts(parts: readonly string[]): string {
+  const enc = new TextEncoder();
+  return parts.map((p) => `${enc.encode(p).length}:${p}`).join(",");
+}
+
+// The value a client signs into "b" and the value the server demands are the
+// SAME function of the same inputs — exported so tests and clients build it
+// from here rather than re-implementing a digest that could drift (the
+// buildPayloadSegment precedent). Parts are the request's caller-controlled
+// arguments exactly as supplied, pre-stringified by the operation's verifier
+// (numbers in canonical decimal form, absent values as "", the one structured
+// value via stableStringify below); each operation documents its part list at
+// its own refusal site.
+export async function buildIntentBinding(op: IntentOp, parts: readonly string[]): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(encodeIntentParts(parts)));
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${op}:${hex}`;
+}
+
+// One spelling for the one structured argument (a proposal's payload), so both
+// sides of the digest agree. Recursive key sort; arrays keep their order. Only
+// ever fed JSON-parsed request values, so undefined, functions and cycles are
+// not reachable through a request.
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(record[k])}`).join(",")}}`;
 }

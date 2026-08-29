@@ -17,14 +17,18 @@ import {
   ASSERTION_MAX_LEN,
   ED25519_PUBLIC_KEY_BYTES,
   ED25519_SIGNATURE_BYTES,
+  INTENT_OPS,
+  buildIntentBinding,
   buildPayloadSegment,
   checkPublicKeyShape,
   decodeBase64Url,
   encodeBase64Url,
+  encodeIntentParts,
   importPublicKey,
   looksLikeAssertion,
   newNonce,
   parseAssertion,
+  stableStringify,
   verifyAssertion,
   withinWindow,
 } from "../src/keyauth.ts";
@@ -258,4 +262,59 @@ test("nonces are base64url, long enough to index, and do not repeat", () => {
     assert.equal(seen.has(n), false, "a repeated nonce would be a replay the store could not distinguish");
     seen.add(n);
   }
+});
+
+// ---------- signed intent (D-056) ----------
+
+test("encodeIntentParts is injective: the one-part-that-looks-like-two trap cannot collide", () => {
+  // "a,1:b" as ONE part must never encode the same as "a" and "b" as TWO.
+  // Without length prefixes these would both be "a,1:b" and a signer could be
+  // held to arguments it never supplied.
+  assert.notEqual(encodeIntentParts(["a,1:b"]), encodeIntentParts(["a", "b"]));
+  // And the prefix is BYTE length, not UTF-16 code units: "é" is one code unit
+  // but two UTF-8 bytes, and the digest runs over UTF-8 bytes.
+  assert.equal(encodeIntentParts(["é"]), "2:é");
+  assert.equal(encodeIntentParts([]), "");
+  assert.equal(encodeIntentParts(["", ""]), "0:,0:");
+});
+
+test("buildIntentBinding: op and every argument move the digest (the swapped-choice case at unit level)", async () => {
+  const base = await buildIntentBinding("ballot", ["5", "yes"]);
+  assert.match(base, /^ballot:[0-9a-f]{64}$/);
+  // Same parts, same answer -- both transports and the client must be able to
+  // recompute it.
+  assert.equal(await buildIntentBinding("ballot", ["5", "yes"]), base);
+  // CODEX round 2: op-only binding is insufficient because a captured ballot
+  // assertion could have its proposal or choice swapped. Every argument must
+  // therefore move the digest.
+  assert.notEqual(await buildIntentBinding("ballot", ["5", "no"]), base);
+  assert.notEqual(await buildIntentBinding("ballot", ["6", "yes"]), base);
+  assert.notEqual(await buildIntentBinding("proposal", ["5", "yes"]), base);
+});
+
+test("an intent binding is never a valid public key, and a public key never carries an op prefix (rotate cross-shape disjointness, both directions)", async () => {
+  const { publicKeyB64 } = await realKeypair();
+  for (const op of INTENT_OPS) {
+    const binding = await buildIntentBinding(op, ["42", "anything"]);
+    // Direction one: a captured intent-bound assertion replayed into
+    // /api/rotate would need its "b" to pass the public-key shape check.
+    // ":" is outside the base64url alphabet, so it cannot.
+    assert.ok(binding.includes(":"));
+    assert.equal(checkPublicKeyShape(binding).ok, false, `a ${op} binding must never be installable as a key`);
+  }
+  // Direction two: a captured ROTATE assertion (b = a bare key) replayed into a
+  // bound write would need "op:" at the start of a base64url string, which the
+  // alphabet forbids.
+  assert.doesNotMatch(publicKeyB64, /:/);
+});
+
+test("stableStringify: one spelling per value -- key order collapses, array order and types do not", () => {
+  assert.equal(stableStringify({ a: 1, b: 2 }), stableStringify({ b: 2, a: 1 }));
+  assert.equal(stableStringify({ outer: { z: true, a: null } }), '{"outer":{"a":null,"z":true}}');
+  // Array order is meaning, not spelling.
+  assert.notEqual(stableStringify([1, 2]), stableStringify([2, 1]));
+  // A number and its string are different commitments.
+  assert.notEqual(stableStringify({ n: 1 }), stableStringify({ n: "1" }));
+  assert.equal(stableStringify(null), "null");
+  assert.equal(stableStringify("x"), '"x"');
 });
