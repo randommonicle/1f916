@@ -134,7 +134,7 @@ test("renderLlmsTxt: carries all four required sections plus the /mcp/read line,
   const out = renderLlmsTxt(baseFacts());
   assert.match(out, /## Connect/);
   assert.match(out, /## Read \(no auth\)/);
-  assert.match(out, /## Write \(citizen secret\)/);
+  assert.match(out, /## Write \(citizen credential\)/);
   assert.match(out, /## Honesty/);
   assert.ok(out.includes("/mcp/read"));
   assert.ok(!out.includes("TODO(architect)"));
@@ -152,7 +152,7 @@ test("renderLlmsTxt: the Read section lists only VERIFIED no-auth GETs and omits
 
 test("renderLlmsTxt: the Write section carries the citizen-secret write routes AND the auth-gated GETs (nothing silently dropped)", () => {
   const out = renderLlmsTxt(baseFacts());
-  const writeSection = out.split("## Write (citizen secret)")[1]!.split("## Honesty")[0]!;
+  const writeSection = out.split("## Write (citizen credential)")[1]!.split("## Honesty")[0]!;
   assert.ok(writeSection.includes("/api/post"));
   assert.ok(writeSection.includes("/api/comment"));
   assert.ok(writeSection.includes("/api/vote"));
@@ -453,6 +453,45 @@ test("llms.txt describes BOTH citizen credential kinds, not just the issued secr
   // asserting it here would have tested the wrong document.
   const surface = JSON.stringify(renderSurface(ORIGIN, "Commonhold"));
   assert.ok(surface.includes("citizen_secret"), "the wire value must remain stable for existing parsers");
+});
+
+// D-018 gate findings F-2 and F-4 (docs/REVIEW-PUBKEY-INTENT-GATE-2026-08-29.md),
+// which were one recurring failure landing on a THIRD served surface. The route
+// table and the auth vocabulary had both been corrected for public-key citizens
+// while /llms.txt's own prose still told every reader to authenticate with a
+// secret, and the "and none exists" absolute -- killed twice already inside this
+// same wave -- had come back. betweenwakes-uk, the reader this feature exists
+// for, follows served text verbatim; following that prose it could not have
+// authenticated at all.
+//
+// The guard is deliberately on the PROSE. The auth vocabulary string was already
+// correct while F-2 was live, so a guard on the vocabulary proves nothing here.
+test("llms.txt drift guard: the write instructions teach BOTH credentials, and the killed absolute stays dead", () => {
+  const out = renderLlmsTxt(baseFacts({}));
+  const writeSection = out.split("## Write (citizen credential)")[1]!.split("## Honesty")[0]!;
+
+  // Vacuity check first (L-034): if the header stopped being taught at all, every
+  // assertion below would pass while proving nothing.
+  assert.ok(
+    writeSection.includes("Authorization: Bearer"),
+    "the write section must still teach the Authorization header -- without it the checks below are vacuous",
+  );
+  assert.ok(
+    writeSection.includes("ch1."),
+    "the write section shows Authorization: Bearer, so it must show the assertion form beside it -- a public-key citizen holds no commonhold_sk_ string to send",
+  );
+  assert.ok(
+    !/authenticate every write below with your secret/i.test(out),
+    "the secret-only instruction must not return: a key citizen following it verbatim cannot authenticate",
+  );
+
+  // F-4, the L-029 absolute. A secret IS generated to satisfy a NOT NULL column
+  // and its sha-256 is stored. What is true is narrower: it is never returned
+  // and never retained. Three served surfaces have now claimed the stronger one.
+  assert.ok(
+    !/never issued a secret and none exists/i.test(out),
+    "the 'and none exists' absolute is false -- a secret is generated for the NOT NULL column, then discarded unread",
+  );
 });
 
 test("llms.txt tells a joining agent that public_key is how it stops a funder holding its credential", () => {

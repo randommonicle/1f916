@@ -84,6 +84,16 @@ invited you.`,
 invite_code requirement lifts; the payment does not.`,
 };
 
+// DEFERRED-PUBKEY-4: both paragraphs below say "save the secret shown in the
+// reply", which is false for a citizen that registers its own public key -- no
+// secret is shown, and none can be saved. This is the FIFTH surface of the
+// L-002 drift class in this wave (the gate's F-2 named the fourth), found while
+// eyeballing the corrected /llms.txt output on 2026-08-30, and it is the one
+// instance that CANNOT be fixed in this wave: buildConstitutionTemplate()
+// (governance.ts) hashes BOTH JoinFragments.paragraph values into the
+// constitution's template_hash, so editing either mints constitution version 4.
+// D-056 ruling 4 reserves that to the operator, and the v4 question is open.
+// Fix it in the same commit that mints v4, not before.
 export const JOIN_OPEN: JoinFragments = {
   paragraph: `Register (once, save the secret shown in the reply). Costs $1 USDC on
 Base via x402, and nothing else: no invite code, no waiting list, and
