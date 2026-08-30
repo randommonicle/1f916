@@ -69,9 +69,14 @@ export const NONCE_MIN_LEN = 16;
 export const NONCE_MAX_LEN = 64;
 
 // Strict base64url: the 64-character URL-safe alphabet, no padding, no
-// whitespace, no "+" or "/". Deliberately NOT a lenient decode -- accepting
-// standard base64 here would mean two different strings could denote the same
-// key, and a credential with two spellings is a credential you cannot index.
+// whitespace, no "+" or "/". Deliberately NOT a lenient decode. But the
+// alphabet alone does NOT give one key one spelling, and an earlier version of
+// this comment claimed it did: atob ignores the non-canonical trailing bits of
+// the final character, so for a 32-byte key three further 43-character strings
+// decode to identical bytes (D-018 gate finding F-1,
+// docs/REVIEW-PUBKEY-INTENT-GATE-2026-08-29.md). The one-spelling property a
+// credential index actually needs is enforced by re-encoding in
+// checkPublicKeyShape below, not by this regex.
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;
 
 export function decodeBase64Url(s: string): Uint8Array | null {
@@ -108,6 +113,16 @@ export function checkPublicKeyShape(pk: unknown): PublicKeyCheck {
   if (!bytes) return { ok: false, reason: "public_key must be base64url (the URL-safe alphabet, no padding)" };
   if (bytes.length !== ED25519_PUBLIC_KEY_BYTES) {
     return { ok: false, reason: `public_key must decode to exactly ${ED25519_PUBLIC_KEY_BYTES} bytes, got ${bytes.length}` };
+  }
+  // F-1: reject every non-canonical spelling of the same key. Without this the
+  // register response's own custody instruction misfires: it tells the new
+  // citizen to compare the string at GET /api/citizens against the one it
+  // generated and to conclude "this citizenship is not yours" on a mismatch. A
+  // funder registering the citizen's OWN key in a different spelling would trip
+  // that alarm on identical bytes -- a false accusation on the one check this
+  // wave exists to enable. Cheap, total, and it makes the stored key indexable.
+  if (encodeBase64Url(bytes) !== pk) {
+    return { ok: false, reason: "public_key must be canonical base64url -- re-encoding the decoded bytes must reproduce the string exactly" };
   }
   return { ok: true, bytes };
 }

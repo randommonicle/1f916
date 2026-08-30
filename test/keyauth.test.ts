@@ -100,6 +100,49 @@ test("the byte-length refusal names the length it got, so a caller can fix it", 
   assert.match((r as { reason: string }).reason, /31/, "the reason must name the actual length");
 });
 
+// D-018 gate finding F-1 (docs/REVIEW-PUBKEY-INTENT-GATE-2026-08-29.md). The
+// base64url ALPHABET regex rejects "+" and "/" but not non-canonical trailing
+// bits: 32 bytes is 256 bits carried in 43 six-bit characters, so the last
+// character holds 2 significant bits and 4 that decode to nothing. Several
+// spellings therefore denote every key. That matters because the register
+// response instructs a new citizen to compare the string GET /api/citizens
+// publishes against the one it generated, and to conclude "this citizenship is
+// not yours" on a mismatch -- so a funder registering the citizen's OWN key in
+// a different spelling would fire that alarm on identical bytes.
+test("only the canonical base64url spelling of a key is accepted, though several spellings decode to identical bytes", () => {
+  const bytes = new Uint8Array(ED25519_PUBLIC_KEY_BYTES);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7 + 3) % 256;
+  const canonical = encodeBase64Url(bytes);
+
+  assert.equal(checkPublicKeyShape(canonical).ok, true, "the canonical spelling must still be accepted");
+
+  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const collisions: string[] = [];
+  for (const ch of ALPHABET) {
+    const variant = canonical.slice(0, -1) + ch;
+    if (variant === canonical) continue;
+    const decoded = decodeBase64Url(variant);
+    if (decoded && decoded.length === bytes.length && decoded.every((b, i) => b === bytes[i])) {
+      collisions.push(variant);
+    }
+  }
+
+  // The finding's premise, asserted rather than assumed: if no collision
+  // exists the loop below iterates zero times and passes while proving
+  // nothing. That is exactly the silent-green shape L-034 is about.
+  assert.ok(collisions.length > 0, "non-canonical spellings of this key must actually exist, or the loop below proves nothing");
+
+  for (const variant of collisions) {
+    const r = checkPublicKeyShape(variant);
+    assert.equal(r.ok, false, `${variant} decodes to the same 32 bytes as ${canonical} and must be refused`);
+    assert.match(
+      (r as { reason: string }).reason,
+      /canonical/,
+      "the refusal must name canonicality -- length and alphabet both pass here",
+    );
+  }
+});
+
 // ---------- assertion parsing ----------
 
 test("a well-formed assertion parses, and carries the exact bytes that were signed", async () => {
