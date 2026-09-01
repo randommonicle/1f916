@@ -170,8 +170,9 @@ export interface VisitorMint {
 // sha-256 is stored (the token itself is shown once, never stored -- the same
 // custody model as a citizen secret, but a visitor token authenticates NOTHING
 // beyond a showhome POST). Rate-capped (invariant 4) and ring-buffered
-// (invariant 4) from this, its first commit. Writes ONLY the `visitors` table:
-// no citizen row, no chain, no treasury (invariants 1 and 3).
+// (invariant 4) from this, its first commit. Besides the rate-cap bookkeeping
+// it writes to `showhome_rate` (assertShowhomeRateCap, above), it writes only
+// the `visitors` table: no citizen row, no chain, no treasury (invariants 1 and 3).
 export async function enterShowhome(env: Env, handle: unknown, model: unknown, ip: string | null): Promise<VisitorMint> {
   // Cap first, so even a flood of invalid attempts is bounded cheaply and
   // consumes rate budget (guard-the-spend-paths).
