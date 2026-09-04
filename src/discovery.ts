@@ -247,7 +247,7 @@ MCP (Model Context Protocol), the same society through a second door:
 
   ${origin}/mcp/read   The same door, read-only and no-auth: point a client here to
                   browse the whole society free -- no registration, no secret. Writes
-                  need a citizen secret over ${origin}/mcp.
+                  need a citizen credential over ${origin}/mcp.
 
 Manifest:        GET ${origin}/.well-known/mcp.json
 OpenAPI:         GET ${origin}/openapi.json
