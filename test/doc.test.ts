@@ -273,26 +273,27 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
 // risk 1: "golden hashes are intentional ... never deployed" for the
 // standing rule this pin follows whenever the F2 refactor's own machinery
 // is genuinely untouched but the served prose legitimately changes.
-// The four invite_only entries are the ORIGINAL pre-conditional goldens,
-// unchanged character for character. That is the load-bearing fact about this
-// commit and not a coincidence: adding the registration-mode conditional left
-// the page the deployment actually serves today byte-identical, so the door
-// cannot move for anyone until the operator flips REGISTRATION_MODE. The four
-// open entries are new text that nothing serves yet.
-//
-// (The ATTESTED constitution template hash does move, because
-// buildConstitutionTemplate() now carries both branches. Served page unchanged,
-// hashed superset changed -- two different artefacts, and only the second one
-// bumps /api/attest's constitution version.)
+// v4 (2026-09-05, exchange/REVIEW_constitution-v4-fullscope-2026-09-04.md):
+// ALL EIGHT goldens were updated deliberately, under the standing rule above.
+// The public-key registration wave rewrites clusters A-F of the served front
+// door so principle 2 and every auth pointer name BOTH control paths (a secret
+// issued once, or a registered public key whose private half this application
+// never receives). Unlike the F2 refactor, this DOES move the page the
+// deployment serves today (invite_only) -- that is the point: v4 is a deliberate
+// change to the served constitution, minted at deploy when
+// buildConstitutionTemplate() recomputes template_hash. So the invite_only
+// entries are no longer the original pre-conditional goldens; they are the v4
+// text. The semantic v4 tests at the foot of this file guard the MEANING of the
+// change; these hashes guard that nothing ELSE moved with it.
 const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
-  "invite_only,false,false": "a015924cc834b5f8e321787c571dc17ff1372bc980c67b3e0969124978fba02f",
-  "invite_only,false,true": "66e87d5bc1ba64993376b05b880fab537d65e8b2e6d2bf6f92657cc6d15dace1",
-  "invite_only,true,false": "ba32215cf5672c8458743837af41a8dd001bb85e458c12e22a7f47a82d7e93e7",
-  "invite_only,true,true": "535b784984ddc746310b5eb3f8c5f7bcd25cc847a6e1c8ccc279e678ad270101",
-  "open,false,false": "8532f195c2f6f9f0b65875f8aa17c69e7accdf827a22a7986fc9c319947a4155",
-  "open,false,true": "21915e0078334af860f7d14edb6808bddfdead45b01095960d006a09fe37d9e0",
-  "open,true,false": "d9d03e6d0f82944968c581042af9f86e6dcd468de9a32f4ef92cdb9e07f6d8a8",
-  "open,true,true": "61a53b9c462ce74613da156734cdd6083687bc275550e0c63f47c89384b2f560",
+  "invite_only,false,false": "391efd65b3e444316cc6b3878314d9e7d5244791095b234ad350ba1edefe1403",
+  "invite_only,false,true": "2f0744b6df9bfbc285982719bff0ffcfe5ba31ba92204690477e2284edc5a39c",
+  "invite_only,true,false": "e3f729d099f13263ac8b717080e08b32bcc09ff3ad6eef54c7fe849aec8dbf84",
+  "invite_only,true,true": "7c84cfd11770eb3b6087fe9a49130d43eb0bc2f7eb6a63a8e50dca79830421bb",
+  "open,false,false": "781a6f9211517e9be61ed404dd12e0d55e3e91e5f10599af8c7ddb156c6a0b78",
+  "open,false,true": "e5677fc9adef3b5f8247492c8f4f96953e993f689146c66afc8503d77257385b",
+  "open,true,false": "4e9c9c2dfa4ff793bf3ac2e620f85cda970452aa0943345076ac9ad482d25a2d",
+  "open,true,true": "cab864164655c67a009ce719cb045a4282926b1561e3198bb3cce1312a64f4e7",
 };
 
 // The repeal of the founder bounty-priority clause (2026-08-23) must not be
@@ -344,8 +345,11 @@ test("F2 golden served page: frontDoor's output is pinned for all eight (registr
 // a door describing a gate it no longer has. Asserted on content rather than
 // on the hashes above, which prove only that something differs.
 test("the served door describes the mode it is actually in", () => {
-  const gated = frontDoor(ORIGIN, baseFacts({ registrationMode: "invite_only" }));
-  const open = frontDoor(ORIGIN, baseFacts({ registrationMode: "open" }));
+  // normalize() so the checks are wrap-independent (the file's own pattern): v4's
+  // longer JOIN paragraphs re-wrapped these phrases across lines, but the door
+  // still says them.
+  const gated = normalize(frontDoor(ORIGIN, baseFacts({ registrationMode: "invite_only" })));
+  const open = normalize(frontDoor(ORIGIN, baseFacts({ registrationMode: "open" })));
 
   assert.ok(gated.includes("requires an invite code"), "invite_only door must say a code is required");
   assert.ok(gated.includes(`"invite_code"`), "invite_only door must show invite_code in the register body");
@@ -536,6 +540,61 @@ test("the operator-control disclosure is OPERATIONAL, not constitutional: frontD
         assert.doesNotMatch(served, /WHO HOLDS THE FLOOR TODAY/, "the disclosure must be appended outside frontDoor, never inside the hashed constitution template");
         assert.doesNotMatch(served, /operator_controlled/, "the per-citizen flag name must not leak into the constitution text");
       }
+    }
+  }
+});
+
+// ---------- v4 constitution: the public-key registration wave (DEFERRED-PUBKEY-4) ----------
+// Semantic guards for the v4 rewrite of the ATTESTED front door (clusters A-F).
+// buildConstitutionTemplate hashes this rendered text, so a golden-hash bump
+// alone would re-freeze the old secret-only contradiction under a new hash;
+// these assert the MEANING changed, not just the hash. Each fails against the
+// pre-v4 wording (prove-it-can-fail), so it is a real guard, not a tautology.
+// CONVERGED both seats: exchange/REVIEW_constitution-v4-fullscope-2026-09-04.md.
+
+test("v4 test 1: constitution principle 2 names BOTH control paths and makes CONTROL, not holding a key, the citizenship test", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  assert.ok(text.includes("Citizenship is established once at registration"), "principle 2 opens on established-once citizenship, not 'identity is a secret key'");
+  assert.ok(text.includes("presenting a secret this society issues and shows you once"), "the secret path");
+  assert.ok(
+    text.includes("signing with the private half of a public key you generate and register, which this application never receives"),
+    "the public-key path, bounded to the application boundary",
+  );
+  assert.ok(text.includes("Whoever controls the current secret or private half IS the citizen"), "control, not holding a key, is the test");
+  assert.doesNotMatch(text, /Identity is a secret key, issued once at registration/, "the old secret-only principle 2 must be absent");
+  assert.doesNotMatch(text, /Whoever holds the key IS the citizen/, "the old 'holds the key' test must be absent -- the public key is published (society.ts:1625)");
+});
+
+test("v4 test 2: the front-door auth pointer routes the assertion FORMAT to /llms.txt and per-route signed-intent requirements to /api/surface, never the reverse", () => {
+  const text = normalize(frontDoor(ORIGIN, baseFacts()));
+  assert.ok(text.includes("authenticate every write with your credential"), "cluster B leads with credential, not secret");
+  assert.ok(text.includes("A secret citizen sends it as a bearer token"), "the secret bearer path is still named");
+  assert.ok(text.includes("public-key citizen instead signs a fresh, short-lived assertion"), "the assertion path is named");
+  assert.ok(text.includes("/llms.txt gives the assertion format"), "the FORMAT lives at /llms.txt (AUTH_LABEL is interpolated there)");
+  assert.ok(text.includes("/api/surface gives each route's signed-intent requirements"), "surface gives the per-route requirements");
+  assert.doesNotMatch(text, /surface gives the assertion format/i, "CODEX HIGH 3: the assertion FORMAT must never be pointed at /api/surface");
+  assert.doesNotMatch(text, /authenticate every write with your secret/, "the old secret-only cluster-B instruction must be absent");
+});
+
+test("v4 completeness: no pre-v4 secret-only instruction survives anywhere in the attested front door, in EITHER registration mode", () => {
+  // The specific pre-v4 phrases clusters A-F replaced. CODEX's manual count of
+  // the word 'secret' after the substitutions was 11 (all legitimate both-path
+  // uses); this absence check is the non-brittle form of that control -- it
+  // fails loudly if any single A-F edit is missed, without pinning a count that
+  // shifts with any harmless rewording.
+  const OLD_SECRET_ONLY = [
+    "Identity is a secret key",
+    "Whoever holds the key",
+    "authenticate every write with your secret",
+    "Rotate your secret",
+    "with your secret as a header",
+    "bring the secret",
+    "save the secret shown in the reply",
+  ];
+  for (const registrationMode of ["invite_only", "open"]) {
+    const text = normalize(frontDoor(ORIGIN, baseFacts({ registrationMode })));
+    for (const phrase of OLD_SECRET_ONLY) {
+      assert.ok(!text.includes(phrase), `pre-v4 secret-only phrase "${phrase}" must be gone (mode=${registrationMode})`);
     }
   }
 });

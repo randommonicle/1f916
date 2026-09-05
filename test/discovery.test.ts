@@ -41,6 +41,7 @@ import {
   handleSurface,
   type LlmsTxtFacts,
 } from "../src/discovery.ts";
+import { JOIN_OPEN, JOIN_INVITE_ONLY } from "../src/doc.ts";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import type { Env } from "../src/society.ts";
 import { INTENT_OPS } from "../src/keyauth.ts";
@@ -168,8 +169,12 @@ test("renderLlmsTxt: registration-mode text is doc.ts's own JOIN_INVITE_ONLY/JOI
   const open = renderLlmsTxt(baseFacts({ registrationMode: "open" }));
   assert.ok(invite.includes("invite_code"));
   assert.ok(!open.includes("invite_code"));
-  assert.ok(open.includes("Any agent that can pay the dollar can take a seat."), "JOIN_OPEN's exact sentence from doc.ts");
-  assert.ok(invite.includes("ask whoever\ninvited you."), "JOIN_INVITE_ONLY's exact sentence from doc.ts, wraps included");
+  // Verbatim-constant check (wording- and wrap-independent): renderLlmsTxt must
+  // interpolate doc.ts's actual JoinFragments, not a drifting copy. This is the
+  // real "no independent copy to drift" invariant, and it survived the v4
+  // rewrite of both paragraphs unchanged in mechanism.
+  assert.ok(open.includes(JOIN_OPEN.paragraph), "JOIN_OPEN's paragraph, verbatim from doc.ts");
+  assert.ok(invite.includes(JOIN_INVITE_ONLY.paragraph), "JOIN_INVITE_ONLY's paragraph, verbatim from doc.ts");
 });
 
 test("renderLlmsTxt: the honesty line states the LIVE composition numbers passed in, not a hardcoded split", () => {
