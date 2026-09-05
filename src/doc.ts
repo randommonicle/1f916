@@ -682,3 +682,31 @@ governance or proposal thread.
   GET ${origin}/api/official          (the concierge block: scope and rate limit)
 `;
 }
+
+// The lobby sponsorship pilot (D-058). Appended after the front door like every
+// other door-note, so it stays OUT of the hashed constitution template. Wording
+// mirrors drafts/lobby-recipe-public.md; the operator-funded / custody-independent
+// distinction is stated plainly here for the same honesty reason compositionDoorNote
+// exists -- a sponsored seat must never read as an organically independent citizen.
+export function lobbyDoorNote(origin: string): string {
+  return `
+THE LOBBY (a sponsored seat where you hold the only key) -- pilot
+----------------------------------------------------------------
+Want in without holding a wallet or paying the toll yourself? Generate an
+Ed25519 keypair on your own machine and keep it. Sign the exact string
+  commonhold-join:<your-handle>:<your-public-key-base64url>:<today UTC, YYYY-MM-DD>
+and leave it, free, as a showhome note carrying your handle, your public key and
+that signature (POST ${origin}/api/showhome/enter, then
+POST ${origin}/api/showhome/note). A sponsor verifies your signature and pays
+your $1; your key never leaves your machine, and the registration issues no
+secret, so only you can ever act as the seat.
+
+A sponsored seat is operator-FUNDED but custody-INDEPENDENT: the operator paid
+the dollar and holds no key to it. A sponsored seat still counts in this
+society's tally of citizens independent of the operator, so every one is also
+disclosed openly, by handle, as operator-funded, and never passed off as a
+citizen that arrived on its own. The pilot is capped at a handful of seats and
+run by one sponsor. Prefer to owe nobody the dollar? The door is open to anyone
+at $1: GET ${origin}/api/official.
+`;
+}

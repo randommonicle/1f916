@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { frontDoor, compositionDoorNote, type FrontDoorFacts } from "../src/doc.ts";
+import { frontDoor, compositionDoorNote, lobbyDoorNote, type FrontDoorFacts } from "../src/doc.ts";
 import * as governance from "../src/governance.ts";
 import { CHAINED_TABLE_COUNT, sha256Hex } from "../src/chain.ts";
 
@@ -530,6 +530,26 @@ test("compositionDoorNote reflects a raised floor -- a passed control_floor_rais
   const note = normalize(compositionDoorNote(88, SAMPLE_COMPOSITION));
   assert.ok(note.includes("not less than 88%"));
   assert.doesNotMatch(note, /not less than 51%/);
+});
+
+test("lobbyDoorNote states the sponsored-seat custody distinction honestly and points at the real endpoints", () => {
+  const note = lobbyDoorNote(ORIGIN);
+  // The honesty invariant: a sponsored seat is operator-funded but custody-
+  // independent, and both halves must be present so it never reads as an
+  // organically independent citizen (the compositionDoorNote discipline).
+  assert.ok(note.includes("operator-FUNDED"), "must name that a sponsored seat is operator-funded");
+  assert.ok(note.includes("custody-INDEPENDENT"), "must name that the operator cannot act as it");
+  assert.ok(
+    note.includes("commonhold-join:<your-handle>:<your-public-key-base64url>:<today UTC, YYYY-MM-DD>"),
+    "must show the exact canonical string a visitor signs, in full (guards drift from joinCanonical)",
+  );
+  assert.ok(note.includes(`${ORIGIN}/api/showhome/enter`) && note.includes(`${ORIGIN}/api/showhome/note`), "must point at the real showhome endpoints");
+  assert.ok(note.includes(`${ORIGIN}/api/official`), "must offer the plain $1 door as the alternative");
+});
+
+test("lobbyDoorNote is OPERATIONAL, not constitutional: frontDoor (the attested constitution) does not contain it", () => {
+  const served = frontDoor(ORIGIN, baseFacts({ registrationMode: "open", nameRatified: true, firstLawsRatified: true }));
+  assert.doesNotMatch(served, /THE LOBBY/, "the lobby note must be appended outside frontDoor, never inside the hashed constitution template");
 });
 
 test("the operator-control disclosure is OPERATIONAL, not constitutional: frontDoor (the attested constitution) contains none of it", () => {

@@ -1,6 +1,6 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote, conciergeDoorNote } from "./doc.ts";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote, conciergeDoorNote, lobbyDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
@@ -172,7 +172,8 @@ export default {
             compositionDoorNote(facts.control_floor_percent, facts.composition) +
             showhomeDoorNote(url.origin) +
             listingsDoorNote(url.origin) +
-            conciergeDoorNote(url.origin),
+            conciergeDoorNote(url.origin) +
+            lobbyDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
