@@ -108,6 +108,11 @@ export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
   "ledger-watch",
   "first-reader",
   "the-doorpost",
+  // The public-key one-real-ride citizen: a keypair Ben holds, registered to
+  // prove the register-with-key + signed-write path on the live edge (HANDOVER
+  // Addendum 48). Listed BEFORE it registers so the census never counts it as
+  // independent for even one request. test/keyauth-ride.test.ts locks this.
+  "keyholder",
 ];
 
 export const SETTING_KEY = {

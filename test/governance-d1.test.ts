@@ -2471,37 +2471,48 @@ test("citizenDirectory: an ordinary page with no collision is unaffected by the 
 // test/doc.test.ts prove frontDoor stays byte-identical, and the human-readable
 // compositionDoorNote is unit-tested there. These cover the machine surface. ----------
 
-test("officialFacts.composition: the four operator agents plus one independent report 4 of 5 (80%), the four named, one independent", async () => {
+// Numbers derive from OPERATOR_CONTROLLED_HANDLES.length rather than being
+// hardcoded, so adding an operator agent (the disclosure is meant to grow the
+// moment the operator runs another citizen, society.ts) updates the expectation
+// with the constant instead of turning this red. The math is still genuinely
+// tested: independent count and percentage come from the live census total, not
+// the constant.
+test("officialFacts.composition: the operator agents plus one independent report N of N+1, the operator handles named, one independent", async () => {
   const d1 = createLocalD1();
   try {
     for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
     insertCitizen(d1, { handle: "sisyphus" });
 
+    const n = OPERATOR_CONTROLLED_HANDLES.length;
+    const total = n + 1;
+    const pct = Math.round((n / total) * 100);
     const c = (await officialFacts(testEnv(d1))).composition;
-    assert.equal(c.citizens, 5);
-    assert.equal(c.operator_controlled, 4);
+    assert.equal(c.citizens, total);
+    assert.equal(c.operator_controlled, n);
     assert.equal(c.independent, 1);
-    assert.equal(c.operator_controlled_percent, 80);
+    assert.equal(c.operator_controlled_percent, pct);
     assert.deepEqual([...c.operator_controlled_handles].sort(), [...OPERATOR_CONTROLLED_HANDLES].sort());
-    assert.ok(c.note.includes("4 of the 5"), `the note must state the magnitude plainly, got: ${c.note}`);
-    assert.ok(c.note.includes("80%"), "the note must state the percentage so 51% cannot be mistaken for the real share");
+    assert.ok(c.note.includes(`${n} of the ${total}`), `the note must state the magnitude plainly, got: ${c.note}`);
+    assert.ok(c.note.includes(`${pct}%`), "the note must state the percentage so 51% cannot be mistaken for the real share");
   } finally {
     d1.close();
   }
 });
 
-test("officialFacts.composition: an independent joining shifts the share DOWN and is reflected live (4 of 6 = 67%)", async () => {
+test("officialFacts.composition: two independents joining shift the share DOWN and are reflected live", async () => {
   const d1 = createLocalD1();
   try {
     for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
     insertCitizen(d1, { handle: "sisyphus" });
     insertCitizen(d1, { handle: "newcomer-paid-at-the-door" });
 
+    const n = OPERATOR_CONTROLLED_HANDLES.length;
+    const total = n + 2;
     const c = (await officialFacts(testEnv(d1))).composition;
-    assert.equal(c.citizens, 6);
-    assert.equal(c.operator_controlled, 4);
+    assert.equal(c.citizens, total);
+    assert.equal(c.operator_controlled, n);
     assert.equal(c.independent, 2);
-    assert.equal(c.operator_controlled_percent, 67); // Math.round(4/6*100)
+    assert.equal(c.operator_controlled_percent, Math.round((n / total) * 100));
   } finally {
     d1.close();
   }
