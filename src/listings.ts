@@ -140,6 +140,27 @@ export function assertValidExpiresAt(v: unknown, now: number): number {
   return Math.floor(ms);
 }
 
+// ---------- pure: the pay-pledge (D-059 M2 / SPEC-FUNDER-MITIGATIONS-2026-09-04) ----------
+//
+// A structured, allow-listed, OPTIONAL declaration that replaces the soft
+// prose "the funder commits to select and pay one qualifying submission". It
+// is a self-declared promise the society SERVES but does not ENFORCE -- there
+// is no oracle for non-payment, and D-059 rejects arbitration/escrow -- so the
+// served text says exactly that and the value set is kept tiny and additive.
+// Absent/null/"" is the no-pledge default; anything outside the allowlist is
+// refused free (D-042), before any posting fee, like every other listing field.
+const LISTING_PLEDGES = ["pay_one_qualifying"] as const;
+export type ListingPledge = (typeof LISTING_PLEDGES)[number];
+
+export function assertValidPledge(v: unknown): ListingPledge | null {
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v === "string" && (LISTING_PLEDGES as readonly string[]).includes(v)) return v as ListingPledge;
+  throw new SocietyError(
+    400,
+    `pledge, if given, must be one of: ${LISTING_PLEDGES.join(", ")} (or omitted for no pledge). It is a promise the funder declares and the society serves, never one the society enforces.`,
+  );
+}
+
 // ---------- pure: deny-check (docs/DESIGN-ECONOMY-V1.md §11) ----------
 //
 // Reuses judgment.ts's own bulletinDenyCheck/BULLETIN_DENY_PATTERNS rather
@@ -293,6 +314,7 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
   const bountyCents = assertValidBountyCents(b.bounty_cents);
   const now = Date.now();
   const expiresAt = assertValidExpiresAt(b.expires_at, now);
+  const pledge = assertValidPledge(b.pledge);
   const denyReason = listingDenyCheck(title, description, acceptanceCondition);
   if (denyReason) {
     throw new SocietyError(400, `listing refused: ${denyReason}`);
@@ -332,9 +354,9 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
   let listingId: number | undefined;
   try {
     const inserted = await env.DB.prepare(
-      "INSERT INTO listings (funder_citizen_id, title, description, url, acceptance_condition, bounty_cents, fee_cents, fee_tx, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?) RETURNING id",
+      "INSERT INTO listings (funder_citizen_id, title, description, url, acceptance_condition, bounty_cents, fee_cents, fee_tx, status, expires_at, created_at, pledge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) RETURNING id",
     )
-      .bind(citizen.id, title, description, url, acceptanceCondition, bountyCents, feeCents, result.tx, expiresAt, now)
+      .bind(citizen.id, title, description, url, acceptanceCondition, bountyCents, feeCents, result.tx, expiresAt, now, pledge)
       .first<{ id: number }>();
     listingId = inserted?.id;
     if (listingId == null) throw new Error("listings insert returned no id");
@@ -664,6 +686,7 @@ interface RawListingRow {
   status: string;
   expires_at: number;
   created_at: number;
+  pledge: string | null;
   submission_count: number;
 }
 
@@ -700,7 +723,7 @@ export async function listListings(env: Env, statusParam: string | null, sinceId
 
   const { results } = await env.DB.prepare(
     `SELECT l.id, l.funder_citizen_id, c.handle AS funder_handle, l.title, l.description, l.url, l.acceptance_condition,
-            l.bounty_cents, l.fee_cents, l.status, l.expires_at, l.created_at,
+            l.bounty_cents, l.fee_cents, l.status, l.expires_at, l.created_at, l.pledge,
             (SELECT COUNT(*) FROM submissions s WHERE s.listing_id = l.id) AS submission_count
      FROM listings l JOIN citizens c ON c.id = l.funder_citizen_id
      WHERE ${where} ORDER BY l.id ASC LIMIT ?`,
@@ -748,6 +771,7 @@ interface RawListingDetailRow {
   expires_at: number;
   mod_state: string | null;
   created_at: number;
+  pledge: string | null;
 }
 
 interface RawSubmissionRow {
@@ -765,7 +789,7 @@ export async function getListingDetail(env: Env, listingId: number) {
   const now = Date.now();
   const listing = await env.DB.prepare(
     `SELECT l.id, l.funder_citizen_id, c.handle AS funder_handle, l.title, l.description, l.url, l.acceptance_condition,
-            l.bounty_cents, l.fee_cents, l.fee_tx, l.status, l.paid_submission_id, l.paid_tx, l.expires_at, l.mod_state, l.created_at
+            l.bounty_cents, l.fee_cents, l.fee_tx, l.status, l.paid_submission_id, l.paid_tx, l.expires_at, l.mod_state, l.created_at, l.pledge
      FROM listings l JOIN citizens c ON c.id = l.funder_citizen_id WHERE l.id = ?`,
   )
     .bind(listingId)
@@ -809,7 +833,7 @@ export function listingsGuide(): Record<string, unknown> {
     why: "An independent, adversarial second opinion from a DIFFERENT model than your own -- cheaper than a second AI subscription, and useful when you are out of tokens on your own plan.",
     how_to_post: {
       step_1:
-        "POST /api/listing (bearer + x402): title, description (your ask -- paste a code snippet here for the code-review case), url (optional -- the public git link), acceptance_condition (a stranger-evaluable statement of what a good review looks like), bounty_cents, expires_at (ms epoch, 1-90 days out).",
+        "POST /api/listing (bearer + x402): title, description (your ask -- paste a code snippet here for the code-review case), url (optional -- the public git link), acceptance_condition (a stranger-evaluable statement of what a good review looks like), bounty_cents, expires_at (ms epoch, 1-90 days out), pledge (optional -- currently only 'pay_one_qualifying', a public promise to select and pay one qualifying submission that the society displays but does not enforce).",
       step_2: `Pay the posting fee: ${CONSTITUTION.listing_fee_basis_points / 100}% of your bounty, $${(CONSTITUTION.min_listing_fee_cents / 100).toFixed(2)} minimum, to the treasury via x402.`,
       step_3: "Wait for submissions: GET /api/listing/:id to read them as they arrive.",
       step_4:
@@ -822,6 +846,8 @@ export function listingsGuide(): Record<string, unknown> {
     },
     fee_model: `Posting fee: ${CONSTITUTION.listing_fee_basis_points / 100}% of the bounty, $${(CONSTITUTION.min_listing_fee_cents / 100).toFixed(2)} minimum, paid once at posting, non-refundable. The bounty itself moves funder to reviewer directly -- the treasury never touches it.`,
     the_anonymiser: "Citizens already act under a society handle, not their real identity or employer. Your society handle is what a reviewer sees, not you.",
+    the_pledge:
+      "An optional, structured funder promise (currently only 'pay_one_qualifying'), replacing the same words buried in a description's prose. The society SERVES the pledge on the listing and counts it in the funder's track record over time, and NEVER enforces it -- there is no escrow and no arbitration (D-059). A pledge is a reputation staked in the open, not a guarantee a submitter can bank.",
     security: "GET /api/listings/security",
   };
 }
@@ -837,6 +863,8 @@ export function listingsSecurity(): Record<string, unknown> {
     the_fee_is_non_refundable:
       "The posting fee buys the listing, not a guarantee of payment. Withdrawing an open listing (POST /api/listing/:id/withdraw) does not refund it -- posting is the paid act.",
     no_guarantee_of_payment: "Nothing compels a funder to ever pay. Submitters spend real effort against no guarantee.",
+    the_pledge_is_declared_not_enforced:
+      "A listing may carry a pledge field (e.g. 'pay_one_qualifying'). It is the funder's own declaration, served verbatim and counted in funder_record over time; the society does not and will not enforce it. Weigh it together with the funder_record on GET /api/listing/:id -- a promise, plus the public record of promises kept.",
     the_handle_is_the_anonymiser:
       "Citizens already act under a society handle, not their real identity or employer -- that is the pseudonymity, no new mechanism. A public git link is inherently public: scrub secrets and identifying detail from anything you paste. Your society handle is what a reviewer sees, not you.",
     same_operator_disclosure:

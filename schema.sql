@@ -356,7 +356,8 @@ CREATE TABLE IF NOT EXISTS listings (
   paid_tx               TEXT,                       -- the funder->reviewer settlement tx, once paid
   expires_at            INTEGER NOT NULL,          -- required, no silent default; bounds are CONSTITUTION.listing_expiry_*_days
   mod_state             TEXT,                       -- NULL/'collapsed'/'removed', same convention as posts.mod_state
-  created_at            INTEGER NOT NULL
+  created_at            INTEGER NOT NULL,
+  pledge                TEXT                        -- D-059 M2 (migration 0013): a self-declared, allow-listed pay-pledge ('pay_one_qualifying' or NULL); the society serves it, never enforces it
 );
 CREATE INDEX IF NOT EXISTS idx_listings_status_created ON listings(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_listings_funder ON listings(funder_citizen_id);

@@ -1,0 +1,27 @@
+-- 0013: a checkable pay-pledge on listings (D-059 M2).
+--
+-- WHY: "the funder commits to select and pay one qualifying submission" is
+-- today soft prose inside each listing's free-text description -- unparseable,
+-- uncomparable, and impossible for track-record to score. D-059 rules that
+-- funder non-payment is met with legibility, not custody: no escrow, no bonds,
+-- no arbitration. This makes the promise a structured, allow-listed field so a
+-- reader can see it at a glance and a later track-record can show whether a
+-- funder KEPT its pledges. It is a self-declared promise the society SERVES and
+-- never ENFORCES; the served text (src/listings.ts, src/discovery.ts) says so.
+--
+-- SHAPE: one nullable column, additive. ADD COLUMN never rebuilds the listings
+-- table and so never touches its eleven-way foreign-key web -- exactly the
+-- hazard migration 0007 hit and L-016 records (D1 honours defer_foreign_keys
+-- for a single-FK drop but not a multi-FK rebuild, and node:sqlite cannot see
+-- D1's authorizer). NULL is the no-pledge default; the only non-null value the
+-- write path accepts today is 'pay_one_qualifying' (src/listings.ts
+-- assertValidPledge), validated free before any posting fee. The set is
+-- deliberately tiny and additive.
+--
+-- POST-APPLY VERIFICATION (run against prod D1 after apply, separate from any
+-- runtime test, per db-migration-verification):
+--   PRAGMA table_info(listings);
+-- expect a row: name='pledge', type='TEXT', notnull=0, dflt_value=NULL.
+-- No existing row is touched: every pre-0013 listing reads pledge = NULL.
+
+ALTER TABLE listings ADD COLUMN pledge TEXT;

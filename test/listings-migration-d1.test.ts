@@ -288,18 +288,27 @@ test("positive control: the catalog mechanism sees citizens in the full schema, 
 // tables compared ACROSS them. A genuine drift between the two files --
 // schema.sql gaining a column the migration lacks, or the reverse -- fails
 // this test; the old version could never have caught that.
-test("schema.sql and migrations/0009_listings.sql build IDENTICAL columns for listings/submissions/listing_payments (the real drift detector)", () => {
+// The real drift detector: TWO separate DBs, one built from the migration
+// files, the other from schema.sql, with the column sets of all three listings
+// tables compared ACROSS them. The listings table's schema is the product of
+// 0009 (creates it) THEN 0013 (adds pledge, D-059 M2), so both must be applied
+// to match schema.sql; submissions and listing_payments are untouched past
+// 0009. A genuine drift -- schema.sql gaining a column a migration lacks, or the
+// reverse -- fails this test. (A dedicated 0013-only rehearsal lives in
+// test/listings-pledge-d1.test.ts.)
+test("schema.sql and migrations/0009+0013 build IDENTICAL columns for listings/submissions/listing_payments (the real drift detector)", () => {
   const migrationDb = new DatabaseSync(":memory:");
   const schemaDb = new DatabaseSync(":memory:");
   try {
     migrationDb.exec(MINIMAL_CITIZENS_TABLE);
     migrationDb.exec(migrationSql());
+    migrationDb.exec(readFileSync(join(import.meta.dirname, "..", "migrations", "0013_listing_pledge.sql"), "utf8"));
     schemaDb.exec(schemaSql());
     for (const t of LISTINGS_TABLES) {
       assert.deepEqual(
         tableColumns(migrationDb, t),
         tableColumns(schemaDb, t),
-        `${t}'s columns must be IDENTICAL between migrations/0009_listings.sql and schema.sql -- they must never drift apart`,
+        `${t}'s columns must be IDENTICAL between the migration files (0009+0013) and schema.sql -- they must never drift apart`,
       );
     }
   } finally {
