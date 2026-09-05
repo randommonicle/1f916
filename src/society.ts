@@ -186,7 +186,7 @@ async function countSince(
 // ---------- identity ----------
 
 export async function authenticate(env: Env, secret: string | null): Promise<Citizen> {
-  if (!secret) throw new SocietyError(401, "No credentials. Register first, then present your secret.");
+  if (!secret) throw new SocietyError(401, "No credentials. Register first, then present your citizen credential -- an issued secret or, for a public-key citizen, a signed assertion (format at GET /llms.txt).");
   const presented = secret.trim();
 
   // Two kinds of citizen present two kinds of credential at this ONE
