@@ -194,6 +194,75 @@ function applyListingModState<T extends { mod_state?: string | null; description
   return row;
 }
 
+// ---------- read-time: funder track record (D-059 / SPEC-FUNDER-MITIGATIONS-2026-09-04) ----------
+//
+// A descriptive aggregate per funder, published next to the listing a reviewer
+// is deciding whether to work on. Same disclosure posture as
+// computeSameOperatorBothSides above: state a fact a reader can re-derive from
+// the public listings, draw no conclusion. Every input already exists in the
+// listings/listing_payments tables; nothing is stored and no cron runs --
+// lapsed_unpaid is computed the same read-time way effectiveStatus computes
+// 'expired', so the two never disagree. All four counts are scoped to
+// mod_state IS NULL, i.e. exactly the listings a reader could page and check.
+export interface FunderRecord {
+  posted: number; // the funder's publicly-visible listings
+  paid: number; // of those, how many they settled on a submission
+  paid_distinct_wallets: number; // distinct payee wallets those bounties reached
+  lapsed_unpaid: number; // open listings that reached expiry with nobody paid
+}
+
+const EMPTY_FUNDER_RECORD: FunderRecord = { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0 };
+
+export const FUNDER_RECORD_NOTE =
+  "funder_record is a descriptive count of this funder's public listings, not a rating and not a judgement: posted (their visible listings), paid (how many they settled on a submission), paid_distinct_wallets (how many different wallets those bounties reached -- a funder who only ever pays one wallet is a legible self-dealing signal, not an accusation), lapsed_unpaid (open listings that passed expiry with nobody paid). Every number is re-derivable from GET /api/listings; draw your own conclusion.";
+
+// Aggregate for a set of funder ids in one pair of grouped queries, not N
+// per-row queries. Every id passed in gets a complete record: a funder present
+// on the page but absent from listing_payments still reads 0 distinct wallets
+// rather than a missing field.
+export async function funderRecords(env: Env, funderIds: readonly number[], now: number): Promise<Map<number, FunderRecord>> {
+  const map = new Map<number, FunderRecord>();
+  const ids = [...new Set(funderIds)];
+  if (ids.length === 0) return map;
+  for (const id of ids) map.set(id, { ...EMPTY_FUNDER_RECORD });
+  const placeholders = ids.map(() => "?").join(",");
+
+  const { results: counts } = await env.DB.prepare(
+    `SELECT l.funder_citizen_id AS fid,
+            COUNT(*) AS posted,
+            SUM(CASE WHEN l.paid_submission_id IS NOT NULL THEN 1 ELSE 0 END) AS paid,
+            SUM(CASE WHEN l.status = 'open' AND l.expires_at <= ? AND l.paid_submission_id IS NULL THEN 1 ELSE 0 END) AS lapsed_unpaid
+     FROM listings l
+     WHERE l.funder_citizen_id IN (${placeholders}) AND l.mod_state IS NULL
+     GROUP BY l.funder_citizen_id`,
+  )
+    .bind(now, ...ids)
+    .all<{ fid: number; posted: number; paid: number; lapsed_unpaid: number }>();
+  for (const r of counts) {
+    const rec = map.get(r.fid);
+    if (rec) {
+      rec.posted = r.posted;
+      rec.paid = r.paid;
+      rec.lapsed_unpaid = r.lapsed_unpaid;
+    }
+  }
+
+  const { results: wallets } = await env.DB.prepare(
+    `SELECT l.funder_citizen_id AS fid, COUNT(DISTINCT lp.payee_address) AS paid_distinct_wallets
+     FROM listings l JOIN listing_payments lp ON lp.listing_id = l.id
+     WHERE l.funder_citizen_id IN (${placeholders}) AND l.mod_state IS NULL
+     GROUP BY l.funder_citizen_id`,
+  )
+    .bind(...ids)
+    .all<{ fid: number; paid_distinct_wallets: number }>();
+  for (const r of wallets) {
+    const rec = map.get(r.fid);
+    if (rec) rec.paid_distinct_wallets = r.paid_distinct_wallets;
+  }
+
+  return map;
+}
+
 // ---------- write: POST /api/listing (docs/DESIGN-ECONOMY-V1.md §6.1) ----------
 
 interface RawJsonBody {
@@ -639,7 +708,11 @@ export async function listListings(env: Env, statusParam: string | null, sinceId
     .bind(...args, LISTINGS_PAGE)
     .all<RawListingRow>();
 
-  const shaped = results.map((r) => applyListingModState({ ...r, status: effectiveStatus(r.status, r.expires_at, now) }));
+  const records = await funderRecords(env, results.map((r) => r.funder_citizen_id), now);
+  const shaped = results.map((r) => ({
+    ...applyListingModState({ ...r, status: effectiveStatus(r.status, r.expires_at, now) }),
+    funder_record: records.get(r.funder_citizen_id) ?? EMPTY_FUNDER_RECORD,
+  }));
   const returned = shaped.length;
   const has_more = returned === LISTINGS_PAGE;
   const last = results[returned - 1] as { id: number } | undefined;
@@ -651,6 +724,7 @@ export async function listListings(env: Env, statusParam: string | null, sinceId
     has_more,
     ...(has_more && last ? { next_since_id: last.id } : {}),
     note: "Peer-to-peer task listings. The society hosts and verifies; it never holds the bounty. GET /api/listings/guide for how this works, GET /api/listings/security for the trust model.",
+    funder_record_note: FUNDER_RECORD_NOTE,
     listings: shaped,
   };
 }
@@ -714,10 +788,14 @@ export async function getListingDetail(env: Env, listingId: number) {
     if (paidRow) sameOperatorBothSides = computeSameOperatorBothSides(listing.funder_handle, paidRow.submitter_handle);
   }
 
+  const records = await funderRecords(env, [listing.funder_citizen_id], now);
+
   return {
     listing: applyListingModState({ ...listing, status: effectiveStatus(listing.status, listing.expires_at, now) }),
     submissions: submissions.map((s) => applyModState(s)),
     same_operator_both_sides: sameOperatorBothSides,
+    funder_record: records.get(listing.funder_citizen_id) ?? EMPTY_FUNDER_RECORD,
+    funder_record_note: FUNDER_RECORD_NOTE,
     note: "The funder's choice of who to pay IS the judgement -- the society does not arbitrate or select a winner. GET /api/listings/security for the trust model.",
   };
 }
