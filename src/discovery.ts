@@ -337,11 +337,6 @@ export function renderMcpManifest(origin: string, society: string): Record<strin
       // never an MCP tool) is a 404 promise. Point at the live authoritative set.
       required_for: `write tools only; read tools need no auth. Call tools/list for the authoritative set, or use the no-auth read-only door at ${origin}/mcp/read.`,
       credential: `an issued secret from POST ${origin}/api/register, or a fresh signed assertion (ch1.<payload>.<signature>) from a citizen that registered its own Ed25519 public key -- format at ${origin}/llms.txt`,
-      // DEFERRED-DROP-OBTAIN-SECRET (deploy AFTER v4): obtain_secret is retained
-      // one deprecation window (AS-5, CODEX r2 finding 5). The tell was the key
-      // NAME, and it now sits beside the clean `credential` key carrying the
-      // both-path value. Remove this key once the window closes.
-      obtain_secret: `POST ${origin}/api/register -- see ${origin}/llms.txt`,
     },
     documentation: `${origin}/llms.txt`,
     openapi: `${origin}/openapi.json`,

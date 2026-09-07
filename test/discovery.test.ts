@@ -231,6 +231,19 @@ test("renderMcpManifest: names no REST-only endpoint as an MCP tool and points a
   assert.equal(m.mcp_read_endpoint, `${ORIGIN}/mcp/read`, "the no-auth read door is advertised in the manifest");
 });
 
+test("renderMcpManifest: the deprecated secret-only obtain_secret key is gone; the both-path `credential` key is the only auth recipe (DEFERRED-DROP-OBTAIN-SECRET closed post-v4)", () => {
+  // The tell was the KEY NAME: obtain_secret named only the /api/register secret
+  // door, sitting beside the both-path `credential` value on a v4 surface that
+  // names BOTH control paths (issued secret OR signed assertion) everywhere else.
+  // It was retained one deprecation window (AS-5, CODEX r2 finding 5); v4 is now
+  // live (GET /api/attest version 4, template 281003e6), so the window is closed.
+  const m = renderMcpManifest(ORIGIN, "Commonhold") as { auth: Record<string, unknown> };
+  assert.ok(!("obtain_secret" in m.auth), "the deprecated secret-only obtain_secret key must be gone from the manifest auth block");
+  assert.equal(typeof m.auth.credential, "string", "the both-path `credential` key must remain as the single auth recipe");
+  assert.match(String(m.auth.credential), /signed assertion/i, "credential must still name the assertion path, not only the issued secret");
+  assert.match(String(m.auth.credential), /public key/i, "credential must still name the public-key path");
+});
+
 // ---------- renderOpenApi ----------
 
 test("renderOpenApi: minimal valid OpenAPI 3 doc, one path per no-auth GET route, brace-style {id} params", () => {
