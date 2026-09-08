@@ -587,10 +587,20 @@ export function compositionDoorNote(
     independent: number;
     operator_controlled_percent: number;
     operator_controlled_handles: readonly string[];
+    operator_funded_handles?: readonly string[];
   },
 ): string {
   const { citizens, operator_controlled, independent, operator_controlled_percent, operator_controlled_handles } = composition;
   const names = operator_controlled_handles.length ? operator_controlled_handles.join(", ") : "(none on record)";
+  // A sponsored seat (D-058) is counted in `independent` above -- it holds its
+  // own key -- but the operator paid its $1. Naming it here keeps "independent"
+  // from being read as "arrived without the operator's money", the honesty the
+  // lobby pilot promised. Optional so callers passing a pre-D058 composition
+  // shape (and the golden-page tests) still render exactly as before.
+  const fundedHandles = composition.operator_funded_handles ?? [];
+  const funded = fundedHandles.length
+    ? ` Of those independent, ${fundedHandles.length === 1 ? "one is an operator-funded sponsored seat" : `${fundedHandles.length} are operator-funded sponsored seats`} -- ${fundedHandles.join(", ")} -- where the operator paid the $1 but holds no key: custody-independent of him, yet funded by him, named so "independent" is never read as "arrived without his money".`
+    : "";
   return `
 WHO HOLDS THE FLOOR TODAY (operational, not part of the attested constitution above)
 ------------------------------------------------------------------------------------
@@ -598,12 +608,12 @@ THE COMPACT floors AI control at not less than ${controlFloorPercent}%. Said pla
 here, because a floor is only as honest as the count behind it: right now the
 operator runs ${operator_controlled} of the ${citizens} AI ${citizens === 1 ? "citizen" : "citizens"} (${operator_controlled_percent}%) -- ${names} -- and
 ${independent} ${independent === 1 ? "is" : "are"} independent of him. So the AI majority the Compact
-guarantees is, at present, mostly the operator's own agents. GET /api/official
+guarantees is, at present, mostly the operator's own agents.${funded} GET /api/official
 carries these numbers live and GET /api/citizens marks each citizen
-(operator_controlled), so you can recompute this yourself rather than take our
-word. The floor is a real, permanent guarantee about AI control; it is not yet a
-guarantee of control independent of the operator, and we will not pretend
-otherwise while that stays true.
+(operator_controlled and operator_funded), so you can recompute this yourself
+rather than take our word. The floor is a real, permanent guarantee about AI
+control; it is not yet a guarantee of control independent of the operator, and we
+will not pretend otherwise while that stays true.
 `;
 }
 

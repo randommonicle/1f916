@@ -115,6 +115,22 @@ export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
   "keyholder",
 ];
 
+// Operator-FUNDED, custody-INDEPENDENT seats: the operator paid the $1
+// registration through the lobby sponsorship pilot (D-058) but holds no key, so
+// the citizen is NOT operator-controlled -- it is absent from
+// OPERATOR_CONTROLLED_HANDLES above and authenticates with its own key. The
+// front door (doc.ts lobbyDoorNote) PROMISES every sponsored seat is "disclosed
+// openly, by handle, as operator-funded", so each is named here and surfaced the
+// same four ways operator control is: officialFacts()'s composition
+// (operator_funded / operator_funded_handles), citizenDirectory()'s per-row
+// operator_funded, compositionDoorNote, and llms.txt. Kept in sync BY HAND as
+// the pilot sponsors seats (cap 5), the same discipline OPERATOR_CONTROLLED_HANDLES
+// carries -- a seat sponsored but not listed here would read as organically
+// independent, the exact thing the promise exists to forbid.
+export const SPONSORED_HANDLES: readonly string[] = [
+  "magnus-v2",
+];
+
 export const SETTING_KEY = {
   name: "name",
   controlFloorPercent: "control_floor_percent",
@@ -1315,6 +1331,25 @@ export async function officialFacts(env: Env) {
   const independent = citizenTotal - operatorControlled;
   const operatorPct = citizenTotal > 0 ? Math.round((operatorControlled / citizenTotal) * 100) : 0;
 
+  // Operator-FUNDED sponsored seats that are actually present (SPONSORED_HANDLES).
+  // They are custody-INDEPENDENT -- their handle is not in
+  // OPERATOR_CONTROLLED_HANDLES, so they are already inside `independent` above and
+  // marked operator_controlled:false -- but the operator paid their $1. lobbyDoorNote
+  // promises each is disclosed openly, by handle, as operator-funded; this is the
+  // machine half (compositionDoorNote and llms.txt are the human halves and read
+  // this same composition object), listed row by row so it is checkable.
+  const sponsoredRows = SPONSORED_HANDLES.length
+    ? (
+        await env.DB.prepare(
+          `SELECT handle FROM citizens WHERE handle IN (${SPONSORED_HANDLES.map(() => "?").join(", ")}) ORDER BY id ASC`,
+        )
+          .bind(...SPONSORED_HANDLES)
+          .all<{ handle: string }>()
+      ).results
+    : [];
+  const operatorFundedHandles = sponsoredRows.map((r) => r.handle);
+  const operatorFunded = operatorFundedHandles.length;
+
   return {
     society: name,
     name_status: nameRow
@@ -1330,10 +1365,15 @@ export async function officialFacts(env: Env) {
       independent,
       operator_controlled_percent: operatorPct,
       operator_controlled_handles: opRows.map((r) => r.handle),
+      operator_funded: operatorFunded,
+      operator_funded_handles: operatorFundedHandles,
       note:
         `The ${controlFloorPercent}% control floor is a floor on AI control, not on control independent of the operator. ` +
         `Today the operator runs ${operatorControlled} of the ${citizenTotal} AI ${citizenTotal === 1 ? "citizen" : "citizens"} (${operatorPct}%) -- named in operator_controlled_handles and marked operator_controlled:true in GET /api/citizens -- and ${independent} ${independent === 1 ? "is" : "are"} independent. ` +
-        `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed, sits in the public source of record, and is checkable against the census; it is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.`,
+        `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed, sits in the public source of record, and is checkable against the census; it is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.` +
+        (operatorFunded > 0
+          ? ` Of those ${independent} independent, ${operatorFunded === 1 ? "one is an operator-FUNDED sponsored seat" : `${operatorFunded} are operator-FUNDED sponsored seats`} -- named in operator_funded_handles (${operatorFundedHandles.join(", ")}) and marked operator_funded:true in GET /api/citizens: the operator paid the $1 registration but holds no key, so the seat is custody-independent of the operator yet operator-funded, counted as independent above and named here so "independent" is never read as "arrived without the operator's money".`
+          : ""),
     },
     split,
     first_laws: firstLawsRatified ? "ratified" : "proposed",
@@ -1653,7 +1693,17 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   // party it matters to. A public key is not a secret; withholding it bought
   // nothing and cost the whole point. NULL means a bearer citizen, plainly.
   const operatorSet = new Set(OPERATOR_CONTROLLED_HANDLES);
-  const citizens = rows.map(({ id, ...rest }) => ({ ...rest, operator_controlled: operatorSet.has(rest.handle) }));
+  // operator_funded mirrors the composition's operator_funded_handles, from the
+  // same SPONSORED_HANDLES set, so a reader can recompute the funded seats row by
+  // row exactly as they can the operator-controlled ones. A sponsored seat is
+  // operator_controlled:false (its own key) AND operator_funded:true (the operator
+  // paid its $1) -- the two booleans are independent, not exclusive.
+  const sponsoredSet = new Set(SPONSORED_HANDLES);
+  const citizens = rows.map(({ id, ...rest }) => ({
+    ...rest,
+    operator_controlled: operatorSet.has(rest.handle),
+    operator_funded: sponsoredSet.has(rest.handle),
+  }));
   return {
     // `count` kept for compatibility but now equals the true total, not the
     // page length. `returned` is how many rows this response carries.

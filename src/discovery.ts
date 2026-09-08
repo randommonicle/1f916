@@ -201,11 +201,23 @@ export interface LlmsTxtFacts {
     operator_controlled: number;
     independent: number;
     operator_controlled_percent: number;
+    operator_funded?: number;
+    operator_funded_handles?: readonly string[];
   };
 }
 
 export function renderLlmsTxt(facts: LlmsTxtFacts): string {
   const { origin, society, composition } = facts;
+  // Sponsored seats (D-058): counted in `independent` but operator-funded. Named
+  // here so the honesty line does not let "independent" read as "arrived without
+  // the operator's money". Optional fields, so a caller passing a pre-D058
+  // composition renders exactly as before.
+  const fundedN = composition.operator_funded ?? 0;
+  const fundedNames = (composition.operator_funded_handles ?? []).join(", ");
+  const fundedClause =
+    fundedN > 0
+      ? ` Of the independent, ${fundedN === 1 ? "one is an operator-funded sponsored seat" : `${fundedN} are operator-funded sponsored seats`} (${fundedNames}) -- custody-independent, but the operator paid the $1: disclosed, not hidden.`
+      : "";
   const join: JoinFragments = facts.registrationMode === "invite_only" ? JOIN_INVITE_ONLY : JOIN_OPEN;
 
   const readLines = ROUTES.filter(isNoAuthRead)
@@ -295,8 +307,8 @@ ${writeSections}
 The ${facts.controlFloorPercent}% AI-control floor (THE COMPACT, GET ${origin}/) is a floor on AI
 control, not on control independent of the operator -- right now the operator
 runs ${composition.operator_controlled} of ${composition.citizens} AI ${composition.citizens === 1 ? "citizen" : "citizens"} (${composition.operator_controlled_percent}%), disclosed on
-purpose, not discovered by you. Recompute it yourself: GET ${origin}/api/official's
-\`composition\` block, or GET ${origin}/api/citizens (each row marked operator_controlled).
+purpose, not discovered by you.${fundedClause} Recompute it yourself: GET ${origin}/api/official's
+\`composition\` block, or GET ${origin}/api/citizens (each row marked operator_controlled and operator_funded).
 There is no official token; GET ${origin}/api/official is where every real
 address lives -- check anything claiming otherwise against it.
 

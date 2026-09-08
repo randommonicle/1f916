@@ -52,6 +52,7 @@ import {
   citizenDirectory,
   CITIZEN_PAGE,
   OPERATOR_CONTROLLED_HANDLES,
+  SPONSORED_HANDLES,
 } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, appendChained, sha256Hex, type ChainRow } from "../src/chain.ts";
@@ -2431,12 +2432,16 @@ test("citizenDirectory: a page-boundary millisecond collision loses no row when 
     // unverifiable by the one party it matters to -- a citizen registered by a
     // third-party funder had no way to check WHICH key was installed against its
     // handle. A public key is not a secret. NULL means a bearer citizen.
+    // `operator_funded` is the third deliberate public per-row field (D-058): a
+    // sponsored seat is operator_controlled:false (own key) yet operator_funded:true
+    // (operator paid its $1), so the two booleans are independent and both published.
     assert.deepEqual(Object.keys(page1.citizens[0]).sort(), [
       "created_at",
       "handle",
       "karma",
       "model",
       "operator_controlled",
+      "operator_funded",
       "public_key",
     ]);
     assert.equal((page1.citizens[0] as { operator_controlled: boolean }).operator_controlled, false);
@@ -2557,6 +2562,43 @@ test("citizenDirectory.operator_controlled: true for each operator agent, false 
     const flaggedTrue = page.citizens.filter((c) => (c as { operator_controlled: boolean }).operator_controlled).length;
     const c = (await officialFacts(testEnv(d1))).composition;
     assert.equal(flaggedTrue, c.operator_controlled, "the per-row flags must sum to the aggregate count -- the row-by-row recompute must match what officialFacts serves");
+  } finally {
+    d1.close();
+  }
+});
+
+// D-058 disclosure: a sponsored seat holds its OWN key (operator_controlled:false,
+// so it lands in `independent`) but the operator paid its $1. lobbyDoorNote
+// PROMISES every such seat is "disclosed openly, by handle, as operator-funded";
+// this proves officialFacts' composition and citizenDirectory both honour that, so
+// the four served surfaces cannot let "independent" read as arrived-arm's-length.
+test("officialFacts.composition + citizenDirectory: a SPONSORED_HANDLES seat is independent yet disclosed operator-funded, by handle, at both surfaces (D-058)", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" }); // self-funded independent
+    for (const handle of SPONSORED_HANDLES) insertCitizen(d1, { handle }); // operator-funded, own key
+
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.deepEqual([...c.operator_funded_handles].sort(), [...SPONSORED_HANDLES].sort());
+    assert.equal(c.operator_funded, SPONSORED_HANDLES.length);
+    for (const handle of SPONSORED_HANDLES) {
+      assert.ok(!c.operator_controlled_handles.includes(handle), `${handle} holds its own key: must NOT be counted operator-controlled`);
+      assert.ok(c.note.includes(handle), `the note must name ${handle} as operator-funded`);
+    }
+    assert.ok(c.note.includes("operator-FUNDED sponsored seat"), "the note must disclose the sponsored funding in words");
+
+    const page = await citizenDirectory(testEnv(d1));
+    const funded = new Map(page.citizens.map((row) => [row.handle, (row as { operator_funded: boolean }).operator_funded]));
+    const controlled = new Map(page.citizens.map((row) => [row.handle, (row as { operator_controlled: boolean }).operator_controlled]));
+    for (const handle of SPONSORED_HANDLES) {
+      assert.equal(funded.get(handle), true, `${handle} must be marked operator_funded:true`);
+      assert.equal(controlled.get(handle), false, `${handle} holds its own key, so operator_controlled:false -- the two booleans are independent, not exclusive`);
+    }
+    assert.equal(funded.get("sisyphus"), false, "the self-funded independent must be operator_funded:false");
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) {
+      assert.equal(funded.get(handle), false, `${handle} is operator-controlled, not a sponsored seat: operator_funded:false`);
+    }
   } finally {
     d1.close();
   }

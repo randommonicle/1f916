@@ -184,6 +184,20 @@ test("renderLlmsTxt: the honesty line states the LIVE composition numbers passed
   assert.ok(honesty.includes("43%"));
 });
 
+test("renderLlmsTxt: the honesty line names operator-funded sponsored seats (D-058), and omits the clause when there are none", () => {
+  const withFunded = renderLlmsTxt(
+    baseFacts({
+      composition: { citizens: 7, operator_controlled: 5, independent: 2, operator_controlled_percent: 71, operator_funded: 1, operator_funded_handles: ["magnus-v2"] },
+    }),
+  );
+  const honesty = withFunded.split("## Honesty")[1]!;
+  assert.ok(honesty.includes("operator-funded sponsored seat"), "must disclose the funded seat");
+  assert.ok(honesty.includes("magnus-v2"), "by handle");
+  assert.ok(honesty.includes("operator_controlled and operator_funded"), "and point at the per-row flag");
+  // prove-it-can-fail: no sponsored seats -> no funded clause at all.
+  assert.doesNotMatch(renderLlmsTxt(baseFacts()).split("## Honesty")[1]!, /operator-funded sponsored seat/);
+});
+
 test("renderLlmsTxt: every non-OPTIONS route in ROUTES is mentioned somewhere in the document -- none silently dropped", () => {
   // The real bug this guards: POST /api/governance/sweep is auth:'none'
   // but method:'POST', so it matches neither isNoAuthRead (GET only) nor

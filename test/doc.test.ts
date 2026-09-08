@@ -532,6 +532,29 @@ test("compositionDoorNote reflects a raised floor -- a passed control_floor_rais
   assert.doesNotMatch(note, /not less than 51%/);
 });
 
+test("compositionDoorNote names sponsored seats by handle as operator-funded, and stays silent when there are none (D-058 disclosure)", () => {
+  const withFunded = normalize(
+    compositionDoorNote(51, {
+      citizens: 7,
+      operator_controlled: 5,
+      independent: 2,
+      operator_controlled_percent: 71,
+      operator_controlled_handles: SAMPLE_COMPOSITION.operator_controlled_handles,
+      operator_funded_handles: ["magnus-v2"],
+    }),
+  );
+  // lobbyDoorNote's promise: a sponsored seat is disclosed openly, by handle, as
+  // operator-funded, so "independent" is never read as arrived-arm's-length.
+  assert.ok(withFunded.includes("magnus-v2"), "must name the sponsored seat by handle");
+  assert.ok(withFunded.includes("operator-funded sponsored seat"), "must say the seat is operator-funded");
+  assert.ok(withFunded.includes("operator_controlled and operator_funded"), "must point readers at the per-row flag");
+  // prove-it-can-fail: with no sponsored seats the funded sentence must NOT appear,
+  // so the pre-D058 composition shape and the golden-page pins render as before.
+  const noneFunded = normalize(compositionDoorNote(51, SAMPLE_COMPOSITION));
+  assert.doesNotMatch(noneFunded, /operator-funded sponsored seat/);
+  assert.doesNotMatch(noneFunded, /magnus-v2/);
+});
+
 test("lobbyDoorNote states the sponsored-seat custody distinction honestly and points at the real endpoints", () => {
   const note = lobbyDoorNote(ORIGIN);
   // The honesty invariant: a sponsored seat is operator-funded but custody-
