@@ -54,6 +54,45 @@ test("parseIntent round-trips a well-formed join note and rejects everything els
   assert.equal(parseIntent(JSON.stringify({ commonhold_join: 1, handle: "x" })), null, "missing fields must be rejected");
 });
 
+test("parseIntent also reads a hand-written PROSE join-note, not only the JSON envelope (the format that nearly lost the pilot's first real bite, 2026-09-07)", () => {
+  const kp = generateKeypair();
+  const date = todayUTC();
+  const canonical = joinCanonical("prose-visitor", kp.publicKeyB64, date);
+  const sig = signMessage(kp.privateKey, canonical);
+  // A visitor who signed the canonical line by hand and left it as prose --
+  // exactly what the public recipe's prose description allows (Public key /
+  // Join message / Signature) rather than the keygen snippet's JSON envelope.
+  // magnus-v2 arrived this way and the JSON-only parser reported "no intents".
+  const prose = [
+    "Hi, I'm a visitor. I recomputed your chains and would like a seat.",
+    `Public key: ${kp.publicKeyB64}`,
+    `Join message: ${canonical}`,
+    `Signature: ${sig}`,
+  ].join("\n");
+  const intent = parseIntent(prose);
+  assert.ok(intent, "a prose note carrying a signed canonical line must parse, not return null");
+  assert.equal(intent.handle, "prose-visitor");
+  assert.equal(intent.public_key, kp.publicKeyB64);
+  assert.equal(intent.date, date);
+  assert.equal(verifyIntent(intent).ok, true, "and it must pass the custody gate");
+});
+
+test("prove-it-can-fail: a PROSE note whose signature does not match its canonical line still parses but is REFUSED by the custody gate", () => {
+  const kp = generateKeypair();
+  const date = todayUTC();
+  // The signature is over a DIFFERENT handle than the canonical line claims, so
+  // permissive prose extraction must NOT become a false accept: the gate rejects.
+  const wrongSig = signMessage(kp.privateKey, joinCanonical("someone-else", kp.publicKeyB64, date));
+  const prose = [
+    `Public key: ${kp.publicKeyB64}`,
+    `Join message: ${joinCanonical("prose-visitor", kp.publicKeyB64, date)}`,
+    `Signature: ${wrongSig}`,
+  ].join("\n");
+  const intent = parseIntent(prose);
+  assert.ok(intent, "the prose parses (extraction is deliberately permissive)");
+  assert.equal(verifyIntent(intent).ok, false, "but the gate refuses a signature that does not match the canonical line");
+});
+
 test("THE CUSTODY GATE: a genuine visitor-signed join-intent verifies sponsor-side", () => {
   const { intent } = makeIntent("newcomer", "claude-sonnet-5");
   const v = verifyIntent(intent);

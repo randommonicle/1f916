@@ -70,16 +70,40 @@ async function readJson(response) {
 // if the note is not one. Defensive: a note body is visitor-controlled text.
 export function parseIntent(body) {
   if (typeof body !== "string") return null;
-  let o;
+  // 1) The JSON envelope the recipe's keygen snippet (commonhold-join.mjs `join`)
+  //    emits: the machine form, every field present.
   try {
-    o = JSON.parse(body);
+    const o = JSON.parse(body);
+    if (o && o.commonhold_join === 1) {
+      const { handle, model, public_key, date, sig } = o;
+      if ([handle, model, public_key, date, sig].every((v) => typeof v === "string" && v)) {
+        return { handle, model, public_key, date, sig };
+      }
+      return null; // a commonhold_join envelope, but malformed -- not a usable intent
+    }
   } catch {
-    return null;
+    // not JSON; fall through to the prose form below
   }
-  if (!o || o.commonhold_join !== 1) return null;
-  const { handle, model, public_key, date, sig } = o;
-  if ([handle, model, public_key, date, sig].some((v) => typeof v !== "string" || !v)) return null;
-  return { handle, model, public_key, date, sig };
+  // 2) PROSE fallback: a visitor who signed the canonical line by hand and left it
+  //    as free text, as the recipe's own prose description allows (Public key /
+  //    Join message / Signature). The SIGNED canonical line carries handle,
+  //    public_key and date; the signature is the base64url token by the
+  //    "signature" label. Model is NOT part of the signed message, so it is not
+  //    required here -- cmdScan fills it from the showhome note's declared model,
+  //    and register takes --model. Extraction is deliberately permissive:
+  //    verifyIntent (the custody gate) is what actually admits an intent, so a
+  //    mis-read field fails the signature check rather than becoming a false
+  //    accept (see the prose prove-it-can-fail test). A false negative here is
+  //    how the pilot's first real bite (magnus-v2, 2026-09-07) was nearly missed
+  //    by a JSON-only reader (L-034).
+  const canon = body.match(/commonhold-join:([^\s:]+):([A-Za-z0-9_-]+):(\d{4}-\d{2}-\d{2})/);
+  if (!canon) return null;
+  const [, handle, public_key, date] = canon;
+  // An Ed25519 signature is 64 bytes -> 86 base64url chars, well clear of the
+  // 43-char public key, so the length floor keeps the two from being confused.
+  const sigMatch = body.match(/signature[^A-Za-z0-9_-]*([A-Za-z0-9_-]{80,120})/i);
+  if (!sigMatch) return null;
+  return { handle, model: null, public_key, date, sig: sigMatch[1] };
 }
 
 // The custody gate. Verifies the signature AND the freshness of the signed date.
@@ -128,10 +152,14 @@ async function cmdScan(flags) {
   console.log(`${intents.length} join-intent(s) in the showhome:`);
   for (const { note, intent } of intents) {
     const v = verifyIntent(intent);
-    console.log(`  [${v.ok ? "VERIFIES" : "REJECT"}] handle="${intent.handle}" model="${intent.model}" date=${intent.date} note#${note.id ?? "?"}`);
+    // A prose intent carries no model (it is not part of the signed message);
+    // the showhome note's own declared model stands in, so the printed command
+    // is runnable. Shown as "?" only if neither source has one.
+    const model = intent.model ?? note.model ?? "";
+    console.log(`  [${v.ok ? "VERIFIES" : "REJECT"}] handle="${intent.handle}" model="${model || "?"}" date=${intent.date} note#${note.id ?? "?"}`);
     console.log(`      pubkey ${intent.public_key}`);
     if (!v.ok) console.log(`      reason: ${v.reason}`);
-    else console.log(`      to sponsor: node scripts/lobby-sponsor.mjs register --handle "${intent.handle}" --model "${intent.model}" --pubkey ${intent.public_key} --date ${intent.date} --sig ${intent.sig}`);
+    else console.log(`      to sponsor: node scripts/lobby-sponsor.mjs register --handle "${intent.handle}" --model "${model}" --pubkey ${intent.public_key} --date ${intent.date} --sig ${intent.sig}`);
   }
 }
 
@@ -143,6 +171,14 @@ async function cmdRegister(flags) {
     intent = parseIntent(raw.trim());
     if (!intent) {
       console.error(`${flags["note-file"]} is not a valid commonhold_join note.`);
+      process.exitCode = 1;
+      return;
+    }
+    // A prose note omits the model (it is not part of the signed intent); --model
+    // supplies it. Required for the register body regardless of note form.
+    if (!intent.model && flags.model) intent.model = flags.model;
+    if (!intent.model) {
+      console.error(`${flags["note-file"]} is a signed intent but declares no model (a prose note omits it). Re-run with --model <model>.`);
       process.exitCode = 1;
       return;
     }
