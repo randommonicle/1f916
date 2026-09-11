@@ -285,15 +285,22 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
 // entries are no longer the original pre-conditional goldens; they are the v4
 // text. The semantic v4 tests at the foot of this file guard the MEANING of the
 // change; these hashes guard that nothing ELSE moved with it.
+// v5 (2026-09-12): the TREASURY paragraph no longer calls the $1 "the society's
+// sybil defence" -- a served-text correction bringing the constitution into line
+// with D-054/D-055/D-062 (the toll is rent and an accountable money-in signal; the
+// real defence belongs at the vote, not the door). Deliberate served-text change,
+// verified by a before/after diff of all eight served pages showing ONLY the
+// TREASURY sentence moved; mints v4->v5 at deploy when buildConstitutionTemplate()
+// recomputes template_hash.
 const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
-  "invite_only,false,false": "391efd65b3e444316cc6b3878314d9e7d5244791095b234ad350ba1edefe1403",
-  "invite_only,false,true": "2f0744b6df9bfbc285982719bff0ffcfe5ba31ba92204690477e2284edc5a39c",
-  "invite_only,true,false": "e3f729d099f13263ac8b717080e08b32bcc09ff3ad6eef54c7fe849aec8dbf84",
-  "invite_only,true,true": "7c84cfd11770eb3b6087fe9a49130d43eb0bc2f7eb6a63a8e50dca79830421bb",
-  "open,false,false": "781a6f9211517e9be61ed404dd12e0d55e3e91e5f10599af8c7ddb156c6a0b78",
-  "open,false,true": "e5677fc9adef3b5f8247492c8f4f96953e993f689146c66afc8503d77257385b",
-  "open,true,false": "4e9c9c2dfa4ff793bf3ac2e620f85cda970452aa0943345076ac9ad482d25a2d",
-  "open,true,true": "cab864164655c67a009ce719cb045a4282926b1561e3198bb3cce1312a64f4e7",
+  "invite_only,false,false": "4cf896b863a841998546dd0a37fb7a711c72adc0abdba06dc14a77e901a1f935",
+  "invite_only,false,true": "cf5b5eccd8dd09bbc6b2c9613b9a87782cd5abd5259c5570797dc866c46c713e",
+  "invite_only,true,false": "165b9b5b75b77db4a7dcdd162ba9179b52cad8fea3c0a4176d9df7981cdb9c1d",
+  "invite_only,true,true": "f988af02feb0ddec63960c87d05d6f4702c289cc41b799e6b897697f0c0eb207",
+  "open,false,false": "11937c6641b817ac7d705656c4c12863b31469c58e139539339f6d92118c6114",
+  "open,false,true": "5b1e052fcd16c070f21a5614b93243825f6769cd59b5b7d5a505d17b784aee42",
+  "open,true,false": "365da5bfa0a41d97f4a67df5cec21cce45b4387c80d23dbeeeeda87d9a91e622",
+  "open,true,true": "02f5365888a3384bb16e136f889d07c97f60511b0c8fd57c66148e2d100a4298",
 };
 
 // The repeal of the founder bounty-priority clause (2026-08-23) must not be

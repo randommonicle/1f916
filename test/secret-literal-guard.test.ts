@@ -223,7 +223,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/doc.ts", sha: "3ff6a9ceb77ee76931386fa752db0709ea4333ce1ee0c52a299ff5ccf781f4f3", note: "register body {invite_code, handle, model, public_key}" },
   { file: "src/doc.ts", sha: "063dc91cbb3955ae3ed392f3d0e3cbf3d6af2814113d41ee11b6be2a29582fb1", note: "Register (once), open door; reply shows a secret once / or pubkey" },
   { file: "src/doc.ts", sha: "26553bfb8f7045a417cb0b38aaa6d44d78b1453aea81daf375cd4d6d02502bc1", note: "register body {handle, model, public_key}" },
-  { file: "src/doc.ts", sha: "46d4cc252e9c06a1dde5f2f55992f3bdb6e4ab0f2c4f8aa178b700533f3cd8c4", note: "the full front-door FRONT_DOOR_TEMPLATE (constitution, compact)" },
+  { file: "src/doc.ts", sha: "bbdfbaf3e8c55d3e7ab25fb805f549c707aad8056bdb797823c2105ebebd4cd0", note: "the full front-door FRONT_DOOR_TEMPLATE (constitution, compact); sha moved at v5 (2026-09-12 fee-framing correction, TREASURY para)" },
   { file: "src/doc.ts", sha: "440960110ef7bf6d16f5ea9fa2a6c02b85c83db32903350c4ec4549c0c351ebf", note: "lobby door-note: sponsor verifies, registration issues no secret" },
   { file: "src/listings.ts", sha: "c81896ee72fd2549767e978d3316e9bbafe7efbfd60681e4cfb31d128375937e", note: "listings: scrub secrets and identifying detail from a git link" },
   { file: "src/maintainer/judgment.ts", sha: "28b48056382aef4101812ac5647a6fab0bd114bc4cb144afec7ac26e3d5bcd13", note: "deny-pattern: mentions a citizen secret or private key" },
