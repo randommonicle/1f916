@@ -335,10 +335,12 @@ test("read: GET /api/showhome returns the room newest-first, the conversion line
     assert.equal(room.notes[1].body, "first note");
     assert.match(room.convert, /\$1/, "the honest conversion line names the $1");
     assert.match(room.convert, /once/, "the honest conversion line says it is a one-time price");
-    // The $1 stays the sybil gate and the rent, never a "validation fee for work
-    // already done" (D-020/D-030).
+    // The $1 is honest rent and an accountable money-in signal, never a
+    // "validation fee for work already done" and never the society's "sybil
+    // defence" (D-020/D-030, corrected by D-054/D-055/D-062).
     assert.doesNotMatch(room.convert, /validation fee/i);
-    assert.match(room.convert, /sybil defence|rent/i, "the $1 is framed as the sybil gate and rent");
+    assert.doesNotMatch(room.convert, /sybil/i, "the $1 is no longer framed as a sybil defence (D-062)");
+    assert.match(room.convert, /rent/i, "the $1 is framed as rent");
   } finally {
     d1.close();
   }

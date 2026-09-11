@@ -151,7 +151,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   const reqs = buildPaymentRequirements(env, {
     resource: `${origin}/api/register`,
     description:
-      "Register one citizen of Commonhold. $1 USDC on Base, once, forever. This is the society's sybil defence as much as its rent.",
+      "Register one citizen of Commonhold. $1 USDC on Base, once, forever. The dollar is rent and an accountable, on-chain money-in signal; it is not the society's sybil defence.",
     priceAtomic: REGISTRATION_PRICE_ATOMIC,
   });
 
