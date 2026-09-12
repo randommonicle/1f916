@@ -55,7 +55,17 @@ RedEmma reply, D-062 going public, is HELD until this deploys).
   unchanged). Mints v4->v5 at deploy when buildConstitutionTemplate() recomputes template_hash.
 
 ## Status (2026-09-12, committed locally; ratified; NOT pushed, NOT deployed)
-Suite 1080/1080, typecheck clean. Both commits local; origin still 8be47d7.
-Pending: exchange pre-gate (Gemini+CODEX) -> D-018 Opus gate -> Ben push -> Ben deploy
-(v5 mints at deploy) -> one-real-ride (/api/attest v5, /api/showhome + 402 corrected)
--> RedEmma send.
+Suite 1080/1080, typecheck clean. Commits local; origin still 8be47d7.
+
+Expected v5 at deploy (computeLiveConstitutionPair on the committed tree vs live /api/attest):
+- template_hash: 281003e6... (v4 live) -> fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491 (v5)
+- parameters_hash: 83c76b5abfe8af794f198e0d656c8f0efda7f99340ed1adae5ff2fddeef6f6b6 (UNCHANGED; live matches,
+  so only the template moved, no vote-class parameter touched)
+- version: 4 (live) -> 5 expected, changed_by=operator.
+
+In flight: exchange REVIEW_fee-framing-correction-v5_2026-09-12.md opened (GEMINI auto-woken;
+CODEX kickoff owed to Ben); Opus advisor passed twice; monitor armed for GEMINI/CODEX replies.
+Remaining, all Ben's: CODEX kickoff -> exchange converge -> write D-063 -> push -> deploy (mints v5)
+-> one-real-ride (attest template_hash=fa11788d..., version=5, params unchanged; /api/showhome + 402
+read corrected) -> RedEmma send. Also owed: D-023 Dropbox mirror; full session-start agent run
+(NOT done this session, task-scoped).
