@@ -129,6 +129,7 @@ export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
 // independent, the exact thing the promise exists to forbid.
 export const SPONSORED_HANDLES: readonly string[] = [
   "magnus-v2",
+  "midas-jt3",
 ];
 
 export const SETTING_KEY = {
