@@ -30,16 +30,16 @@ RedEmma reply, D-062 going public, is HELD until this deploys).
       (negative assertion load-bearing, red-proofed). DONE 631f2a1.
 - [x] Commit B (v5 MINT): reword doc.ts:263 constitution TREASURY prose;
       regenerate doc.test.ts golden fixtures deliberately. DONE (this commit).
-- [ ] Ben ratifies the exact constitution wording (governance act; D-056 ruling 4).
-- [ ] Exchange pre-gate (Gemini + CODEX), then D-018 Opus gate (authority-bearing text).
+- [x] Ben ratified the exact constitution wording (2026-09-12; D-056 ruling 4).
+- [x] Exchange converged DEPLOYABLE (GEMINI + CODEX, 2026-09-13); D-018 Opus gate DEPLOYABLE (docs/REVIEW-V5-FEE-FRAMING-GATE-2026-09-13.md).
 - [x] flag-deferred-items: add "fee-as-defence framing" named class + grep flag to
       docs/BRIEF-HARDENING-2.md (I-008 build-time served-text gate). DONE: §5a,
       grep token DEFERRED-FEE-FRAMING-GATE.
-- [ ] Ben push (per-action approval).
-- [ ] Ben deploy (v5 mints at deploy; changed_by=operator).
-- [ ] one-real-ride: GET /api/attest shows v5; /api/showhome + 402 read corrected.
-- [ ] RedEmma reply sent (Ben) AFTER deploy verified.
-- [ ] DECISIONS.md pointer (correction as operator act) + LESSONS if warranted.
+- [x] Pushed the v5 commits (2026-09-13; origin ecccf63).
+- [x] Deployed (2026-09-13; npx wrangler deploy; v5 minted).
+- [x] one-real-ride GREEN (2026-09-13): /api/attest version 5, changed_by operator, identity 21->22, template_hash fa11788d..., parameters_hash unchanged; /api/showhome + register 402 read corrected.
+- [x] RedEmma reply SENT (2026-09-13; 1f916 comment 58844 on post 4580); D-062 now public.
+- [x] DECISIONS D-063 stamped DEPLOYED+VERIFIED (2026-09-13). LESSONS pending Ben: L-054 + a parallel-work-recon miss.
 
 ## Commit log
 - **Commit A 631f2a1 (non-minting served text + test).** Reworded the 402-challenge
@@ -54,7 +54,7 @@ RedEmma reply, D-062 going public, is HELD until this deploys).
   46d4cc25...->bbdfbaf3... via the guard's own lexer (other 5 doc.ts secret-literals
   unchanged). Mints v4->v5 at deploy when buildConstitutionTemplate() recomputes template_hash.
 
-## Status (2026-09-12, committed locally; ratified; NOT pushed, NOT deployed)
+## Status (2026-09-12 pre-deploy record; superseded by the Closeout at the end of this file)
 Suite 1080/1080, typecheck clean. Commits local; origin still 8be47d7.
 
 Expected v5 at deploy (computeLiveConstitutionPair on the committed tree vs live /api/attest):
@@ -69,3 +69,13 @@ Remaining, all Ben's: CODEX kickoff -> exchange converge -> write D-063 -> push 
 -> one-real-ride (attest template_hash=fa11788d..., version=5, params unchanged; /api/showhome + 402
 read corrected) -> RedEmma send. Also owed: D-023 Dropbox mirror; full session-start agent run
 (NOT done this session, task-scoped).
+
+## Closeout (2026-09-13): DEPLOYED, MINTED, VERIFIED; RedEmma SENT
+- Exchange converged DEPLOYABLE across GEMINI + CODEX (CODEX conceded the "each seat" quantifier objection; hashes independently re-derived). Record: exchange/REVIEW_fee-framing-correction-v5_2026-09-12.md, all sections [[CONVERGED]].
+- D-018 Opus gate: DEPLOYABLE, 0 HIGH / 0 MED / 3 LOW (all non-blocking). Record: docs/REVIEW-V5-FEE-FRAMING-GATE-2026-09-13.md (committed with this checkpoint).
+- Pushed + deployed (Ben, 2026-09-13). v5 minted and verified live on /api/attest: version 5, changed_by operator, first_seen_at set, template_hash fa11788d... (was 281003e6...), parameters_hash 83c76b5... UNCHANGED. Identity chain 21 -> 22 (the constitution_changed seal); treasury 11 / ballots 14 / payouts genesis unchanged. /api/constitution/versions total 5 with the v5 row.
+- All three served surfaces confirmed corrected live: /api/showhome convert (GET); register 402 description (POST /api/register returns 402 with the rent/money-in text); constitution TREASURY prose (via the live template_hash).
+- The mint queues one review-only constitution_fidelity item at the next judgment wake (Sun 07:00 UTC), expected verdict "no mandate" (correct for an operator edit); one bounded model call.
+- RedEmma reply SENT (Ben ran the .ps1) and verified: 1f916 comment 58844 on post 4580, parent 54545, author commonhold-envoy; body matches the staged text; it is the thread tail. D-062 is now public.
+- DECISIONS: D-063 stamped DEPLOYED+VERIFIED (2026-09-13). Dropbox mirror refreshed (D-023). HANDOVER Addendum 59 written.
+- Process note (banked): a stale-snapshot round-2 was appended to the exchange while the seats converged in parallel (live-state-first / parallel-work-recon miss); closed cleanly with a round-3. Candidate lesson, pending Ben.
