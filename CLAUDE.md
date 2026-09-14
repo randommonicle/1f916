@@ -11,17 +11,27 @@ travel with the repo.
 are in `.claude/skills/UPSTREAM.md`. Do not edit those skills in place; re-run the installer
 to change the set.
 
-Sessions launch from the parent folder, one level up, so these skills are a subdirectory
-away and the harness serves them **path-scoped**: `society:seo-audit`, `society:pricing`,
-`society:content-strategy`. Call them by the scoped name from a parent-folder session;
-a session launched inside this repo sees them unscoped. Discovery is dynamic, so they may
-not appear in a session's opening listing and still load when called. No junction or other
-per-machine setup is needed (one was created and then removed on 2026-09-14, after a test
-session proved the scoped names work; `mklink /J` from the parent's `.claude\skills` to
-this directory is the fallback if a machine ever fails to reach them).
+Sessions launch from the parent folder, one level up, and a session's opening skill
+listing is built from the `.claude/skills/` of the directory it launched in; nothing below
+it is included. So each machine needs a directory junction from the parent's
+`.claude\skills` to this directory, created once (cmd.exe or PowerShell, no admin):
 
-A skill installed while a session is already running is not invocable in that session.
-Install first, then start a new session.
+```
+mklink /J "<parent>\.claude\skills" "<parent>\society\.claude\skills"
+```
+
+Through it the pack is in the listing from the first message under its **bare** names:
+`seo-audit`, `pricing`, `content-strategy`. Two things the harness also does, recorded so
+nobody rebuilds a decision on them: it can discover this directory lazily during a session,
+after a file tool touches something under `society/`, and then list the same skills a
+second time as `society:seo-audit` and so on (one session in two got this on 2026-09-14);
+and a skill directory that appears at the launch directory mid-session can be picked up by
+a call. Neither is relied on. The junction was removed on 2026-09-14 on the strength of the
+first of those and restored the same night when a fresh session without it listed none of
+the pack; the guardrail library's LESSONS 14 has the account.
+
+Launch in the right directory and use a fresh session after installing skills; that is
+practice, not a claimed harness rule (an earlier version of this file stated it as one).
 
 Copy produced through those skills gets `unslop-text` as the final pass (the pack is written
 in the register that skill strips). Any customer-facing claim, statistic or certification
