@@ -41,11 +41,17 @@ import {
   encodePaymentHeader,
   describeWouldSign,
 } from "./register-maintainer.mjs";
+import { readFunderSecret } from "./pay-listing.mjs";
 
 export const DEFAULT_URL = "https://commonhold.randommonicle.workers.dev";
 export const TARGET = `${DEFAULT_URL}/api/listing`; // pinned; no --url override
 const WALLET_PATH = resolve(process.cwd(), "..", "payer-wallet.local.json");
-const FUNDER_SECRET_PATH = resolve(process.cwd(), "..", "maintainer-secret.local.txt"); // commonhold-agent = the v1 funder
+// commonhold-agent = the v1 funder. Its CITIZEN secret was rolled on 2026-09-13
+// (L-056) into commonhold-agent-registration.local.json ({handle, secret});
+// maintainer-secret.local.txt holds the rolled-away original, which still
+// serves as the worker's MAINTAINER_SECRET but no longer authenticates as a
+// citizen (401 "Unknown secret", probed 2026-09-15).
+const FUNDER_SECRET_PATH = resolve(process.cwd(), "..", "commonhold-agent-registration.local.json");
 const TOMBSTONE_DIR = resolve(process.cwd(), "..", ".x402-tombstones");
 
 const EXPECTED_NETWORK = "base";
@@ -343,7 +349,14 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const funderSecret = readFileSync(FUNDER_SECRET_PATH, "utf8").trim();
+  let funderSecret = "";
+  try {
+    funderSecret = readFunderSecret(readFileSync(FUNDER_SECRET_PATH, "utf8"));
+  } catch (e) {
+    console.error(`Funder custody file unusable: ${e.message ?? e}. Refusing.`);
+    process.exitCode = 1;
+    return;
+  }
   if (!funderSecret) {
     console.error(`${FUNDER_SECRET_PATH} is empty.`);
     process.exitCode = 1;
