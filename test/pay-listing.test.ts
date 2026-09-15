@@ -410,6 +410,8 @@ test("execute: a 402 second leg whose nonce the chain says is UNUSED becomes a '
   const r = await payListing({ ...RUN, execute: true }, deps);
   assert.equal(r.reason, "leg2_refused");
   assert.match(String(r.message), /Nothing was paid/);
+  // the time the operator is told to wait for is the gate's time: validBefore + margin
+  assert.match(String(r.message), new RegExp("re-run is allowed after " + new Date((VALID_BEFORE + RETRY_MARGIN_SECONDS) * 1000).toISOString().replace(/[.]/g, "[.]")));
   const t = JSON.parse(store()!);
   assert.equal(t.status, "refused");
   assert.equal(t.nonce, NONCE);

@@ -425,7 +425,7 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
       const used = await deps.authorizationUsed(sent.from, sent.nonce);
       if (used === false) {
         deps.writeAtomic(tombPath, JSON.stringify({ status: "refused", key, target, ...purchase, from: sent.from, nonce: sent.nonce, valid_before: sent.validBefore, http_status: second.status, refused_at: deps.nowSeconds(), detail: secondText.slice(0, 2000) }, null, 2));
-        return { ...base, ok: false, exitCode: 1, reason: "leg2_refused", message: `The server refused the signed payment (HTTP ${second.status}) and the chain confirms the authorization was not executed. Nothing was paid. Recorded as 'refused'; a re-run is allowed after ${new Date(sent.validBefore * 1000).toISOString()} (when the signed authorization can no longer be executed by anyone).`, detail: secondText };
+        return { ...base, ok: false, exitCode: 1, reason: "leg2_refused", message: `The server refused the signed payment (HTTP ${second.status}) and the chain confirms the authorization was not executed. Nothing was paid. Recorded as 'refused'; a re-run is allowed after ${new Date((sent.validBefore + RETRY_MARGIN_SECONDS) * 1000).toISOString()} (the signed authorization's validBefore plus a ${RETRY_MARGIN_SECONDS}s clock-skew margin, when nobody holding it can execute it).`, detail: secondText };
       }
     } catch {
       // fall through: keep 'signing'
