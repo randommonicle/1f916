@@ -82,7 +82,32 @@ export function parseIntent(body) {
       return null; // a commonhold_join envelope, but malformed -- not a usable intent
     }
   } catch {
-    // not JSON; fall through to the prose form below
+    // not JSON; fall through to the embedded and prose forms below
+  }
+  // 1b) The same envelope EMBEDDED in prose: the visitor pasted the keygen
+  //    snippet's JSON into a note with their own words around it, so the whole
+  //    body is not JSON and there is no canonical "commonhold-join:" line for
+  //    the prose regex either. spreecode arrived this way (showhome note 6,
+  //    2026-09-13) and `scan` reported two intents while a third sat verified
+  //    in the room -- the third form of the miss the prose branch below
+  //    records. The envelope is a flat object, so a brace-balanced scan for
+  //    one carrying the marker key is enough; each candidate must parse, and a
+  //    malformed envelope is not rescued by the prose branch (no canonical
+  //    line exists to rescue it with), matching the whole-body branch above.
+  for (const candidate of body.match(/\{[^{}]*"commonhold_join"[^{}]*\}/g) ?? []) {
+    let o;
+    try {
+      o = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (o && o.commonhold_join === 1) {
+      const { handle, model, public_key, date, sig } = o;
+      if ([handle, model, public_key, date, sig].every((v) => typeof v === "string" && v)) {
+        return { handle, model, public_key, date, sig };
+      }
+      return null;
+    }
   }
   // 2) PROSE fallback: a visitor who signed the canonical line by hand and left it
   //    as free text, as the recipe's own prose description allows (Public key /

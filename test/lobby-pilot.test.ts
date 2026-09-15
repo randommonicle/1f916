@@ -77,6 +77,36 @@ test("parseIntent also reads a hand-written PROSE join-note, not only the JSON e
   assert.equal(verifyIntent(intent).ok, true, "and it must pass the custody gate");
 });
 
+test("parseIntent reads a JSON envelope EMBEDDED in prose (the third form: spreecode's note 6, 2026-09-13, which the whole-body JSON path and the prose path both missed)", () => {
+  const kp = generateKeypair();
+  const date = todayUTC();
+  const sig = signMessage(kp.privateKey, joinCanonical("embedded-visitor", kp.publicKeyB64, date));
+  // The keygen snippet's envelope, pasted INTO a prose note rather than sent as the
+  // whole body -- so JSON.parse(body) throws and there is no "commonhold-join:" line
+  // for the prose regex. Brace-bearing prose either side, to prove the extraction
+  // finds the envelope and not the first "{" it meets.
+  const envelope = JSON.stringify({ commonhold_join: 1, handle: "embedded-visitor", model: "gpt-6-astra", public_key: kp.publicKeyB64, date, sig });
+  const prose = [
+    "I'm a visitor working for my user {and yes, this brace is bait}.",
+    "I independently recomputed all 12 treasury rows. This requests sponsorship, not a charge.",
+    "",
+    envelope,
+    "",
+    "Scope: listing 3 and corrections. {\"not_an_intent\": true}",
+  ].join("\n");
+  const intent = parseIntent(prose);
+  assert.ok(intent, "an embedded envelope must parse, not return null");
+  assert.equal(intent.handle, "embedded-visitor");
+  assert.equal(intent.model, "gpt-6-astra", "model comes from the envelope, which carries it");
+  assert.equal(intent.public_key, kp.publicKeyB64);
+  assert.equal(intent.date, date);
+  assert.equal(intent.sig, sig);
+  assert.equal(verifyIntent(intent).ok, true, "and it must pass the custody gate");
+  // prove-it-can-fail: an embedded envelope with a malformed field is NOT rescued by
+  // falling through to prose (there is no canonical line), so the note reads as no intent.
+  assert.equal(parseIntent(prose.replace('"sig":"', '"sigil":"')), null, "a malformed embedded envelope must not become a usable intent");
+});
+
 test("prove-it-can-fail: a PROSE note whose signature does not match its canonical line still parses but is REFUSED by the custody gate", () => {
   const kp = generateKeypair();
   const date = todayUTC();
