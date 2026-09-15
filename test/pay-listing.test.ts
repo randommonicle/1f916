@@ -18,6 +18,8 @@ import {
   validatePayRequirements,
   validatePayReceipt,
   checkSettlementHeader,
+  decodeSentAuthorization,
+  refusedRetryDecision,
   classifyTombstone,
   parseArgs,
   readFunderSecret,
@@ -107,6 +109,9 @@ test("validatePayRequirements refuses a resource that is not the exact target, w
   assert.throws(() => validatePayRequirements(goodReqs({ network: "base-sepolia" }), gate), /network/);
   assert.throws(() => validatePayRequirements(goodReqs({ extra: { name: "USD Coin", version: "1" } }), gate), /extra: expected EIP-712 domain/);
   assert.throws(() => validatePayRequirements(goodReqs({ maxTimeoutSeconds: 86400 }), gate), /maxTimeoutSeconds/);
+  // GEMINI r1 p4: the worker emits 300; a wider window is refused
+  assert.throws(() => validatePayRequirements(goodReqs({ maxTimeoutSeconds: 3600 }), gate), /maxTimeoutSeconds: expected a positive integer <= 300/);
+  assert.doesNotThrow(() => validatePayRequirements(goodReqs({ maxTimeoutSeconds: 300 }), gate));
 });
 
 test("validatePayRequirements collects every mismatch in one refusal", () => {
@@ -138,10 +143,14 @@ function goodReceipt(overrides: Record<string, unknown> = {}) {
 }
 
 test("validatePayReceipt accepts the receipt that describes our purchase", () => {
-  assert.deepEqual(validatePayReceipt(goodReceipt(), PURCHASE), []);
+  assert.deepEqual(validatePayReceipt(goodReceipt(), { ...PURCHASE, payer: PAYER }), []);
+  // GEMINI r1 p3: a receipt naming another payer is a contradiction
+  assert.match(validatePayReceipt(goodReceipt({ payer_address: PAYEE }), { ...PURCHASE, payer: PAYER }).join(), /payer_address: expected the signing account/);
+  assert.match(validatePayReceipt(goodReceipt(), PURCHASE as any).join(), /payer_address/, "no payer supplied means no receipt can pass");
 });
 
 test("validatePayReceipt names every contradiction", () => {
+  const PURCHASE = { listingId: 3, submissionId: 1, payee: PAYEE, amountCents: 1200, payer: PAYER };
   assert.match(validatePayReceipt(goodReceipt({ payee_address: "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" }), PURCHASE).join("\n"), /payee_address/);
   assert.match(validatePayReceipt(goodReceipt({ amount_cents: 1199 }), PURCHASE).join("\n"), /amount_cents/);
   assert.match(validatePayReceipt(goodReceipt({ submission_id: 2 }), PURCHASE).join("\n"), /submission_id/);
@@ -189,7 +198,14 @@ function settlementHeader(tx: string) {
   return Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "base", payer: "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" })).toString("base64");
 }
 
-function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any } = {}) {
+const PAYER = "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16";
+const NONCE = "0x" + "11".repeat(32);
+const VALID_BEFORE = 1_800_000_300;
+function sentHeader(from = PAYER, nonce = NONCE, validBefore = VALID_BEFORE) {
+  return Buffer.from(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { signature: "0xsig", authorization: { from, to: PAYEE, value: "12000000", validAfter: "1", validBefore: String(validBefore), nonce } } })).toString("base64");
+}
+
+function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any; balance?: bigint | Error; nonceUsed?: boolean | Error; now?: number } = {}) {
   const calls: Call[] = [];
   let store: string | null = opts.existing ?? null;
   const deps = {
@@ -211,12 +227,15 @@ function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { 
     },
     writeAtomic: (p: string, data: string) => { calls.push({ kind: "writeAtomic", p, data }); store = data; },
     mkdir: (d: string) => { calls.push({ kind: "mkdir", d }); },
-    sign: async (reqs: unknown) => { calls.push({ kind: "sign", reqs }); if (opts.signThrows) throw new Error("no key"); return "PAYMENT-HEADER"; },
+    sign: async (reqs: unknown) => { calls.push({ kind: "sign", reqs }); if (opts.signThrows) throw new Error("no key"); return sentHeader(); },
+    usdcBalanceAtomic: async (addr: string) => { calls.push({ kind: "usdcBalanceAtomic", addr }); const b = opts.balance ?? 12_000_000n; if (b instanceof Error) throw b; return b; },
+    authorizationUsed: async (from: string, nonce: string) => { calls.push({ kind: "authorizationUsed", from, nonce }); const u = opts.nonceUsed ?? false; if (u instanceof Error) throw u; return u; },
+    nowSeconds: () => opts.now ?? 1_800_000_000,
   };
   return { deps, calls, store: () => store };
 }
 
-const RUN = { ...PURCHASE, maxAmountCents: 2000, target: TARGET, funderSecret: "commonhold_sk_" + "1".repeat(64) };
+const RUN = { ...PURCHASE, maxAmountCents: 2000, target: TARGET, funderSecret: "commonhold_sk_" + "1".repeat(64), payer: PAYER };
 
 test("dry run: one authenticated 402 probe with redirect:error, requirements validated, NEVER signs, writes nothing", async () => {
   const { deps, calls } = fakeDeps();
@@ -236,7 +255,7 @@ test("execute: mkdir + exclusive tombstone BEFORE sign, then leg 2, then the set
   assert.equal(r.reason, "settled");
   assert.equal(r.tx, "0x" + "ab".repeat(32));
   const order = calls.map((c) => c.kind);
-  assert.deepEqual(order, ["exists", "fetch:leg1", "mkdir", "writeExclusive", "sign", "fetch:leg2", "writeAtomic"]);
+  assert.deepEqual(order, ["exists", "fetch:leg1", "usdcBalanceAtomic", "mkdir", "writeExclusive", "sign", "fetch:leg2", "writeAtomic"]);
   const settled = JSON.parse(store()!);
   assert.equal(settled.status, "settled");
   assert.equal(settled.payee, PAYEE);
@@ -271,7 +290,8 @@ test("execute: a contradictory 200 (payee_address differs) leaves the tombstone 
 });
 
 test("execute: the server's settled-but-unrecorded 500 leaves the tombstone 'signing' with the recovery message", async () => {
-  const { deps, store } = fakeDeps({ second: { status: 500, body: { error: "Your payment settled (tx 0xabc) but recording it failed." } } });
+  // money moved, so the chain reports our nonce as USED: the record must stay 'signing'
+  const { deps, store } = fakeDeps({ second: { status: 500, body: { error: "Your payment settled (tx 0xabc) but recording it failed." } }, nonceUsed: true });
   const r = await payListing({ ...RUN, execute: true }, deps);
   assert.equal(r.reason, "leg2_not_200");
   assert.match(String(r.message), /DO NOT re-run/);
@@ -319,12 +339,15 @@ test("an amount over the cap is refused before any network call", async () => {
 
 test("checkSettlementHeader: present + success + same tx passes; missing, undecodable, failed, or a different tx are named", () => {
   const tx = "0x" + "ab".repeat(32);
-  assert.deepEqual(checkSettlementHeader(settlementHeader(tx), tx), []);
-  assert.deepEqual(checkSettlementHeader(settlementHeader(tx.toUpperCase().replace("0X", "0x")), tx), [], "tx hashes are case-insensitive hex");
-  assert.match(checkSettlementHeader(null, tx).join(), /header missing/);
-  assert.match(checkSettlementHeader("%%%not-base64-json", tx).join(), /not base64-encoded JSON/);
-  assert.match(checkSettlementHeader(Buffer.from(JSON.stringify({ success: false, transaction: tx })).toString("base64"), tx).join(), /success is not true/);
-  assert.match(checkSettlementHeader(settlementHeader("0x" + "cd".repeat(32)), tx).join(), /does not match the body's tx/);
+  assert.deepEqual(checkSettlementHeader(settlementHeader(tx), tx, PAYER), []);
+  assert.deepEqual(checkSettlementHeader(settlementHeader(tx.toUpperCase().replace("0X", "0x")), tx, PAYER.toUpperCase().replace("0X", "0x")), [], "tx hashes and addresses are case-insensitive hex");
+  assert.match(checkSettlementHeader(null, tx, PAYER).join(), /header missing/);
+  assert.match(checkSettlementHeader("%%%not-base64-json", tx, PAYER).join(), /not base64-encoded JSON/);
+  assert.match(checkSettlementHeader(Buffer.from(JSON.stringify({ success: false, transaction: tx, network: "base", payer: PAYER })).toString("base64"), tx, PAYER).join(), /success is not true/);
+  assert.match(checkSettlementHeader(settlementHeader("0x" + "cd".repeat(32)), tx, PAYER).join(), /does not match the body's tx/);
+  // GEMINI r1 p5: network and payer are checked too
+  assert.match(checkSettlementHeader(Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "base-sepolia", payer: PAYER })).toString("base64"), tx, PAYER).join(), /network "base-sepolia" is not "base"/);
+  assert.match(checkSettlementHeader(Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "base", payer: PAYEE })).toString("base64"), tx, PAYER).join(), /payer .* is not the account that signed/);
 });
 
 test("execute: a 402 carrying MORE than one payment alternative is refused with nothing signed (CODEX finding 1)", async () => {
@@ -351,10 +374,92 @@ test("execute: a 200 whose X-PAYMENT-RESPONSE is missing or names another tx lea
 
 test("payListing re-validates its numeric arguments at the exported boundary, before the bearer is used", async () => {
   const { deps, calls } = fakeDeps();
+  const noPayer = await payListing({ ...RUN, payer: null, execute: true }, deps);
+  assert.equal(noPayer.reason, "argument_invalid");
+  assert.match(String(noPayer.message), /payer/);
   for (const bad of [{ listingId: 3.5 }, { submissionId: 0 }, { amountCents: -1200 }, { maxAmountCents: Number.NaN }, { amountCents: 2 ** 53 }]) {
     const r = await payListing({ ...RUN, ...bad, target: payTarget((bad as any).listingId ?? 3), execute: true }, deps);
     assert.equal(r.reason, "argument_invalid", JSON.stringify(bad));
   }
   assert.deepEqual(calls, []);
+});
+
+// ---------- GEMINI round 1: balance pre-check, refused leg 2, retry rule ----------
+
+test("execute: the balance is read BEFORE the tombstone and the sign; an underfunded payer is refused with nothing written (the live $5.17 case)", async () => {
+  const { deps, calls, store } = fakeDeps({ balance: 5_174_821n });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "balance_insufficient");
+  assert.match(String(r.message), /holds 5.174821 USDC, less than the 12.00 USDC/);
+  assert.deepEqual(calls.map((c) => c.kind), ["exists", "fetch:leg1", "usdcBalanceAtomic"]);
+  assert.equal(store(), null);
+});
+
+test("execute: an unreadable balance refuses to sign (fail closed)", async () => {
+  const { deps, calls } = fakeDeps({ balance: new Error("every RPC refused") });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "balance_unknown");
+  assert.ok(!calls.some((c) => c.kind === "sign" || c.kind === "writeExclusive"));
+});
+
+test("execute: a 402 second leg whose nonce the chain says is UNUSED becomes a 'refused' tombstone, not a wedge", async () => {
+  const { deps, calls, store } = fakeDeps({ second: { status: 402, body: { x402Version: 1, error: "insufficient funds", accepts: [goodReqs()] } }, nonceUsed: false });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "leg2_refused");
+  assert.match(String(r.message), /Nothing was paid/);
+  const t = JSON.parse(store()!);
+  assert.equal(t.status, "refused");
+  assert.equal(t.nonce, NONCE);
+  assert.equal(t.from, PAYER);
+  assert.equal(t.valid_before, VALID_BEFORE);
+  assert.ok(calls.some((c) => c.kind === "authorizationUsed" && c.nonce === NONCE && c.from === PAYER));
+});
+
+test("execute: a non-200 second leg whose nonce the chain says IS used, or cannot be checked, keeps 'signing'", async () => {
+  const used = fakeDeps({ second: { status: 500, body: { error: "settled but unrecorded" } }, nonceUsed: true });
+  const r1 = await payListing({ ...RUN, execute: true }, used.deps);
+  assert.equal(r1.reason, "leg2_not_200");
+  assert.equal(JSON.parse(used.store()!).status, "signing");
+
+  const dark = fakeDeps({ second: { status: 402, body: { error: "x" } }, nonceUsed: new Error("rpc down") });
+  const r2 = await payListing({ ...RUN, execute: true }, dark.deps);
+  assert.equal(r2.reason, "leg2_not_200");
+  assert.equal(JSON.parse(dark.store()!).status, "signing");
+});
+
+test("refusedRetryDecision: retry only after valid_before, and never if the chain now says the nonce was used", () => {
+  const refused = { status: "refused", valid_before: VALID_BEFORE };
+  assert.equal(refusedRetryDecision(refused, VALID_BEFORE - 1, false).retry, false);
+  assert.equal(refusedRetryDecision(refused, VALID_BEFORE, false).retry, false);
+  assert.equal(refusedRetryDecision(refused, VALID_BEFORE + 1, false).retry, true);
+  assert.match(refusedRetryDecision(refused, VALID_BEFORE + 1, true).reason, /HAS been executed/);
+  assert.equal(refusedRetryDecision({ status: "refused" }, VALID_BEFORE + 1, false).retry, false);
+});
+
+test("execute: a 'refused' tombstone blocks a re-run while the earlier authorization is still valid, and allows one (atomic replace, not wx) after it expires", async () => {
+  const refusedRecord = JSON.stringify({ status: "refused", key: "k", from: PAYER, nonce: NONCE, valid_before: VALID_BEFORE });
+  const early = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE - 10 });
+  const r1 = await payListing({ ...RUN, execute: true }, early.deps);
+  assert.equal(r1.reason, "tombstone_blocks");
+  assert.match(String(r1.message), /still valid until/);
+  assert.ok(!early.calls.some((c) => c.kind.startsWith("fetch")));
+
+  const late = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE + 10 });
+  const r2 = await payListing({ ...RUN, execute: true }, late.deps);
+  assert.equal(r2.reason, "settled", JSON.stringify(r2));
+  const order = late.calls.map((c) => c.kind);
+  assert.ok(order.indexOf("authorizationUsed") < order.indexOf("fetch:leg1"), "the chain is asked before any network call");
+  assert.ok(order.includes("writeAtomic") && !order.slice(0, order.indexOf("sign")).includes("writeExclusive"), "the refused record is REPLACED atomically, never wx'd over");
+  assert.equal(JSON.parse(late.store()!).status, "settled");
+
+  const executedMeanwhile = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE + 10, nonceUsed: true });
+  const r3 = await payListing({ ...RUN, execute: true }, executedMeanwhile.deps);
+  assert.equal(r3.reason, "tombstone_blocks");
+  assert.match(String(r3.message), /HAS been executed/);
+});
+
+test("decodeSentAuthorization reads from, nonce and validBefore back out of the header we sent, and rejects a malformed one", () => {
+  assert.deepEqual(decodeSentAuthorization(sentHeader()), { from: PAYER, nonce: NONCE, validBefore: VALID_BEFORE });
+  assert.throws(() => decodeSentAuthorization(Buffer.from(JSON.stringify({ payload: { authorization: { from: PAYER, nonce: "0x12" } } })).toString("base64")), /well-formed authorization/);
 });
 

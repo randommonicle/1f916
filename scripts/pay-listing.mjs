@@ -26,6 +26,14 @@
 //   - the 200 body is validated against what we AUTHORISED (payee_address,
 //     amount_cents, submission_id, listing_id, a non-empty tx,
 //     listing_marked_paid:true) before the tombstone becomes terminal.
+//   - two read-only chain reads over public Base RPCs (no key): the payer's
+//     USDC balance is checked BEFORE the tombstone and the sign (an
+//     underfunded payer refuses cleanly instead of wedging on its own
+//     'signing' record), and after a refused second leg the chain is asked
+//     whether OUR nonce (authorizationState) was executed -- if not, the
+//     record becomes 'refused' and may be retried only after the signed
+//     authorization's validBefore has passed and the chain still says
+//     unexecuted. Both reads fail CLOSED. (exchange 2026-09-15, GEMINI r1.)
 //   - the bearer is commonhold-agent's CITIZEN secret, read from
 //     commonhold-agent-registration.local.json -- the file scripts/
 //     roll-citizen-secret.mjs wrote on 2026-09-13 (L-056). The older
@@ -57,6 +65,7 @@ const EXPECTED_NETWORK = "base";
 const EXPECTED_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC_BASE, register-maintainer.mjs:81
 const EXPECTED_DOMAIN_NAME = "USD Coin";
 const EXPECTED_DOMAIN_VERSION = "2";
+const EXPECTED_MAX_TIMEOUT_SECONDS = 300; // x402.ts buildPaymentRequirements: maxTimeoutSeconds 300
 const FUNDER_HANDLE = "commonhold-agent"; // the v1 funder of every listing so far (DECISIONS.md D-014)
 const DEFAULT_MAX_AMOUNT_CENTS = 2000; // $20 hard cap for this single-shot; the largest open bounty is $15
 
@@ -104,14 +113,16 @@ export function validatePayRequirements(reqs, { payee, amountCents, maxAmountCen
   if (reqs.maxAmountRequired !== expectedAtomic) problems.push(`maxAmountRequired: expected exactly "${expectedAtomic}" (the pinned bounty $${(amountCents / 100).toFixed(2)}), got ${JSON.stringify(reqs.maxAmountRequired)}`);
   if (typeof reqs.resource !== "string" || reqs.resource !== resource) problems.push(`resource: expected exactly "${resource}", got ${JSON.stringify(reqs.resource)}`);
   if (!reqs.extra || reqs.extra.name !== EXPECTED_DOMAIN_NAME || reqs.extra.version !== EXPECTED_DOMAIN_VERSION) problems.push(`extra: expected EIP-712 domain {name:${JSON.stringify(EXPECTED_DOMAIN_NAME)},version:${JSON.stringify(EXPECTED_DOMAIN_VERSION)}}, got ${JSON.stringify(reqs.extra)}`);
-  if (!Number.isInteger(reqs.maxTimeoutSeconds) || reqs.maxTimeoutSeconds <= 0 || reqs.maxTimeoutSeconds > 3600) problems.push(`maxTimeoutSeconds: expected a sane positive integer (<=3600), got ${JSON.stringify(reqs.maxTimeoutSeconds)}`);
+  // The worker emits exactly 300 (x402.ts buildPaymentRequirements); a larger window
+  // would only widen how long a signed authorization stays executable (GEMINI r1 p4).
+  if (!Number.isInteger(reqs.maxTimeoutSeconds) || reqs.maxTimeoutSeconds <= 0 || reqs.maxTimeoutSeconds > EXPECTED_MAX_TIMEOUT_SECONDS) problems.push(`maxTimeoutSeconds: expected a positive integer <= ${EXPECTED_MAX_TIMEOUT_SECONDS}, got ${JSON.stringify(reqs.maxTimeoutSeconds)}`);
   if (problems.length > 0) throw new Error("payment requirements did not match, refusing to sign:\n  " + problems.join("\n  "));
   return reqs;
 }
 
 // The 200 receipt must describe the purchase we authorised, or the tombstone
 // stays 'signing' and the operator reconciles from chain.
-export function validatePayReceipt(body, { listingId, submissionId, payee, amountCents }) {
+export function validatePayReceipt(body, { listingId, submissionId, payee, amountCents, payer }) {
   const problems = [];
   if (!body || typeof body !== "object") return ["receipt is not a JSON object"];
   if (body.listing_id !== listingId) problems.push(`listing_id: expected ${listingId}, got ${JSON.stringify(body.listing_id)}`);
@@ -120,13 +131,18 @@ export function validatePayReceipt(body, { listingId, submissionId, payee, amoun
   if (body.amount_cents !== amountCents) problems.push(`amount_cents: expected ${amountCents}, got ${JSON.stringify(body.amount_cents)}`);
   if (typeof body.tx !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(body.tx)) problems.push(`tx: expected a 0x-prefixed 32-byte hash, got ${JSON.stringify(body.tx)}`);
   if (body.listing_marked_paid !== true) problems.push(`listing_marked_paid: expected true, got ${JSON.stringify(body.listing_marked_paid)}`);
+  // The receipt must name OUR signing account as the payer, or the permanent
+  // record would certify a payer identity it never verified (GEMINI r1 p3).
+  if (typeof body.payer_address !== "string" || typeof payer !== "string" || body.payer_address.toLowerCase() !== payer.toLowerCase()) problems.push(`payer_address: expected the signing account ${payer}, got ${JSON.stringify(body.payer_address)}`);
   return problems;
 }
 
 // The X-PAYMENT-RESPONSE header is base64(JSON) of the facilitator's settlement
 // ({success, transaction, network, payer}). Returns the problems found: absent,
-// undecodable, not a success, or naming a different transaction from the body.
-export function checkSettlementHeader(headerValue, bodyTx) {
+// undecodable, not a success, wrong network, naming a different transaction
+// from the body, or naming a payer other than the account that signed
+// (exchange 2026-09-15, GEMINI round 1 point 5).
+export function checkSettlementHeader(headerValue, bodyTx, payer) {
   if (typeof headerValue !== "string" || !headerValue) return ["X-PAYMENT-RESPONSE: header missing from the 200; the server always sets it"];
   let s;
   try {
@@ -136,10 +152,41 @@ export function checkSettlementHeader(headerValue, bodyTx) {
   }
   const problems = [];
   if (!s || s.success !== true) problems.push(`X-PAYMENT-RESPONSE: success is not true (${JSON.stringify(s?.success)})`);
+  if (s?.network !== EXPECTED_NETWORK) problems.push(`X-PAYMENT-RESPONSE: network ${JSON.stringify(s?.network)} is not "${EXPECTED_NETWORK}"`);
   if (typeof s?.transaction !== "string" || typeof bodyTx !== "string" || s.transaction.toLowerCase() !== bodyTx.toLowerCase()) {
     problems.push(`X-PAYMENT-RESPONSE: transaction ${JSON.stringify(s?.transaction)} does not match the body's tx ${JSON.stringify(bodyTx)}`);
   }
+  if (typeof s?.payer !== "string" || typeof payer !== "string" || s.payer.toLowerCase() !== payer.toLowerCase()) {
+    problems.push(`X-PAYMENT-RESPONSE: payer ${JSON.stringify(s?.payer)} is not the account that signed (${payer})`);
+  }
   return problems;
+}
+
+// The authorization we signed, read back out of the X-PAYMENT header we sent
+// (encodePaymentHeader: base64 JSON {payload:{authorization:{from,nonce,
+// validBefore,...}}}). Needed after a refused second leg to ask the chain
+// whether that exact nonce was ever executed.
+export function decodeSentAuthorization(paymentHeader) {
+  const p = JSON.parse(Buffer.from(paymentHeader, "base64").toString("utf8"));
+  const a = p?.payload?.authorization;
+  if (!a || !isAddress(a.from) || typeof a.nonce !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(a.nonce) || !/^\d+$/.test(String(a.validBefore))) {
+    throw new Error("the sent X-PAYMENT header does not carry a well-formed authorization");
+  }
+  return { from: a.from, nonce: a.nonce, validBefore: Number(a.validBefore) };
+}
+
+// A 'refused' tombstone (second leg came back non-200 AND the chain says our
+// nonce was never executed) may be retried only once the signed authorization
+// can no longer be executed by anyone: after its validBefore, re-checked
+// against the chain at that moment. Pure; the caller supplies the clock and
+// the chain answer.
+export function refusedRetryDecision(refused, nowSeconds, nonceUsedNow) {
+  if (nonceUsedNow === true) return { retry: false, reason: "the earlier authorization HAS been executed on-chain since it was refused; this is a settled payment with no receipt -- reconcile from the chain, do not re-run" };
+  if (!Number.isInteger(refused.valid_before)) return { retry: false, reason: "the refused record carries no valid_before; cannot prove the earlier authorization is dead" };
+  if (nowSeconds <= refused.valid_before) {
+    return { retry: false, reason: `the earlier authorization is unexecuted but still valid until ${new Date(refused.valid_before * 1000).toISOString()}; re-run after that, when nobody holding it can execute it` };
+  }
+  return { retry: true, reason: "earlier authorization expired unexecuted" };
 }
 
 export function tombstonePath(dir, key) {
@@ -155,6 +202,7 @@ export function classifyTombstone(raw) {
   }
   if (t && t.status === "settled") return { status: "settled", tx: t.tx, listing_id: t.listing_id, submission_id: t.submission_id };
   if (t && t.status === "signing") return { ...t, status: "signing" };
+  if (t && t.status === "refused") return { ...t, status: "refused" };
   // Classification wins over the file's own status field (post-listing.mjs
   // spreads the other way round, so an unrecognised status there survives as
   // itself; harmless because every consumer checks === "settled" only, but
@@ -207,7 +255,7 @@ export function recoveryMessage(path) {
 // the sequence with no network, no disk, no key. Returns a structured result;
 // it never touches console or process. deps: { fetch, exists, readFile,
 // writeExclusive(path,data), writeAtomic(path,data), mkdir(dir), sign(reqs) }.
-export async function payListing({ listingId, submissionId, payee, amountCents, maxAmountCents, target, funderSecret, execute }, deps) {
+export async function payListing({ listingId, submissionId, payee, amountCents, maxAmountCents, target, funderSecret, execute, payer }, deps) {
   // Chokepoint pin for exported money code: enforced HERE, before the bearer is
   // used, so no importer can point the credential or the signed X-PAYMENT at
   // another origin. The at-most-once store is likewise the one pinned constant.
@@ -235,11 +283,33 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
     return { ...base, ok: false, exitCode: 1, reason: "amount_over_cap", message: `amount $${(amountCents / 100).toFixed(2)} exceeds cap $${(maxAmountCents / 100).toFixed(2)}` };
   }
 
-  // At-most-once gate (execute). Settled -> idempotent success; else refuse.
+  // At-most-once gate (execute). Settled -> idempotent success. Refused (a
+  // non-200 second leg whose authorization the chain says was never executed)
+  // -> retryable ONLY once that authorization has expired and the chain still
+  // says unexecuted (GEMINI r1 p2: an ordinary refusal must not wedge the
+  // operator into deleting a tombstone by hand; but a still-valid signed
+  // authorization in the facilitator's hands is a double-pay if we sign
+  // another). Anything else blocks.
+  if (execute && !isAddress(payer)) {
+    return { ...base, ok: false, exitCode: 1, reason: "argument_invalid", message: "payer (the signing account's address) is required to execute; refusing before any bearer is used." };
+  }
+  let replaceTombstone = false;
   if (execute && deps.exists(tombPath)) {
     const t = classifyTombstone(deps.readFile(tombPath));
     if (t.status === "settled") return { ...base, ok: true, exitCode: 0, reason: "already_settled", tx: t.tx };
-    return { ...base, ok: false, exitCode: 1, reason: "tombstone_blocks", message: recoveryMessage(tombPath) };
+    if (t.status === "refused") {
+      let usedNow;
+      try {
+        usedNow = await deps.authorizationUsed(t.from, t.nonce);
+      } catch (e) {
+        return { ...base, ok: false, exitCode: 1, reason: "tombstone_blocks", message: `A refused earlier attempt exists and the chain could not be asked whether its authorization was executed (${e?.message ?? e}). Refusing until it can. ${recoveryMessage(tombPath)}` };
+      }
+      const d = refusedRetryDecision(t, deps.nowSeconds(), usedNow);
+      if (!d.retry) return { ...base, ok: false, exitCode: 1, reason: "tombstone_blocks", message: `Refused earlier attempt at ${tombPath}: ${d.reason}` };
+      replaceTombstone = true;
+    } else {
+      return { ...base, ok: false, exitCode: 1, reason: "tombstone_blocks", message: recoveryMessage(tombPath) };
+    }
   }
 
   const authHeader = { Authorization: `Bearer ${funderSecret}` };
@@ -283,12 +353,30 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
 
   if (!execute) return { ...base, ok: true, exitCode: 0, reason: "dry_run", reqs };
 
+  // Balance pre-check, BEFORE the tombstone and the sign (GEMINI r1 p2): a
+  // payer that cannot cover the amount would sign, be refused at settle, and
+  // wedge on its own 'signing' record. Ask the chain first; fail closed if the
+  // chain cannot be asked.
+  let balanceAtomic;
+  try {
+    balanceAtomic = await deps.usdcBalanceAtomic(payer);
+  } catch (e) {
+    return { ...base, ok: false, exitCode: 1, reason: "balance_unknown", message: `Could not read the payer's USDC balance on Base (${e?.message ?? e}). Refusing to sign without knowing it can settle.` };
+  }
+  const needAtomic = BigInt(reqs.maxAmountRequired);
+  if (balanceAtomic < needAtomic) {
+    return { ...base, ok: false, exitCode: 1, reason: "balance_insufficient", message: `Payer ${payer} holds ${(Number(balanceAtomic) / 1e6).toFixed(6)} USDC, less than the ${(Number(needAtomic) / 1e6).toFixed(2)} USDC this bounty needs. Nothing signed. Top up and re-run.` };
+  }
+
   // The durable at-most-once record is created EXCLUSIVELY and FLUSHED right
-  // before the irreversible sign. If it exists, refuse; if the flushed write
-  // fails, refuse (never sign without a durable gate).
+  // before the irreversible sign (or atomically REPLACED when the only prior
+  // record is an expired, unexecuted refusal). If it exists otherwise, refuse;
+  // if the flushed write fails, refuse (never sign without a durable gate).
   try {
     deps.mkdir(TOMBSTONE_DIR);
-    deps.writeExclusive(tombPath, JSON.stringify({ status: "signing", key, target, ...purchase }));
+    const signing = JSON.stringify({ status: "signing", key, target, ...purchase });
+    if (replaceTombstone) deps.writeAtomic(tombPath, signing);
+    else deps.writeExclusive(tombPath, signing);
   } catch (e) {
     if (e && e.code === "EEXIST") {
       const t = classifyTombstone(deps.readFile(tombPath));
@@ -320,16 +408,30 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   // a listing left 'paying': money moved. That is exactly the case the
   // tombstone must stay 'signing' for, so it is not special-cased here.
   if (second.status !== 200) {
+    // Ask the chain whether OUR nonce was executed. If it was not, record a
+    // 'refused' tombstone (retryable after the authorization expires, see the
+    // gate above) instead of wedging on 'signing'. If the chain says it was,
+    // or cannot be asked, 'signing' stands and the operator reconciles.
+    try {
+      const sent = decodeSentAuthorization(paymentHeader);
+      const used = await deps.authorizationUsed(sent.from, sent.nonce);
+      if (used === false) {
+        deps.writeAtomic(tombPath, JSON.stringify({ status: "refused", key, target, ...purchase, from: sent.from, nonce: sent.nonce, valid_before: sent.validBefore, http_status: second.status, refused_at: deps.nowSeconds(), detail: secondText.slice(0, 2000) }, null, 2));
+        return { ...base, ok: false, exitCode: 1, reason: "leg2_refused", message: `The server refused the signed payment (HTTP ${second.status}) and the chain confirms the authorization was not executed. Nothing was paid. Recorded as 'refused'; a re-run is allowed after ${new Date(sent.validBefore * 1000).toISOString()} (when the signed authorization can no longer be executed by anyone).`, detail: secondText };
+      }
+    } catch {
+      // fall through: keep 'signing'
+    }
     return { ...base, ok: false, exitCode: 1, reason: "leg2_not_200", message: `Bounty not confirmed paid after the signed request: HTTP ${second.status}.\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
-  const problems = validatePayReceipt(secondJson, { listingId, submissionId, payee, amountCents });
+  const problems = validatePayReceipt(secondJson, { listingId, submissionId, payee, amountCents, payer });
   // Belt to the body's braces (exchange 2026-09-15, CODEX): the worker also
   // returns the facilitator's settlement verbatim in X-PAYMENT-RESPONSE
   // (listings.ts, the 200's headers). It must be present and name the SAME
   // transaction as the body, or the receipt is contradictory and the
   // tombstone stays 'signing'. This still proves nothing about chain
   // inclusion -- that is the operator's on-chain check after the run.
-  problems.push(...checkSettlementHeader(typeof second.headers?.get === "function" ? second.headers.get("X-PAYMENT-RESPONSE") : null, secondJson?.tx));
+  problems.push(...checkSettlementHeader(typeof second.headers?.get === "function" ? second.headers.get("X-PAYMENT-RESPONSE") : null, secondJson?.tx, payer));
   if (problems.length > 0) {
     return { ...base, ok: false, exitCode: 1, reason: "leg2_bad_body", message: `200 body did not match what we authorised; leaving the tombstone 'signing'.\n  ${problems.join("\n  ")}\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
@@ -340,9 +442,51 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   return { ...base, ok: true, exitCode: 0, reason: "settled", tx: secondJson.tx, payerAddress: secondJson.payer_address };
 }
 
+// ---------- chain reads (public Base RPC, read-only, no key) ----------
+
+// Public JSON-RPC endpoints tried in order; the first that answers wins. A
+// non-answer everywhere throws, and every caller above treats that as
+// "refuse" (never as "fine").
+const BASE_RPCS = ["https://base.drpc.org", "https://1rpc.io/base", "https://base-rpc.publicnode.com", "https://mainnet.base.org"];
+const SEL_BALANCE_OF = "0x70a08231"; // balanceOf(address)
+const SEL_AUTHORIZATION_STATE = "0xe94a0102"; // authorizationState(address,bytes32), EIP-3009 on Base USDC
+
+async function ethCall(data) {
+  let lastErr;
+  for (const url of BASE_RPCS) {
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: EXPECTED_ASSET, data }, "latest"] }), signal: AbortSignal.timeout(15000) });
+      const j = await r.json();
+      if (typeof j?.result === "string" && /^0x[0-9a-fA-F]*$/.test(j.result)) return j.result;
+      lastErr = new Error(`${url}: ${JSON.stringify(j?.error ?? j).slice(0, 120)}`);
+    } catch (e) {
+      lastErr = new Error(`${url}: ${e?.message ?? e}`);
+    }
+  }
+  throw lastErr ?? new Error("no RPC answered");
+}
+
+const pad32 = (hexNo0x) => hexNo0x.toLowerCase().padStart(64, "0");
+
+export async function usdcBalanceAtomic(address) {
+  const out = await ethCall(SEL_BALANCE_OF + pad32(address.slice(2)));
+  return BigInt(out === "0x" ? "0x0" : out);
+}
+
+// true if the (authorizer, nonce) pair has been used on-chain, i.e. the
+// signed transferWithAuthorization was executed.
+export async function authorizationUsed(authorizer, nonce) {
+  const out = await ethCall(SEL_AUTHORIZATION_STATE + pad32(authorizer.slice(2)) + pad32(nonce.slice(2)));
+  if (!/^0x0{63}[01]$/.test(out)) throw new Error(`unexpected authorizationState result ${out}`);
+  return out.endsWith("1");
+}
+
 // ---------- CLI (not exercised by tests; payListing is) ----------
 
 const realDeps = (account) => ({
+  usdcBalanceAtomic,
+  authorizationUsed,
+  nowSeconds: () => Math.floor(Date.now() / 1000),
   fetch: (...a) => fetch(...a),
   exists: (p) => existsSync(p),
   readFile: (p) => readFileSync(p, "utf8"),
@@ -423,7 +567,7 @@ async function main() {
   console.log(`Target (pinned): POST ${target}`);
 
   const result = await payListing(
-    { listingId: args.listingId, submissionId: args.submissionId, payee: args.payee, amountCents: args.amountCents, maxAmountCents: args.maxAmountCents, target, funderSecret, execute: args.execute },
+    { listingId: args.listingId, submissionId: args.submissionId, payee: args.payee, amountCents: args.amountCents, maxAmountCents: args.maxAmountCents, target, funderSecret, execute: args.execute, payer: account?.address ?? null },
     realDeps(account ?? { address: "0x0000000000000000000000000000000000000000" }),
   );
 
