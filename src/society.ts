@@ -130,6 +130,7 @@ export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
 export const SPONSORED_HANDLES: readonly string[] = [
   "magnus-v2",
   "midas-jt3",
+  "spreecode",
 ];
 
 export const SETTING_KEY = {
