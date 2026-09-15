@@ -180,11 +180,19 @@ export function decodeSentAuthorization(paymentHeader) {
 // can no longer be executed by anyone: after its validBefore, re-checked
 // against the chain at that moment. Pure; the caller supplies the clock and
 // the chain answer.
+// RETRY_MARGIN_SECONDS: the contract judges validBefore against BLOCK time,
+// this machine against its own clock. A local clock running ahead would let
+// a retry sign while the first authorization is still executable on-chain,
+// and a facilitator holding both could execute both. Five minutes covers any
+// skew a working machine has; the cost is the operator waiting that long.
+export const RETRY_MARGIN_SECONDS = 300;
 export function refusedRetryDecision(refused, nowSeconds, nonceUsedNow) {
   if (nonceUsedNow === true) return { retry: false, reason: "the earlier authorization HAS been executed on-chain since it was refused; this is a settled payment with no receipt -- reconcile from the chain, do not re-run" };
+  if (nonceUsedNow !== false) return { retry: false, reason: "the chain's answer about the earlier authorization was not a definite 'unexecuted'; refusing" };
   if (!Number.isInteger(refused.valid_before)) return { retry: false, reason: "the refused record carries no valid_before; cannot prove the earlier authorization is dead" };
-  if (nowSeconds <= refused.valid_before) {
-    return { retry: false, reason: `the earlier authorization is unexecuted but still valid until ${new Date(refused.valid_before * 1000).toISOString()}; re-run after that, when nobody holding it can execute it` };
+  const deadAfter = refused.valid_before + RETRY_MARGIN_SECONDS;
+  if (nowSeconds <= deadAfter) {
+    return { retry: false, reason: `the earlier authorization is unexecuted but still valid until ${new Date(refused.valid_before * 1000).toISOString()} (plus a ${RETRY_MARGIN_SECONDS}s clock-skew margin); re-run after ${new Date(deadAfter * 1000).toISOString()}, when nobody holding it can execute it` };
   }
   return { retry: true, reason: "earlier authorization expired unexecuted" };
 }
@@ -451,16 +459,22 @@ const BASE_RPCS = ["https://base.drpc.org", "https://1rpc.io/base", "https://bas
 const SEL_BALANCE_OF = "0x70a08231"; // balanceOf(address)
 const SEL_AUTHORIZATION_STATE = "0xe94a0102"; // authorizationState(address,bytes32), EIP-3009 on Base USDC
 
+async function ethCallOne(url, data) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: EXPECTED_ASSET, data }, "latest"] }), signal: AbortSignal.timeout(15000) });
+  const j = await r.json();
+  if (typeof j?.result === "string" && /^0x[0-9a-fA-F]*$/.test(j.result)) return j.result;
+  throw new Error(`${url}: ${JSON.stringify(j?.error ?? j).slice(0, 120)}`);
+}
+
+// First endpoint that answers wins. Used for the balance, where a wrong answer
+// only ever leads to a refusal or to a settle the server itself then refuses.
 async function ethCall(data) {
   let lastErr;
   for (const url of BASE_RPCS) {
     try {
-      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: EXPECTED_ASSET, data }, "latest"] }), signal: AbortSignal.timeout(15000) });
-      const j = await r.json();
-      if (typeof j?.result === "string" && /^0x[0-9a-fA-F]*$/.test(j.result)) return j.result;
-      lastErr = new Error(`${url}: ${JSON.stringify(j?.error ?? j).slice(0, 120)}`);
+      return await ethCallOne(url, data);
     } catch (e) {
-      lastErr = new Error(`${url}: ${e?.message ?? e}`);
+      lastErr = e;
     }
   }
   throw lastErr ?? new Error("no RPC answered");
@@ -474,11 +488,33 @@ export async function usdcBalanceAtomic(address) {
 }
 
 // true if the (authorizer, nonce) pair has been used on-chain, i.e. the
-// signed transferWithAuthorization was executed.
+// signed transferWithAuthorization was executed. A wrong "unexecuted" here is
+// the ONE answer that could lead to a second signature for the same purchase
+// (refused -> retry), so "false" is returned only when at least
+// AUTHORIZATION_QUORUM independent endpoints agree on it; any "true" wins;
+// anything less is an error, and every caller treats an error as "refuse".
+// Pure decision in decideAuthorizationUsed (tested); the fan-out is here.
+export const AUTHORIZATION_QUORUM = 2;
+export function decideAuthorizationUsed(answers) {
+  const bools = answers.filter((a) => a === true || a === false);
+  if (bools.some((a) => a === true)) return true;
+  if (bools.filter((a) => a === false).length >= AUTHORIZATION_QUORUM) return false;
+  throw new Error(`only ${bools.length} endpoint(s) gave a definite answer; ${AUTHORIZATION_QUORUM} agreeing on 'unexecuted' are required`);
+}
 export async function authorizationUsed(authorizer, nonce) {
-  const out = await ethCall(SEL_AUTHORIZATION_STATE + pad32(authorizer.slice(2)) + pad32(nonce.slice(2)));
-  if (!/^0x0{63}[01]$/.test(out)) throw new Error(`unexpected authorizationState result ${out}`);
-  return out.endsWith("1");
+  const data = SEL_AUTHORIZATION_STATE + pad32(authorizer.slice(2)) + pad32(nonce.slice(2));
+  const answers = await Promise.all(
+    BASE_RPCS.map(async (url) => {
+      try {
+        const out = await ethCallOne(url, data);
+        if (!/^0x0{63}[01]$/.test(out)) return new Error(`${url}: unexpected authorizationState result ${out}`);
+        return out.endsWith("1");
+      } catch (e) {
+        return e instanceof Error ? e : new Error(String(e));
+      }
+    }),
+  );
+  return decideAuthorizationUsed(answers);
 }
 
 // ---------- CLI (not exercised by tests; payListing is) ----------

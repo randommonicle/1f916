@@ -20,6 +20,9 @@ import {
   checkSettlementHeader,
   decodeSentAuthorization,
   refusedRetryDecision,
+  RETRY_MARGIN_SECONDS,
+  decideAuthorizationUsed,
+  AUTHORIZATION_QUORUM,
   classifyTombstone,
   parseArgs,
   readFunderSecret,
@@ -427,13 +430,16 @@ test("execute: a non-200 second leg whose nonce the chain says IS used, or canno
   assert.equal(JSON.parse(dark.store()!).status, "signing");
 });
 
-test("refusedRetryDecision: retry only after valid_before, and never if the chain now says the nonce was used", () => {
+test("refusedRetryDecision: retry only after valid_before PLUS the clock-skew margin, and never if the chain now says the nonce was used or gave no definite answer", () => {
   const refused = { status: "refused", valid_before: VALID_BEFORE };
+  assert.equal(RETRY_MARGIN_SECONDS, 300);
   assert.equal(refusedRetryDecision(refused, VALID_BEFORE - 1, false).retry, false);
-  assert.equal(refusedRetryDecision(refused, VALID_BEFORE, false).retry, false);
-  assert.equal(refusedRetryDecision(refused, VALID_BEFORE + 1, false).retry, true);
-  assert.match(refusedRetryDecision(refused, VALID_BEFORE + 1, true).reason, /HAS been executed/);
-  assert.equal(refusedRetryDecision({ status: "refused" }, VALID_BEFORE + 1, false).retry, false);
+  assert.equal(refusedRetryDecision(refused, VALID_BEFORE + 1, false).retry, false, "inside the margin: a fast local clock could still be inside the on-chain validity window");
+  assert.equal(refusedRetryDecision(refused, VALID_BEFORE + RETRY_MARGIN_SECONDS, false).retry, false);
+  assert.equal(refusedRetryDecision(refused, VALID_BEFORE + RETRY_MARGIN_SECONDS + 1, false).retry, true);
+  assert.match(refusedRetryDecision(refused, VALID_BEFORE + 1000, true).reason, /HAS been executed/);
+  assert.match(refusedRetryDecision(refused, VALID_BEFORE + 1000, undefined as any).reason, /not a definite 'unexecuted'/);
+  assert.equal(refusedRetryDecision({ status: "refused" }, VALID_BEFORE + 1000, false).retry, false);
 });
 
 test("execute: a 'refused' tombstone blocks a re-run while the earlier authorization is still valid, and allows one (atomic replace, not wx) after it expires", async () => {
@@ -444,7 +450,7 @@ test("execute: a 'refused' tombstone blocks a re-run while the earlier authoriza
   assert.match(String(r1.message), /still valid until/);
   assert.ok(!early.calls.some((c) => c.kind.startsWith("fetch")));
 
-  const late = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE + 10 });
+  const late = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE + RETRY_MARGIN_SECONDS + 10 });
   const r2 = await payListing({ ...RUN, execute: true }, late.deps);
   assert.equal(r2.reason, "settled", JSON.stringify(r2));
   const order = late.calls.map((c) => c.kind);
@@ -452,7 +458,7 @@ test("execute: a 'refused' tombstone blocks a re-run while the earlier authoriza
   assert.ok(order.includes("writeAtomic") && !order.slice(0, order.indexOf("sign")).includes("writeExclusive"), "the refused record is REPLACED atomically, never wx'd over");
   assert.equal(JSON.parse(late.store()!).status, "settled");
 
-  const executedMeanwhile = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE + 10, nonceUsed: true });
+  const executedMeanwhile = fakeDeps({ existing: refusedRecord, now: VALID_BEFORE + RETRY_MARGIN_SECONDS + 10, nonceUsed: true });
   const r3 = await payListing({ ...RUN, execute: true }, executedMeanwhile.deps);
   assert.equal(r3.reason, "tombstone_blocks");
   assert.match(String(r3.message), /HAS been executed/);
@@ -461,5 +467,14 @@ test("execute: a 'refused' tombstone blocks a re-run while the earlier authoriza
 test("decodeSentAuthorization reads from, nonce and validBefore back out of the header we sent, and rejects a malformed one", () => {
   assert.deepEqual(decodeSentAuthorization(sentHeader()), { from: PAYER, nonce: NONCE, validBefore: VALID_BEFORE });
   assert.throws(() => decodeSentAuthorization(Buffer.from(JSON.stringify({ payload: { authorization: { from: PAYER, nonce: "0x12" } } })).toString("base64")), /well-formed authorization/);
+});
+
+test("decideAuthorizationUsed: any 'true' wins; 'false' needs a quorum of agreeing endpoints; anything less is an error (never a silent 'unexecuted')", () => {
+  assert.equal(AUTHORIZATION_QUORUM, 2);
+  assert.equal(decideAuthorizationUsed([false, false, new Error("down"), new Error("down")]), false);
+  assert.equal(decideAuthorizationUsed([false, true, false, false]), true, "one endpoint seeing the execution is enough to refuse a retry");
+  assert.equal(decideAuthorizationUsed([true, new Error("down"), new Error("down"), new Error("down")]), true);
+  assert.throws(() => decideAuthorizationUsed([false, new Error("down"), new Error("down"), new Error("down")]), /only 1 endpoint\(s\) gave a definite answer/);
+  assert.throws(() => decideAuthorizationUsed([new Error("a"), new Error("b"), new Error("c"), new Error("d")]), /only 0 endpoint/);
 });
 
