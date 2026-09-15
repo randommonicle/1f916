@@ -17,6 +17,7 @@ import {
   attemptKey,
   validatePayRequirements,
   validatePayReceipt,
+  checkSettlementHeader,
   classifyTombstone,
   parseArgs,
   readFunderSecret,
@@ -184,15 +185,21 @@ test("readFunderSecret accepts only commonhold-agent's custody file with a well-
 
 type Call = { kind: string; [k: string]: unknown };
 
-function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any } = {}) {
+function settlementHeader(tx: string) {
+  return Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "base", payer: "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" })).toString("base64");
+}
+
+function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any } = {}) {
   const calls: Call[] = [];
   let store: string | null = opts.existing ?? null;
   const deps = {
     fetch: async (url: string, init: any) => {
       const leg = init.headers["X-PAYMENT"] ? "leg2" : "leg1";
       calls.push({ kind: `fetch:${leg}`, url, redirect: init.redirect, hasBearer: String(init.headers.Authorization).startsWith("Bearer "), body: init.body });
-      const r = leg === "leg1" ? (opts.first ?? { status: 402, body: { x402Version: 1, accepts: [goodReqs()] } }) : (opts.second ?? { status: 200, body: goodReceipt() });
-      return { status: r.status, text: async () => (typeof r.body === "string" ? r.body : JSON.stringify(r.body)) };
+      const r: any = leg === "leg1" ? (opts.first ?? { status: 402, body: { x402Version: 1, accepts: [goodReqs()] } }) : (opts.second ?? { status: 200, body: goodReceipt() });
+      // leg 2 carries X-PAYMENT-RESPONSE naming the body's tx unless the test says otherwise
+      const hdr = leg === "leg2" ? ("header" in r ? r.header : settlementHeader((r.body as any)?.tx ?? "")) : null;
+      return { status: r.status, headers: { get: (k: string) => (k === "X-PAYMENT-RESPONSE" ? hdr : null) }, text: async () => (typeof r.body === "string" ? r.body : JSON.stringify(r.body)) };
     },
     exists: (p: string) => { calls.push({ kind: "exists", p }); return store !== null; },
     readFile: (p: string) => { calls.push({ kind: "readFile", p }); return store ?? ""; },
@@ -309,3 +316,45 @@ test("an amount over the cap is refused before any network call", async () => {
   assert.equal(r.reason, "amount_over_cap");
   assert.deepEqual(calls, []);
 });
+
+test("checkSettlementHeader: present + success + same tx passes; missing, undecodable, failed, or a different tx are named", () => {
+  const tx = "0x" + "ab".repeat(32);
+  assert.deepEqual(checkSettlementHeader(settlementHeader(tx), tx), []);
+  assert.deepEqual(checkSettlementHeader(settlementHeader(tx.toUpperCase().replace("0X", "0x")), tx), [], "tx hashes are case-insensitive hex");
+  assert.match(checkSettlementHeader(null, tx).join(), /header missing/);
+  assert.match(checkSettlementHeader("%%%not-base64-json", tx).join(), /not base64-encoded JSON/);
+  assert.match(checkSettlementHeader(Buffer.from(JSON.stringify({ success: false, transaction: tx })).toString("base64"), tx).join(), /success is not true/);
+  assert.match(checkSettlementHeader(settlementHeader("0x" + "cd".repeat(32)), tx).join(), /does not match the body's tx/);
+});
+
+test("execute: a 402 carrying MORE than one payment alternative is refused with nothing signed (CODEX finding 1)", async () => {
+  const { deps, calls } = fakeDeps({ first: { status: 402, body: { x402Version: 1, accepts: [goodReqs(), goodReqs({ payTo: "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" })] } } });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "leg1_bad_402");
+  assert.match(String(r.message), /2 payment alternatives/);
+  assert.ok(!calls.some((c) => c.kind === "sign" || c.kind === "writeExclusive"));
+});
+
+test("execute: a 200 whose X-PAYMENT-RESPONSE is missing or names another tx leaves the tombstone 'signing'", async () => {
+  const missing = fakeDeps({ second: { status: 200, body: goodReceipt(), header: null } });
+  const r1 = await payListing({ ...RUN, execute: true }, missing.deps);
+  assert.equal(r1.reason, "leg2_bad_body");
+  assert.match(String(r1.message), /header missing/);
+  assert.equal(JSON.parse(missing.store()!).status, "signing");
+
+  const other = fakeDeps({ second: { status: 200, body: goodReceipt(), header: settlementHeader("0x" + "cd".repeat(32)) } });
+  const r2 = await payListing({ ...RUN, execute: true }, other.deps);
+  assert.equal(r2.reason, "leg2_bad_body");
+  assert.match(String(r2.message), /does not match the body's tx/);
+  assert.equal(JSON.parse(other.store()!).status, "signing");
+});
+
+test("payListing re-validates its numeric arguments at the exported boundary, before the bearer is used", async () => {
+  const { deps, calls } = fakeDeps();
+  for (const bad of [{ listingId: 3.5 }, { submissionId: 0 }, { amountCents: -1200 }, { maxAmountCents: Number.NaN }, { amountCents: 2 ** 53 }]) {
+    const r = await payListing({ ...RUN, ...bad, target: payTarget((bad as any).listingId ?? 3), execute: true }, deps);
+    assert.equal(r.reason, "argument_invalid", JSON.stringify(bad));
+  }
+  assert.deepEqual(calls, []);
+});
+

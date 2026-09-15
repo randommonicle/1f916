@@ -123,6 +123,25 @@ export function validatePayReceipt(body, { listingId, submissionId, payee, amoun
   return problems;
 }
 
+// The X-PAYMENT-RESPONSE header is base64(JSON) of the facilitator's settlement
+// ({success, transaction, network, payer}). Returns the problems found: absent,
+// undecodable, not a success, or naming a different transaction from the body.
+export function checkSettlementHeader(headerValue, bodyTx) {
+  if (typeof headerValue !== "string" || !headerValue) return ["X-PAYMENT-RESPONSE: header missing from the 200; the server always sets it"];
+  let s;
+  try {
+    s = JSON.parse(Buffer.from(headerValue, "base64").toString("utf8"));
+  } catch {
+    return ["X-PAYMENT-RESPONSE: not base64-encoded JSON"];
+  }
+  const problems = [];
+  if (!s || s.success !== true) problems.push(`X-PAYMENT-RESPONSE: success is not true (${JSON.stringify(s?.success)})`);
+  if (typeof s?.transaction !== "string" || typeof bodyTx !== "string" || s.transaction.toLowerCase() !== bodyTx.toLowerCase()) {
+    problems.push(`X-PAYMENT-RESPONSE: transaction ${JSON.stringify(s?.transaction)} does not match the body's tx ${JSON.stringify(bodyTx)}`);
+  }
+  return problems;
+}
+
 export function tombstonePath(dir, key) {
   return join(dir, `pay-${key}.json`);
 }
@@ -198,6 +217,15 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   if (!isAddress(payee)) {
     return { ok: false, exitCode: 1, reason: "payee_invalid", key: null, tombPath: null, message: "payee is not a 0x-prefixed 20-byte address; refusing before any bearer is used." };
   }
+  // The CLI already checks these, but this is the exported money-code
+  // boundary and a future importer or test is not the CLI (exchange
+  // 2026-09-15, CODEX): a non-integer here would silently shape the purchase
+  // identity, the URL and the atomic amount string.
+  for (const [name, v] of [["listingId", listingId], ["submissionId", submissionId], ["amountCents", amountCents], ["maxAmountCents", maxAmountCents]]) {
+    if (!Number.isSafeInteger(v) || v <= 0) {
+      return { ok: false, exitCode: 1, reason: "argument_invalid", key: null, tombPath: null, message: `${name} must be a positive safe integer; refusing before any bearer is used.` };
+    }
+  }
   const purchase = purchaseIdentity({ listingId, submissionId, payee, amountCents });
   const key = attemptKey("POST", target, FUNDER_HANDLE, purchase);
   const tombPath = tombstonePath(TOMBSTONE_DIR, key);
@@ -236,6 +264,14 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   }
   if (!firstJson || firstJson.x402Version !== 1 || !Array.isArray(firstJson.accepts) || firstJson.accepts.length === 0) {
     return { ...base, ok: false, exitCode: 1, reason: "leg1_bad_402", message: "402 was not a valid v1 x402 challenge. Refusing.", detail: firstText };
+  }
+  // Exactly ONE alternative, or refuse (exchange 2026-09-15, CODEX finding 1):
+  // the worker emits `accepts: [reqs]` and settles that same object
+  // (x402.ts payAndSettle), so a challenge with several entries is not this
+  // server's, and "every field matched" would be true only of the entry we
+  // happened to pick, not of the challenge as a whole.
+  if (firstJson.accepts.length !== 1) {
+    return { ...base, ok: false, exitCode: 1, reason: "leg1_bad_402", message: `402 carried ${firstJson.accepts.length} payment alternatives; this server emits exactly one. Refusing to choose.`, detail: firstText };
   }
 
   let reqs;
@@ -287,6 +323,13 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
     return { ...base, ok: false, exitCode: 1, reason: "leg2_not_200", message: `Bounty not confirmed paid after the signed request: HTTP ${second.status}.\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
   const problems = validatePayReceipt(secondJson, { listingId, submissionId, payee, amountCents });
+  // Belt to the body's braces (exchange 2026-09-15, CODEX): the worker also
+  // returns the facilitator's settlement verbatim in X-PAYMENT-RESPONSE
+  // (listings.ts, the 200's headers). It must be present and name the SAME
+  // transaction as the body, or the receipt is contradictory and the
+  // tombstone stays 'signing'. This still proves nothing about chain
+  // inclusion -- that is the operator's on-chain check after the run.
+  problems.push(...checkSettlementHeader(typeof second.headers?.get === "function" ? second.headers.get("X-PAYMENT-RESPONSE") : null, secondJson?.tx));
   if (problems.length > 0) {
     return { ...base, ok: false, exitCode: 1, reason: "leg2_bad_body", message: `200 body did not match what we authorised; leaving the tombstone 'signing'.\n  ${problems.join("\n  ")}\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
