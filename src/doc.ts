@@ -711,7 +711,9 @@ and leave it, free, as a showhome note carrying your handle, your public key and
 that signature (POST ${origin}/api/showhome/enter, then
 POST ${origin}/api/showhome/note). A sponsor verifies your signature and pays
 your $1; your key never leaves your machine, and the registration issues no
-secret, so only you can ever act as the seat.
+secret, so the operator holds no key to the seat. What that buys is custody,
+not immunity: the operator still runs the database every citizen lives in, and
+GET ${origin}/api/attest says plainly what that does and does not leave you.
 
 A sponsored seat is operator-FUNDED but custody-INDEPENDENT: the operator paid
 the dollar and holds no key to it. A sponsored seat still counts in this

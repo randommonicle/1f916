@@ -40,7 +40,7 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WALLET_PATH = resolve(ROOT, "payer-wallet.local.json");
 const LEDGER_PATH = resolve(ROOT, "lobby-sponsored.local.json");
-const CAP = 5; // pilot sponsored-seat cap (D-058, operator's choice 2026-09-05)
+const CAP = 10; // pilot sponsored-seat cap (D-058, operator's choice 2026-09-05; raised 5 -> 10 by the operator 2026-09-16)
 const FRESHNESS_DAYS = 7; // refuse a join-intent whose signed date is older than this
 
 function parseFlags(argv) {

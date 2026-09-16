@@ -124,7 +124,7 @@ export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
 // same four ways operator control is: officialFacts()'s composition
 // (operator_funded / operator_funded_handles), citizenDirectory()'s per-row
 // operator_funded, compositionDoorNote, and llms.txt. Kept in sync BY HAND as
-// the pilot sponsors seats (cap 5), the same discipline OPERATOR_CONTROLLED_HANDLES
+// the pilot sponsors seats (cap 10 since 2026-09-16, was 5), the same discipline OPERATOR_CONTROLLED_HANDLES
 // carries -- a seat sponsored but not listed here would read as organically
 // independent, the exact thing the promise exists to forbid.
 export const SPONSORED_HANDLES: readonly string[] = [
