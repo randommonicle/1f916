@@ -87,7 +87,18 @@ function regexAllowedAfter(prev: Prev): boolean {
 // Fail-closed lexer: returns the decoded value + line of every string and
 // template-quasi literal. Throws on an unterminated literal/comment/regex, or if
 // the walk fails to advance (CODEX r2 req 4).
-function extractLiterals(source: string): Array<{ value: string; line: number }> {
+//
+// Line terminators are normalised to LF before lexing. ECMAScript already does
+// this to the runtime VALUE of a template literal (a CRLF in the source becomes
+// "\n" in the string the worker serves), so hashing the raw source bytes would
+// key PROSE_ALLOW on the checkout's line-ending policy rather than on the served
+// text: on a fresh Windows clone with Git's default autocrlf=true, the
+// multi-line literals in doc.ts decoded with "\r\n" and this guard reported them
+// unreviewed (found by an outside auditor's first clone, 2026-09-17; reproduced
+// in a scratch clone). The repo carries no .gitattributes, so the guard must not
+// depend on one.
+function extractLiterals(rawSource: string): Array<{ value: string; line: number }> {
+  const source = rawSource.replace(/\r\n?/g, "\n");
   const out: Array<{ value: string; line: number }> = [];
   const n = source.length;
   let i = 0;
@@ -215,8 +226,8 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/discovery.ts", sha: "5f617e2821be2f5f0c503739f92bdf6f2a03485a0d5f29e388034b670753fcac", note: "a citizen credential in Bearer <credential> (secret OR assertion)" },
   { file: "src/discovery.ts", sha: "2c148d9bb1a8e95f29f9af64f1135a0a677dcc3c84dbbb18c0a1800508e2876f", note: "showhome visitor token, never a citizen secret" },
   { file: "src/discovery.ts", sha: "9917671a3aafd921d2f509269bf99e78a728b22798a5d021357a64a49ad24fa3", note: "MAINTAINER_SECRET, operator credential distinct from citizen's" },
-  { file: "src/discovery.ts", sha: "fde7c641cab681fcac62f706c67398b569bc9314215fd1a492ae08b85f4240fd", note: "/mcp/read read-only no-auth, writes need a credential" },
-  { file: "src/discovery.ts", sha: "f81504c9aec2a4a0c875f8e48896177f766c271833a092b6a504906a631880df", note: "authenticate every write with your citizen credential (both forms)" },
+  { file: "src/discovery.ts", sha: "8d13de6287fbc78727e9cb650c606f0a22ce69fd4a0fce62c76691c7729678d0", note: "/mcp/read read-only no-auth, writes need a credential" },
+  { file: "src/discovery.ts", sha: "a9a481d697c193f86e112466da42930d301dfb2e729e93a3790d515f3c353e6e", note: "authenticate every write with your citizen credential (both forms)" },
   { file: "src/discovery.ts", sha: "07584c9afa4ef1e1978a6f40f05f98c5955dab0ced278454e0b14505c651f21b", note: "an issued secret from POST" },
   { file: "src/discovery.ts", sha: "6d8c25756aec66c544bcbab7616ab1bea58ac4b5dc9080e84dd85b4df606d433", note: "llms.txt for write routes, credential (secret or assertion)" },
   { file: "src/doc.ts", sha: "de69f7e8e96fcb76b9b4cc6c1712e52a7e16fa72b7ac891edf7f1e609a391c1c", note: "Register (once). invite-gated; reply shows a secret once / or pubkey" },
@@ -314,6 +325,21 @@ test("secret-literal guard red-proof: catches a novel secret-only instruction, d
   assert.equal(classify("src/new-surface.ts", 'see "citizen_secret" in the vocabulary'), "offender");
   // Changing an allowed prose literal changes its hash, so it is caught for re-review.
   assert.equal(classify(PROSE_ALLOW[0].file, "Pay $1 USDC to inscribe one public MODIFIED secret line."), "offender");
+});
+
+test("secret-literal guard: a CRLF checkout hashes to the same PROSE_ALLOW key as the LF source, matching what the runtime serves", () => {
+  const lf = "const p = `Register (once). By default the reply shows a\nsecret once, which is your credential to save.`;";
+  const crlf = lf.replace(/\n/g, "\r\n");
+  const [fromLf] = extractLiterals(lf);
+  const [fromCrlf] = extractLiterals(crlf);
+  assert.equal(fromCrlf.value, fromLf.value, "the decoded value must not depend on the checkout's line endings");
+  assert.equal(proseKey("src/doc.ts", fromCrlf.value), proseKey("src/doc.ts", fromLf.value));
+  // The normalisation is what ECMAScript does to the runtime value: a template literal
+  // written with CRLF in the source serves "\n". Guard and worker must agree.
+  assert.equal(fromLf.value, `Register (once). By default the reply shows a\nsecret once, which is your credential to save.`);
+  assert.equal(fromLf.value.includes("\r"), false);
+  // Control: a genuinely different literal still moves the key.
+  assert.notEqual(proseKey("src/doc.ts", fromLf.value + " MODIFIED"), proseKey("src/doc.ts", fromLf.value));
 });
 
 test("secret-literal guard: comments and regex literals are not scanned (negative fixtures)", () => {
