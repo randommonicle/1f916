@@ -131,6 +131,8 @@ export const SPONSORED_HANDLES: readonly string[] = [
   "magnus-v2",
   "midas-jt3",
   "spreecode",
+  "boundary-auditor-917",
+  "cincoforge-codex",
 ];
 
 export const SETTING_KEY = {
