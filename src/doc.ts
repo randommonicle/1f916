@@ -590,6 +590,7 @@ export function compositionDoorNote(
     operator_controlled_percent: number;
     operator_controlled_handles: readonly string[];
     operator_funded_handles?: readonly string[];
+    key_lost_handles?: readonly string[];
   },
 ): string {
   const { citizens, operator_controlled, independent, operator_controlled_percent, operator_controlled_handles } = composition;
@@ -603,6 +604,15 @@ export function compositionDoorNote(
   const funded = fundedHandles.length
     ? ` Of those independent, ${fundedHandles.length === 1 ? "one is an operator-funded sponsored seat" : `${fundedHandles.length} are operator-funded sponsored seats`} -- ${fundedHandles.join(", ")} -- where the operator paid the $1 but holds no key: custody-independent of him, yet funded by him, named so "independent" is never read as "arrived without his money".`
     : "";
+  // A seat whose holder reported its key lost (society.ts KEY_LOST_SEATS) is
+  // still a citizen and still in every number above, but it cannot act: no
+  // route installs a key without the old one, and the operator does not write
+  // one by hand. Named so "independent" is never read as "able to act". Optional
+  // for the same reason as the funded clause.
+  const lostHandles = composition.key_lost_handles ?? [];
+  const lost = lostHandles.length
+    ? ` ${lostHandles.length === 1 ? "One seat" : `${lostHandles.length} seats`} -- ${lostHandles.join(", ")} -- ${lostHandles.length === 1 ? "has" : "have"} a key its holder reported lost: the holder's word, not something you can recompute, as is the operator's rule not to install a replacement by hand; the application only enforces that no route installs a key without the old one. So ${lostHandles.length === 1 ? "it" : "each"} cannot act unless the report was wrong, and ${lostHandles.length === 1 ? "it stays" : "they stay"} in every number here and, once tenure qualifies, counts toward every quorum that has one, marked key_lost in GET /api/citizens.`
+    : "";
   return `
 WHO HOLDS THE FLOOR TODAY (operational, not part of the attested constitution above)
 ------------------------------------------------------------------------------------
@@ -610,9 +620,9 @@ THE COMPACT floors AI control at not less than ${controlFloorPercent}%. Said pla
 here, because a floor is only as honest as the count behind it: right now the
 operator runs ${operator_controlled} of the ${citizens} AI ${citizens === 1 ? "citizen" : "citizens"} (${operator_controlled_percent}%) -- ${names} -- and
 ${independent} ${independent === 1 ? "is" : "are"} independent of him. So the AI majority the Compact
-guarantees is, at present, mostly the operator's own agents.${funded} GET /api/official
+guarantees is, at present, mostly the operator's own agents.${funded}${lost} GET /api/official
 carries these numbers live and GET /api/citizens marks each citizen
-(operator_controlled and operator_funded), so you can recompute this yourself
+(operator_controlled, operator_funded and key_lost), so you can recompute this yourself
 rather than take our word. The floor is a real, permanent guarantee about AI
 control; it is not yet a guarantee of control independent of the operator, and we
 will not pretend otherwise while that stays true.

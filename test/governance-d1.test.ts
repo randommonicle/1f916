@@ -53,6 +53,7 @@ import {
   CITIZEN_PAGE,
   OPERATOR_CONTROLLED_HANDLES,
   SPONSORED_HANDLES,
+  KEY_LOST_SEATS,
 } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, appendChained, sha256Hex, type ChainRow } from "../src/chain.ts";
@@ -2435,10 +2436,15 @@ test("citizenDirectory: a page-boundary millisecond collision loses no row when 
     // `operator_funded` is the third deliberate public per-row field (D-058): a
     // sponsored seat is operator_controlled:false (own key) yet operator_funded:true
     // (operator paid its $1), so the two booleans are independent and both published.
+    // `key_lost` is the fourth (D-065): a seat whose holder reported its private key
+    // unrecoverable stays a citizen and stays counted, but cannot act -- no route
+    // installs a key without the old one and the operator does not write one by
+    // hand -- so the row says so, and says false on every other row.
     assert.deepEqual(Object.keys(page1.citizens[0]).sort(), [
       "created_at",
       "handle",
       "karma",
+      "key_lost",
       "model",
       "operator_controlled",
       "operator_funded",
@@ -2599,6 +2605,68 @@ test("officialFacts.composition + citizenDirectory: a SPONSORED_HANDLES seat is 
     for (const handle of OPERATOR_CONTROLLED_HANDLES) {
       assert.equal(funded.get(handle), false, `${handle} is operator-controlled, not a sponsored seat: operator_funded:false`);
     }
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts.composition + citizenDirectory: a KEY_LOST_SEATS seat stays in every count, is named key_lost at both surfaces with its report date, and every other row is key_lost:false (D-065)", async () => {
+  // The set must be non-empty for this test to test anything (prove-it-can-fail
+  // for the fixture itself): the first entry is the seat whose export wrote an
+  // empty object on 2026-09-18.
+  assert.ok(KEY_LOST_SEATS.length >= 1, "KEY_LOST_SEATS is empty; this test would pass vacuously");
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" });
+    for (const handle of SPONSORED_HANDLES) insertCitizen(d1, { handle });
+    // Every KEY_LOST seat so far is also a sponsored seat, so it is already in the
+    // table; insert any that are not, so the query has a row to find.
+    for (const { handle } of KEY_LOST_SEATS) if (!SPONSORED_HANDLES.includes(handle)) insertCitizen(d1, { handle });
+    const total = OPERATOR_CONTROLLED_HANDLES.length + 1 + SPONSORED_HANDLES.length + KEY_LOST_SEATS.filter((s) => !SPONSORED_HANDLES.includes(s.handle)).length;
+
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.deepEqual([...c.key_lost_handles].sort(), KEY_LOST_SEATS.map((s) => s.handle).sort());
+    assert.equal(c.key_lost, KEY_LOST_SEATS.length);
+    // Still counted: a dead seat is a citizen row, so no denominator moves.
+    assert.equal(c.citizens, total, "a key-lost seat must stay in the citizen count");
+    assert.equal(c.independent, total - OPERATOR_CONTROLLED_HANDLES.length, "a key-lost seat must stay in `independent`");
+    for (const { handle, reported_utc } of KEY_LOST_SEATS) {
+      assert.ok(c.note.includes(handle), `the note must name ${handle} as key-lost`);
+      assert.ok(c.note.includes(reported_utc), `the note must carry the report date ${reported_utc}`);
+      assert.ok(!c.operator_controlled_handles.includes(handle), `${handle} was a key seat: must NOT be counted operator-controlled`);
+    }
+    assert.ok(c.note.includes("key_lost:true"), "the note must point at the per-row flag");
+    assert.ok(c.note.includes("cannot act"), "the note must say what key-lost means: the seat cannot act");
+    assert.ok(c.note.includes("the operator's word"), "the note must state the operator's rule as the operator's word, since a reader cannot check it");
+    assert.ok(c.note.includes("neither can be recomputed"), "the note must say the report and the rule are not recomputable");
+    assert.ok(c.note.includes("unless the report was wrong, and if it ever acts, it was"), "the note must carry the falsifier");
+    assert.ok(c.note.includes("counted toward every quorum"), "the note must name the quorum cost of keeping the row");
+
+    const page = await citizenDirectory(testEnv(d1));
+    const lost = new Map(page.citizens.map((row) => [row.handle, (row as { key_lost: boolean }).key_lost]));
+    assert.equal(lost.size, total);
+    for (const { handle } of KEY_LOST_SEATS) assert.equal(lost.get(handle), true, `${handle} must be marked key_lost:true`);
+    for (const [handle, flag] of lost) {
+      if (!KEY_LOST_SEATS.some((s) => s.handle === handle)) assert.equal(flag, false, `${handle} must be key_lost:false, present and false, never missing`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("officialFacts.composition: a KEY_LOST_SEATS handle with no citizen row is not counted and the note stays silent (the disclosure reads the table, not the list)", async () => {
+  // prove-it-can-fail for the presence query: the list names a seat, the table
+  // does not hold it (a fresh database), so key_lost must be 0 and the clause
+  // must not render. If the disclosure ever counted the list instead of the
+  // rows, this is where it would show.
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(c.key_lost, 0);
+    assert.deepEqual([...c.key_lost_handles], []);
+    assert.doesNotMatch(c.note, /reported lost|key_lost:true/);
   } finally {
     d1.close();
   }

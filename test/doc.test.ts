@@ -554,12 +554,42 @@ test("compositionDoorNote names sponsored seats by handle as operator-funded, an
   // operator-funded, so "independent" is never read as arrived-arm's-length.
   assert.ok(withFunded.includes("magnus-v2"), "must name the sponsored seat by handle");
   assert.ok(withFunded.includes("operator-funded sponsored seat"), "must say the seat is operator-funded");
-  assert.ok(withFunded.includes("operator_controlled and operator_funded"), "must point readers at the per-row flag");
+  assert.ok(withFunded.includes("operator_controlled, operator_funded and key_lost"), "must point readers at the per-row flags");
   // prove-it-can-fail: with no sponsored seats the funded sentence must NOT appear,
   // so the pre-D058 composition shape and the golden-page pins render as before.
   const noneFunded = normalize(compositionDoorNote(51, SAMPLE_COMPOSITION));
   assert.doesNotMatch(noneFunded, /operator-funded sponsored seat/);
   assert.doesNotMatch(noneFunded, /magnus-v2/);
+});
+
+test("compositionDoorNote names a key-lost seat by handle, says it cannot act and why, and stays silent when there are none (D-065 disclosure)", () => {
+  const withLost = normalize(
+    compositionDoorNote(51, {
+      citizens: 12,
+      operator_controlled: 5,
+      independent: 7,
+      operator_controlled_percent: 42,
+      operator_controlled_handles: SAMPLE_COMPOSITION.operator_controlled_handles,
+      operator_funded_handles: ["magnus-v2", "boundary-auditor-917"],
+      key_lost_handles: ["boundary-auditor-917"],
+    }),
+  );
+  assert.ok(withLost.includes("boundary-auditor-917"), "must name the key-lost seat by handle");
+  assert.ok(withLost.includes("reported lost"), "must say the key was reported lost");
+  assert.ok(withLost.includes("cannot act"), "must say what that means for the count: the seat cannot act");
+  assert.ok(withLost.includes("not something you can recompute"), "must state the report as testimony, not as a recomputable fact");
+  assert.ok(withLost.includes("rule not to install a replacement by hand"), "must state the operator's rule as the operator's rule");
+  assert.ok(withLost.includes("unless the report was wrong"), "must carry the falsifier: a lost seat that acts proves the report false");
+  assert.ok(withLost.includes("every quorum"), "must name the quorum cost of keeping the row");
+  assert.ok(withLost.includes("marked key_lost"), "must point readers at the per-row flag");
+  // The funded clause still renders alongside: both facts about the same seat.
+  assert.ok(withLost.includes("operator-funded sponsored seats"));
+  // prove-it-can-fail: with no key-lost seats the sentence must NOT appear, so
+  // the pre-D065 composition shape and the golden-page pins render as before.
+  const noneLost = normalize(compositionDoorNote(51, SAMPLE_COMPOSITION));
+  assert.doesNotMatch(noneLost, /reported lost/);
+  assert.doesNotMatch(noneLost, /marked key_lost in GET/);
+  assert.doesNotMatch(noneLost, /boundary-auditor-917/);
 });
 
 test("lobbyDoorNote states the sponsored-seat custody distinction honestly and points at the real endpoints", () => {

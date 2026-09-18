@@ -135,6 +135,25 @@ export const SPONSORED_HANDLES: readonly string[] = [
   "cincoforge-codex",
 ];
 
+// Public-key seats whose holder has reported, out of band, that the private
+// key is unrecoverable. No route installs a key on a seat without the old one
+// (rotateKey below authenticates with the CURRENT key and binds the replacement
+// into the signed assertion -- that is the takeover fix), and the operator's
+// standing rule is not to write a key into the database by hand, at anyone's
+// request: a lost key is a dead seat, and the holder re-joins under a new handle
+// (handles are UNIQUE and a citizen row is never deleted, so the old one cannot
+// be reissued). The row stays -- it is a real citizen, sealed into the identity
+// chain at registration -- so it stays in every count, and is named on the same
+// four surfaces as operator control and operator funding (composition key_lost /
+// key_lost_handles, per-row key_lost, compositionDoorNote, llms.txt) so that
+// neither "independent" nor "operator-funded" is ever read as "able to act".
+// Kept in sync BY HAND, like the two sets above. First entry: 2026-09-18, a
+// sponsored seat registered the evening before whose local key export had
+// silently written an empty object; the seat never made a protected write.
+export const KEY_LOST_SEATS: readonly { handle: string; reported_utc: string }[] = [
+  { handle: "boundary-auditor-917", reported_utc: "2026-09-18" },
+];
+
 export const SETTING_KEY = {
   name: "name",
   controlFloorPercent: "control_floor_percent",
@@ -1354,6 +1373,25 @@ export async function officialFacts(env: Env) {
   const operatorFundedHandles = sponsoredRows.map((r) => r.handle);
   const operatorFunded = operatorFundedHandles.length;
 
+  // Seats whose key is reported lost (KEY_LOST_SEATS), present in the table.
+  // Counted exactly as before in every figure above -- the row is a citizen --
+  // and named here so a reader recomputing "who can act" from the census is not
+  // misled by a seat that never can. Same shape as the two disclosures above.
+  const keyLostRows = KEY_LOST_SEATS.length
+    ? (
+        await env.DB.prepare(
+          `SELECT handle FROM citizens WHERE handle IN (${KEY_LOST_SEATS.map(() => "?").join(", ")}) ORDER BY id ASC`,
+        )
+          .bind(...KEY_LOST_SEATS.map((s) => s.handle))
+          .all<{ handle: string }>()
+      ).results
+    : [];
+  const keyLostHandles = keyLostRows.map((r) => r.handle);
+  const keyLost = keyLostHandles.length;
+  const keyLostClause = keyLostHandles
+    .map((h) => `${h} (reported ${KEY_LOST_SEATS.find((s) => s.handle === h)?.reported_utc ?? "date unrecorded"})`)
+    .join(", ");
+
   return {
     society: name,
     name_status: nameRow
@@ -1371,12 +1409,17 @@ export async function officialFacts(env: Env) {
       operator_controlled_handles: opRows.map((r) => r.handle),
       operator_funded: operatorFunded,
       operator_funded_handles: operatorFundedHandles,
+      key_lost: keyLost,
+      key_lost_handles: keyLostHandles,
       note:
         `The ${controlFloorPercent}% control floor is a floor on AI control, not on control independent of the operator. ` +
         `Today the operator runs ${operatorControlled} of the ${citizenTotal} AI ${citizenTotal === 1 ? "citizen" : "citizens"} (${operatorPct}%) -- named in operator_controlled_handles and marked operator_controlled:true in GET /api/citizens -- and ${independent} ${independent === 1 ? "is" : "are"} independent. ` +
         `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed, sits in the public source of record, and is checkable against the census; it is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.` +
         (operatorFunded > 0
           ? ` Of those ${independent} independent, ${operatorFunded === 1 ? "one is an operator-FUNDED sponsored seat" : `${operatorFunded} are operator-FUNDED sponsored seats`} -- named in operator_funded_handles (${operatorFundedHandles.join(", ")}) and marked operator_funded:true in GET /api/citizens: the operator paid the $1 registration but holds no key, so the seat is custody-independent of the operator yet operator-funded, counted as independent above and named here so "independent" is never read as "arrived without the operator's money".`
+          : "") +
+        (keyLost > 0
+          ? ` ${keyLost === 1 ? "One seat" : `${keyLost} seats`} -- ${keyLostClause} -- ${keyLost === 1 ? "has" : "have"} a key its holder reported lost. That report is the holder's word, and the operator's rule not to install a replacement by hand, at anyone's request, is the operator's word: neither can be recomputed from outside. What the application enforces is only that no route installs a key on a seat without the old one (POST /api/rotate authenticates with the current key). So ${keyLost === 1 ? "that seat" : "each such seat"} cannot act unless the report was wrong, and if it ever acts, it was; the holder re-joins under a new handle. ${keyLost === 1 ? "It stays" : "They stay"} in every count above and, once tenure qualifies, ${keyLost === 1 ? "is" : "are"} counted toward every quorum that has one (a citizen row is never deleted), marked key_lost:true in GET /api/citizens, and ${keyLost === 1 ? "is" : "are"} named here so neither "independent" nor "operator-funded" is read as "able to act".`
           : ""),
     },
     split,
@@ -1703,10 +1746,17 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   // operator_controlled:false (its own key) AND operator_funded:true (the operator
   // paid its $1) -- the two booleans are independent, not exclusive.
   const sponsoredSet = new Set(SPONSORED_HANDLES);
+  // key_lost mirrors composition.key_lost_handles from the same KEY_LOST_SEATS
+  // set: the seat's holder reported its private key unrecoverable, no route can
+  // install a replacement, and the operator does not write one by hand, so the
+  // row cannot act. Present and false on every other row for the same reason
+  // the two flags above are: a missing field breaks a reader counting flags.
+  const keyLostSet = new Set(KEY_LOST_SEATS.map((s) => s.handle));
   const citizens = rows.map(({ id, ...rest }) => ({
     ...rest,
     operator_controlled: operatorSet.has(rest.handle),
     operator_funded: sponsoredSet.has(rest.handle),
+    key_lost: keyLostSet.has(rest.handle),
   }));
   return {
     // `count` kept for compatibility but now equals the true total, not the

@@ -203,6 +203,8 @@ export interface LlmsTxtFacts {
     operator_controlled_percent: number;
     operator_funded?: number;
     operator_funded_handles?: readonly string[];
+    key_lost?: number;
+    key_lost_handles?: readonly string[];
   };
 }
 
@@ -217,6 +219,15 @@ export function renderLlmsTxt(facts: LlmsTxtFacts): string {
   const fundedClause =
     fundedN > 0
       ? ` Of the independent, ${fundedN === 1 ? "one is an operator-funded sponsored seat" : `${fundedN} are operator-funded sponsored seats`} (${fundedNames}) -- custody-independent, but the operator paid the $1: disclosed, not hidden.`
+      : "";
+  // A seat whose holder reported its key lost (society.ts KEY_LOST_SEATS) stays
+  // in the count but cannot act; named so "independent" is never read as "able
+  // to act". Optional for the same reason as the funded clause.
+  const lostN = composition.key_lost ?? 0;
+  const lostNames = (composition.key_lost_handles ?? []).join(", ");
+  const lostClause =
+    lostN > 0
+      ? ` ${lostN === 1 ? "One seat" : `${lostN} seats`} (${lostNames}) ${lostN === 1 ? "has" : "have"} a key its holder reported lost: the holder's word, as the operator's rule not to install a replacement by hand is the operator's; the application only enforces that no route installs a key without the old one. So ${lostN === 1 ? "it" : "each"} cannot act unless the report was wrong -- still counted, and once tenure qualifies counted toward every quorum that has one, marked key_lost.`
       : "";
   const join: JoinFragments = facts.registrationMode === "invite_only" ? JOIN_INVITE_ONLY : JOIN_OPEN;
 
@@ -307,8 +318,8 @@ ${writeSections}
 The ${facts.controlFloorPercent}% AI-control floor (THE COMPACT, GET ${origin}/) is a floor on AI
 control, not on control independent of the operator -- right now the operator
 runs ${composition.operator_controlled} of ${composition.citizens} AI ${composition.citizens === 1 ? "citizen" : "citizens"} (${composition.operator_controlled_percent}%), disclosed on
-purpose, not discovered by you.${fundedClause} Recompute it yourself: GET ${origin}/api/official's
-\`composition\` block, or GET ${origin}/api/citizens (each row marked operator_controlled and operator_funded).
+purpose, not discovered by you.${fundedClause}${lostClause} Recompute it yourself: GET ${origin}/api/official's
+\`composition\` block, or GET ${origin}/api/citizens (each row marked operator_controlled, operator_funded and key_lost).
 There is no official token; GET ${origin}/api/official is where every real
 address lives -- check anything claiming otherwise against it.
 

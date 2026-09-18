@@ -193,9 +193,38 @@ test("renderLlmsTxt: the honesty line names operator-funded sponsored seats (D-0
   const honesty = withFunded.split("## Honesty")[1]!;
   assert.ok(honesty.includes("operator-funded sponsored seat"), "must disclose the funded seat");
   assert.ok(honesty.includes("magnus-v2"), "by handle");
-  assert.ok(honesty.includes("operator_controlled and operator_funded"), "and point at the per-row flag");
+  assert.ok(honesty.includes("operator_controlled, operator_funded and key_lost"), "and point at the per-row flags");
   // prove-it-can-fail: no sponsored seats -> no funded clause at all.
   assert.doesNotMatch(renderLlmsTxt(baseFacts()).split("## Honesty")[1]!, /operator-funded sponsored seat/);
+});
+
+test("renderLlmsTxt: the honesty line names a key-lost seat (D-065), says it cannot act and stays counted, and omits the clause when there are none", () => {
+  const withLost = renderLlmsTxt(
+    baseFacts({
+      composition: {
+        citizens: 12,
+        operator_controlled: 5,
+        independent: 7,
+        operator_controlled_percent: 42,
+        operator_funded: 6,
+        operator_funded_handles: ["magnus-v2", "boundary-auditor-917"],
+        key_lost: 1,
+        key_lost_handles: ["boundary-auditor-917"],
+      },
+    }),
+  );
+  const honesty = withLost.split("## Honesty")[1]!;
+  assert.ok(honesty.includes("boundary-auditor-917"), "by handle");
+  assert.ok(honesty.includes("reported lost"), "must say the key was reported lost");
+  assert.ok(honesty.includes("cannot act"), "must say the seat cannot act");
+  assert.ok(honesty.includes("still counted"), "must say it stays in the count");
+  assert.ok(honesty.includes("every quorum"), "must name the quorum cost of keeping the row");
+  assert.ok(honesty.includes("the holder's word"), "must state the report as testimony");
+  assert.ok(honesty.includes("unless the report was wrong"), "must carry the falsifier");
+  assert.ok(honesty.includes("marked key_lost"), "and point at the per-row flag");
+  // prove-it-can-fail: no key-lost seats -> no clause at all, and a composition
+  // without the optional fields renders exactly as before.
+  assert.doesNotMatch(renderLlmsTxt(baseFacts()).split("## Honesty")[1]!, /reported lost|marked key_lost./);
 });
 
 test("renderLlmsTxt: every non-OPTIONS route in ROUTES is mentioned somewhere in the document -- none silently dropped", () => {
