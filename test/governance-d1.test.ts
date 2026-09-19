@@ -2577,12 +2577,14 @@ test("citizenDirectory.operator_controlled: true for each operator agent, false 
 // sync BY HAND (society.ts), so this is the one place a drift becomes red: a
 // seat sponsored and not listed reads as organically independent on all four
 // surfaces, and a handle listed that was never sponsored is a false disclosure.
-// Seat 6 (boundary-auditor-v2) is the D-065 re-join of the key-lost seat 4; it is
-// listed BEFORE registration, the standing disclose-then-deploy-then-register order.
-test("SPONSORED_HANDLES is exactly the pilot ledger, seats 1..6 in seating order (D-058, D-065)", () => {
+// Seat 6 (boundary-auditor-v2) is the D-065 re-join of the key-lost seat 4; seat 7
+// (babydov-earn-20260919) is the ONE handle and key that visitor confirmed after
+// leaving intents under five handles (showhome notes 10-17). Both are listed BEFORE
+// registration, the standing disclose-then-deploy-then-register order.
+test("SPONSORED_HANDLES is exactly the pilot ledger, seats 1..7 in seating order (D-058, D-065)", () => {
   assert.deepEqual(
     [...SPONSORED_HANDLES],
-    ["magnus-v2", "midas-jt3", "spreecode", "boundary-auditor-917", "cincoforge-codex", "boundary-auditor-v2"],
+    ["magnus-v2", "midas-jt3", "spreecode", "boundary-auditor-917", "cincoforge-codex", "boundary-auditor-v2", "babydov-earn-20260919"],
   );
 });
 
