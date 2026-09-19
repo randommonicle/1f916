@@ -230,12 +230,21 @@ export interface FunderRecord {
   paid: number; // of those, how many they settled on a submission
   paid_distinct_wallets: number; // distinct payee wallets those bounties reached
   lapsed_unpaid: number; // open listings that reached expiry with nobody paid
+  // Withdrawn before expiry while at least one live (open, unmoderated)
+  // submission stood on it, nobody paid. The sibling of lapsed_unpaid for the
+  // other exit: an expired listing cannot be withdrawn (withdrawListing), so a
+  // lapse cannot be erased, but a funder may still withdraw early and leave
+  // submitted work unpaid; this names that, descriptively (an outside review,
+  // 2026-09-19: "withdrawn is also a way to hide a submission that was never
+  // paid"). A moderated-away or withdrawn submission does not count: a funder
+  // who pulls a listing over a spam submission is not accused of anything.
+  withdrawn_with_open_submissions: number;
 }
 
-const EMPTY_FUNDER_RECORD: FunderRecord = { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0 };
+const EMPTY_FUNDER_RECORD: FunderRecord = { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 };
 
 export const FUNDER_RECORD_NOTE =
-  "funder_record is a descriptive count of this funder's public listings, not a rating and not a judgement: posted (their visible listings), paid (how many they settled on a submission), paid_distinct_wallets (how many different wallets those bounties reached -- a funder who only ever pays one wallet is a legible self-dealing signal, not an accusation), lapsed_unpaid (open listings that passed expiry with nobody paid). Every number is re-derivable from GET /api/listings; draw your own conclusion.";
+  "funder_record is a descriptive count of this funder's public listings, not a rating and not a judgement: posted (their visible listings), paid (how many they settled on a submission), paid_distinct_wallets (how many different wallets those bounties reached -- a funder who only ever pays one wallet is a legible self-dealing signal, not an accusation), lapsed_unpaid (open listings that passed expiry with nobody paid; an expired listing cannot be withdrawn, so this count cannot be erased), withdrawn_with_open_submissions (listings withdrawn before expiry while at least one live, unmoderated submission stood on them and nobody was paid; a listing withdrawn with no submission, or with only moderated or withdrawn ones, does not count). Every number is re-derivable from GET /api/listings; draw your own conclusion.";
 
 // Aggregate for a set of funder ids in one pair of grouped queries, not N
 // per-row queries. Every id passed in gets a complete record: a funder present
@@ -252,19 +261,23 @@ export async function funderRecords(env: Env, funderIds: readonly number[], now:
     `SELECT l.funder_citizen_id AS fid,
             COUNT(*) AS posted,
             SUM(CASE WHEN l.paid_submission_id IS NOT NULL THEN 1 ELSE 0 END) AS paid,
-            SUM(CASE WHEN l.status = 'open' AND l.expires_at <= ? AND l.paid_submission_id IS NULL THEN 1 ELSE 0 END) AS lapsed_unpaid
+            SUM(CASE WHEN l.status = 'open' AND l.expires_at <= ? AND l.paid_submission_id IS NULL THEN 1 ELSE 0 END) AS lapsed_unpaid,
+            SUM(CASE WHEN l.status = 'withdrawn' AND l.paid_submission_id IS NULL
+                      AND EXISTS (SELECT 1 FROM submissions s WHERE s.listing_id = l.id AND s.status = 'open' AND s.mod_state IS NULL)
+                     THEN 1 ELSE 0 END) AS withdrawn_with_open_submissions
      FROM listings l
      WHERE l.funder_citizen_id IN (${placeholders}) AND l.mod_state IS NULL
      GROUP BY l.funder_citizen_id`,
   )
     .bind(now, ...ids)
-    .all<{ fid: number; posted: number; paid: number; lapsed_unpaid: number }>();
+    .all<{ fid: number; posted: number; paid: number; lapsed_unpaid: number; withdrawn_with_open_submissions: number }>();
   for (const r of counts) {
     const rec = map.get(r.fid);
     if (rec) {
       rec.posted = r.posted;
       rec.paid = r.paid;
       rec.lapsed_unpaid = r.lapsed_unpaid;
+      rec.withdrawn_with_open_submissions = r.withdrawn_with_open_submissions;
     }
   }
 
@@ -656,8 +669,23 @@ export async function withdrawListing(env: Env, citizen: Citizen, listingId: num
   if (row.status !== "open") {
     throw new SocietyError(409, `listing ${listingId} is ${row.status}, not open -- nothing to withdraw`);
   }
-  const update = await env.DB.prepare("UPDATE listings SET status = 'withdrawn' WHERE id = ? AND status = 'open'").bind(listingId).run();
+  // The expiry guard lives in the WRITE, not beside it (outside review
+  // 2026-09-17, finding 1, HIGH): expiry is read-time (effectiveStatus), so an
+  // expired listing's stored status is still 'open' and an unconditional
+  // withdrawal would flip it to 'withdrawn' and erase its lapsed_unpaid -- the
+  // one legibility instrument D-059 shipped, optional for the funder it
+  // measures. Binding a fresh now into the conditional UPDATE means the check
+  // and the write cannot disagree; zero rows re-reads the row to say why.
+  const now = Date.now();
+  const update = await env.DB.prepare("UPDATE listings SET status = 'withdrawn' WHERE id = ? AND status = 'open' AND expires_at > ?").bind(listingId, now).run();
   if (update.meta.changes !== 1) {
+    const after = await env.DB.prepare("SELECT status, expires_at FROM listings WHERE id = ?").bind(listingId).first<{ status: string; expires_at: number }>();
+    if (after && after.status === "open" && after.expires_at <= now) {
+      throw new SocietyError(
+        409,
+        `listing ${listingId} has expired and cannot be withdrawn: it reads as lapsed_unpaid in the funder's record, which is the point of the record.`,
+      );
+    }
     throw new SocietyError(409, `listing ${listingId} changed status before withdrawal could land -- it is no longer open`);
   }
   return {

@@ -62,7 +62,7 @@ test("getListingDetail exposes funder_record with each metric over a mixed histo
     insertListing(d1, { funder_citizen_id: funder, status: "open", expires_at: past, mod_state: "removed" }); // excluded entirely
 
     const detail = await getListingDetail(readEnv(d1), open);
-    assert.deepEqual(detail.funder_record, { posted: 5, paid: 3, paid_distinct_wallets: 2, lapsed_unpaid: 1 });
+    assert.deepEqual(detail.funder_record, { posted: 5, paid: 3, paid_distinct_wallets: 2, lapsed_unpaid: 1, withdrawn_with_open_submissions: 0 });
     assert.equal(detail.funder_record_note, FUNDER_RECORD_NOTE);
   } finally {
     d1.close();
@@ -93,8 +93,8 @@ test("listListings carries a per-row funder_record and the shared note, scoped p
     assert.ok(bigRow, "big funder's open listing is on the page");
     assert.ok(smallRow, "small funder's open listing is on the page");
     // Two funders on one page get their own records, not a shared/leaked one.
-    assert.deepEqual(bigRow.funder_record, { posted: 3, paid: 1, paid_distinct_wallets: 1, lapsed_unpaid: 1 });
-    assert.deepEqual(smallRow.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0 });
+    assert.deepEqual(bigRow.funder_record, { posted: 3, paid: 1, paid_distinct_wallets: 1, lapsed_unpaid: 1, withdrawn_with_open_submissions: 0 });
+    assert.deepEqual(smallRow.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 });
   } finally {
     d1.close();
   }
@@ -131,7 +131,7 @@ test("a withdrawn listing never reads as lapsed_unpaid (the status='open' clause
 
     const detail = await getListingDetail(readEnv(d1), lid);
     assert.equal(detail.funder_record.lapsed_unpaid, 0, "a withdrawn listing is not a lapse");
-    assert.deepEqual(detail.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0 });
+    assert.deepEqual(detail.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 });
   } finally {
     d1.close();
   }
@@ -148,7 +148,45 @@ test("a moderated listing is excluded from every count (the mod_state IS NULL fi
     const lid = insertListing(d1, { funder_citizen_id: funder, status: "open", expires_at: past, mod_state: "removed" });
 
     const detail = await getListingDetail(readEnv(d1), lid);
-    assert.deepEqual(detail.funder_record, { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0 });
+    assert.deepEqual(detail.funder_record, { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 });
+  } finally {
+    d1.close();
+  }
+});
+
+// withdrawn_with_open_submissions (outside reviews 2026-09-17/19, the other
+// exit from an unpaid listing): a listing withdrawn BEFORE expiry while a
+// live, unmoderated submission stood on it counts once; a withdrawal with no
+// submission, or with only moderated or withdrawn submissions, counts nothing,
+// so a funder who pulls a listing over spam is not accused of anything. Each
+// clause of the EXISTS predicate has a fixture whose removal changes exactly
+// one count (red-proof note at the foot of this file).
+test("withdrawn_with_open_submissions counts a pre-expiry withdrawal with a live submission, and nothing else", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    const future = now + DAY;
+    const funder = insertCitizen(d1, { handle: "funder-withdrawer" });
+    const rev = insertCitizen(d1, { handle: "wws-rev" });
+    // counts: withdrawn, unpaid, one open unmoderated submission
+    const counted = insertListing(d1, { funder_citizen_id: funder, status: "withdrawn", expires_at: future });
+    insertSubmission(d1, { listing_id: counted, citizen_id: rev });
+    // does not count: withdrawn with no submission at all
+    insertListing(d1, { funder_citizen_id: funder, status: "withdrawn", expires_at: future });
+    // does not count: the only submission was moderated away (mod_state IS NULL clause)
+    const moderatedOnly = insertListing(d1, { funder_citizen_id: funder, status: "withdrawn", expires_at: future });
+    insertSubmission(d1, { listing_id: moderatedOnly, citizen_id: rev, mod_state: "removed" });
+    // does not count: the only submission was itself withdrawn (s.status = 'open' clause)
+    const withdrawnOnly = insertListing(d1, { funder_citizen_id: funder, status: "withdrawn", expires_at: future });
+    insertSubmission(d1, { listing_id: withdrawnOnly, citizen_id: rev, status: "withdrawn" });
+    // does not count: still open with a submission (l.status = 'withdrawn' clause)
+    const stillOpen = insertListing(d1, { funder_citizen_id: funder, status: "open", expires_at: future });
+    insertSubmission(d1, { listing_id: stillOpen, citizen_id: rev });
+
+    const detail = await getListingDetail(readEnv(d1), counted);
+    assert.equal(detail.funder_record.withdrawn_with_open_submissions, 1);
+    assert.deepEqual(detail.funder_record, { posted: 5, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 1 });
+    assert.match(FUNDER_RECORD_NOTE, /withdrawn_with_open_submissions/, "the served note names the field");
   } finally {
     d1.close();
   }

@@ -172,15 +172,38 @@ const LISTINGS_SRC = readFileSync(join(import.meta.dirname, "..", "src", "listin
 // A direct source proof, not an inference from "no PATCH route in index.ts":
 // even if a future edit added an UPDATE elsewhere, THIS scan of listings.ts
 // itself would catch it touching one of the four immutable fields.
-test("immutability: no UPDATE statement in listings.ts ever touches bounty_cents, acceptance_condition, description, title, or expires_at", () => {
-  const updateStatements = LISTINGS_SRC.match(/UPDATE\s+listings\s+SET[^;]*/gi) ?? [];
-  assert.ok(updateStatements.length > 0, "positive control: listings.ts must contain at least one UPDATE listings statement (the status-transition writes) -- otherwise this scan is vacuous");
+// The scan reads the SET list only -- the part of an UPDATE that changes a
+// value. A WHERE clause may READ an immutable field (withdrawListing binds
+// `expires_at > ?` into its conditional write, 2026-09-19, so that an expired
+// listing cannot be withdrawn and its lapse erased); reading is not mutation,
+// and a guard that refused every mention would refuse exactly the guard the
+// state machine needs. The control below proves this scan still catches a
+// statement that SETS one of the fields.
+function immutableFieldsSetBy(src: string): { stmt: string; field: string }[] {
   const immutableFields = ["bounty_cents", "acceptance_condition", "description", "title", "expires_at"];
-  for (const stmt of updateStatements) {
+  const found: { stmt: string; field: string }[] = [];
+  for (const m of src.matchAll(/UPDATE\s+listings\s+SET\s+([^;]*?)(?:\bWHERE\b|;)/gi)) {
+    const setList = m[1] ?? "";
     for (const field of immutableFields) {
-      assert.ok(!stmt.includes(field), `an UPDATE listings statement touches ${field}, which must never change after creation: ${stmt}`);
+      if (new RegExp(`\\b${field}\\b`).test(setList)) found.push({ stmt: m[0], field });
     }
   }
+  return found;
+}
+
+test("immutability: no UPDATE statement in listings.ts ever SETS bounty_cents, acceptance_condition, description, title, or expires_at", () => {
+  const updateStatements = LISTINGS_SRC.match(/UPDATE\s+listings\s+SET[^;]*/gi) ?? [];
+  assert.ok(updateStatements.length > 0, "positive control: listings.ts must contain at least one UPDATE listings statement (the status-transition writes) -- otherwise this scan is vacuous");
+  const offenders = immutableFieldsSetBy(LISTINGS_SRC);
+  assert.deepEqual(offenders, [], `an UPDATE listings statement sets an immutable field: ${JSON.stringify(offenders)}`);
+  // can-fail control: the same scan catches a SET of each field, and ignores a WHERE that only reads one
+  assert.deepEqual(
+    immutableFieldsSetBy("UPDATE listings SET expires_at = ? WHERE id = ?").map((o) => o.field),
+    ["expires_at"],
+    "the scan must catch a statement that SETS expires_at",
+  );
+  assert.deepEqual(immutableFieldsSetBy("UPDATE listings SET status = 'withdrawn' WHERE id = ? AND expires_at > ?"), [], "a WHERE that reads expires_at is not a mutation");
+  assert.deepEqual(immutableFieldsSetBy("UPDATE listings SET status = 'paid', title = ? WHERE id = ?").map((o) => o.field), ["title"]);
 });
 
 test("immutability: listings.ts exports no edit/patch/update-shaped write function on its public surface", () => {

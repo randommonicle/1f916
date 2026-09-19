@@ -1391,6 +1391,52 @@ test("withdrawListing: only the funder may withdraw -- another citizen is refuse
   }
 });
 
+// F1 (outside review 2026-09-17, HIGH): expiry is read-time, so an expired
+// listing's stored status is still 'open'; before this guard a withdrawal
+// flipped it to 'withdrawn' and erased its lapsed_unpaid, making the funder
+// record optional for the funder it measures. The guard lives in the
+// conditional UPDATE (`AND expires_at > ?`), so this test's red-proof is
+// exact: remove that clause and (a) goes red while (b) stays green.
+test("withdrawListing: (a) an EXPIRED listing cannot be withdrawn -- 409 naming the lapse, row still 'open', lapsed_unpaid still 1", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() - 1000 });
+    const before = await getListingDetail(env, listingId);
+    assert.equal(before.listing.status, "expired", "served as expired (read-time) while stored 'open'");
+    assert.equal(before.funder_record.lapsed_unpaid, 1);
+    await assert.rejects(
+      () => withdrawListing(env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /expired and cannot be withdrawn/.test(e.message) && /lapsed_unpaid/.test(e.message),
+    );
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "open", "the stored status is untouched, so the lapse still counts");
+    const after = await getListingDetail(env, listingId);
+    assert.equal(after.funder_record.lapsed_unpaid, 1, "the lapse cannot be erased by withdrawal");
+  } finally {
+    d1.close();
+  }
+});
+
+test("withdrawListing: (b) an open, UNEXPIRED listing withdraws exactly as before (the guard is the expiry, not the act)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    const result = await withdrawListing(env, funder, listingId);
+    assert.equal(result.status, "withdrawn");
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "withdrawn");
+    assert.equal((await getListingDetail(env, listingId)).funder_record.lapsed_unpaid, 0);
+  } finally {
+    d1.close();
+  }
+});
+
 test("withdrawListing: a listing already withdrawn cannot be withdrawn again", async () => {
   const d1 = createLocalD1();
   try {
