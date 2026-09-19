@@ -576,11 +576,34 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // payer is mid-settle, re-opening the exact double-pay this reservation
   // exists to prevent. Only the request whose own afterVerify won the reserve
   // may release it.
+  // Finding 2 + the second reviewer's claim 2 (outside reviews 2026-09-17/18,
+  // both re-derived at source): Step 1's expiry and submission checks are
+  // reads, and the facilitator round trip sits between them and this write,
+  // so a listing that expired during /verify, or a submission moderated during
+  // it (POST /api/moderate reaches submissions), was still settled and
+  // recorded. The reservation is the ONE write that must be authoritative, so
+  // it re-checks both objects at the free-exit boundary in a single statement
+  // (a fresh now for expiry; an EXISTS on the submission row for its listing,
+  // status and mod_state). One statement on purpose: submissions.status admits
+  // only 'open'/'withdrawn' (schema.sql), so a second row cannot be reserved,
+  // and a conditional UPDATE that matches zero rows is a SUCCESSFUL statement,
+  // so two statements in a batch would not protect each other. A successful
+  // reservation FREEZES eligibility: moderation committed after it changes
+  // visibility, not the in-flight payment the funder already chose to make.
   let reservedByMe = false;
   const result = await payAndSettle(env, request, reqs, async () => {
-    const reserved = await env.DB.prepare("UPDATE listings SET status = 'paying' WHERE id = ? AND status = 'open'").bind(listingId).run();
+    const reserved = await env.DB.prepare(
+      `UPDATE listings SET status = 'paying'
+       WHERE id = ? AND status = 'open' AND expires_at > ? AND mod_state IS NULL
+         AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ? AND s.listing_id = listings.id AND s.status = 'open' AND s.mod_state IS NULL)`,
+    )
+      .bind(listingId, Date.now(), submissionId)
+      .run();
     if (reserved.meta.changes !== 1) {
-      throw new SocietyError(409, "This listing is no longer open -- already being paid, paid, withdrawn, or expired.");
+      throw new SocietyError(
+        409,
+        "This listing can no longer be paid: it is already being paid, paid, withdrawn, expired or moderated, or the submission is no longer open. Nothing was settled.",
+      );
     }
     reservedByMe = true;
   });

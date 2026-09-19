@@ -565,7 +565,7 @@ function payRequestFromIp(listingId: number, submissionId: number, ip: string): 
 // settle request's own paymentRequirements (payTo, maxAmountRequired) so
 // tests can assert on exactly what was actually signed-for, independent of
 // what a request body claimed.
-function stubFacilitatorFetch(settle: { payer?: string; transaction?: string } = {}) {
+function stubFacilitatorFetch(settle: { payer?: string; transaction?: string } = {}, hooks: { onVerify?: () => Promise<void> | void } = {}) {
   const original = globalThis.fetch;
   let verifyCalls = 0;
   let settleCalls = 0;
@@ -574,6 +574,10 @@ function stubFacilitatorFetch(settle: { payer?: string; transaction?: string } =
     const href = String(url);
     if (href === `${FACILITATOR_URL}/verify`) {
       verifyCalls++;
+      // The race window: whatever a test does here lands between Step 1's
+      // reads and the reservation write, exactly where a real facilitator
+      // round trip leaves room for the world to move.
+      await hooks.onVerify?.();
       return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (href === `${FACILITATOR_URL}/settle`) {
@@ -901,6 +905,135 @@ test("handlePayListing: payTo is derived from the submission's citizen -> wallet
     assert.equal(ledgerCount.n, 0, "paying a bounty must never add a ledger row -- the treasury is not party to this payment");
   } finally {
     stub.restore();
+    d1.close();
+  }
+});
+
+// Finding 2 (outside review 2026-09-17, MEDIUM): loadPayableListing checked
+// expiry BEFORE /verify; the reservation checked status only, so a listing
+// that expired during the facilitator round trip was still settled and
+// recorded paid after its own deadline. The onVerify hook expires it inside
+// that window. Red-proof: drop `expires_at > ?` from the reservation and this
+// goes red (the settle would be called and the row would read 'paid').
+test("handlePayListing: a listing that EXPIRES during /verify is refused 409 at the reservation -- /settle is never called, the row stays 'open', no payment row", async () => {
+  const d1 = createLocalD1();
+  let listingId = 0;
+  const stub = stubFacilitatorFetch({}, {
+    onVerify: () => {
+      d1.raw.prepare("UPDATE listings SET expires_at = ? WHERE id = ?").run(Date.now() - 1, listingId);
+    },
+  });
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee2");
+    listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /expired/.test(e.message) && /Nothing was settled/.test(e.message),
+    );
+    assert.equal(stub.verifyCalls(), 1, "the signed payment did reach /verify");
+    assert.equal(stub.settleCalls(), 0, "and never reached /settle");
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "open", "no reservation was taken, so nothing to release");
+    const payments = d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments WHERE listing_id = ?").get(listingId) as { n: number };
+    assert.equal(payments.n, 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// The second reviewer's claim 2 (showhome note 10, 2026-09-18, re-derived at
+// source): loadPayableSubmission's status/mod_state checks were reads before
+// /verify, and POST /api/moderate reaches submissions, so a submission
+// moderated during the round trip was still paid and recorded. The reservation
+// now re-checks the submission row (EXISTS) in the same statement. Uses the
+// REAL moderateContent, not a raw UPDATE. Red-proof: drop the EXISTS and this
+// goes red.
+test("handlePayListing: a submission MODERATED during /verify (real moderateContent) is refused 409 at the reservation -- /settle is never called", async () => {
+  const d1 = createLocalD1();
+  let submissionId = 0;
+  let env: Env;
+  let maintainerCitizen: Awaited<ReturnType<typeof loadCitizen>>;
+  const stub = stubFacilitatorFetch({}, {
+    onVerify: async () => {
+      await moderateContent(env, maintainerCitizen, "submission", submissionId, "remove", "plagiarised review", null);
+    },
+  });
+  try {
+    env = testEnv(d1);
+    const maintainerId = insertCitizen(d1, { handle: "commonhold-agent" });
+    assert.equal(maintainerId, MAINTAINER_ID, "test setup invariant");
+    maintainerCitizen = await loadCitizen(d1, maintainerId);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee3");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /submission is no longer open/.test(e.message),
+    );
+    assert.equal(stub.settleCalls(), 0, "never reached /settle");
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "open");
+    const sub = d1.raw.prepare("SELECT mod_state FROM submissions WHERE id = ?").get(submissionId) as { mod_state: string };
+    assert.equal(sub.mod_state, "removed", "the moderation that won the race is the one on the row");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// The boundary the fix draws: a reservation that succeeded FREEZES payment
+// eligibility. Moderation landing after it (here: during /settle) changes the
+// submission's visibility and nothing else; the payment the funder already
+// chose to make completes and is recorded. Not a race test of the fix but a
+// pin of the rule the brief states, so a later "cancel in-flight on
+// moderation" change has to argue with this test first.
+test("handlePayListing: moderation landing AFTER the reservation (during /settle) does not cancel the in-flight payment", async () => {
+  const d1 = createLocalD1();
+  let submissionId = 0;
+  let env: Env;
+  let maintainerCitizen: Awaited<ReturnType<typeof loadCitizen>>;
+  const original = globalThis.fetch;
+  let settleCalls = 0;
+  globalThis.fetch = (async (url: unknown) => {
+    const href = String(url);
+    if (href === `${FACILITATOR_URL}/verify`) return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    if (href === `${FACILITATOR_URL}/settle`) {
+      settleCalls++;
+      await moderateContent(env, maintainerCitizen, "submission", submissionId, "collapse", "flagged late", null);
+      return new Response(JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000000abc", transaction: "0xlate" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unexpected fetch in the freeze test: ${href}`);
+  }) as typeof fetch;
+  try {
+    env = testEnv(d1);
+    const maintainerId = insertCitizen(d1, { handle: "commonhold-agent" });
+    maintainerCitizen = await loadCitizen(d1, maintainerId);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee4");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    const res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assert.equal(settleCalls, 1);
+    const row = d1.raw.prepare("SELECT status, paid_submission_id FROM listings WHERE id = ?").get(listingId) as { status: string; paid_submission_id: number };
+    assert.equal(row.status, "paid");
+    assert.equal(row.paid_submission_id, submissionId);
+  } finally {
+    globalThis.fetch = original;
     d1.close();
   }
 });
