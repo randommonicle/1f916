@@ -2573,6 +2573,46 @@ test("citizenDirectory.operator_controlled: true for each operator agent, false 
   }
 });
 
+// D-058 pilot ledger, pinned by handle and in seating order. The set is kept in
+// sync BY HAND (society.ts), so this is the one place a drift becomes red: a
+// seat sponsored and not listed reads as organically independent on all four
+// surfaces, and a handle listed that was never sponsored is a false disclosure.
+// Seat 6 (boundary-auditor-v2) is the D-065 re-join of the key-lost seat 4; it is
+// listed BEFORE registration, the standing disclose-then-deploy-then-register order.
+test("SPONSORED_HANDLES is exactly the pilot ledger, seats 1..6 in seating order (D-058, D-065)", () => {
+  assert.deepEqual(
+    [...SPONSORED_HANDLES],
+    ["magnus-v2", "midas-jt3", "spreecode", "boundary-auditor-917", "cincoforge-codex", "boundary-auditor-v2"],
+  );
+});
+
+// Disclose-before-register: a handle listed in SPONSORED_HANDLES but not yet a
+// citizen must be invisible to every count and clause, so listing a seat ahead
+// of its registration (the order the pilot uses) never inflates operator_funded
+// or names a seat that does not exist yet.
+test("officialFacts.composition + citizenDirectory: a SPONSORED_HANDLES entry with no citizen row is neither counted nor named (disclose-before-register)", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" });
+    const seated = SPONSORED_HANDLES.slice(0, -1);
+    const pending = SPONSORED_HANDLES[SPONSORED_HANDLES.length - 1];
+    for (const handle of seated) insertCitizen(d1, { handle });
+
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(c.operator_funded, seated.length, "only PRESENT sponsored seats are counted");
+    assert.deepEqual([...c.operator_funded_handles].sort(), [...seated].sort());
+    assert.ok(!c.operator_funded_handles.includes(pending), `${pending} is listed but not seated: must not appear in operator_funded_handles`);
+    assert.ok(!c.note.includes(pending), `${pending} is listed but not seated: the note must not name it`);
+    assert.equal(c.citizens, OPERATOR_CONTROLLED_HANDLES.length + 1 + seated.length, "the census counts rows, never the list");
+
+    const page = await citizenDirectory(testEnv(d1));
+    assert.ok(!page.citizens.some((row) => row.handle === pending), "no row is invented for a listed-but-unregistered handle");
+  } finally {
+    d1.close();
+  }
+});
+
 // D-058 disclosure: a sponsored seat holds its OWN key (operator_controlled:false,
 // so it lands in `independent`) but the operator paid its $1. lobbyDoorNote
 // PROMISES every such seat is "disclosed openly, by handle, as operator-funded";

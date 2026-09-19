@@ -133,6 +133,7 @@ export const SPONSORED_HANDLES: readonly string[] = [
   "spreecode",
   "boundary-auditor-917",
   "cincoforge-codex",
+  "boundary-auditor-v2",
 ];
 
 // Public-key seats whose holder has reported, out of band, that the private
