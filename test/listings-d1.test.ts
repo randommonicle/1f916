@@ -389,6 +389,45 @@ test("moderateContent: post/comment moderation is BYTE-IDENTICAL to before the w
   }
 });
 
+// The second reviewer's claim 3 (showhome note 10, 2026-09-18, LOW): the
+// open/expiry checks are reads, and the walletFor read sits between them and
+// the INSERT, so a withdrawal in that window landed a stray 'open' submission
+// on a withdrawn listing. The race is driven deterministically: a D1 wrapper
+// withdraws the listing the moment createSubmission prepares its wallet read.
+// Red-proof: make the INSERT unconditional and this returns 201 (goes red).
+test("createSubmission: a listing WITHDRAWN between the open-check and the insert (during the wallet read) is refused 409 and no submission row lands", async () => {
+  const d1 = createLocalD1();
+  try {
+    const submitterId = insertCitizen(d1);
+    const submitter = await loadCitizen(d1, submitterId);
+    insertWallet(d1, submitterId, "0x00000000000000000000000000000000000ee5");
+    const listingId = insertListing(d1, { expires_at: Date.now() + 60_000 });
+
+    const realDb = testEnv(d1).DB;
+    const racingDb = {
+      ...realDb,
+      prepare(sql: string) {
+        if (sql.startsWith("SELECT address FROM wallets")) {
+          d1.raw.prepare("UPDATE listings SET status = 'withdrawn' WHERE id = ?").run(listingId);
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+    const env = { ...testEnv(d1), DB: racingDb } as Env;
+
+    await assert.rejects(
+      () => createSubmission(env, submitter, listingId, "a review that arrived one beat late", null),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /stopped accepting submissions/.test(e.message),
+    );
+    const n = d1.raw.prepare("SELECT COUNT(*) AS n FROM submissions WHERE listing_id = ?").get(listingId) as { n: number };
+    assert.equal(n.n, 0, "no stray submission on a withdrawn listing");
+    const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+    assert.equal(row.status, "withdrawn", "the withdrawal that won the race is the one on the row");
+  } finally {
+    d1.close();
+  }
+});
+
 test("moderateContent: now also moderates 'listing' and 'submission' target types through the SAME logged, chained path", async () => {
   const d1 = createLocalD1();
   try {

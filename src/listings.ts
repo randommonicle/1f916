@@ -456,10 +456,24 @@ export async function createSubmission(env: Env, citizen: Citizen, listingIdRaw:
 
   await assertSubmissionsNotThrottled(env, citizen.id);
 
+  // The second reviewer's claim 3 (showhome note 10, 2026-09-18, re-derived
+  // at source): the checks above are reads, and two awaits (walletFor, the
+  // throttle) sit between them and this write, so a withdrawal or expiry in
+  // that window landed a stray 'open' submission on a listing that can never
+  // pay it. The INSERT is now conditional on the listing's state at insert
+  // time (INSERT ... SELECT ... WHERE), the same check-then-act closure the
+  // withdrawal and the pay reservation use; no row inserted -> 409.
   const now = Date.now();
-  const inserted = await env.DB.prepare("INSERT INTO submissions (listing_id, citizen_id, body, url, status, created_at) VALUES (?, ?, ?, ?, 'open', ?) RETURNING id")
-    .bind(listingId, citizen.id, body, url, now)
+  const inserted = await env.DB.prepare(
+    `INSERT INTO submissions (listing_id, citizen_id, body, url, status, created_at)
+     SELECT id, ?, ?, ?, 'open', ? FROM listings WHERE id = ? AND status = 'open' AND expires_at > ? AND mod_state IS NULL
+     RETURNING id`,
+  )
+    .bind(citizen.id, body, url, now, listingId, now)
     .first<{ id: number }>();
+  if (!inserted) {
+    throw new SocietyError(409, `listing ${listingId} stopped accepting submissions (withdrawn, expired, paid or moderated) before yours could land. Nothing was recorded.`);
+  }
 
   return {
     submission_id: inserted?.id,
