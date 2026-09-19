@@ -62,7 +62,7 @@ export function buildPaymentRequirements(
     resource: opts.resource,
     description: opts.description,
     mimeType: "application/json",
-    maxTimeoutSeconds: 300,
+    maxTimeoutSeconds: PAYMENT_MAX_TIMEOUT_SECONDS,
     extra: { name: "USD Coin", version: "2" }, // EIP-712 domain of Base USDC
   };
 }
@@ -74,10 +74,17 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
     body: JSON.stringify(body),
   });
   // The facilitator answers malformed payloads with 4xx/5xx JSON; only an
-  // unparseable response means it is actually down.
+  // unparseable response means it is actually down. The wording is
+  // path-aware (2026-09-19 exchange, item 4): before /settle nothing was sent
+  // that could move money, so "not taken" is true; an unreadable answer to
+  // /settle is exactly the case where whether the money moved is UNKNOWN,
+  // and the caller (handlePayListing) keeps its reservation and says so.
   try {
     return (await res.json()) as Record<string, unknown>;
   } catch {
+    if (path === "/settle") {
+      throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). The settle request was sent; whether the money moved is unknown until the chain is checked.`);
+    }
     throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`);
   }
 }
@@ -97,6 +104,12 @@ export type SettleResult =
 // (architect ruling: one check at 402-issuance, a second immediately
 // before settle). If afterVerify throws, it propagates straight out of
 // this function and settle() is never called.
+// The x402 window every requirement we issue declares (maxTimeoutSeconds): a
+// signed authorisation is executable until roughly this long after it was
+// issued. listings.ts's UNRESOLVED_AFTER_MS is derived from it, so the two
+// cannot drift apart.
+export const PAYMENT_MAX_TIMEOUT_SECONDS = 300;
+
 export async function payAndSettle(
   env: Env,
   request: Request,

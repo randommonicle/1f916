@@ -412,6 +412,28 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   let secondJson = null;
   try { secondJson = JSON.parse(secondText); } catch {}
 
+  // The worker's own "settle sent, answer never read" case (2026-09-19,
+  // finding 3): it answers 502 with error "settlement_unconfirmed" and KEEPS
+  // the listing reserved, because the facilitator may have moved the money.
+  // The generic non-200 branch below would ask the chain and, seeing our
+  // nonce unexecuted so far, write a 'refused' tombstone that says nothing was
+  // paid -- a label the transfer may falsify minutes later. So this code is
+  // recognised FIRST: the tombstone stays 'signing', and is REWRITTEN with the
+  // authorisation identity (from, nonce, validBefore) plus the 502's detail,
+  // so the later two-RPC reconciliation has the exact thing to ask the chain
+  // about after this process has exited. Nothing is retried by this script.
+  if (secondJson && secondJson.error === "settlement_unconfirmed") {
+    let ident = {};
+    try {
+      const sent = decodeSentAuthorization(paymentHeader);
+      ident = { from: sent.from, nonce: sent.nonce, valid_before: sent.validBefore };
+    } catch {
+      // keep going: the tombstone still records the status and the detail
+    }
+    deps.writeAtomic(tombPath, JSON.stringify({ status: "signing", key, target, ...purchase, ...ident, http_status: second.status, unconfirmed_at: deps.nowSeconds(), detail: secondText.slice(0, 2000) }, null, 2));
+    return { ...base, ok: false, exitCode: 1, reason: "leg2_unconfirmed", message: `The server sent the settle request and could not read the facilitator's answer (HTTP ${second.status}, settlement_unconfirmed); it keeps the listing reserved and so does this record. Outcome AMBIGUOUS: the money may or may not have moved. DO NOT re-run. After the authorization's validBefore${ident.valid_before ? ` (${new Date((ident.valid_before + RETRY_MARGIN_SECONDS) * 1000).toISOString()} with the ${RETRY_MARGIN_SECONDS}s margin)` : ""}, the operator checks authorizationState(from, nonce) on two RPCs and reconciles the listing from that; the identity is in the 'signing' record.\n${recoveryMessage(tombPath)}`, detail: secondText };
+  }
+
   // The server's own settled-but-unrecorded case is a 500 carrying the tx and
   // a listing left 'paying': money moved. That is exactly the case the
   // tombstone must stay 'signing' for, so it is not special-cased here.

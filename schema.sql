@@ -354,6 +354,7 @@ CREATE TABLE IF NOT EXISTS listings (
   status                TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'paying', 'paid', 'withdrawn', 'expired')),  -- 'paying' is the transient atomic-reservation state (F1): set by handlePayListing's afterVerify before an irreversible settle, so only one concurrent payer can ever hold it
   paid_submission_id    INTEGER REFERENCES submissions(id),  -- set exactly once, once the sole reserver (status='paying') settles
   paid_tx               TEXT,                       -- the funder->reviewer settlement tx, once paid
+  paying_since          INTEGER,                    -- migration 0014: when the 'paying' reservation was taken, written in the same UPDATE; NULL once released or paid, and NULL on rows reserved before 0014 (served as unresolved, time unavailable)
   expires_at            INTEGER NOT NULL,          -- required, no silent default; bounds are CONSTITUTION.listing_expiry_*_days
   mod_state             TEXT,                       -- NULL/'collapsed'/'removed', same convention as posts.mod_state
   created_at            INTEGER NOT NULL,

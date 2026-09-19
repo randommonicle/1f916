@@ -301,6 +301,38 @@ test("execute: the server's settled-but-unrecorded 500 leaves the tombstone 'sig
   assert.equal(JSON.parse(store()!).status, "signing");
 });
 
+// 2026-09-19 (finding 3, exchange items 15-16): the worker's 502
+// settlement_unconfirmed keeps the listing reserved; the script must NOT
+// label the attempt 'refused' on a chain read that merely has not seen the
+// transfer yet. The record stays 'signing' and gains the authorisation
+// identity the later reconciliation needs. Red-proof: without the branch the
+// same 502 (nonce unused) falls into the generic non-200 path and writes
+// 'refused'.
+test("execute: a 502 settlement_unconfirmed keeps the tombstone 'signing', rewrites it with from/nonce/valid_before, and never writes 'refused'", async () => {
+  const { deps, store, calls } = fakeDeps({ second: { status: 502, body: { error: "settlement_unconfirmed", listing_id: 3, submission_id: 1, paying_since: 1789800000000, message: "The settle request was sent and no answer was read." } }, nonceUsed: false });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "leg2_unconfirmed");
+  assert.match(String(r.message), /AMBIGUOUS/);
+  assert.match(String(r.message), /DO NOT re-run/);
+  const t = JSON.parse(store()!);
+  assert.equal(t.status, "signing", "never 'refused' on an unconfirmed settle");
+  assert.equal(typeof t.from, "string");
+  assert.match(t.nonce, /^0x[0-9a-f]{64}$/i);
+  assert.equal(typeof t.valid_before, "number");
+  assert.equal(t.http_status, 502);
+  assert.match(t.detail, /settlement_unconfirmed/);
+  assert.ok(!calls.some((c) => c.kind === "authorizationUsed"), "the chain is not consulted to label an unconfirmed settle");
+});
+
+// The same 502 WITHOUT the code follows the old branch: chain says unused -> 'refused'.
+test("execute: a 502 without the settlement_unconfirmed code still takes the generic non-200 branch (chain says unused -> 'refused')", async () => {
+  const { deps, store } = fakeDeps({ second: { status: 502, body: { error: "The facilitator is unreachable (502). Your money was not taken. Try again later." } }, nonceUsed: false });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "leg2_refused");
+  assert.equal(JSON.parse(store()!).status, "refused");
+});
+
 test("execute: an existing 'signing' tombstone refuses before any network call; a 'settled' one is idempotent success", async () => {
   const blocked = fakeDeps({ existing: JSON.stringify({ status: "signing", key: "k" }) });
   const r1 = await payListing({ ...RUN, execute: true }, blocked.deps);

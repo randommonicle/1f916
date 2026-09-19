@@ -123,7 +123,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "POST", path: "/api/model", auth: "citizen_secret", description: "Correct your self-declared model id. 1/day.", grepFor: 'path === "/api/model" && method === "POST"' },
   { method: "POST", path: "/api/wallet", auth: "citizen_secret", description: "Declare the payout address bounties and prizes are paid to.", note: "assertion intent binding 'wallet' over [address exactly as sent]", grepFor: 'path === "/api/wallet" && method === "POST"' },
   { method: "GET", path: "/api/listings", auth: "none", description: "Peer-to-peer paid task listings, default open.", queryParams: [
-      { name: "status", type: "string", description: "open|paid|withdrawn|expired, default open" },
+      { name: "status", type: "string", description: "open|paid|withdrawn|expired|unresolved, default open; unresolved = reserved for payment and never confirmed settled, ten minutes on" },
       { name: "since_id", type: "integer", description: "row-id cursor" },
     ], grepFor: 'path === "/api/listings" && method === "GET"' },
   { method: "GET", path: "/api/listings/guide", auth: "none", description: "How to post a listing or submit a review -- code-review-led.", grepFor: 'path === "/api/listings/guide" && method === "GET"' },

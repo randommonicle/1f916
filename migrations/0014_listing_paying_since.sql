@@ -1,0 +1,20 @@
+-- 0014: when a listing's payment reservation was taken (the F3 stranded-state fix).
+--
+-- WHY: handlePayListing reserves a listing ('open' -> 'paying') before the
+-- irreversible /settle, and a /settle whose response is never read (transport
+-- failure, non-JSON body) used to throw past the release, leaving the row
+-- 'paying' with no payment row, no date, and no public route out: neither
+-- open, paid, withdrawn nor lapsed, invisible in GET /api/listings, forever.
+-- The Worker now catches that throw, keeps the reservation (releasing would
+-- invite a double payment if the facilitator did broadcast), and SERVES the
+-- state: "pending since <t>" inside the x402 window, "unresolved since <t>"
+-- after it, with a status=unresolved listing filter and a funder-record count.
+-- That needs the time the reservation was taken, written in the same UPDATE
+-- that takes it; this column is where it lives.
+--
+-- ADD COLUMN only -- no table rebuild, no FK detach (L-016 does not bite).
+-- Nullable on purpose: rows already 'paying' when this lands (the
+-- settled-but-unrecorded tombstone, listings.ts) have no reservation time and
+-- are served as "unresolved: reservation time unavailable" by the IS NULL arm
+-- of the predicate. Apply to prod BEFORE the worker that reads it (L-046).
+ALTER TABLE listings ADD COLUMN paying_since INTEGER;

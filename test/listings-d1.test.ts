@@ -34,7 +34,7 @@ import {
   MAINTAINER_ID,
   SocietyError,
 } from "../src/society.ts";
-import { handleCreateListing, createSubmission, handlePayListing, withdrawListing, listListings, getListingDetail, listingPaymentsPage, computeListingFeeCents } from "../src/listings.ts";
+import { handleCreateListing, createSubmission, handlePayListing, withdrawListing, listListings, getListingDetail, listingPaymentsPage, computeListingFeeCents, UNRESOLVED_AFTER_MS } from "../src/listings.ts";
 import { sha256Hex } from "../src/chain.ts";
 import type { Env } from "../src/society.ts";
 
@@ -1071,6 +1071,158 @@ test("handlePayListing: moderation landing AFTER the reservation (during /settle
     const row = d1.raw.prepare("SELECT status, paid_submission_id FROM listings WHERE id = ?").get(listingId) as { status: string; paid_submission_id: number };
     assert.equal(row.status, "paid");
     assert.equal(row.paid_submission_id, submissionId);
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
+
+// Finding 3 (outside review 2026-09-17, MEDIUM): facilitator() throws on a
+// rejected fetch or a non-JSON body, and that throw used to propagate past
+// the release, leaving 'paying' with no payment row, no date and no route
+// out. Now: the reservation is KEPT (a release would invite a double payment
+// if the facilitator did broadcast), the response is a machine-readable 502,
+// and the state is served -- pending inside the x402 window, unresolved after
+// it, in the detail read, the ?status=unresolved list and the funder record.
+// Red-proof: remove the catch and this goes red (the throw propagates).
+test("handlePayListing: a /settle whose answer cannot be read keeps the reservation, answers 502 settlement_unconfirmed, and the state is SERVED", async () => {
+  const d1 = createLocalD1();
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    const href = String(url);
+    if (href === `${FACILITATOR_URL}/verify`) return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    if (href === `${FACILITATOR_URL}/settle`) return new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+    throw new Error(`unexpected fetch in the unconfirmed-settle test: ${href}`);
+  }) as typeof fetch;
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee6");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    const before = Date.now();
+    const res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    assert.equal(res.status, 502);
+    const body = (await res.json()) as { error: string; listing_id: number; submission_id: number; paying_since: number; message: string };
+    assert.equal(body.error, "settlement_unconfirmed", "a stable code the pay script can branch on");
+    assert.equal(body.listing_id, listingId);
+    assert.equal(body.submission_id, submissionId);
+    assert.ok(body.paying_since >= before, "carries the reservation time");
+    assert.match(body.message, /stays reserved/);
+    assert.doesNotMatch(body.message, /money was not taken/i, "the facilitator's pre-settle wording must not be repeated after a settle was sent");
+
+    const row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number };
+    assert.equal(row.status, "paying", "the reservation is kept, not released");
+    assert.equal(row.paying_since, body.paying_since, "paying_since was written in the reservation statement itself");
+    const payments = d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments WHERE listing_id = ?").get(listingId) as { n: number };
+    assert.equal(payments.n, 0, "nothing was recorded as paid");
+
+    // Served, inside the window: pending; not in any of the four old feeds; not yet unresolved.
+    const detail = await getListingDetail(env, listingId);
+    assert.equal(detail.listing.status, "paying");
+    assert.match(String(detail.listing.settlement), /^pending since /);
+    assert.equal(detail.listing.paying_since, body.paying_since);
+    assert.equal(detail.funder_record.unresolved, 0);
+    for (const f of ["open", "paid", "withdrawn", "expired", "unresolved"]) {
+      const page = await listListings(env, f, NaN);
+      assert.ok(!page.listings.some((l) => l.id === listingId), `a fresh reservation is in no feed, including ${f}`);
+    }
+
+    // Served, after the window (the clock moved on: age the row): unresolved, listed, counted.
+    d1.raw.prepare("UPDATE listings SET paying_since = ? WHERE id = ?").run(Date.now() - UNRESOLVED_AFTER_MS - 1, listingId);
+    const later = await getListingDetail(env, listingId);
+    assert.match(String(later.listing.settlement), /^unresolved since /);
+    assert.equal(later.funder_record.unresolved, 1);
+    const unresolved = await listListings(env, "unresolved", NaN);
+    const listed = unresolved.listings.find((l) => l.id === listingId) as { status: string; settlement?: string; paying_since?: number } | undefined;
+    assert.ok(listed, "the stale reservation is discoverable without knowing its id");
+    assert.equal(listed.status, "paying");
+    assert.match(String(listed.settlement), /^unresolved since /, "the list row carries the same derived explanation as the detail read");
+
+    // A retry against the kept reservation is refused for free, before any settle: the tombstone holds.
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /is paying, not open/.test(e.message),
+    );
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
+
+// The other side of the same boundary: a throw BEFORE the reservation (here
+// /verify itself answers non-JSON) propagates unchanged -- no settle was
+// sent, "your money was not taken" is true, and nothing is reserved.
+test("handlePayListing: a /verify whose answer cannot be read throws the facilitator's own 502 and reserves nothing", async () => {
+  const d1 = createLocalD1();
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    const href = String(url);
+    if (href === `${FACILITATOR_URL}/verify`) return new Response("nope", { status: 503, headers: { "content-type": "text/plain" } });
+    throw new Error(`unexpected fetch in the unreadable-verify test: ${href}`);
+  }) as typeof fetch;
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee7");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    await assert.rejects(
+      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      (e: unknown) => e instanceof SocietyError && e.status === 502 && /money was not taken/i.test(e.message),
+    );
+    const row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
+    assert.equal(row.status, "open");
+    assert.equal(row.paying_since, null);
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
+
+// The ordinary release path and the paid path both clear paying_since, so a
+// stale timestamp can never sit on an open or paid row.
+test("handlePayListing: paying_since is cleared on a refused settle (release) and on a successful one (paid)", async () => {
+  const d1 = createLocalD1();
+  const original = globalThis.fetch;
+  let refuse = true;
+  globalThis.fetch = (async (url: unknown) => {
+    const href = String(url);
+    if (href === `${FACILITATOR_URL}/verify`) return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    if (href === `${FACILITATOR_URL}/settle`) {
+      return refuse
+        ? new Response(JSON.stringify({ success: false, errorReason: "insufficient funds" }), { status: 200, headers: { "content-type": "application/json" } })
+        : new Response(JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000000abc", transaction: "0xok" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unexpected fetch in the clear test: ${href}`);
+  }) as typeof fetch;
+  try {
+    const env = testEnv(d1);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee8");
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+
+    const refused = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    assert.equal(refused.status, 402);
+    let row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
+    assert.equal(row.status, "open", "a refused settle is an answer: released");
+    assert.equal(row.paying_since, null, "and the reservation time goes with it");
+
+    refuse = false;
+    const paid = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    assert.equal(paid.status, 200);
+    row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
+    assert.equal(row.status, "paid");
+    assert.equal(row.paying_since, null, "paid clears it too");
+    assert.equal((await getListingDetail(env, listingId)).listing.settlement, undefined, "no settlement field on a paid row");
   } finally {
     globalThis.fetch = original;
     d1.close();

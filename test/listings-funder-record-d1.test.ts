@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertListing, insertSubmission, type LocalD1 } from "./helpers/local-d1.ts";
-import { getListingDetail, listListings, FUNDER_RECORD_NOTE } from "../src/listings.ts";
+import { getListingDetail, listListings, FUNDER_RECORD_NOTE, UNRESOLVED_AFTER_MS } from "../src/listings.ts";
 import type { Env } from "../src/society.ts";
 
 function readEnv(d1: LocalD1): Env {
@@ -62,7 +62,7 @@ test("getListingDetail exposes funder_record with each metric over a mixed histo
     insertListing(d1, { funder_citizen_id: funder, status: "open", expires_at: past, mod_state: "removed" }); // excluded entirely
 
     const detail = await getListingDetail(readEnv(d1), open);
-    assert.deepEqual(detail.funder_record, { posted: 5, paid: 3, paid_distinct_wallets: 2, lapsed_unpaid: 1, withdrawn_with_open_submissions: 0 });
+    assert.deepEqual(detail.funder_record, { posted: 5, paid: 3, paid_distinct_wallets: 2, lapsed_unpaid: 1, withdrawn_with_open_submissions: 0, unresolved: 0 });
     assert.equal(detail.funder_record_note, FUNDER_RECORD_NOTE);
   } finally {
     d1.close();
@@ -93,8 +93,8 @@ test("listListings carries a per-row funder_record and the shared note, scoped p
     assert.ok(bigRow, "big funder's open listing is on the page");
     assert.ok(smallRow, "small funder's open listing is on the page");
     // Two funders on one page get their own records, not a shared/leaked one.
-    assert.deepEqual(bigRow.funder_record, { posted: 3, paid: 1, paid_distinct_wallets: 1, lapsed_unpaid: 1, withdrawn_with_open_submissions: 0 });
-    assert.deepEqual(smallRow.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 });
+    assert.deepEqual(bigRow.funder_record, { posted: 3, paid: 1, paid_distinct_wallets: 1, lapsed_unpaid: 1, withdrawn_with_open_submissions: 0, unresolved: 0 });
+    assert.deepEqual(smallRow.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0, unresolved: 0 });
   } finally {
     d1.close();
   }
@@ -131,7 +131,7 @@ test("a withdrawn listing never reads as lapsed_unpaid (the status='open' clause
 
     const detail = await getListingDetail(readEnv(d1), lid);
     assert.equal(detail.funder_record.lapsed_unpaid, 0, "a withdrawn listing is not a lapse");
-    assert.deepEqual(detail.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 });
+    assert.deepEqual(detail.funder_record, { posted: 1, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0, unresolved: 0 });
   } finally {
     d1.close();
   }
@@ -148,7 +148,7 @@ test("a moderated listing is excluded from every count (the mod_state IS NULL fi
     const lid = insertListing(d1, { funder_citizen_id: funder, status: "open", expires_at: past, mod_state: "removed" });
 
     const detail = await getListingDetail(readEnv(d1), lid);
-    assert.deepEqual(detail.funder_record, { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 });
+    assert.deepEqual(detail.funder_record, { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0, unresolved: 0 });
   } finally {
     d1.close();
   }
@@ -185,8 +185,40 @@ test("withdrawn_with_open_submissions counts a pre-expiry withdrawal with a live
 
     const detail = await getListingDetail(readEnv(d1), counted);
     assert.equal(detail.funder_record.withdrawn_with_open_submissions, 1);
-    assert.deepEqual(detail.funder_record, { posted: 5, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 1 });
+    assert.deepEqual(detail.funder_record, { posted: 5, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 1, unresolved: 0 });
     assert.match(FUNDER_RECORD_NOTE, /withdrawn_with_open_submissions/, "the served note names the field");
+  } finally {
+    d1.close();
+  }
+});
+
+// unresolved (F3(B), 2026-09-19 exchange items 1-3, 13): a 'paying' row whose
+// reservation is older than UNRESOLVED_AFTER_MS, or has no recorded time
+// (reserved before migration 0014), counts once; a fresh reservation does
+// not. Each arm of the predicate has its fixture.
+test("unresolved counts a stale or undated 'paying' reservation, never a fresh one", async () => {
+  const d1 = createLocalD1();
+  try {
+    const now = Date.now();
+    const future = now + DAY;
+    const funder = insertCitizen(d1, { handle: "funder-stranded" });
+    // counts: reserved longer ago than the window
+    const stale = insertListing(d1, { funder_citizen_id: funder, status: "paying", expires_at: future });
+    d1.raw.prepare("UPDATE listings SET paying_since = ? WHERE id = ?").run(now - UNRESOLVED_AFTER_MS - 1000, stale);
+    // counts: reserved before the column existed (IS NULL arm)
+    insertListing(d1, { funder_citizen_id: funder, status: "paying", expires_at: future });
+    // does not count: a reservation still inside the window
+    const fresh = insertListing(d1, { funder_citizen_id: funder, status: "paying", expires_at: future });
+    d1.raw.prepare("UPDATE listings SET paying_since = ? WHERE id = ?").run(now - 1000, fresh);
+    // does not count: open
+    insertListing(d1, { funder_citizen_id: funder, status: "open", expires_at: future });
+
+    const detail = await getListingDetail(readEnv(d1), stale);
+    assert.equal(detail.funder_record.unresolved, 2);
+    assert.deepEqual(detail.funder_record, { posted: 4, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0, unresolved: 2 });
+    assert.match(FUNDER_RECORD_NOTE, /unresolved/, "the served note names the field");
+    assert.match(String(detail.listing.settlement), /^unresolved since /, "the stale reservation's detail read says so");
+    assert.match(String((await getListingDetail(readEnv(d1), fresh)).listing.settlement), /^pending since /, "a fresh reservation reads as pending");
   } finally {
     d1.close();
   }

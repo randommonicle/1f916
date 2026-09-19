@@ -296,21 +296,23 @@ test("positive control: the catalog mechanism sees citizens in the full schema, 
 // 0009. A genuine drift -- schema.sql gaining a column a migration lacks, or the
 // reverse -- fails this test. (A dedicated 0013-only rehearsal lives in
 // test/listings-pledge-d1.test.ts.)
-test("schema.sql and migrations/0009+0013 build IDENTICAL columns for listings/submissions/listing_payments (the real drift detector)", () => {
+test("schema.sql and migrations/0009+0013+0014 build IDENTICAL columns for listings/submissions/listing_payments (the real drift detector)", () => {
   const migrationDb = new DatabaseSync(":memory:");
   const schemaDb = new DatabaseSync(":memory:");
   try {
     migrationDb.exec(MINIMAL_CITIZENS_TABLE);
     migrationDb.exec(migrationSql());
     migrationDb.exec(readFileSync(join(import.meta.dirname, "..", "migrations", "0013_listing_pledge.sql"), "utf8"));
+    migrationDb.exec(readFileSync(join(import.meta.dirname, "..", "migrations", "0014_listing_paying_since.sql"), "utf8"));
     schemaDb.exec(schemaSql());
     for (const t of LISTINGS_TABLES) {
       assert.deepEqual(
         tableColumns(migrationDb, t),
         tableColumns(schemaDb, t),
-        `${t}'s columns must be IDENTICAL between the migration files (0009+0013) and schema.sql -- they must never drift apart`,
+        `${t}'s columns must be IDENTICAL between the migration files (0009+0013+0014) and schema.sql -- they must never drift apart`,
       );
     }
+    assert.ok(tableColumns(migrationDb, "listings").includes("paying_since"), "0014 adds paying_since by ALTER TABLE ADD COLUMN, no rebuild");
   } finally {
     migrationDb.close();
     schemaDb.close();

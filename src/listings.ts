@@ -24,7 +24,7 @@
 // posting fee.
 
 import { appendChained } from "./chain.ts";
-import { buildPaymentRequirements, payAndSettle } from "./x402.ts";
+import { buildPaymentRequirements, payAndSettle, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor } from "./wallets.ts";
 import {
@@ -239,12 +239,38 @@ export interface FunderRecord {
   // paid"). A moderated-away or withdrawn submission does not count: a funder
   // who pulls a listing over a spam submission is not accused of anything.
   withdrawn_with_open_submissions: number;
+  // Reserved for payment ('paying') and never resolved: the x402 window plus
+  // a margin has passed since the reservation (or the reservation predates
+  // the column), so a settle was attempted and its answer never read. Neither
+  // open nor paid until the operator reconciles it against the chain.
+  unresolved: number;
 }
 
-const EMPTY_FUNDER_RECORD: FunderRecord = { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0 };
+const EMPTY_FUNDER_RECORD: FunderRecord = { posted: 0, paid: 0, paid_distinct_wallets: 0, lapsed_unpaid: 0, withdrawn_with_open_submissions: 0, unresolved: 0 };
+
+// A 'paying' reservation older than this is served as unresolved: the x402
+// window (PAYMENT_MAX_TIMEOUT_SECONDS) after which the signed authorisation
+// can no longer execute, plus a 300 s clock-skew margin. Read-time, like
+// effectiveStatus: no cron, no state change, nothing reopens by itself.
+export const UNRESOLVED_AFTER_MS = (PAYMENT_MAX_TIMEOUT_SECONDS + 300) * 1000;
+
+// The SQL form of "this 'paying' row is unresolved". The IS NULL arm serves
+// rows reserved before migration 0014 (no reservation time recorded).
+const UNRESOLVED_PREDICATE = "l.status = 'paying' AND (l.paying_since IS NULL OR l.paying_since <= ?)";
+
+// The served explanation for a 'paying' row, on the detail read and on
+// ?status=unresolved list rows alike (a bare status: "paying" would say
+// nothing a reader could act on). undefined for every other status.
+export function settlementField(status: string, payingSince: number | null | undefined, now: number): string | undefined {
+  if (status !== "paying") return undefined;
+  if (payingSince == null) return "unresolved: reservation time unavailable (reserved before the column existed); a settlement was attempted and not confirmed; neither open nor paid until the operator reconciles it against the chain";
+  const iso = new Date(payingSince).toISOString();
+  if (payingSince > now - UNRESOLVED_AFTER_MS) return `pending since ${iso}: a payment is being settled; not open for submissions`;
+  return `unresolved since ${iso}: a settlement was attempted and not confirmed; neither open nor paid until the operator reconciles it against the chain`;
+}
 
 export const FUNDER_RECORD_NOTE =
-  "funder_record is a descriptive count of this funder's public listings, not a rating and not a judgement: posted (their visible listings), paid (how many they settled on a submission), paid_distinct_wallets (how many different wallets those bounties reached -- a funder who only ever pays one wallet is a legible self-dealing signal, not an accusation), lapsed_unpaid (open listings that passed expiry with nobody paid; an expired listing cannot be withdrawn, so this count cannot be erased), withdrawn_with_open_submissions (listings withdrawn before expiry while at least one live, unmoderated submission stood on them and nobody was paid; a listing withdrawn with no submission, or with only moderated or withdrawn ones, does not count). Every number is re-derivable from GET /api/listings; draw your own conclusion.";
+  "funder_record is a descriptive count of this funder's public listings, not a rating and not a judgement: posted (their visible listings), paid (how many they settled on a submission), paid_distinct_wallets (how many different wallets those bounties reached -- a funder who only ever pays one wallet is a legible self-dealing signal, not an accusation), lapsed_unpaid (open listings that passed expiry with nobody paid; an expired listing cannot be withdrawn, so this count cannot be erased), withdrawn_with_open_submissions (listings withdrawn before expiry while at least one live, unmoderated submission stood on them and nobody was paid; a listing withdrawn with no submission, or with only moderated or withdrawn ones, does not count), unresolved (listings reserved for payment whose settlement was never confirmed, ten minutes after the reservation; GET /api/listings?status=unresolved lists them with the reservation time). Every number is re-derivable from GET /api/listings; draw your own conclusion.";
 
 // Aggregate for a set of funder ids in one pair of grouped queries, not N
 // per-row queries. Every id passed in gets a complete record: a funder present
@@ -264,13 +290,14 @@ export async function funderRecords(env: Env, funderIds: readonly number[], now:
             SUM(CASE WHEN l.status = 'open' AND l.expires_at <= ? AND l.paid_submission_id IS NULL THEN 1 ELSE 0 END) AS lapsed_unpaid,
             SUM(CASE WHEN l.status = 'withdrawn' AND l.paid_submission_id IS NULL
                       AND EXISTS (SELECT 1 FROM submissions s WHERE s.listing_id = l.id AND s.status = 'open' AND s.mod_state IS NULL)
-                     THEN 1 ELSE 0 END) AS withdrawn_with_open_submissions
+                     THEN 1 ELSE 0 END) AS withdrawn_with_open_submissions,
+            SUM(CASE WHEN ${UNRESOLVED_PREDICATE} THEN 1 ELSE 0 END) AS unresolved
      FROM listings l
      WHERE l.funder_citizen_id IN (${placeholders}) AND l.mod_state IS NULL
      GROUP BY l.funder_citizen_id`,
   )
-    .bind(now, ...ids)
-    .all<{ fid: number; posted: number; paid: number; lapsed_unpaid: number; withdrawn_with_open_submissions: number }>();
+    .bind(now, now - UNRESOLVED_AFTER_MS, ...ids)
+    .all<{ fid: number; posted: number; paid: number; lapsed_unpaid: number; withdrawn_with_open_submissions: number; unresolved: number }>();
   for (const r of counts) {
     const rec = map.get(r.fid);
     if (rec) {
@@ -278,6 +305,7 @@ export async function funderRecords(env: Env, funderIds: readonly number[], now:
       rec.paid = r.paid;
       rec.lapsed_unpaid = r.lapsed_unpaid;
       rec.withdrawn_with_open_submissions = r.withdrawn_with_open_submissions;
+      rec.unresolved = r.unresolved;
     }
   }
 
@@ -605,31 +633,64 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // reservation FREEZES eligibility: moderation committed after it changes
   // visibility, not the in-flight payment the funder already chose to make.
   let reservedByMe = false;
-  const result = await payAndSettle(env, request, reqs, async () => {
-    const reserved = await env.DB.prepare(
-      `UPDATE listings SET status = 'paying'
-       WHERE id = ? AND status = 'open' AND expires_at > ? AND mod_state IS NULL
-         AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ? AND s.listing_id = listings.id AND s.status = 'open' AND s.mod_state IS NULL)`,
-    )
-      .bind(listingId, Date.now(), submissionId)
-      .run();
-    if (reserved.meta.changes !== 1) {
-      throw new SocietyError(
-        409,
-        "This listing can no longer be paid: it is already being paid, paid, withdrawn, expired or moderated, or the submission is no longer open. Nothing was settled.",
-      );
-    }
-    reservedByMe = true;
-  });
+  let reservedAt = 0;
+  let result: Awaited<ReturnType<typeof payAndSettle>>;
+  try {
+    result = await payAndSettle(env, request, reqs, async () => {
+      const at = Date.now();
+      const reserved = await env.DB.prepare(
+        `UPDATE listings SET status = 'paying', paying_since = ?
+         WHERE id = ? AND status = 'open' AND expires_at > ? AND mod_state IS NULL
+           AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ? AND s.listing_id = listings.id AND s.status = 'open' AND s.mod_state IS NULL)`,
+      )
+        .bind(at, listingId, at, submissionId)
+        .run();
+      if (reserved.meta.changes !== 1) {
+        throw new SocietyError(
+          409,
+          "This listing can no longer be paid: it is already being paid, paid, withdrawn, expired or moderated, or the submission is no longer open. Nothing was settled.",
+        );
+      }
+      reservedByMe = true;
+      reservedAt = at;
+    });
+  } catch (e) {
+    // Finding 3 (outside review 2026-09-17, MEDIUM): facilitator() THROWS on
+    // a rejected fetch or a non-JSON body, and that throw used to sail past
+    // the release below, leaving 'paying' with no payment row, no date and
+    // no public route out. Before the reservation the throw is still true
+    // ("your money was not taken": no /settle was sent), so it propagates.
+    // After it, the /settle request was sent and its answer never read: the
+    // facilitator may have broadcast, so releasing would invite a second
+    // payment. The reservation is KEPT, and the state is SERVED instead
+    // (settlementField, the unresolved filter and count) with a stable,
+    // machine-readable code the pay script recognises. Recovery is the
+    // operator's act with the chain as arbiter: EIP-3009 authorizationState
+    // for the signed nonce, after validBefore, at a two-RPC quorum.
+    if (!reservedByMe) throw e;
+    const reason = e instanceof Error ? e.message : String(e);
+    console.log(JSON.stringify({ level: "error", event: "listing_pay_settle_unconfirmed", listing_id: listingId, submission_id: submissionId, paying_since: reservedAt, reason }));
+    return Response.json(
+      {
+        error: "settlement_unconfirmed",
+        listing_id: listingId,
+        submission_id: submissionId,
+        paying_since: reservedAt,
+        message: `The settle request was sent and no answer was read (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that. GET /api/listing/${listingId} serves the state.`,
+      },
+      { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
+    );
+  }
   if (!result.ok) {
     // Release ONLY if THIS request is the one that reserved. If the reserve
     // never ran (no X-PAYMENT / invalid signature -- payAndSettle returns
     // before afterVerify), reservedByMe is false and we must NOT touch the
     // row: another request may legitimately hold 'paying' and be mid-settle
     // right now. If we did reserve and settle then failed, release our OWN
-    // lock so the funder can retry.
+    // lock so the funder can retry. A refused settle is an ANSWER (the
+    // facilitator said no), unlike the unread one caught above.
     if (reservedByMe) {
-      await env.DB.prepare("UPDATE listings SET status = 'open' WHERE id = ? AND status = 'paying'").bind(listingId).run();
+      await env.DB.prepare("UPDATE listings SET status = 'open', paying_since = NULL WHERE id = ? AND status = 'paying'").bind(listingId).run();
     }
     return result.response;
   }
@@ -648,7 +709,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   const insertStmt = env.DB.prepare(
     "INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now);
-  const updateStmt = env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ? WHERE id = ?").bind(submissionId, result.tx, listingId);
+  const updateStmt = env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL WHERE id = ?").bind(submissionId, result.tx, listingId);
 
   try {
     await env.DB.batch([insertStmt, updateStmt]);
@@ -735,7 +796,7 @@ export async function withdrawListing(env: Env, citizen: Citizen, listingId: num
 // ---------- read: GET /api/listings ----------
 
 const LISTINGS_PAGE = 100;
-const LISTING_STATUS_FILTERS = ["open", "paid", "withdrawn", "expired"] as const;
+const LISTING_STATUS_FILTERS = ["open", "paid", "withdrawn", "expired", "unresolved"] as const;
 type ListingStatusFilter = (typeof LISTING_STATUS_FILTERS)[number];
 
 interface RawListingRow {
@@ -752,18 +813,23 @@ interface RawListingRow {
   expires_at: number;
   created_at: number;
   pledge: string | null;
+  paying_since: number | null;
   submission_count: number;
 }
 
 // F1: 'paying' (the transient reservation state) is deliberately absent from
-// LISTING_STATUS_FILTERS and from every branch below -- a listing mid-payment
-// is not open for new submissions, so it must never surface in the "open"
-// feed. This holds by construction, not by a special case: every branch
-// matches l.status by exact string equality ('open', or whatever `status`
-// resolved to), and 'paying' !== 'open', so a reserved listing simply never
-// matches any WHERE clause here. An unrecognised ?status=paying request
-// falls through the ternary above to the "open" default, which still
-// excludes it for the same reason.
+// LISTING_STATUS_FILTERS and from every branch below except one -- a listing
+// mid-payment is not open for new submissions, so it must never surface in
+// the "open" feed. This holds by construction, not by a special case: every
+// branch matches l.status by exact string equality ('open', or whatever
+// `status` resolved to), and 'paying' !== 'open', so a reserved listing simply
+// never matches the open/paid/withdrawn/expired clauses. An unrecognised
+// ?status=paying request falls through the ternary above to the "open"
+// default, which still excludes it for the same reason. The one branch that
+// does name 'paying' is `unresolved` (2026-09-19 exchange, item 3): a
+// reservation older than UNRESOLVED_AFTER_MS, or one with no recorded time,
+// which without this filter was visible only to a reader who already knew
+// its id -- the opposite of the legibility D-059 chose.
 export async function listListings(env: Env, statusParam: string | null, sinceId: number) {
   const status: ListingStatusFilter = (LISTING_STATUS_FILTERS as readonly string[]).includes(statusParam ?? "") ? (statusParam as ListingStatusFilter) : "open";
   const now = Date.now();
@@ -774,6 +840,9 @@ export async function listListings(env: Env, statusParam: string | null, sinceId
   if (status === "expired") {
     where = "l.status = 'open' AND l.expires_at <= ? AND l.mod_state IS NULL";
     args.push(now);
+  } else if (status === "unresolved") {
+    where = `${UNRESOLVED_PREDICATE} AND l.mod_state IS NULL`;
+    args.push(now - UNRESOLVED_AFTER_MS);
   } else if (status === "open") {
     where = "l.status = 'open' AND l.expires_at > ? AND l.mod_state IS NULL";
     args.push(now);
@@ -788,7 +857,7 @@ export async function listListings(env: Env, statusParam: string | null, sinceId
 
   const { results } = await env.DB.prepare(
     `SELECT l.id, l.funder_citizen_id, c.handle AS funder_handle, l.title, l.description, l.url, l.acceptance_condition,
-            l.bounty_cents, l.fee_cents, l.status, l.expires_at, l.created_at, l.pledge,
+            l.bounty_cents, l.fee_cents, l.status, l.expires_at, l.created_at, l.pledge, l.paying_since,
             (SELECT COUNT(*) FROM submissions s WHERE s.listing_id = l.id) AS submission_count
      FROM listings l JOIN citizens c ON c.id = l.funder_citizen_id
      WHERE ${where} ORDER BY l.id ASC LIMIT ?`,
@@ -797,10 +866,15 @@ export async function listListings(env: Env, statusParam: string | null, sinceId
     .all<RawListingRow>();
 
   const records = await funderRecords(env, results.map((r) => r.funder_citizen_id), now);
-  const shaped = results.map((r) => ({
-    ...applyListingModState({ ...r, status: effectiveStatus(r.status, r.expires_at, now) }),
-    funder_record: records.get(r.funder_citizen_id) ?? EMPTY_FUNDER_RECORD,
-  }));
+  const shaped = results.map((r) => {
+    const { paying_since, ...rest } = r;
+    const settlement = settlementField(r.status, paying_since, now);
+    return {
+      ...applyListingModState({ ...rest, status: effectiveStatus(r.status, r.expires_at, now) }),
+      ...(settlement ? { paying_since, settlement } : {}),
+      funder_record: records.get(r.funder_citizen_id) ?? EMPTY_FUNDER_RECORD,
+    };
+  });
   const returned = shaped.length;
   const has_more = returned === LISTINGS_PAGE;
   const last = results[returned - 1] as { id: number } | undefined;
@@ -837,6 +911,7 @@ interface RawListingDetailRow {
   mod_state: string | null;
   created_at: number;
   pledge: string | null;
+  paying_since: number | null;
 }
 
 interface RawSubmissionRow {
@@ -854,7 +929,7 @@ export async function getListingDetail(env: Env, listingId: number) {
   const now = Date.now();
   const listing = await env.DB.prepare(
     `SELECT l.id, l.funder_citizen_id, c.handle AS funder_handle, l.title, l.description, l.url, l.acceptance_condition,
-            l.bounty_cents, l.fee_cents, l.fee_tx, l.status, l.paid_submission_id, l.paid_tx, l.expires_at, l.mod_state, l.created_at, l.pledge
+            l.bounty_cents, l.fee_cents, l.fee_tx, l.status, l.paid_submission_id, l.paid_tx, l.expires_at, l.mod_state, l.created_at, l.pledge, l.paying_since
      FROM listings l JOIN citizens c ON c.id = l.funder_citizen_id WHERE l.id = ?`,
   )
     .bind(listingId)
@@ -879,8 +954,13 @@ export async function getListingDetail(env: Env, listingId: number) {
 
   const records = await funderRecords(env, [listing.funder_citizen_id], now);
 
+  const { paying_since, ...listingRest } = listing;
+  const settlement = settlementField(listing.status, paying_since, now);
   return {
-    listing: applyListingModState({ ...listing, status: effectiveStatus(listing.status, listing.expires_at, now) }),
+    listing: {
+      ...applyListingModState({ ...listingRest, status: effectiveStatus(listing.status, listing.expires_at, now) }),
+      ...(settlement ? { paying_since, settlement } : {}),
+    },
     submissions: submissions.map((s) => applyModState(s)),
     same_operator_both_sides: sameOperatorBothSides,
     funder_record: records.get(listing.funder_citizen_id) ?? EMPTY_FUNDER_RECORD,
