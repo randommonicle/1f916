@@ -207,3 +207,29 @@ the exchange before opening.
     unbroken hashes (6); closed topic absent from `/api/front`, present on `/api/topics`, pin refused
     (7); `officialFacts.topics` and the door note present, template hash unchanged (8); the deploy
     script's catalogue gate exercised on a scratch database (9).
+13. **The chained row is gated on the state change landing (CODEX round 2, point 1).** A conditional
+    `INSERT ... SELECT` that changes zero rows is a successful statement, so the extended atomic helper
+    must gate its log row on the state statements' `meta.changes` exactly as `appendChainedGated` does
+    (`chain.ts:383-396`): the opening INSERT must report 1 change, and at the cap the close UPDATE must
+    report 1 change, or NO row is written and the caller gets 409. At the cap the open is bound to THIS
+    attempt's close: the INSERT's WHERE also requires `EXISTS (SELECT 1 FROM posts WHERE kind = 'topic'
+    AND topic_state = 'closed' AND topic_closed_at = <this attempt's now>)`, so an opening can never
+    ride on a close it did not make. The concurrency test asserts the refused attempt writes neither
+    topic state nor moderation row, not merely that a sixth open topic is absent.
+14. **The seed INSERT counts topics ever opened at execution time (point 2).** Its WHERE carries
+    `(SELECT COUNT(*) FROM posts WHERE kind = 'topic') < TOPIC_CAP` (all rows, whatever their state or
+    moderation), so two concurrent seed openings cannot make a sixth-ever topic.
+15. **Open topics have exactly one front-page projection (point 3).** `frontPage`'s `posts` query uses
+    `p.kind = 'post'`; the `topics` block is the sole place a topic appears there and topics never
+    consume the 300-row ranked window.
+16. **Moderation and the cap (point 4).** The topic-comment gate adds `p.mod_state IS NULL` (a
+    collapsed or removed topic accepts no comment). A `restore` of a moderated topic row always succeeds
+    as a moderation act, but if the open count is already at `TOPIC_CAP` the restored row is set
+    `topic_state = 'closed', topic_closed_at = now` in the same statement and the moderation row says
+    so ("restored as closed: the cap was full"); it is readable, not commentable, and never a sixth open
+    topic. Test: moderate away -> replacement -> restore -> `open_now = 5`, the restored topic closed.
+17. **Citations and the ruling's wording (point 5).** The no-in-memory-lock ruling is D-044
+    (`DECISIONS.md:146-147`), not D-046. D-070 now exists in `DECISIONS.md` (written 2026-09-20 after
+    the seats' round 1) as RECORDED and PROPOSED: the build proceeds on the non-minting disclosure with
+    a citizen vote on Rule 7 to follow, unless Ben amends D-070 to mint v6 first; the brief's item 8 is
+    read with that sentence in place of its conditional.
