@@ -40,10 +40,23 @@
 //     maintainer-secret.local.txt holds the ORIGINAL secret, which no longer
 //     authenticates (secret_hash was rolled); it is still the worker's
 //     MAINTAINER_SECRET, which is a different door.
+//   - the payee is pinned to the CHAIN, not only to the command line.
+//     --wallet-row names the identity-log row (GET /api/events?kind=
+//     wallet_declared) in which the submission's citizen declared that wallet,
+//     and --wallet-row-hash is that row's hash as the operator wrote it down
+//     when reading it. Before the 402 probe, in dry run and execute alike, the
+//     script re-reads the row, recomputes its hash from the served preimage,
+//     requires it to name the pinned payee, to belong to the submission's
+//     citizen and to be that citizen's newest declaration, then asks
+//     GET /api/attest?identity_from=<row>&identity_expect=<hash> whether the
+//     chain still holds that hash at that row. A head that moved under the row
+//     the desk pinned is a refusal before any bearer is used (1f916 comment
+//     69513, chit402, 2026-09-19: what should the desk refuse when the
+//     published head moves). All three reads are public and fail CLOSED.
 //
 // Run from society/:
-//   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200            # DRY RUN
-//   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --execute  # pays
+//   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --wallet-row 24 --wallet-row-hash <64 hex>            # DRY RUN
+//   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --wallet-row 24 --wallet-row-hash <64 hex> --execute  # pays
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -219,7 +232,7 @@ export function classifyTombstone(raw) {
 }
 
 export function parseArgs(argv) {
-  const args = { listingId: undefined, submissionId: undefined, payee: undefined, amountCents: undefined, maxAmountCents: DEFAULT_MAX_AMOUNT_CENTS, execute: false };
+  const args = { listingId: undefined, submissionId: undefined, payee: undefined, amountCents: undefined, maxAmountCents: DEFAULT_MAX_AMOUNT_CENTS, walletRow: undefined, walletRowHash: undefined, execute: false };
   const intFlag = (name, v) => {
     if (v === undefined) throw new Error(`${name} requires a value`);
     const n = Number(v);
@@ -233,15 +246,64 @@ export function parseArgs(argv) {
     else if (a === "--submission") args.submissionId = intFlag(a, argv[++i]);
     else if (a === "--amount-cents") args.amountCents = intFlag(a, argv[++i]);
     else if (a === "--max-amount-cents") args.maxAmountCents = intFlag(a, argv[++i]);
-    else if (a === "--payee") {
+    else if (a === "--wallet-row") args.walletRow = intFlag(a, argv[++i]);
+    else if (a === "--wallet-row-hash") {
+      args.walletRowHash = argv[++i];
+      if (!IDENTITY_HASH_RE.test(String(args.walletRowHash))) throw new Error("--wallet-row-hash must be the row's 64-hex sha256 as GET /api/events serves it (lowercase)");
+    } else if (a === "--payee") {
       args.payee = argv[++i];
       if (!isAddress(args.payee)) throw new Error("--payee must be a 0x-prefixed 20-byte address (the submitter's declared wallet, from GET /api/events)");
     } else throw new Error(`unrecognised argument: ${a}. (There is no --url or --tombstone-dir: the target and the at-most-once store are pinned.)`);
   }
-  for (const [flag, v] of [["--listing", args.listingId], ["--submission", args.submissionId], ["--payee", args.payee], ["--amount-cents", args.amountCents]]) {
+  for (const [flag, v] of [["--listing", args.listingId], ["--submission", args.submissionId], ["--payee", args.payee], ["--amount-cents", args.amountCents], ["--wallet-row", args.walletRow], ["--wallet-row-hash", args.walletRowHash]]) {
     if (v === undefined) throw new Error(`${flag} is required`);
   }
   return args;
+}
+
+// ---------- the wallet-row pin (pure; test/pay-listing.test.ts) ----------
+
+export const IDENTITY_HASH_RE = /^[0-9a-f]{64}$/;
+
+// The identity log's own preimage (society.ts identityLog how_to_verify;
+// chain.ts): sha256(prev_hash + "\n" + JSON.stringify([citizen_id, kind,
+// detail, created_at])). Recomputed here so the pin never takes the served
+// `hash` field's word for what the row says.
+export function recomputeIdentityRowHash(row) {
+  return createHash("sha256")
+    .update(String(row.prev_hash) + "\n" + JSON.stringify([row.citizen_id, row.kind, row.detail, row.created_at]))
+    .digest("hex");
+}
+
+// From the public wallet_declared rows already fetched: does the pinned row bind
+// the pinned payee to the submission's citizen, as the newest declaration, with
+// the hash the operator wrote down? Pure, so every refusal is provable offline.
+export function checkWalletRow({ rows, walletRow, walletRowHash, payee, submitterCitizenId }) {
+  const row = rows.find((r) => r && r.id === walletRow);
+  if (!row) return { ok: false, reason: "wallet_row_missing", message: `identity-log row ${walletRow} is not among GET /api/events?kind=wallet_declared. Refusing.` };
+  if (row.kind !== "wallet_declared") return { ok: false, reason: "wallet_row_kind", message: `identity-log row ${walletRow} is a '${row.kind}' row, not wallet_declared. Refusing.` };
+  const detail = String(row.detail ?? "");
+  if (!detail.toLowerCase().includes(payee.toLowerCase())) return { ok: false, reason: "wallet_row_payee", message: `identity-log row ${walletRow} reads "${detail}", which does not name the pinned payee ${payee}. Refusing.` };
+  if (row.citizen_id !== submitterCitizenId) return { ok: false, reason: "wallet_row_citizen", message: `identity-log row ${walletRow} belongs to citizen ${row.citizen_id} (${row.citizen ?? "?"}), not to the submission's citizen ${submitterCitizenId}. Refusing.` };
+  const newer = rows.filter((r) => r && r.kind === "wallet_declared" && r.citizen_id === row.citizen_id && r.id > row.id).map((r) => r.id);
+  if (newer.length) return { ok: false, reason: "wallet_row_superseded", message: `citizen ${row.citizen_id} declared a wallet again after row ${walletRow} (row${newer.length > 1 ? "s" : ""} ${newer.join(", ")}). Re-read the newest declaration and re-pin. Refusing.` };
+  const recomputed = recomputeIdentityRowHash(row);
+  if (recomputed !== walletRowHash) return { ok: false, reason: "wallet_row_hash", message: `identity-log row ${walletRow} recomputes to ${recomputed}, not the pinned ${walletRowHash}: this is not the row the operator read. Refusing.` };
+  return { ok: true, row };
+}
+
+// The witness answer: GET /api/attest?identity_from=<row>&identity_expect=<hash>
+// compares the saved hash to the chain's hash at that row (chain.ts
+// attestTable, `expect_matches`). Anything but a definite match refuses; a
+// chain reported broken after the row refuses too. 'incomplete' (a chain longer
+// than one verify page, no break found) is accepted only with the match, since
+// the match is the pin and the page limit is not a tamper report.
+export function checkWitness(attest, walletRow, walletRowHash) {
+  const il = attest && typeof attest === "object" ? attest.identity_log : undefined;
+  if (!il || typeof il !== "object") return { ok: false, reason: "wallet_row_unreadable", message: "GET /api/attest answered without an identity_log block. Refusing." };
+  if (il.expect_matches !== true) return { ok: false, reason: "wallet_row_moved", message: `the identity chain no longer holds ${walletRowHash} at row ${walletRow} (status ${il.status ?? "?"}, the chain's hash there is now ${il.anchor_at_from ?? "?"}): the published head moved under the row the desk pinned. Refusing; re-read the row by eye and decide whether the record or the pin is wrong before anything is paid.` };
+  if (il.status === "broken") return { ok: false, reason: "wallet_row_chain_broken", message: `the identity chain verifies as broken after row ${walletRow}${il.reason ? `: ${il.reason}` : ""}. Refusing.` };
+  return { ok: true, status: il.status, head: il.head };
 }
 
 export function recoveryMessage(path) {
@@ -263,7 +325,7 @@ export function recoveryMessage(path) {
 // the sequence with no network, no disk, no key. Returns a structured result;
 // it never touches console or process. deps: { fetch, exists, readFile,
 // writeExclusive(path,data), writeAtomic(path,data), mkdir(dir), sign(reqs) }.
-export async function payListing({ listingId, submissionId, payee, amountCents, maxAmountCents, target, funderSecret, execute, payer }, deps) {
+export async function payListing({ listingId, submissionId, payee, amountCents, maxAmountCents, walletRow, walletRowHash, target, funderSecret, execute, payer }, deps) {
   // Chokepoint pin for exported money code: enforced HERE, before the bearer is
   // used, so no importer can point the credential or the signed X-PAYMENT at
   // another origin. The at-most-once store is likewise the one pinned constant.
@@ -277,10 +339,13 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   // boundary and a future importer or test is not the CLI (exchange
   // 2026-09-15, CODEX): a non-integer here would silently shape the purchase
   // identity, the URL and the atomic amount string.
-  for (const [name, v] of [["listingId", listingId], ["submissionId", submissionId], ["amountCents", amountCents], ["maxAmountCents", maxAmountCents]]) {
+  for (const [name, v] of [["listingId", listingId], ["submissionId", submissionId], ["amountCents", amountCents], ["maxAmountCents", maxAmountCents], ["walletRow", walletRow]]) {
     if (!Number.isSafeInteger(v) || v <= 0) {
       return { ok: false, exitCode: 1, reason: "argument_invalid", key: null, tombPath: null, message: `${name} must be a positive safe integer; refusing before any bearer is used.` };
     }
+  }
+  if (typeof walletRowHash !== "string" || !IDENTITY_HASH_RE.test(walletRowHash)) {
+    return { ok: false, exitCode: 1, reason: "argument_invalid", key: null, tombPath: null, message: "walletRowHash must be a lowercase 64-hex sha256; refusing before any bearer is used." };
   }
   const purchase = purchaseIdentity({ listingId, submissionId, payee, amountCents });
   const key = attemptKey("POST", target, FUNDER_HANDLE, purchase);
@@ -319,6 +384,39 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
       return { ...base, ok: false, exitCode: 1, reason: "tombstone_blocks", message: recoveryMessage(tombPath) };
     }
   }
+
+  // The wallet-row pin, dry run and execute alike, BEFORE the bearer is used:
+  // the payee on the command line must be the wallet the submission's citizen
+  // declared in the named identity-log row, with the hash the operator wrote
+  // down, and the chain must still hold that hash at that row. Three public
+  // GETs (listing, wallet_declared rows, the attest witness), all fail closed.
+  const origin = new URL(target).origin;
+  let listingDoc;
+  let eventsDoc;
+  try {
+    listingDoc = await deps.readJson(`${origin}/api/listing/${listingId}`);
+    eventsDoc = await deps.readJson(`${origin}/api/events?kind=wallet_declared`);
+  } catch (e) {
+    return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `Could not read the public rows the payee pin needs (${e?.message ?? e}). Refusing before any bearer is used.` };
+  }
+  const submission = Array.isArray(listingDoc?.submissions) ? listingDoc.submissions.find((s) => s && s.id === submissionId) : undefined;
+  if (!submission || !Number.isSafeInteger(submission.citizen_id)) {
+    return { ...base, ok: false, exitCode: 1, reason: "submission_unknown", message: `GET /api/listing/${listingId} does not list submission ${submissionId} with a citizen_id. Refusing before any bearer is used.` };
+  }
+  if (!Array.isArray(eventsDoc?.events)) {
+    return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: "GET /api/events?kind=wallet_declared answered without an events array. Refusing before any bearer is used." };
+  }
+  const pin = checkWalletRow({ rows: eventsDoc.events, walletRow, walletRowHash, payee, submitterCitizenId: submission.citizen_id });
+  if (!pin.ok) return { ...base, ok: false, exitCode: 1, reason: pin.reason, message: pin.message };
+  let attestDoc;
+  try {
+    attestDoc = await deps.readJson(`${origin}/api/attest?identity_from=${walletRow}&identity_expect=${walletRowHash}`);
+  } catch (e) {
+    return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `Could not ask GET /api/attest whether the chain still holds the pinned row (${e?.message ?? e}). Refusing before any bearer is used.` };
+  }
+  const witness = checkWitness(attestDoc, walletRow, walletRowHash);
+  if (!witness.ok) return { ...base, ok: false, exitCode: 1, reason: witness.reason, message: witness.message };
+  const walletRowCheck = { row: walletRow, citizen_id: pin.row.citizen_id, citizen: pin.row.citizen ?? null, submitter_handle: submission.submitter_handle ?? null, attest_status: witness.status, identity_head: witness.head ?? null };
 
   const authHeader = { Authorization: `Bearer ${funderSecret}` };
   const bodyStr = JSON.stringify({ submission_id: submissionId });
@@ -359,7 +457,7 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
     return { ...base, ok: false, exitCode: 1, reason: "reqs_rejected", message: `Refusing to sign: ${e?.message ?? e}` };
   }
 
-  if (!execute) return { ...base, ok: true, exitCode: 0, reason: "dry_run", reqs };
+  if (!execute) return { ...base, ok: true, exitCode: 0, reason: "dry_run", reqs, walletRowCheck };
 
   // Balance pre-check, BEFORE the tombstone and the sign (GEMINI r1 p2): a
   // payer that cannot cover the amount would sign, be refused at settle, and
@@ -469,7 +567,7 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   // Success: atomic flushed replacement of the tombstone with a permanent,
   // terminal 'settled' receipt.
   deps.writeAtomic(tombPath, JSON.stringify({ status: "settled", key, target, ...purchase, tx: secondJson.tx, payer_address: secondJson.payer_address }, null, 2));
-  return { ...base, ok: true, exitCode: 0, reason: "settled", tx: secondJson.tx, payerAddress: secondJson.payer_address };
+  return { ...base, ok: true, exitCode: 0, reason: "settled", tx: secondJson.tx, payerAddress: secondJson.payer_address, walletRowCheck };
 }
 
 // ---------- chain reads (public Base RPC, read-only, no key) ----------
@@ -546,6 +644,13 @@ const realDeps = (account) => ({
   authorizationUsed,
   nowSeconds: () => Math.floor(Date.now() / 1000),
   fetch: (...a) => fetch(...a),
+  // public, key-free GET; a non-2xx or a non-JSON body throws, and every
+  // caller treats a throw as "refuse".
+  readJson: async (url) => {
+    const r = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(30000) });
+    if (!r.ok) throw new Error(`GET ${url} answered HTTP ${r.status}`);
+    return r.json();
+  },
   exists: (p) => existsSync(p),
   readFile: (p) => readFileSync(p, "utf8"),
   // flushed exclusive create: fsync before the handle closes, so a crash after
@@ -581,7 +686,7 @@ async function main() {
     args = parseArgs(process.argv.slice(2));
   } catch (e) {
     console.error(String(e.message ?? e));
-    console.error("Usage: node scripts/pay-listing.mjs --listing <id> --submission <id> --payee <0x...> --amount-cents <n> [--execute] [--max-amount-cents N]");
+    console.error("Usage: node scripts/pay-listing.mjs --listing <id> --submission <id> --payee <0x...> --amount-cents <n> --wallet-row <identity row id> --wallet-row-hash <its 64-hex hash> [--execute] [--max-amount-cents N]");
     process.exitCode = 1;
     return;
   }
@@ -623,13 +728,18 @@ async function main() {
   console.log(`Pay listing ${args.listingId}, submission ${args.submissionId}`);
   console.log(`Pinned payee ${args.payee}; pinned amount $${(args.amountCents / 100).toFixed(2)} (cap $${(args.maxAmountCents / 100).toFixed(2)})`);
   console.log(`Target (pinned): POST ${target}`);
+  console.log(`Pinned wallet row ${args.walletRow} (hash ${args.walletRowHash.slice(0, 8)}...): the payee must be that row's declared wallet, by the submission's citizen, still held by the chain.`);
 
   const result = await payListing(
-    { listingId: args.listingId, submissionId: args.submissionId, payee: args.payee, amountCents: args.amountCents, maxAmountCents: args.maxAmountCents, target, funderSecret, execute: args.execute, payer: account?.address ?? null },
+    { listingId: args.listingId, submissionId: args.submissionId, payee: args.payee, amountCents: args.amountCents, maxAmountCents: args.maxAmountCents, walletRow: args.walletRow, walletRowHash: args.walletRowHash, target, funderSecret, execute: args.execute, payer: account?.address ?? null },
     realDeps(account ?? { address: "0x0000000000000000000000000000000000000000" }),
   );
 
   console.log(`Idempotency key: ${result.key}`);
+  if (result.walletRowCheck) {
+    const w = result.walletRowCheck;
+    console.log(`Wallet row ${w.row}: wallet_declared by citizen ${w.citizen_id} (${w.citizen ?? "?"}), the submitter of submission ${args.submissionId} (${w.submitter_handle ?? "?"}); recomputed hash matches the pin; GET /api/attest holds it at that row (status ${w.attest_status}, identity head ${w.identity_head ?? "?"}).`);
+  }
   if (result.reason === "dry_run") {
     console.log("DRY RUN: the 402 matched every expected field (asset, pinned payee, pinned amount, domain, exact resource).");
     let addr = null;

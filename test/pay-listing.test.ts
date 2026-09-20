@@ -28,11 +28,35 @@ import {
   readFunderSecret,
   payListing,
   DEFAULT_URL,
+  IDENTITY_HASH_RE,
+  recomputeIdentityRowHash,
+  checkWalletRow,
+  checkWitness,
 } from "../scripts/pay-listing.mjs";
+import { createHash } from "node:crypto";
 
 const PAYEE = "0xb7c76e6a9422ae6a6d610be0e7b8fc1b18b7369e";
 const TARGET = `${DEFAULT_URL}/api/listing/3/pay`;
 const PURCHASE = { listingId: 3, submissionId: 1, payee: PAYEE, amountCents: 1200 };
+
+// The wallet-row pin fixture: the live shape of GET /api/events?kind=wallet_declared row 24
+// (midas-jt3, citizen 8, 2026-09-14), with the hash recomputed from its own preimage so the
+// pin's recomputation and the fixture agree by construction, not by copying a served value.
+const SUBMITTER_ID = 8;
+const WALLET_ROW_ID = 24;
+const WALLET_ROW_BASE = { id: WALLET_ROW_ID, citizen_id: SUBMITTER_ID, kind: "wallet_declared", detail: `wallet declared: ${PAYEE}`, created_at: 1789348708252, prev_hash: "9a8ef67f791d236a49a847c57147ca3a3b8693eb6a4c024779d665bb185deb71", citizen: "midas-jt3" };
+const WALLET_ROW_HASH = createHash("sha256").update(WALLET_ROW_BASE.prev_hash + "\n" + JSON.stringify([WALLET_ROW_BASE.citizen_id, WALLET_ROW_BASE.kind, WALLET_ROW_BASE.detail, WALLET_ROW_BASE.created_at])).digest("hex");
+const WALLET_ROW = { ...WALLET_ROW_BASE, hash: WALLET_ROW_HASH };
+const PIN = { walletRow: WALLET_ROW_ID, walletRowHash: WALLET_ROW_HASH };
+function goodListingDoc() {
+  return { listing: { id: 3, status: "open" }, submissions: [{ id: 1, citizen_id: SUBMITTER_ID, submitter_handle: "midas-jt3", status: "open", mod_state: null }] };
+}
+function goodEventsDoc(rows: unknown[] = [WALLET_ROW]) {
+  return { kinds: ["key_rotation", "model_correction", "moderation"], count: rows.length, events: rows };
+}
+function goodAttestDoc(overrides: Record<string, unknown> = {}) {
+  return { ok: true, identity_log: { ok: true, status: "verified", head: "0x" + "cd".repeat(32), expected: WALLET_ROW_HASH, anchor_at_from: WALLET_ROW_HASH, expect_matches: true, ...overrides } };
+}
 
 function goodReqs(overrides: Record<string, unknown> = {}) {
   return {
@@ -171,18 +195,24 @@ test("classifyTombstone: settled, signing, corrupt, unknown", () => {
   assert.equal(classifyTombstone(JSON.stringify({ status: "weird" })).status, "unknown");
 });
 
-test("parseArgs requires all four purchase flags, refuses --url, and validates the payee", () => {
-  const ok = parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200"]);
-  assert.deepEqual(ok, { listingId: 3, submissionId: 1, payee: PAYEE, amountCents: 1200, maxAmountCents: 2000, execute: false });
-  assert.equal(parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", "--execute", "--max-amount-cents", "1500"]).execute, true);
-  assert.throws(() => parseArgs(["--submission", "1", "--payee", PAYEE, "--amount-cents", "1200"]), /--listing is required/);
-  assert.throws(() => parseArgs(["--listing", "3", "--payee", PAYEE, "--amount-cents", "1200"]), /--submission is required/);
-  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--amount-cents", "1200"]), /--payee is required/);
-  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE]), /--amount-cents is required/);
-  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", "not-an-address", "--amount-cents", "1200"]), /--payee must be a 0x-prefixed/);
-  assert.throws(() => parseArgs(["--listing", "0", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200"]), /--listing must be a positive integer/);
-  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "12.5"]), /--amount-cents must be a positive integer/);
-  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", "--url", "https://evil.example"]), /unrecognised argument: --url/);
+test("parseArgs requires all six pin flags (four purchase + the wallet row and its hash), refuses --url, and validates the payee and the hash", () => {
+  const pinArgv = ["--wallet-row", String(WALLET_ROW_ID), "--wallet-row-hash", WALLET_ROW_HASH];
+  const ok = parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", ...pinArgv]);
+  assert.deepEqual(ok, { listingId: 3, submissionId: 1, payee: PAYEE, amountCents: 1200, maxAmountCents: 2000, walletRow: WALLET_ROW_ID, walletRowHash: WALLET_ROW_HASH, execute: false });
+  assert.equal(parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", ...pinArgv, "--execute", "--max-amount-cents", "1500"]).execute, true);
+  assert.throws(() => parseArgs(["--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", ...pinArgv]), /--listing is required/);
+  assert.throws(() => parseArgs(["--listing", "3", "--payee", PAYEE, "--amount-cents", "1200", ...pinArgv]), /--submission is required/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--amount-cents", "1200", ...pinArgv]), /--payee is required/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, ...pinArgv]), /--amount-cents is required/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200"]), /--wallet-row is required/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", "--wallet-row", "24"]), /--wallet-row-hash is required/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", "--wallet-row", "24", "--wallet-row-hash", WALLET_ROW_HASH.toUpperCase()]), /--wallet-row-hash must be the row's 64-hex/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", "--wallet-row", "24", "--wallet-row-hash", "0x" + WALLET_ROW_HASH]), /--wallet-row-hash must be the row's 64-hex/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", "--wallet-row", "0", "--wallet-row-hash", WALLET_ROW_HASH]), /--wallet-row must be a positive integer/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", "not-an-address", "--amount-cents", "1200", ...pinArgv]), /--payee must be a 0x-prefixed/);
+  assert.throws(() => parseArgs(["--listing", "0", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", ...pinArgv]), /--listing must be a positive integer/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "12.5", ...pinArgv]), /--amount-cents must be a positive integer/);
+  assert.throws(() => parseArgs(["--listing", "3", "--submission", "1", "--payee", PAYEE, "--amount-cents", "1200", ...pinArgv, "--url", "https://evil.example"]), /unrecognised argument: --url/);
 });
 
 test("readFunderSecret accepts only commonhold-agent's custody file with a well-formed secret", () => {
@@ -208,10 +238,19 @@ function sentHeader(from = PAYER, nonce = NONCE, validBefore = VALID_BEFORE) {
   return Buffer.from(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { signature: "0xsig", authorization: { from, to: PAYEE, value: "12000000", validAfter: "1", validBefore: String(validBefore), nonce } } })).toString("base64");
 }
 
-function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any; balance?: bigint | Error; nonceUsed?: boolean | Error; now?: number } = {}) {
+function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any; balance?: bigint | Error; nonceUsed?: boolean | Error; now?: number; listing?: unknown | Error; events?: unknown | Error; attest?: unknown | Error } = {}) {
   const calls: Call[] = [];
   let store: string | null = opts.existing ?? null;
   const deps = {
+    // the three public reads the wallet-row pin makes; recorded as fetch:* so every
+    // "no network call" assertion below counts them
+    readJson: async (url: string) => {
+      const which = url.includes("/api/listing/") ? "listing" : url.includes("/api/events") ? "events" : url.includes("/api/attest") ? "attest" : "other";
+      calls.push({ kind: `fetch:json:${which}`, url });
+      const v = which === "listing" ? (opts.listing ?? goodListingDoc()) : which === "events" ? (opts.events ?? goodEventsDoc()) : which === "attest" ? (opts.attest ?? goodAttestDoc()) : undefined;
+      if (v instanceof Error) throw v;
+      return v;
+    },
     fetch: async (url: string, init: any) => {
       const leg = init.headers["X-PAYMENT"] ? "leg2" : "leg1";
       calls.push({ kind: `fetch:${leg}`, url, redirect: init.redirect, hasBearer: String(init.headers.Authorization).startsWith("Bearer "), body: init.body });
@@ -238,17 +277,19 @@ function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { 
   return { deps, calls, store: () => store };
 }
 
-const RUN = { ...PURCHASE, maxAmountCents: 2000, target: TARGET, funderSecret: "commonhold_sk_" + "1".repeat(64), payer: PAYER };
+const RUN = { ...PURCHASE, ...PIN, maxAmountCents: 2000, target: TARGET, funderSecret: "commonhold_sk_" + "1".repeat(64), payer: PAYER };
+const PIN_READS = ["fetch:json:listing", "fetch:json:events", "fetch:json:attest"];
 
 test("dry run: one authenticated 402 probe with redirect:error, requirements validated, NEVER signs, writes nothing", async () => {
   const { deps, calls } = fakeDeps();
   const r = await payListing({ ...RUN, execute: false }, deps);
   assert.equal(r.ok, true);
   assert.equal(r.reason, "dry_run");
-  assert.deepEqual(calls.map((c) => c.kind), ["fetch:leg1"]);
-  assert.equal(calls[0].redirect, "error");
-  assert.equal(calls[0].hasBearer, true);
-  assert.equal(calls[0].body, JSON.stringify({ submission_id: 1 }));
+  assert.deepEqual(calls.map((c) => c.kind), [...PIN_READS, "fetch:leg1"]);
+  const leg1 = calls[PIN_READS.length];
+  assert.equal(leg1.redirect, "error");
+  assert.equal(leg1.hasBearer, true);
+  assert.equal(leg1.body, JSON.stringify({ submission_id: 1 }));
 });
 
 test("execute: mkdir + exclusive tombstone BEFORE sign, then leg 2, then the settled receipt", async () => {
@@ -258,7 +299,7 @@ test("execute: mkdir + exclusive tombstone BEFORE sign, then leg 2, then the set
   assert.equal(r.reason, "settled");
   assert.equal(r.tx, "0x" + "ab".repeat(32));
   const order = calls.map((c) => c.kind);
-  assert.deepEqual(order, ["exists", "fetch:leg1", "usdcBalanceAtomic", "mkdir", "writeExclusive", "sign", "fetch:leg2", "writeAtomic"]);
+  assert.deepEqual(order, ["exists", ...PIN_READS, "fetch:leg1", "usdcBalanceAtomic", "mkdir", "writeExclusive", "sign", "fetch:leg2", "writeAtomic"]);
   const settled = JSON.parse(store()!);
   assert.equal(settled.status, "settled");
   assert.equal(settled.payee, PAYEE);
@@ -280,7 +321,7 @@ test("execute: a non-402 first leg (e.g. 409 'no declared wallet') ends the run 
   const r = await payListing({ ...RUN, execute: true }, deps);
   assert.equal(r.reason, "leg1_not_402");
   assert.match(String(r.detail), /no declared wallet/);
-  assert.deepEqual(calls.map((c) => c.kind), ["exists", "fetch:leg1"]);
+  assert.deepEqual(calls.map((c) => c.kind), ["exists", ...PIN_READS, "fetch:leg1"]);
 });
 
 test("execute: a contradictory 200 (payee_address differs) leaves the tombstone 'signing'", async () => {
@@ -412,11 +453,119 @@ test("payListing re-validates its numeric arguments at the exported boundary, be
   const noPayer = await payListing({ ...RUN, payer: null, execute: true }, deps);
   assert.equal(noPayer.reason, "argument_invalid");
   assert.match(String(noPayer.message), /payer/);
-  for (const bad of [{ listingId: 3.5 }, { submissionId: 0 }, { amountCents: -1200 }, { maxAmountCents: Number.NaN }, { amountCents: 2 ** 53 }]) {
+  for (const bad of [{ listingId: 3.5 }, { submissionId: 0 }, { amountCents: -1200 }, { maxAmountCents: Number.NaN }, { amountCents: 2 ** 53 }, { walletRow: 0 }, { walletRow: "24" }, { walletRowHash: undefined }, { walletRowHash: WALLET_ROW_HASH.slice(1) }, { walletRowHash: WALLET_ROW_HASH.toUpperCase() }]) {
     const r = await payListing({ ...RUN, ...bad, target: payTarget((bad as any).listingId ?? 3), execute: true }, deps);
     assert.equal(r.reason, "argument_invalid", JSON.stringify(bad));
   }
   assert.deepEqual(calls, []);
+});
+
+// ---------- the wallet-row pin: what the desk refuses when the published head moves (1f916 69513, chit402) ----------
+
+test("pin: the three public reads run BEFORE the bearer is used, in dry run and execute alike, and the dry run reports what was checked", async () => {
+  const dry = fakeDeps();
+  const r1 = await payListing({ ...RUN, execute: false }, dry.deps);
+  assert.equal(r1.reason, "dry_run", JSON.stringify(r1));
+  assert.deepEqual(dry.calls.slice(0, 3).map((c) => c.kind), PIN_READS);
+  assert.match(dry.calls[0].url, new RegExp(`^${DEFAULT_URL}/api/listing/3$`));
+  assert.equal(dry.calls[1].url, `${DEFAULT_URL}/api/events?kind=wallet_declared`);
+  assert.equal(dry.calls[2].url, `${DEFAULT_URL}/api/attest?identity_from=${WALLET_ROW_ID}&identity_expect=${WALLET_ROW_HASH}`);
+  assert.deepEqual(r1.walletRowCheck, { row: WALLET_ROW_ID, citizen_id: SUBMITTER_ID, citizen: "midas-jt3", submitter_handle: "midas-jt3", attest_status: "verified", identity_head: "0x" + "cd".repeat(32) });
+
+  const exec = fakeDeps();
+  const r2 = await payListing({ ...RUN, execute: true }, exec.deps);
+  assert.equal(r2.reason, "settled", JSON.stringify(r2));
+  const order = exec.calls.map((c) => c.kind);
+  assert.ok(order.indexOf("fetch:json:attest") < order.indexOf("fetch:leg1"), "the witness is asked before the bearer is used");
+  assert.equal(r2.walletRowCheck?.row, WALLET_ROW_ID);
+});
+
+test("pin: a chain that no longer holds the pinned hash at the pinned row (expect_matches:false, the moved head) is refused with nothing signed, no bearer used and no tombstone", async () => {
+  const { deps, calls, store } = fakeDeps({ attest: goodAttestDoc({ status: "mismatch", expect_matches: false, anchor_at_from: "0x" + "ee".repeat(32), ok: false }) });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "wallet_row_moved");
+  assert.match(String(r.message), /published head moved under the row the desk pinned/);
+  assert.ok(!calls.some((c) => c.kind === "fetch:leg1" || c.kind === "sign" || c.kind === "writeExclusive"), JSON.stringify(calls.map((c) => c.kind)));
+  assert.equal(store(), null);
+  // the dry run refuses on the same answer
+  const dry = fakeDeps({ attest: goodAttestDoc({ status: "mismatch", expect_matches: false, ok: false }) });
+  assert.equal((await payListing({ ...RUN, execute: false }, dry.deps)).reason, "wallet_row_moved");
+});
+
+test("pin: a broken chain after the row, or an attest answer with no identity_log, refuses even when expect_matches is true", () => {
+  assert.equal(checkWitness(goodAttestDoc({ status: "broken", ok: false, reason: "row 27 does not chain from row 26" }), WALLET_ROW_ID, WALLET_ROW_HASH).reason, "wallet_row_chain_broken");
+  assert.equal(checkWitness({ ok: true }, WALLET_ROW_ID, WALLET_ROW_HASH).reason, "wallet_row_unreadable");
+  assert.equal(checkWitness(null, WALLET_ROW_ID, WALLET_ROW_HASH).reason, "wallet_row_unreadable");
+  assert.equal(checkWitness(goodAttestDoc({ expect_matches: undefined }), WALLET_ROW_ID, WALLET_ROW_HASH).reason, "wallet_row_moved");
+  // 'incomplete' with the match is accepted: the page limit is not a tamper report, the match is the pin
+  const inc = checkWitness(goodAttestDoc({ status: "incomplete", ok: false, next_from: 20000 }), WALLET_ROW_ID, WALLET_ROW_HASH);
+  assert.equal(inc.ok, true);
+  assert.equal(inc.status, "incomplete");
+});
+
+test("pin: checkWalletRow refuses a missing row, a row of another kind, a row naming another wallet, another citizen's row, a superseded declaration, and a row that does not recompute to the pinned hash", () => {
+  const good = { rows: [WALLET_ROW], walletRow: WALLET_ROW_ID, walletRowHash: WALLET_ROW_HASH, payee: PAYEE, submitterCitizenId: SUBMITTER_ID };
+  assert.equal(checkWalletRow(good).ok, true);
+  // the payee comparison is case-insensitive: the served detail is lowercase, the command line may be checksummed
+  assert.equal(checkWalletRow({ ...good, payee: "0xB7C76E6A9422AE6A6D610BE0E7B8FC1B18B7369E" }).ok, true);
+  assert.equal(checkWalletRow({ ...good, walletRow: 25 }).reason, "wallet_row_missing");
+  assert.equal(checkWalletRow({ ...good, rows: [{ ...WALLET_ROW, kind: "key_registered" }] }).reason, "wallet_row_kind");
+  assert.equal(checkWalletRow({ ...good, payee: "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" }).reason, "wallet_row_payee");
+  assert.equal(checkWalletRow({ ...good, submitterCitizenId: 12 }).reason, "wallet_row_citizen");
+  const later = { ...WALLET_ROW, id: 31, prev_hash: WALLET_ROW_HASH, detail: "wallet declared: 0x2e9bfe770d8fac9e3cfed9c67f260922ef0614a0" };
+  const superseded = checkWalletRow({ ...good, rows: [WALLET_ROW, { ...later, hash: recomputeIdentityRowHash(later) }] });
+  assert.equal(superseded.reason, "wallet_row_superseded");
+  assert.match(String(superseded.message), /row 31/);
+  // another citizen's later declaration does not supersede this one
+  assert.equal(checkWalletRow({ ...good, rows: [WALLET_ROW, { ...later, citizen_id: 12 }] }).ok, true);
+  // the served hash field is ignored; the preimage is what is recomputed
+  assert.equal(checkWalletRow({ ...good, rows: [{ ...WALLET_ROW, hash: "0".repeat(64) }] }).ok, true);
+  assert.equal(checkWalletRow({ ...good, rows: [{ ...WALLET_ROW, created_at: WALLET_ROW.created_at + 1 }] }).reason, "wallet_row_hash");
+  assert.equal(checkWalletRow({ ...good, walletRowHash: "f".repeat(64) }).reason, "wallet_row_hash");
+});
+
+test("pin: recomputeIdentityRowHash is the identity log's own preimage, and IDENTITY_HASH_RE is lowercase 64-hex only", () => {
+  assert.equal(recomputeIdentityRowHash(WALLET_ROW_BASE), WALLET_ROW_HASH);
+  assert.notEqual(recomputeIdentityRowHash({ ...WALLET_ROW_BASE, detail: WALLET_ROW_BASE.detail + " " }), WALLET_ROW_HASH);
+  assert.equal(IDENTITY_HASH_RE.test(WALLET_ROW_HASH), true);
+  assert.equal(IDENTITY_HASH_RE.test(WALLET_ROW_HASH.toUpperCase()), false);
+  assert.equal(IDENTITY_HASH_RE.test("0x" + WALLET_ROW_HASH), false);
+  assert.equal(IDENTITY_HASH_RE.test(WALLET_ROW_HASH.slice(0, 63)), false);
+});
+
+test("pin: through payListing, a row naming another wallet, another citizen's row, or a superseded row refuses before the attest read and before the bearer", async () => {
+  const otherWallet = fakeDeps({ events: goodEventsDoc([{ ...WALLET_ROW, detail: "wallet declared: 0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" }]) });
+  const r1 = await payListing({ ...RUN, execute: true }, otherWallet.deps);
+  assert.equal(r1.reason, "wallet_row_payee");
+  assert.deepEqual(otherWallet.calls.map((c) => c.kind), ["exists", "fetch:json:listing", "fetch:json:events"]);
+
+  const otherCitizen = fakeDeps({ listing: { listing: { id: 3 }, submissions: [{ id: 1, citizen_id: 12, submitter_handle: "boundary-auditor-v2" }] } });
+  const r2 = await payListing({ ...RUN, execute: true }, otherCitizen.deps);
+  assert.equal(r2.reason, "wallet_row_citizen");
+
+  const later = { ...WALLET_ROW, id: 31, prev_hash: WALLET_ROW_HASH };
+  const superseded = fakeDeps({ events: goodEventsDoc([WALLET_ROW, { ...later, hash: recomputeIdentityRowHash(later) }]) });
+  const r3 = await payListing({ ...RUN, execute: true }, superseded.deps);
+  assert.equal(r3.reason, "wallet_row_superseded");
+
+  const unknownSubmission = fakeDeps({ listing: { listing: { id: 3 }, submissions: [] } });
+  const r4 = await payListing({ ...RUN, execute: true }, unknownSubmission.deps);
+  assert.equal(r4.reason, "submission_unknown");
+  for (const d of [otherWallet, otherCitizen, superseded, unknownSubmission]) {
+    assert.ok(!d.calls.some((c) => c.kind === "fetch:leg1" || c.kind === "fetch:json:attest" || c.kind === "sign" || c.kind === "writeExclusive"));
+    assert.equal(d.store(), null);
+  }
+});
+
+test("pin: an unreadable public row refuses (fail closed), with nothing signed and no tombstone", async () => {
+  for (const opts of [{ listing: new Error("HTTP 503") }, { events: new Error("HTTP 503") }, { attest: new Error("timeout") }, { events: { events: "not-an-array" } }]) {
+    const { deps, calls, store } = fakeDeps(opts);
+    const r = await payListing({ ...RUN, execute: true }, deps);
+    assert.equal(r.reason, "wallet_row_unreadable", JSON.stringify(opts));
+    assert.ok(!calls.some((c) => c.kind === "fetch:leg1" || c.kind === "sign" || c.kind === "writeExclusive"));
+    assert.equal(store(), null);
+  }
 });
 
 // ---------- GEMINI round 1: balance pre-check, refused leg 2, retry rule ----------
@@ -426,7 +575,7 @@ test("execute: the balance is read BEFORE the tombstone and the sign; an underfu
   const r = await payListing({ ...RUN, execute: true }, deps);
   assert.equal(r.reason, "balance_insufficient");
   assert.match(String(r.message), /holds 5.174821 USDC, less than the 12.00 USDC/);
-  assert.deepEqual(calls.map((c) => c.kind), ["exists", "fetch:leg1", "usdcBalanceAtomic"]);
+  assert.deepEqual(calls.map((c) => c.kind), ["exists", ...PIN_READS, "fetch:leg1", "usdcBalanceAtomic"]);
   assert.equal(store(), null);
 });
 
