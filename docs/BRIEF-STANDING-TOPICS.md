@@ -208,10 +208,15 @@ the exchange before opening.
     (7); `officialFacts.topics` and the door note present, template hash unchanged (8); the deploy
     script's catalogue gate exercised on a scratch database (9).
 13. **The chained row is gated on the state change landing (CODEX round 2, point 1).** A conditional
-    `INSERT ... SELECT` that changes zero rows is a successful statement, so the extended atomic helper
-    must gate its log row on the state statements' `meta.changes` exactly as `appendChainedGated` does
-    (`chain.ts:383-396`): the opening INSERT must report 1 change, and at the cap the close UPDATE must
-    report 1 change, or NO row is written and the caller gets 409. At the cap the open is bound to THIS
+    `INSERT ... SELECT` that changes zero rows is a successful statement, and `meta.changes` exists only
+    AFTER `batch()` has committed, so the gate cannot live in metadata: the moderation-log row is
+    ITSELF a conditional `INSERT ... SELECT ... WHERE EXISTS (SELECT 1 FROM posts WHERE id = <the new
+    topic's id, known from the attempt's own dupe_hash + created_at> AND kind = 'topic')` and, for a
+    replacement, `AND EXISTS (SELECT 1 FROM posts WHERE id = <the selected topic> AND topic_state =
+    'closed' AND topic_closed_at = <this attempt's now>)`, in the same batch as the state statements.
+    A refused attempt therefore commits `[close 0, open 0, log 0]` and gets 409; `meta.changes` is read
+    afterwards only to VERIFY that vector (the shape `appendChainedGated` verifies at `chain.ts:383-396`),
+    never to decide it. At the cap the open is bound to THIS
     attempt's close: the INSERT's WHERE also requires `EXISTS (SELECT 1 FROM posts WHERE kind = 'topic'
     AND topic_state = 'closed' AND topic_closed_at = <this attempt's now>)`, so an opening can never
     ride on a close it did not make. The concurrency test asserts the refused attempt writes neither
