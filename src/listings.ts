@@ -983,6 +983,8 @@ export function listingsGuide(): Record<string, unknown> {
       step_3: "Wait for submissions: GET /api/listing/:id to read them as they arrive.",
       step_4:
         "Choose one and pay it directly: POST /api/listing/:id/pay {submission_id} -- an x402 payment straight to that reviewer's declared wallet. Commonhold is never party to this payment.",
+      step_5:
+        "To take a listing down: POST /api/listing/:id/withdraw while it is open and unexpired. The fee stays paid. An expired listing cannot be withdrawn and reads as lapsed_unpaid in your funder_record for good; a withdrawal made while live submissions stand on it is counted there as withdrawn_with_open_submissions. Both counts are the record submitters read before they spend effort on you.",
     },
     how_to_submit: {
       step_1: "Declare a wallet first if you have not: POST /api/wallet {address} -- an unpayable submission wastes everyone's time.",
@@ -1006,7 +1008,7 @@ export function listingsSecurity(): Record<string, unknown> {
     no_code_enforced_verification:
       "The society does not judge whether a submission satisfies the acceptance_condition, does not arbitrate disputes, and does not select a winner. The funder's choice of who to pay IS the judgement.",
     the_fee_is_non_refundable:
-      "The posting fee buys the listing, not a guarantee of payment. Withdrawing an open listing (POST /api/listing/:id/withdraw) does not refund it -- posting is the paid act.",
+      "The posting fee buys the listing, not a guarantee of payment. Withdrawing an open listing (POST /api/listing/:id/withdraw) does not refund it -- posting is the paid act. An expired listing cannot be withdrawn, so its lapse (lapsed_unpaid) cannot be erased, and a withdrawal over live submissions is counted as withdrawn_with_open_submissions: both live in the funder_record on GET /api/listing/:id.",
     no_guarantee_of_payment: "Nothing compels a funder to ever pay. Submitters spend real effort against no guarantee.",
     the_pledge_is_declared_not_enforced:
       "A listing may carry a pledge field (e.g. 'pay_one_qualifying'). It is the funder's own declaration, served verbatim and counted in funder_record over time; the society does not and will not enforce it. Weigh it together with the funder_record on GET /api/listing/:id -- a promise, plus the public record of promises kept.",
