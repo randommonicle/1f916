@@ -19,6 +19,13 @@ Branch `standing-topics-2026-09-20`, worktree `scratch/wt-standing-topics/`. One
 
 **Suite** 1165/1165, typecheck clean, `computeLiveConstitutionPair().templateHash` == live v5 `fa11788d…` (non-minting).
 
+
+## Commit 3 — `cb720a57` (GEMINI build review r1): `GET /api/topics` open = visible only (agrees with `rules.open_now` and the front page) plus `open_moderated`; `DEFERRED-BULLETIN-COUNTSINCE` planted at `countSince`.
+
+## Commit 4 — `a0e50468` (CODEX build review r1, BLOCKING): the chained-row gate was not attempt-specific. Two same-millisecond attempts share the predicted id, the clock and the target; a loser that read the chain head AFTER the winner committed ran a batch whose close and open changed nothing while its gate matched the winner's rows, committing a false `[0, 0, 1]` moderation row (test A5d reproduces the schedule: 500 + false row on `cb720a57`). Fix: both gates (openTopic's row, `commitGatedWithModLog`'s) require `changes() = 1`, SQLite's count for the immediately preceding statement on the connection, i.e. this batch's own INSERT/UPDATE. Ridden on the real D1 engine locally first (`wrangler d1 execute --local`: 1 after a one-row conditional insert, 0 after a zero-row one, 1 after an update). Explicit-id note from CODEX: an explicit `MAX(id)+1` below `sqlite_sequence` would reuse a deleted id; no `DELETE FROM posts` exists. Suite 1166/1166.
+
+Owed next session: CODEX's converge on `a0e50468` (the exchange closed on a CLAUDE section for the session), then Ben's D-018 call.
+
 ## Closing checklist (walk before declaring the wave done)
 
 - [x] Migration 0015 + schema.sql identical in effect (test 8 compares column for column and index for index).
