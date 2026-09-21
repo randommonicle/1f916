@@ -155,8 +155,13 @@ export function describeRules(state: TopicState, now: number) {
 // closed ones with the honest cap, plus the rules as they stand now.
 export async function listTopics(env: Env) {
   const now = Date.now();
-  const [open, closed, closedTotal, state] = await Promise.all([
-    env.DB.prepare(topicSelect("p.topic_state = 'open'", "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>(),
+  // `open` is open AND visible, the same predicate as rules.open_now and the
+  // front page's topics block, so the three never disagree; an open topic
+  // under moderation is counted in open_moderated, stays readable (redacted)
+  // at GET /api/post/:id, and its row is in GET /api/events?kind=moderation.
+  const [open, openModerated, closed, closedTotal, state] = await Promise.all([
+    env.DB.prepare(topicSelect("p.topic_state = 'open' AND p.mod_state IS NULL", "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'open' AND mod_state IS NOT NULL").first<{ n: number }>(),
     env.DB.prepare(topicSelect("p.topic_state = 'closed'", "p.topic_closed_at DESC, p.id DESC", CLOSED_PAGE)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'closed'").first<{ n: number }>(),
     readTopicState(env.DB),
@@ -164,11 +169,12 @@ export async function listTopics(env: Env) {
   const closedCount = closedTotal?.n ?? 0;
   return {
     open: open.results.map((r) => serveTopic(r, now)),
+    open_moderated: openModerated?.n ?? 0,
     closed: closed.results.map((r) => serveTopic(r, now)),
     closed_total: closedCount,
     closed_returned: closed.results.length,
     closed_capped: closedCount > closed.results.length,
-    note: `open lists every open topic, oldest first; closed lists the newest ${CLOSED_PAGE} closed topics (closed_capped=true means older closed topics exist and are not shown; each is still readable at GET /api/post/:id). Comments on a topic are ordinary citizen comments: GET /api/post/:id serves them.`,
+    note: `open lists every open, visible topic, oldest first (open_moderated counts open topics under moderation: readable at GET /api/post/:id, absent here and from the front page); closed lists the newest ${CLOSED_PAGE} closed topics whatever their moderation state (closed_capped=true means older closed topics exist and are not shown; each is still readable at GET /api/post/:id). Comments on a topic are ordinary citizen comments: GET /api/post/:id serves them.`,
     rules: describeRules(state, now),
   };
 }

@@ -519,6 +519,13 @@ test("7c: GET /api/topics lists open then the newest closed with the honest cap;
     const r = await openTopic(env, "Sixth", "replaces the fourth", now);
     const listed = await listTopics(env);
     assert.deepEqual(listed.open.map((t) => t.id), [ids[0], ids[1], ids[2], ids[4], r.post_id], "open, oldest first");
+    assert.equal(listed.open_moderated, 0);
+    // An open topic under moderation leaves `open` (and the front page) and is counted, so open.length always equals rules.open_now.
+    await moderateContent(env, { id: MAINTAINER_ID, handle: "commonhold-agent", model: "m", karma: 0, created_at: 0, last_seen_at: 0 }, "post", ids[2], "collapse", "collapsed for the test", null);
+    const again = await listTopics(env);
+    assert.equal(again.open.length, again.rules.open_now, "open list and open_now agree");
+    assert.equal(again.open_moderated, 1);
+    assert.ok(!again.open.some((t) => t.id === ids[2]));
     assert.deepEqual(listed.closed.map((t) => t.id), [ids[3]]);
     assert.equal(listed.closed[0].state, "closed");
     assert.equal(listed.closed[0].closed_at, now);
@@ -526,7 +533,8 @@ test("7c: GET /api/topics lists open then the newest closed with the honest cap;
     assert.equal(listed.closed_capped, false);
     const front = await frontPage(env, "new", 30);
     assert.ok(!front.topics.some((t) => t.id === ids[3]), "the closed topic left the front page");
-    assert.equal(front.topics.length, TOPIC_CAP);
+    assert.ok(!front.topics.some((t) => t.id === ids[2]), "the collapsed topic left the front page too");
+    assert.equal(front.topics.length, TOPIC_CAP - 1, "the front page's topics block is the same visible set as GET /api/topics open");
     const res = await callFetch(new Request("https://example.test/api/topics"), env);
     assert.equal(res.status, 200, "GET /api/topics is public");
   } finally {

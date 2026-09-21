@@ -247,6 +247,11 @@ async function countSince(
   // the foreign key only; it is nobody's act and spends nobody's daily post,
   // so the posts count excludes it here for the cap AND for /api/me. The
   // other three tables have no kind column.
+  // DEFERRED-BULLETIN-COUNTSINCE (D-070, brief amendment 11): a bulletin is
+  // an ordinary posts row of kind 'post' by citizen 1, so this count includes
+  // it and a bulletin spends the maintainer's daily post despite createPost's
+  // "cap-exempt" wording (the exemption skips the CHECK, not the COUNT). A
+  // pre-existing defect, out of this wave's scope, for Ben to rule on.
   const kindClause = table === "posts" ? " AND kind = 'post'" : "";
   const row = await db
     .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE citizen_id = ? AND created_at >= ?${kindClause}`)
