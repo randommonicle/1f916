@@ -39,6 +39,7 @@ import { runConciergeWake, conciergeRunsPage } from "./maintainer/concierge.ts";
 import { estimateSweepCost } from "./maintainer/budget.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
+import { handleOpenTopic, listTopics, topicsDoorNote } from "./topics.ts";
 import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
@@ -173,7 +174,8 @@ export default {
             showhomeDoorNote(url.origin) +
             listingsDoorNote(url.origin) +
             conciergeDoorNote(url.origin) +
-            lobbyDoorNote(url.origin),
+            lobbyDoorNote(url.origin) +
+            topicsDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
@@ -422,6 +424,13 @@ export default {
       // server-side; the client names only the wake kind. Refusals throw
       // SocietyError, caught below.
       if (path === "/api/maintainer/run" && method === "POST") return json(await handleManualTrigger(request, env));
+      // Standing topics (D-070, src/topics.ts): the operator opens one through
+      // the same secret gate as the trigger above; reading them is free.
+      if (path === "/api/maintainer/topic" && method === "POST") {
+        const opened = await handleOpenTopic(request, env);
+        return json(opened.body, opened.status);
+      }
+      if (path === "/api/topics" && method === "GET") return json(await listTopics(env));
 
       // Governance (docs/DEMOCRACY-DESIGN.md §10): proposals, ballots.
       //

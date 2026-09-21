@@ -9,7 +9,7 @@
 // build it once a migration wave is open; this file only covers what is
 // answerable from the existing schema.
 
-import { SocietyError, type Env } from "./society.ts";
+import { SocietyError, type Env, TOPICS, topicCounts } from "./society.ts";
 
 // ---------- search ----------
 
@@ -84,7 +84,10 @@ export async function searchPosts(env: Env, rawQuery: string | null, limit = SEA
   const effLimit = Math.min(Math.max(1, Math.floor(Number.isFinite(limit) ? limit : SEARCH_DEFAULT_LIMIT)), SEARCH_MAX_LIMIT);
 
   const { results } = await env.DB.prepare(
-    `SELECT p.id, p.title, p.body, p.created_at, c.handle AS handle
+    // A standing topic (kind = 'topic', D-070) matches like any post but has
+    // no author: its handle is projected NULL and opened_by names the operator.
+    `SELECT p.id, p.kind, p.title, p.body, p.created_at,
+            CASE WHEN p.kind = 'topic' THEN NULL ELSE c.handle END AS handle
      FROM posts p JOIN citizens c ON c.id = p.citizen_id
      WHERE p.mod_state IS NULL
        AND (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')
@@ -92,7 +95,7 @@ export async function searchPosts(env: Env, rawQuery: string | null, limit = SEA
      LIMIT ?`,
   )
     .bind(likeArg, likeArg, effLimit)
-    .all<{ id: number; title: string; body: string | null; created_at: number; handle: string }>();
+    .all<{ id: number; kind: string; title: string; body: string | null; created_at: number; handle: string | null }>();
 
   return {
     q,
@@ -103,9 +106,11 @@ export async function searchPosts(env: Env, rawQuery: string | null, limit = SEA
       "Substring match over post title and body, ASCII case-insensitive, newest first. Excludes collapsed and removed posts (GET /api/events?kind=moderation is the public record of why any given post is missing). capped=true means there may be more matches than shown -- narrow the query rather than assume this is everything.",
     results: results.map((r) => ({
       id: r.id,
+      kind: r.kind,
       title: r.title,
       snippet: buildSnippet(r.body, q),
       handle: r.handle,
+      opened_by: r.kind === "topic" ? TOPICS.opened_by : null,
       created_at: r.created_at,
     })),
   };
@@ -130,15 +135,19 @@ export async function publicStats(env: Env) {
     proposalsTotal,
     proposalsOpen,
     votesTotal,
+    topics,
   ] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM posts").first<{ n: number }>(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE mod_state IS NULL").first<{ n: number }>(),
+    // Standing topics (kind = 'topic', D-070) are nobody's posts: counted
+    // separately below, never inside posts/posts_visible.
+    env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'post'").first<{ n: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE mod_state IS NULL AND kind = 'post'").first<{ n: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM comments").first<{ n: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM comments WHERE mod_state IS NULL").first<{ n: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM votes").first<{ n: number }>(),
+    topicCounts(env.DB),
   ]);
 
   return {
@@ -146,12 +155,14 @@ export async function publicStats(env: Env) {
     citizens: n(citizens),
     posts: n(postsTotal),
     posts_visible: n(postsVisible),
+    topics_open: topics.open_now,
+    topics_total: topics.opened_ever,
     comments: n(commentsTotal),
     comments_visible: n(commentsVisible),
     proposals: n(proposalsTotal),
     proposals_open: n(proposalsOpen),
     votes: n(votesTotal),
     note:
-      "Every figure above is a live SELECT COUNT(*) against Commonhold's own D1, computed fresh on each call -- nothing here is estimated, tracked, or drawn from an analytics feed (we have none). posts/comments are the full row count including moderated rows (moderation redacts content, it never deletes the row); posts_visible/comments_visible additionally filter to mod_state IS NULL, the same predicate GET /api/front and GET /api/changes apply, so those two figures are the ones matching what a citizen actually sees browsing the site. Recompute or cross-check independently: citizens against GET /api/citizens' own total field, proposals against GET /api/proposals, posts_visible/comments_visible against a full page-through of GET /api/changes. votes and the unfiltered posts/comments totals have no separate bulk-listing endpoint today, so they rest on this endpoint's own COUNT(*) -- still a live read of the same public database everything else here reads from, not an estimate. GET /api/events?kind=moderation is the public record of why any individual post or comment is missing from the _visible figures.",
+      "Every figure above is a live SELECT COUNT(*) against Commonhold's own D1, computed fresh on each call -- nothing here is estimated, tracked, or drawn from an analytics feed (we have none). posts/comments count citizens' posts only: standing topics (opened by the operator, D-070) are counted separately as topics_open/topics_total and never as anyone's post. posts/comments are the full row count including moderated rows (moderation redacts content, it never deletes the row); posts_visible/comments_visible additionally filter to mod_state IS NULL, the same predicate GET /api/front and GET /api/changes apply, so those two figures are the ones matching what a citizen actually sees browsing the site. Recompute or cross-check independently: citizens against GET /api/citizens' own total field, proposals against GET /api/proposals, posts_visible/comments_visible against a full page-through of GET /api/changes. votes and the unfiltered posts/comments totals have no separate bulk-listing endpoint today, so they rest on this endpoint's own COUNT(*) -- still a live read of the same public database everything else here reads from, not an estimate. GET /api/events?kind=moderation is the public record of why any individual post or comment is missing from the _visible figures.",
   };
 }

@@ -1,0 +1,33 @@
+# Checkpoint log: the standing-topics wave (D-070, docs/BRIEF-STANDING-TOPICS.md)
+
+Branch `standing-topics-2026-09-20`, worktree `scratch/wt-standing-topics/`. One note per commit; the closing checklist at the end. Deploy is Ben's hand: migration 0015 behind the full-catalogue gate, then the worker, then `scripts/open-topic.mjs` five times.
+
+## Commit 1 — 2026-09-21: migration 0015, `src/topics.ts`, the attribution sweep, the served surfaces, the tests
+
+**What.** Three additive columns on `posts` (`kind`, `topic_state`, `topic_closed_at`) and `idx_posts_kind` (migration 0015 + `schema.sql`). `src/topics.ts`: the rules (`TOPICS` in society.ts: cap 5, quiet 14 d, interval 7 d), `openTopic` as ONE batch of conditional statements (close carrying both rules, open bound to this attempt's close, the chained moderation row a gated `INSERT ... SELECT` on the state having landed), `listTopics` (`GET /api/topics`), `handleOpenTopic` (`POST /api/maintainer/topic`, the trigger's exact gate), `topicsDoorNote`. The sweep: `countSince` (posts exclude topics, so the cap and `/api/me` agree), `frontPage` (posts `kind = 'post'`, open topics in one unranked `topics` block), `readPost`/`changes`/`searchPosts` (author NULL + `opened_by`), `me` (comments on topics are not "on your posts"), `history`, `publicStats`/`treasury` (`topics_open`/`topics_total`), `officialFacts.topics` (non-minting), `castVote` (no karma on a topic; the maintainer cannot vote on one), `setPinned` (409 on a topic), `createComment` (conditional INSERT: ordinary post, or an OPEN visible topic; 409 with the close time otherwise), `moderateContent` restore-at-cap (amendment 16: the restored row comes back closed when the cap is full, via a new `commitGatedWithModLog`), the concierge's two candidate queries (`DEFERRED-CONCIERGE-TOPICS`), the judgment bulletin reconciliation (`kind = 'post'`), two ROUTES entries, the door note appended on `GET /`.
+
+**Decisions and deviations from the brief, and why.**
+- The new topic's id is chosen BEFORE the batch (`MAX(id)+1`) and inserted explicitly, so the chained row can name it (`topic N opened: "..."`, amendment 6). A concurrent ordinary post taking that id fails the batch on `posts.id` UNIQUE and the loop re-reads, the same shape as the chain-head retry. Verified: an explicit id on an AUTOINCREMENT table is ordinary SQLite and `sqlite_sequence` follows.
+- The parameters live in `society.ts` (`TOPICS`, `topicCounts`) and `topics.ts` imports them, so `society.ts` keeps its zero import cycles (`officialFacts` needed the numbers).
+- The open INSERT keeps `open_now < cap` as well as the seed count / interval / close-binding clauses. On its own that clause is not reachable by any test (the other clauses always refuse first); it stays as defence in depth and this note records that it is not held by a red-proof.
+- The 409 "refused inside the transaction" branch requires the CLOSE to be zero as well as the open and the log; any other vector is the 500 "inconsistent vector" refusal. Found by the red-proof below.
+- The secret-literal guard baseline moved 66 -> 69 (two prose entries for the topics note and door note, one wire token on the new ROUTES entry), reviewed and allowlisted in the same commit.
+
+**Red-proofs (test/topics-d1.test.ts, 18 tests; each mutation restored byte-exact).** RED: `countSince` without the kind clause; maintainer comments counting as activity; the open landing with no chained row (vector check); comments landing on a closed topic; a topic vote paying citizen 1; a topic pinnable; topics among ranked posts; the concierge answering a topic comment; a topic taken for an executed bulletin; a restore at the cap reopening a sixth topic; the close's interval clause (A5c, after the fix below). One mutation is GREEN by design (the redundant `open_now < cap` clause, above).
+
+**What the red-proof found.** With the close's interval clause removed, the first version of A5c stayed green because both racers shared one `now`: the loser's log gate then matched the WINNER's new row (same predicted id, same created_at) and the batch died on the chain's `prev_hash` UNIQUE instead, rolling the close back. With distinct clocks (production) the gate fails, the close commits alone and the route reported a 409. Fixed both: A5c gives the racers `now` and `now + 1`, and the 409 branch now demands all-zero; the mutation is RED.
+
+**Suite** 1165/1165, typecheck clean, `computeLiveConstitutionPair().templateHash` == live v5 `fa11788d…` (non-minting).
+
+## Closing checklist (walk before declaring the wave done)
+
+- [x] Migration 0015 + schema.sql identical in effect (test 8 compares column for column and index for index).
+- [x] Every `posts.citizen_id`-as-authorship read taught `kind` (test 7's fixture: front, readPost, changes, me, history, search, stats, treasury, officialFacts, concierge, judgment).
+- [x] Concurrency in the statements, not in memory (A5, A5b, A5c).
+- [x] One chained row per act, gated on the state landing (test 1, 4, A5, A16).
+- [x] Non-minting (test 9 pins the live template hash; a deliberate re-mint updates the pin in the minting commit).
+- [ ] `scripts/open-topic.mjs` (dry-run default; `--execute` reads `maintainer-secret.local.txt`) — commit 2.
+- [ ] `scripts/deploy-2026-09-2X-standing-topics.ps1` (full-catalogue gate before 0015, verify after, worker, public ride) — commit 2.
+- [ ] Exchange on the built code (GEMINI + CODEX, "assume it is broken and find where"), then Ben's D-018 call.
+- [ ] The five topic bodies under `drafts/topics/`, exchanged, opened by Ben's hand after the deploy.
+- [ ] Announce on our square and where we have threads once the topics are open.

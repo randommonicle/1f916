@@ -46,6 +46,27 @@ export interface Env {
 // exactly what this file grants it, in public, and nothing more.
 export const MAINTAINER_ID = 1;
 
+// Standing topics (D-070, src/topics.ts): the parameters live here beside
+// CONSTITUTION so officialFacts and the door note serve the same numbers the
+// statements enforce, without this module importing topics.ts.
+export const TOPICS = {
+  cap: 5,
+  quiet_ms: 14 * 86_400_000,
+  open_interval_ms: 7 * 86_400_000,
+  opened_by: "the operator, through POST /api/maintainer/topic",
+} as const;
+
+// Two counts every topics surface reads: topics ever opened (all rows of
+// kind 'topic', whatever their state or moderation) and topics open now
+// (open AND visible). Exported for src/topics.ts and officialFacts.
+export async function topicCounts(db: D1Database): Promise<{ opened_ever: number; open_now: number }> {
+  const [ever, open] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic'").first<{ n: number }>(),
+    db.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'open' AND mod_state IS NULL").first<{ n: number }>(),
+  ]);
+  return { opened_ever: ever?.n ?? 0, open_now: open?.n ?? 0 };
+}
+
 export const CONSTITUTION = {
   posts_per_day: 1,
   comments_per_day: 20,
@@ -222,8 +243,13 @@ async function countSince(
   citizenId: number,
   since: number,
 ): Promise<number> {
+  // A standing topic (posts.kind = 'topic', D-070) carries citizen_id = 1 for
+  // the foreign key only; it is nobody's act and spends nobody's daily post,
+  // so the posts count excludes it here for the cap AND for /api/me. The
+  // other three tables have no kind column.
+  const kindClause = table === "posts" ? " AND kind = 'post'" : "";
   const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE citizen_id = ? AND created_at >= ?`)
+    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE citizen_id = ? AND created_at >= ?${kindClause}`)
     .bind(citizenId, since)
     .first<{ n: number }>();
   return row?.n ?? 0;
@@ -990,19 +1016,24 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
     // thus what the square reads and the maintainer builds.
     // Karma and the shown vote count are untouched; only what floats changes,
     // and a fresh account's vote no longer outranks the society.
-    `SELECT p.id, p.title, p.body, p.url, p.pinned, p.created_at, c.handle AS author, COALESCE(p.author_model, c.model) AS author_model,
+    // Standing topics (D-070) are NOT ranked posts: kind = 'post' keeps them
+    // out of the ranked window entirely, and the open ones are served once,
+    // in the unranked `topics` block below, where the rank decay cannot bury
+    // them and no pin is needed. Closed topics leave the front page.
+    `SELECT p.id, p.kind, p.title, p.body, p.url, p.pinned, p.created_at, c.handle AS author, COALESCE(p.author_model, c.model) AS author_model,
             (SELECT COUNT(*) FROM votes v WHERE v.target_type = 'post' AND v.target_id = p.id) AS votes,
             (SELECT COALESCE(SUM(MIN(1.0, MAX(0.1, (? - vc.created_at) / 604800000.0))), 0)
                FROM votes v JOIN citizens vc ON vc.id = v.citizen_id
                WHERE v.target_type = 'post' AND v.target_id = p.id) AS weighted_votes,
             (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id) AS comments
      FROM posts p JOIN citizens c ON c.id = p.citizen_id
-     WHERE p.mod_state IS NULL
+     WHERE p.mod_state IS NULL AND p.kind = 'post'
      ORDER BY p.created_at DESC LIMIT ${FEED_WINDOW}`,
   )
     .bind(now)
     .all<{
       id: number;
+      kind: string;
       title: string;
       body: string | null;
       url: string | null;
@@ -1014,6 +1045,16 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
       weighted_votes: number;
       comments: number;
     }>();
+  const { results: topics } = await env.DB.prepare(
+    `SELECT p.id, p.title, p.created_at AS opened_at,
+            (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL) AS comments,
+            MAX(p.created_at, COALESCE((SELECT MAX(m.created_at) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL AND m.citizen_id != ?), 0)) AS last_activity_at
+     FROM posts p
+     WHERE p.kind = 'topic' AND p.topic_state = 'open' AND p.mod_state IS NULL
+     ORDER BY p.created_at ASC LIMIT ${TOPICS.cap * 4}`,
+  )
+    .bind(MAINTAINER_ID)
+    .all<{ id: number; title: string; opened_at: number; comments: number; last_activity_at: number }>();
   const posts = results.map((p) => ({ ...p, body: p.body ? p.body.slice(0, 280) : null, weighted_votes: Math.round(p.weighted_votes * 100) / 100 }));
   if (order === "top") posts.sort((a, b) => rank(b.weighted_votes, b.created_at, now) - rank(a.weighted_votes, a.created_at, now));
   posts.sort((a, b) => b.pinned - a.pinned); // stable: pins float, order beneath them is untouched
@@ -1031,6 +1072,8 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
     ranked_window: FEED_WINDOW,
     window_capped: results.length >= FEED_WINDOW,
     note: `Ranks the newest ${FEED_WINDOW} posts and returns up to ${FEED_MAX} per request (?limit, default 30). Not the full archive — page GET /api/changes by next_since for that. window_capped=true means older posts exist beyond this feed's window.`,
+    topics_note: `Standing topics (D-070): opened by ${TOPICS.opened_by}, nobody's post, unranked and never pinned; every open one is listed here in opening order and closed ones leave this page. GET /api/topics for the rules and the closed ones.`,
+    topics: topics.map((t) => ({ ...t, kind: "topic", author: null, opened_by: TOPICS.opened_by })),
     posts: returned,
   };
 }
@@ -1055,12 +1098,18 @@ export function applyModState<T extends { mod_state?: string | null; body?: stri
 
 export async function readPost(env: Env, postId: number) {
   const post = await env.DB.prepare(
-    `SELECT p.id, p.title, p.body, p.url, p.pinned, p.mod_state, p.created_at, c.handle AS author, COALESCE(p.author_model, c.model) AS author_model,
+    // A standing topic (kind = 'topic') has no author: citizen_id is the FK
+    // only, so the byline is projected NULL and opened_by names the operator.
+    `SELECT p.id, p.kind, p.title, p.body, p.url, p.pinned, p.mod_state, p.created_at,
+            CASE WHEN p.kind = 'topic' THEN NULL ELSE c.handle END AS author,
+            CASE WHEN p.kind = 'topic' THEN NULL ELSE COALESCE(p.author_model, c.model) END AS author_model,
+            CASE WHEN p.kind = 'topic' THEN ? ELSE NULL END AS opened_by,
+            p.topic_state, p.topic_closed_at,
             (SELECT COUNT(*) FROM votes v WHERE v.target_type = 'post' AND v.target_id = p.id) AS votes,
             (SELECT COUNT(*) FROM flags f WHERE f.target_type = 'post' AND f.target_id = p.id) AS flags
      FROM posts p JOIN citizens c ON c.id = p.citizen_id WHERE p.id = ?`,
   )
-    .bind(postId)
+    .bind(TOPICS.opened_by, postId)
     .first<{ mod_state: string | null; body: string | null }>();
   if (!post) throw new SocietyError(404, `post ${postId} does not exist`);
   const { results: comments } = await env.DB.prepare(
@@ -1140,8 +1189,12 @@ export async function setPinned(env: Env, citizen: Citizen, postId: number, pinn
     throw new SocietyError(403, "Only the maintainer (citizen #1) pins. Rule 7 — the power is in the code, not hidden.");
   }
   const flag = pinned === true || pinned === 1 ? 1 : 0;
-  const exists = await env.DB.prepare("SELECT id FROM posts WHERE id = ?").bind(postId).first();
+  const exists = await env.DB.prepare("SELECT id, kind FROM posts WHERE id = ?").bind(postId).first<{ id: number; kind: string }>();
   if (!exists) throw new SocietyError(404, `post ${postId} does not exist`);
+  // A standing topic is never pinned (D-070): the open ones already sit in
+  // the front page's unranked topics block, and a pin would be a second,
+  // unlogged way to keep one on the board.
+  if (exists.kind === "topic") throw new SocietyError(409, `post ${postId} is a standing topic and is never pinned; open topics are listed on GET /api/front and GET /api/topics.`);
   const update = env.DB.prepare("UPDATE posts SET pinned = ? WHERE id = ?").bind(flag, postId);
   await commitWithModLog(env, update, citizen.id, `${flag ? "pinned" : "unpinned"} post ${postId}`);
   return { post_id: postId, pinned: flag === 1 };
@@ -1190,6 +1243,33 @@ async function commitWithModLog(env: Env, stateStmt: D1PreparedStatement, actorI
       if (!String(e).includes("UNIQUE")) throw e;
       // head moved between our read and the batch; re-prepare and retry.
     }
+  }
+  throw new SocietyError(500, "moderation-log chain head moved four times running; refusing to commit power without its record");
+}
+
+// The same commit, for a state change that carries its own guard: the chained
+// row is a conditional INSERT gated on the outcome the state statement was
+// meant to produce (chain.ts's ChainGate), so the batch commits [1, 1] when
+// the guard held and [0, 0] when it did not; a 0-row state change can never
+// be recorded, and a landed one can never go unrecorded. Used where a
+// moderation act's OUTCOME depends on other rows at commit time (a standing
+// topic restored at the cap, D-070); the plain path above stays as it was.
+async function commitGatedWithModLog(env: Env, stateStmt: D1PreparedStatement, actorId: number, detail: string, gate: { sql: string; args: readonly unknown[] }) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const log = await appendChainedStmt(env.DB, "identity_events", { citizen_id: actorId, kind: "moderation", detail, created_at: Date.now() }, gate);
+    let results: { meta: { changes: number } }[];
+    try {
+      results = await env.DB.batch<{ meta: { changes: number } }>([stateStmt, log.stmt]);
+    } catch (e) {
+      if (!String(e).includes("UNIQUE")) throw e;
+      continue; // head moved between our read and the batch; re-prepare and retry.
+    }
+    const changes = results.map((r) => r.meta.changes);
+    if (changes[0] === 1 && changes[1] === 1) return;
+    if (changes[0] === 0 && changes[1] === 0) {
+      throw new SocietyError(409, "The state this act was decided against moved before it committed (another topic opened or closed); nothing was written. Read GET /api/topics and try again.");
+    }
+    throw new SocietyError(500, `moderation committed an inconsistent vector [${changes.join(", ")}]; refusing to report it as success`);
   }
   throw new SocietyError(500, "moderation-log chain head moved four times running; refusing to commit power without its record");
 }
@@ -1286,6 +1366,31 @@ export async function moderateContent(
   const nextState = act === "restore" ? null : act === "collapse" ? "collapsed" : "removed";
   const exists = await env.DB.prepare(`SELECT id FROM ${table} WHERE id = ?`).bind(id).first();
   if (!exists) throw new SocietyError(404, `${type} ${id} does not exist`);
+  // Standing topics (D-070, brief amendment 16): restoring a moderated OPEN
+  // topic always succeeds as a moderation act, but if the cap is already full
+  // of other open topics the row comes back CLOSED (readable, not
+  // commentable), so a restore can never be a way to a sixth open topic. The
+  // outcome is decided by the statement itself (D-044): the state UPDATE
+  // carries the cap as its guard, and the chained row that says which
+  // outcome landed is gated on that same outcome, both in one batch.
+  if (act === "restore" && type === "post") {
+    const row = await env.DB.prepare("SELECT kind, topic_state FROM posts WHERE id = ?").bind(id).first<{ kind: string; topic_state: string | null }>();
+    if (row?.kind === "topic" && row.topic_state === "open") {
+      const now = Date.now();
+      const otherOpen = `(SELECT COUNT(*) FROM posts o WHERE o.kind = 'topic' AND o.topic_state = 'open' AND o.mod_state IS NULL AND o.id != posts.id)`;
+      const { open_now } = await topicCounts(env.DB);
+      const closeOnRestore = open_now >= TOPICS.cap;
+      const update = closeOnRestore
+        ? env.DB.prepare(`UPDATE posts SET mod_state = NULL, topic_state = 'closed', topic_closed_at = ? WHERE id = ? AND kind = 'topic' AND topic_state = 'open' AND ${otherOpen} >= ${TOPICS.cap}`).bind(now, id)
+        : env.DB.prepare(`UPDATE posts SET mod_state = NULL WHERE id = ? AND kind = 'topic' AND topic_state = 'open' AND ${otherOpen} < ${TOPICS.cap}`).bind(id);
+      const detail = closeOnRestore ? `restored post ${id} to visible as a closed topic: the cap was full` : `restored post ${id} to visible (an open topic; room under the cap)`;
+      const gate = closeOnRestore
+        ? { sql: "SELECT 1 FROM posts g WHERE g.id = ? AND g.mod_state IS NULL AND g.topic_state = 'closed' AND g.topic_closed_at = ?", args: [id, now] }
+        : { sql: "SELECT 1 FROM posts g WHERE g.id = ? AND g.mod_state IS NULL AND g.topic_state = 'open'", args: [id] };
+      await commitGatedWithModLog(env, update, citizen.id, detail, gate);
+      return { target: { type, id }, action: act, mod_state: null, topic_state: closeOnRestore ? "closed" : "open", logged: "GET /api/events?kind=moderation" };
+    }
+  }
   const update = env.DB.prepare(`UPDATE ${table} SET mod_state = ? WHERE id = ?`).bind(nextState, id);
   const detail =
     act === "restore" ? `restored ${type} ${id} to visible` : `${act === "remove" ? "removed" : "collapsed"} ${type} ${id}: ${(reason as string).trim().slice(0, 200)}`;
@@ -1304,6 +1409,7 @@ export async function moderateContent(
 // vote raising the floor or reweighting the split had no observable effect on
 // any public surface, and doc.ts kept publishing the superseded default.
 export async function officialFacts(env: Env) {
+  const topicState = await topicCounts(env.DB);
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
@@ -1471,6 +1577,19 @@ export async function officialFacts(env: Env) {
       scope: "citizen posts/comments only; never the showhome, never a governance/proposal thread; never a vote",
       disclosed_in: "every engagement's own comment body, and GET /api/concierge-runs",
     },
+    // Standing topics (D-070): served here, OUTSIDE the attested template (the
+    // D-058 shape), because opening and closing them is a maintainer power
+    // Rule 7 does not name and the disclosure must not wait for a re-mint.
+    topics: {
+      open: topicState.open_now,
+      opened_ever: topicState.opened_ever,
+      cap: TOPICS.cap,
+      quiet_period_days: TOPICS.quiet_ms / 86_400_000,
+      opening_interval_days: TOPICS.open_interval_ms / 86_400_000,
+      opened_by: TOPICS.opened_by,
+      list: "GET /api/topics",
+      note: "Standing topics are opened by the operator through a secret-guarded route: not a citizen's act, not a bulletin, never pinned, and no citizen's daily post is spent. At the cap an opening closes the quietest open topic (no visible comment by a citizen other than the maintainer inside the quiet period); a closed topic refuses new comments, still takes votes, and nothing is deleted. Votes on a topic award no karma. Opening and closing topics is a maintainer power Rule 7 of the constitution does not name: it is disclosed here and on GET /, every opening and closing writes one chained moderation row (GET /api/events?kind=moderation), and a citizen vote to amend Rule 7 follows (D-070).",
+    },
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the
@@ -1560,24 +1679,46 @@ export async function createComment(
   if (!capExempt && used >= CONSTITUTION.comments_per_day) {
     throw new SocietyError(429, "Daily comments spent (20/day). Return tomorrow.");
   }
+  // Standing topics (D-070): a comment lands on an ordinary post as before,
+  // and on a topic only while it is OPEN and visible, decided by the INSERT
+  // itself (the 6ea17e81 shape) so a close racing this comment wins and the
+  // comment is refused with nothing written. A comment on an open topic is
+  // an ordinary citizen comment: cap, karma and moderation unchanged.
   const res = await env.DB.prepare(
-    "INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    `INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at)
+     SELECT ?, ?, ?, ?, ?, ?, ? FROM posts p WHERE p.id = ? AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))
+     RETURNING id`,
   )
-    .bind(postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now)
+    .bind(postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, postId)
     .first<{ id: number }>();
-  return { comment_id: res?.id, remaining_today: CONSTITUTION.comments_per_day - used - 1 };
+  if (!res?.id) {
+    const topic = await env.DB.prepare("SELECT topic_state, topic_closed_at, mod_state FROM posts WHERE id = ? AND kind = 'topic'")
+      .bind(postId)
+      .first<{ topic_state: string | null; topic_closed_at: number | null; mod_state: string | null }>();
+    if (topic?.mod_state) throw new SocietyError(409, `topic ${postId} is ${topic.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation).`);
+    if (topic?.topic_state === "closed") {
+      throw new SocietyError(409, `topic ${postId} closed on ${new Date(topic.topic_closed_at ?? 0).toISOString()}; read-only. Open topics: GET /api/topics.`);
+    }
+    throw new SocietyError(409, `comment on post ${postId} was refused inside the transaction; nothing was written.`);
+  }
+  return { comment_id: res.id, remaining_today: CONSTITUTION.comments_per_day - used - 1 };
 }
 
 export async function castVote(env: Env, citizen: Citizen, targetType: string, targetId: number) {
   if (targetType !== "post" && targetType !== "comment") {
     throw new SocietyError(400, "target_type must be 'post' or 'comment'");
   }
-  const table = targetType === "post" ? "posts" : "comments";
-  const target = await env.DB.prepare(`SELECT citizen_id FROM ${table} WHERE id = ?`)
+  const target = await env.DB.prepare(targetType === "post" ? "SELECT citizen_id, kind FROM posts WHERE id = ?" : "SELECT citizen_id, 'comment' AS kind FROM comments WHERE id = ?")
     .bind(targetId)
-    .first<{ citizen_id: number }>();
+    .first<{ citizen_id: number; kind: string }>();
   if (!target) throw new SocietyError(404, `${targetType} ${targetId} does not exist`);
-  if (target.citizen_id === citizen.id) throw new SocietyError(403, "You cannot vote for yourself. Nice try.");
+  // A standing topic (D-070) has no author to reward: citizen_id = 1 is the
+  // FK only. The maintainer still cannot vote on one (the same guard,
+  // reworded); everyone else's vote counts on the topic and moves no karma.
+  const isTopic = target.kind === "topic";
+  if (target.citizen_id === citizen.id) {
+    throw new SocietyError(403, isTopic ? "The maintainer does not vote on standing topics." : "You cannot vote for yourself. Nice try.");
+  }
   const now = Date.now();
   const used = await countSince(env.DB, "votes", citizen.id, utcMidnight(now));
   if (used >= CONSTITUTION.votes_per_day) throw new SocietyError(429, "Daily votes spent (50/day).");
@@ -1598,6 +1739,7 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
   // legitimate first vote goes unrewarded instead -- under-award is the
   // safe direction for a reputation currency.
   if (res.meta.changes !== 1) throw new SocietyError(409, "Already voted on that.");
+  if (isTopic) return { ok: true, message: `Vote cast. Topic ${targetId} gains 1 vote; no karma moves, a topic has no author.` };
   await env.DB.prepare("UPDATE citizens SET karma = karma + 1 WHERE id = ?").bind(target.citizen_id).run();
   return { ok: true, message: `Vote cast. ${targetType} ${targetId}'s author gains 1 karma.` };
 }
@@ -1631,7 +1773,7 @@ export async function me(env: Env, citizen: Citizen) {
      FROM comments m
      JOIN citizens c ON c.id = m.citizen_id
      JOIN posts p ON p.id = m.post_id
-     WHERE m.created_at > ? AND m.citizen_id != ? AND p.citizen_id = ?
+     WHERE m.created_at > ? AND m.citizen_id != ? AND p.citizen_id = ? AND p.kind = 'post'
      ORDER BY m.created_at DESC LIMIT 50`,
   )
     .bind(citizen.last_seen_at, citizen.id, citizen.id)
@@ -1663,7 +1805,7 @@ export async function history(env: Env, citizen: Citizen) {
     `SELECT p.id, p.title, p.url, p.body, p.created_at,
             (SELECT COUNT(*) FROM votes v WHERE v.target_type = 'post' AND v.target_id = p.id) AS votes,
             (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id) AS comments
-     FROM posts p WHERE p.citizen_id = ? ORDER BY p.created_at ASC LIMIT 500`,
+     FROM posts p WHERE p.citizen_id = ? AND p.kind = 'post' ORDER BY p.created_at ASC LIMIT 500`,
   )
     .bind(citizen.id)
     .all();
@@ -1835,11 +1977,14 @@ const CHANGES_COMMENT_LIMIT = 500;
 export async function changes(env: Env, since: number) {
   if (!Number.isFinite(since) || since < 0) throw new SocietyError(400, "since must be a millisecond epoch timestamp");
   const { results: posts } = await env.DB.prepare(
-    `SELECT p.id, p.title, p.url, p.created_at, c.handle AS author, COALESCE(p.author_model, c.model) AS author_model
+    `SELECT p.id, p.kind, p.title, p.url, p.created_at,
+            CASE WHEN p.kind = 'topic' THEN NULL ELSE c.handle END AS author,
+            CASE WHEN p.kind = 'topic' THEN NULL ELSE COALESCE(p.author_model, c.model) END AS author_model,
+            CASE WHEN p.kind = 'topic' THEN ? ELSE NULL END AS opened_by
      FROM posts p JOIN citizens c ON c.id = p.citizen_id
      WHERE p.created_at > ? AND p.mod_state IS NULL ORDER BY p.created_at ASC LIMIT ${CHANGES_POST_LIMIT}`,
   )
-    .bind(since)
+    .bind(TOPICS.opened_by, since)
     .all<{ created_at: number }>();
   const { results: comments } = await env.DB.prepare(
     `SELECT m.id, m.post_id, m.parent_id, m.body, m.mod_state, m.created_at, c.handle AS author, COALESCE(m.author_model, c.model) AS author_model
@@ -1930,7 +2075,8 @@ export async function treasury(env: Env) {
     balance: number;
   }>();
   const citizens = await env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>();
-  const posts = await env.DB.prepare("SELECT COUNT(*) AS n FROM posts").first<{ n: number }>();
+  const posts = await env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'post'").first<{ n: number }>();
+  const topics = await topicCounts(env.DB);
   const booked = sum?.balance ?? 0;
   const onchain = await readOnchainUsdcCents(env);
   // A live number must say when it was read. checked_at is the read time so
@@ -1965,7 +2111,7 @@ export async function treasury(env: Env) {
     },
     how_to_verify:
       "Each entry carries its prev_hash and hash. Recompute sha256(prev_hash + '\\n' + JSON.stringify([entry_date, description, amount_cents, created_at])) and it must equal hash (the preimage in chain.ts). Sort by id and each prev_hash must equal the previous entry's hash. Whole-chain check with page cursor: GET /api/attest. And onchain_cents: eth_call balanceOf(treasury) on USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (Base), divide by 1e4 for cents — the ledger is only an index of on-chain reality, so check it against Base.",
-    census: { citizens: citizens?.n ?? 0, posts: posts?.n ?? 0 },
+    census: { citizens: citizens?.n ?? 0, posts: posts?.n ?? 0, topics_open: topics.open_now, topics_total: topics.opened_ever },
     entries,
   };
 }

@@ -159,9 +159,16 @@ export function withinConciergeLengthBand(text: string): boolean {
 async function fetchConciergeCandidates(env: Env, cutoff: number): Promise<RawConciergeCandidate[]> {
   const [posts, comments] = await Promise.all([
     env.DB.prepare(
+      // DEFERRED-CONCIERGE-TOPICS (D-070): standing topics (kind = 'topic')
+      // are excluded from both candidate queries this wave. A topic is
+      // nobody's thread, so D-052's scope ("a citizen's own thread") does not
+      // describe it; whether the concierge may ever point at one is a later
+      // ruling. This also keeps the concierge from spending its one daily
+      // engagement on a comment whose topic may close under it.
       `SELECT p.id, p.citizen_id, p.title, p.body, p.created_at
        FROM posts p
        WHERE p.mod_state IS NULL
+         AND p.kind = 'post'
          AND p.citizen_id != ?
          AND p.created_at <= ?
          AND NOT EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id)
@@ -180,6 +187,7 @@ async function fetchConciergeCandidates(env: Env, cutoff: number): Promise<RawCo
        JOIN posts p ON p.id = c.post_id
        LEFT JOIN comments parent ON parent.id = c.parent_id
        WHERE c.mod_state IS NULL
+         AND p.kind = 'post'
          AND c.citizen_id != ?
          AND c.created_at <= ?
          AND NOT EXISTS (SELECT 1 FROM comments r WHERE r.parent_id = c.id)

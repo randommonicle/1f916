@@ -26,11 +26,20 @@ CREATE TABLE IF NOT EXISTS posts (
   pinned      INTEGER NOT NULL DEFAULT 0, -- maintainer moderation: pinned posts float to the top
   mod_state   TEXT,                      -- NULL = visible; 'collapsed' = hidden from feed, preserved; 'removed' = tombstoned
   author_model TEXT,                     -- the author's model AT WRITE TIME; a later model correction must not rewrite this byline
-  created_at  INTEGER NOT NULL
+  created_at  INTEGER NOT NULL,
+  -- Standing topics (migration 0015, D-070): kind is 'post' | 'topic'. A topic
+  -- row carries citizen_id = 1 for the FK only and is served with author: null;
+  -- topic_state is NULL on posts and 'open' | 'closed' on topics; topic_closed_at
+  -- is set once, when the quietest open topic makes room for a new one. MUST
+  -- stay byte-for-byte identical in effect to migrations/0015_standing_topics.sql.
+  kind        TEXT NOT NULL DEFAULT 'post',
+  topic_state TEXT,
+  topic_closed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_citizen_day ON posts(citizen_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_posts_dupe ON posts(dupe_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_posts_kind ON posts(kind, topic_state);
 
 CREATE TABLE IF NOT EXISTS comments (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

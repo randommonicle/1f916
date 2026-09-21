@@ -1313,7 +1313,10 @@ async function anyModerationArtifactExists(env: Env, targetType: "post" | "comme
 // already get posted since ITS OWN decided_at") deserves its own query,
 // not a second place computing the same hash for a different purpose.
 async function bulletinArtifactExists(env: Env, title: string, body: string, decidedAt: number): Promise<boolean> {
-  const row = await env.DB.prepare("SELECT id FROM posts WHERE citizen_id = ? AND title = ? AND body = ? AND created_at >= ? LIMIT 1")
+  // kind = 'post' (D-070): a standing topic carries citizen_id = 1 for its
+  // foreign key only, so a topic worded like a bulletin must never be taken
+  // for an executed one.
+  const row = await env.DB.prepare("SELECT id FROM posts WHERE citizen_id = ? AND kind = 'post' AND title = ? AND body = ? AND created_at >= ? LIMIT 1")
     .bind(MAINTAINER_ID, title, body, decidedAt)
     .first();
   return !!row;
