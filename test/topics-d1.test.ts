@@ -686,6 +686,60 @@ test("A5c: two concurrent replacements aimed at DIFFERENT quiet topics: the lose
   }
 });
 
+test("A5d (CODEX build review r1): a loser that prepares its chained row AFTER the winner committed, sharing the winner's clock, predicted id and target, lands NO row: the gate binds to this transaction's own write (changes() = 1), not to values two attempts can share", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const alice = seedCitizen(d1, "alice");
+    const env = makeEnv(d1);
+    const now = Date.now();
+    const ids = await openN(env, TOPIC_CAP, now - 20 * DAY);
+    for (const id of ids) setCreatedAt(d1, id, now - 8 * DAY);
+    setCreatedAt(d1, ids[0], now - 15 * DAY);
+    for (const id of ids.slice(1)) insertComment(d1, id, alice.id, now - DAY);
+    // Schedule: both attempts read the same state, quietest, clock and predicted id;
+    // the loser is held at its id read until the winner's batch has COMMITTED, so
+    // it then reads the NEW chain head (no fork collision) and runs a batch whose
+    // close and open change nothing while its gate looks at the winner's rows.
+    const originalPrepare = d1.DB.prepare.bind(d1.DB);
+    const originalBatch = d1.DB.batch.bind(d1.DB);
+    let batches = 0;
+    let headReads = 0;
+    (d1.DB as { batch: typeof d1.DB.batch }).batch = async (stmts) => {
+      const out = await originalBatch(stmts);
+      batches++;
+      return out;
+    };
+    (d1.DB as { prepare: typeof d1.DB.prepare }).prepare = (sql: string) => {
+      const stmt = originalPrepare(sql);
+      // The chain-head read inside appendChainedStmt: the loser's (the second
+      // after the hook) waits until the winner's batch has committed, so the
+      // loser's predicted id and target were read BEFORE the commit and its
+      // chained row is prepared AFTER it.
+      if (sql.includes("SELECT hash FROM identity_events WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1")) {
+        headReads++;
+        if (headReads === 2) {
+          const first = stmt.first.bind(stmt);
+          return { ...stmt, first: async <T>() => { while (batches < 1) await new Promise((r) => setImmediate(r)); return first<T>(); } } as typeof stmt;
+        }
+      }
+      return stmt;
+    };
+    const rowsBefore = modRows(d1).length;
+    const outcomes = await Promise.allSettled([openTopic(env, "Winner", "commits first", now), openTopic(env, "Loser", "prepares its row after the winner", now)]);
+    const ok = outcomes.filter((o) => o.status === "fulfilled");
+    const refused = outcomes.filter((o) => o.status === "rejected") as PromiseRejectedResult[];
+    assert.equal(ok.length, 1, JSON.stringify(outcomes));
+    assert.equal(refused.length, 1);
+    assert.equal((refused[0].reason as SocietyError).status, 409, `the loser is refused honestly, not a 500 after a false row: ${(refused[0].reason as SocietyError).message}`);
+    assert.equal(modRows(d1).length, rowsBefore + 1, "exactly one moderation row: the loser's gate did not match the winner's rows");
+    assert.equal((await topicCounts(d1.DB)).opened_ever, TOPIC_CAP + 1);
+    assert.equal((await topicCounts(d1.DB)).open_now, TOPIC_CAP);
+  } finally {
+    d1.close();
+  }
+});
+
 test("A5b: a close racing a comment: the comment loses with 409 and nothing is written", async () => {
   const d1 = createLocalD1();
   try {

@@ -292,15 +292,25 @@ export async function openTopic(env: Env, title: unknown, body: unknown, now = D
       ).bind(...openArgs),
     );
     // ONE chained moderation row per act, gated on the state change having
-    // landed IN THIS TRANSACTION: the new row exists at the id and time this
-    // attempt chose, and, for a replacement, the selected topic closed at
-    // this attempt's now. A refused attempt therefore writes no row.
+    // landed IN THIS TRANSACTION. Two bindings, both required: the row this
+    // attempt named exists (id, kind, created_at; for a replacement also the
+    // selected topic closed at this attempt's now), AND changes() = 1, SQLite's
+    // count for the immediately preceding statement on this connection, i.e.
+    // THIS batch's open INSERT. The first binding alone is not attempt-specific
+    // (CODEX, exchange/REVIEW_standing-topics-build-2026-09-21.md): two
+    // attempts in one millisecond share the predicted id, the clock and the
+    // target, so a loser that prepared its chained row after the winner
+    // committed would find the winner's rows and land a false [0, 0, 1].
+    // changes() is per connection and a D1 batch is one transaction on one
+    // connection; ridden on the real engine locally (wrangler d1 execute
+    // --local: 1 after a one-row conditional insert, 0 after a zero-row one).
+    // A refused attempt therefore writes no row.
     const detail = replacing
       ? `topic ${closeId} closed (quiet since ${new Date(state.quietest!.last_activity_at).toISOString()}) and topic ${newId} opened: "${cleanTitle}"`
       : `topic ${newId} opened: "${cleanTitle}"`;
     const gateSql = replacing
-      ? `SELECT 1 FROM posts n WHERE n.id = ? AND n.kind = 'topic' AND n.created_at = ? AND EXISTS (SELECT 1 FROM posts c WHERE c.id = ? AND c.topic_state = 'closed' AND c.topic_closed_at = ?)`
-      : `SELECT 1 FROM posts n WHERE n.id = ? AND n.kind = 'topic' AND n.created_at = ?`;
+      ? `SELECT 1 FROM posts n WHERE n.id = ? AND n.kind = 'topic' AND n.created_at = ? AND changes() = 1 AND EXISTS (SELECT 1 FROM posts c WHERE c.id = ? AND c.topic_state = 'closed' AND c.topic_closed_at = ?)`
+      : `SELECT 1 FROM posts n WHERE n.id = ? AND n.kind = 'topic' AND n.created_at = ? AND changes() = 1`;
     const gateArgs = replacing ? [newId, now, closeId, now] : [newId, now];
     const log = await appendChainedStmt(env.DB, "identity_events", { citizen_id: MAINTAINER_ID, kind: "moderation", detail, created_at: now }, { sql: gateSql, args: gateArgs });
     stmts.push(log.stmt);

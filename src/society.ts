@@ -1254,9 +1254,10 @@ async function commitWithModLog(env: Env, stateStmt: D1PreparedStatement, actorI
 
 // The same commit, for a state change that carries its own guard: the chained
 // row is a conditional INSERT gated on the outcome the state statement was
-// meant to produce (chain.ts's ChainGate), so the batch commits [1, 1] when
-// the guard held and [0, 0] when it did not; a 0-row state change can never
-// be recorded, and a landed one can never go unrecorded. Used where a
+// meant to produce (chain.ts's ChainGate) AND on changes() = 1, so the gate
+// sees only THIS batch's UPDATE and the batch commits [1, 1] when the guard
+// held and [0, 0] when it did not; a 0-row state change can never be
+// recorded, and a landed one can never go unrecorded. Used where a
 // moderation act's OUTCOME depends on other rows at commit time (a standing
 // topic restored at the cap, D-070); the plain path above stays as it was.
 async function commitGatedWithModLog(env: Env, stateStmt: D1PreparedStatement, actorId: number, detail: string, gate: { sql: string; args: readonly unknown[] }) {
@@ -1389,9 +1390,11 @@ export async function moderateContent(
         ? env.DB.prepare(`UPDATE posts SET mod_state = NULL, topic_state = 'closed', topic_closed_at = ? WHERE id = ? AND kind = 'topic' AND topic_state = 'open' AND ${otherOpen} >= ${TOPICS.cap}`).bind(now, id)
         : env.DB.prepare(`UPDATE posts SET mod_state = NULL WHERE id = ? AND kind = 'topic' AND topic_state = 'open' AND ${otherOpen} < ${TOPICS.cap}`).bind(id);
       const detail = closeOnRestore ? `restored post ${id} to visible as a closed topic: the cap was full` : `restored post ${id} to visible (an open topic; room under the cap)`;
+      // changes() = 1 binds the chained row to THIS batch's UPDATE (see
+      // topics.ts: the outcome columns alone are not attempt-specific).
       const gate = closeOnRestore
-        ? { sql: "SELECT 1 FROM posts g WHERE g.id = ? AND g.mod_state IS NULL AND g.topic_state = 'closed' AND g.topic_closed_at = ?", args: [id, now] }
-        : { sql: "SELECT 1 FROM posts g WHERE g.id = ? AND g.mod_state IS NULL AND g.topic_state = 'open'", args: [id] };
+        ? { sql: "SELECT 1 FROM posts g WHERE g.id = ? AND g.mod_state IS NULL AND g.topic_state = 'closed' AND g.topic_closed_at = ? AND changes() = 1", args: [id, now] }
+        : { sql: "SELECT 1 FROM posts g WHERE g.id = ? AND g.mod_state IS NULL AND g.topic_state = 'open' AND changes() = 1", args: [id] };
       await commitGatedWithModLog(env, update, citizen.id, detail, gate);
       return { target: { type, id }, action: act, mod_state: null, topic_state: closeOnRestore ? "closed" : "open", logged: "GET /api/events?kind=moderation" };
     }
