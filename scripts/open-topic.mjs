@@ -55,15 +55,23 @@ if (body.length < 1 || body.length > 8000) {
 
 const topics = await fetch(`${ORIGIN}/api/topics`).then((r) => r.json());
 const rules = topics.rules;
+// The server decides when an opening is allowed (it refuses with a 409 and writes
+// nothing); this pre-check is a courtesy against the LOCAL clock, which can lag the
+// server's. When an opening is allowed now, the served next_opening_allowed_at IS the
+// server's now, so a lagging local clock read it as the future and refused every
+// opening (measured 2026-09-22: the server ran 340-384 ms ahead). A gap under
+// CLOCK_SKEW_MS therefore counts as now.
+const CLOCK_SKEW_MS = 60_000;
 const now = Date.now();
+const allowedNow = rules.next_opening_allowed_at <= now + CLOCK_SKEW_MS;
 console.log(`Title (${title.length}): ${title}`);
 console.log(`Body: ${body.length} chars`);
 console.log(`Live: ${rules.open_now} of ${rules.cap} open, ${rules.opened_ever} ever opened, seeding=${rules.seeding}, needs_quiet_topic=${rules.needs_quiet_topic}`);
-console.log(`Next opening allowed at ${new Date(rules.next_opening_allowed_at).toISOString()} (${rules.next_opening_allowed_at <= now ? "NOW" : "not yet"})`);
+console.log(`Next opening allowed at ${new Date(rules.next_opening_allowed_at).toISOString()} (${allowedNow ? "NOW, within the clock-skew allowance; the server decides" : "not yet"})`);
 if (rules.needs_quiet_topic && rules.quietest) {
   console.log(`At the cap: the quietest is topic ${rules.quietest.id}, last active ${new Date(rules.quietest.last_activity_at).toISOString()}, quiet at ${new Date(rules.quietest.quiet_at).toISOString()}; an opening now would CLOSE it.`);
 }
-if (rules.next_opening_allowed_at > now) {
+if (!allowedNow) {
   console.log("The route would refuse (409). Nothing to do.");
   process.exit(args.execute ? 1 : 0);
 }
