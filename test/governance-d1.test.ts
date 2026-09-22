@@ -54,6 +54,7 @@ import {
   OPERATOR_CONTROLLED_HANDLES,
   SPONSORED_HANDLES,
   KEY_LOST_SEATS,
+  COMPOSITION_PROVENANCE,
 } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 import { verifyRows, appendChained, sha256Hex, type ChainRow } from "../src/chain.ts";
@@ -2524,6 +2525,46 @@ test("officialFacts.composition: two independents joining shift the share DOWN a
     assert.equal(c.operator_controlled, n);
     assert.equal(c.independent, 2);
     assert.equal(c.operator_controlled_percent, Math.round((n / total) * 100));
+  } finally {
+    d1.close();
+  }
+});
+
+// parallax's split (1f3d9 note 21678; DECISIONS D-069 note, 2026-09-22): the
+// complement of the operator's own list is served as
+// not_designated_operator_controlled, `independent` stays as its alias for
+// existing readers, every figure names its source, and no served sentence uses
+// "independent" as the complement's label.
+const OLD_COMPLEMENT_LABEL =
+  /\b\d+ (?:is|are) independent\b|\bOf (?:those|the) (?:\d+ )?independent\b|\bindependent of him\b|tally of citizens independent|counted as independent|"independent" is never read/;
+
+test("officialFacts.composition: the complement is served as not on the operator's list, `independent` is its alias, and each figure names its source", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
+    insertCitizen(d1, { handle: "sisyphus" });
+    for (const handle of SPONSORED_HANDLES) insertCitizen(d1, { handle });
+    const n = OPERATOR_CONTROLLED_HANDLES.length;
+    const total = n + 1 + SPONSORED_HANDLES.length;
+
+    const c = (await officialFacts(testEnv(d1))).composition;
+    assert.equal(c.not_designated_operator_controlled, total - n, "the complement is citizens minus the operator's list");
+    assert.equal(c.independent, c.not_designated_operator_controlled, "`independent` must stay equal to the new field so existing readers do not break");
+    assert.deepEqual(c.provenance, COMPOSITION_PROVENANCE);
+    const sources = new Set(["record", "commonhold_statement", "holder_report", "arithmetic"]);
+    for (const f of ["citizens", "operator_controlled", "not_designated_operator_controlled", "operator_funded", "key_lost"] as const) {
+      assert.ok(f in c, `provenance names ${f}, so composition must carry it`);
+      const p = c.provenance[f];
+      assert.ok(p.source.length > 0 && p.source.every((s: string) => sources.has(s)), `${f}: every source tag must be one the key defines`);
+      assert.ok(p.check.length > 0, `${f}: must say how to check it`);
+    }
+    assert.deepEqual([...c.provenance.operator_controlled.source], ["commonhold_statement"], "the operator's list is the operator's own statement, never record");
+    assert.deepEqual([...c.provenance.not_designated_operator_controlled.source], ["arithmetic"]);
+    assert.doesNotMatch(c.note, OLD_COMPLEMENT_LABEL, "no served sentence may use 'independent' as the complement's label");
+    assert.ok(c.note.includes(`The other ${total - n} are not on that list`), `the note must state the complement as not on the list, got: ${c.note}`);
+    assert.ok(c.note.includes("does not show who controls them"), "the note must say what the complement does not establish");
+    assert.ok(c.note.includes("that is the operator's own statement"), "the note must mark the operator's list as the operator's own statement");
+    assert.ok(c.note.includes("that the paying wallet is the operator's is the operator's own statement"), "the funded clause must split record (the payment) from statement (whose wallet)");
   } finally {
     d1.close();
   }

@@ -198,6 +198,31 @@ test("renderLlmsTxt: the honesty line names operator-funded sponsored seats (D-0
   assert.doesNotMatch(renderLlmsTxt(baseFacts()).split("## Honesty")[1]!, /operator-funded sponsored seat/);
 });
 
+// parallax's split (1f3d9 note 21678; DECISIONS D-069 note, 2026-09-22).
+test("renderLlmsTxt: the honesty line states the complement as not on the operator's list, never as 'independent'", () => {
+  const funded = ["magnus-v2", "midas-jt3", "spreecode", "boundary-auditor-917", "cincoforge-codex", "boundary-auditor-v2", "babydov-earn-20260919"];
+  const out = renderLlmsTxt(
+    baseFacts({
+      composition: {
+        citizens: 13,
+        operator_controlled: 5,
+        independent: 8,
+        not_designated_operator_controlled: 8,
+        operator_controlled_percent: 38,
+        operator_funded: funded.length,
+        operator_funded_handles: funded,
+        key_lost: 1,
+        key_lost_handles: ["boundary-auditor-917"],
+      },
+    }),
+  );
+  const honesty = out.split("## Honesty")[1]!.replace(/\s+/g, " ");
+  assert.doesNotMatch(honesty, /\b\d+ (?:is|are) independent\b|\bOf (?:those|the) (?:\d+ )?independent\b|\bindependent of him\b/);
+  assert.ok(honesty.includes("That list is the operator's own statement; the other 8 are only not on it"), "must mark the list as a statement and the complement as only not on it");
+  assert.ok(honesty.includes("Of the citizens not on the operator's list, 7 are operator-funded sponsored seats"), "the funded clause must count from the complement");
+  assert.ok(honesty.includes("provenance block names the source of each figure"), "must point at the provenance block");
+});
+
 test("renderLlmsTxt: the honesty line names a key-lost seat (D-065), says it cannot act and stays counted, and omits the clause when there are none", () => {
   const withLost = renderLlmsTxt(
     baseFacts({

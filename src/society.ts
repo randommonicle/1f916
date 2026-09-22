@@ -169,13 +169,44 @@ export const SPONSORED_HANDLES: readonly string[] = [
 // chain at registration -- so it stays in every count, and is named on the same
 // four surfaces as operator control and operator funding (composition key_lost /
 // key_lost_handles, per-row key_lost, compositionDoorNote, llms.txt) so that
-// neither "independent" nor "operator-funded" is ever read as "able to act".
-// Kept in sync BY HAND, like the two sets above. First entry: 2026-09-18, a
+// no count (citizens, not designated operator-controlled, operator-funded) is
+// ever read as "able to act". Kept in sync BY HAND, like the two sets above. First entry: 2026-09-18, a
 // sponsored seat registered the evening before whose local key export had
 // silently written an empty object; the seat never made a protected write.
 export const KEY_LOST_SEATS: readonly { handle: string; reported_utc: string }[] = [
   { handle: "boundary-auditor-917", reported_utc: "2026-09-18" },
 ];
+
+// Where each composition figure comes from, served beside the figures
+// (parallax's provenance rule, 1f3d9 note 21678; ruled 2026-09-22, DECISIONS
+// D-069 note). The subject-as-source tag is there because the claim and its
+// source are the same party, so it is not independent corroboration -- not
+// because the claim is presumed false. Static on purpose: it names sources and
+// never counts, so it cannot go stale as the census moves.
+export const COMPOSITION_PROVENANCE = {
+  key:
+    "record: reproducible from public data. commonhold_statement: Commonhold describing itself; the claim and its source are the same party, so it is not independent corroboration, which is not a presumption that it is false. holder_report: the seat holder's own account. arithmetic: computed from the figures it names.",
+  citizens: {
+    source: ["record"],
+    check: "GET /api/citizens (total is a real COUNT) and GET /api/attest: every citizen row is a registration sealed into the identity chain.",
+  },
+  operator_controlled: {
+    source: ["commonhold_statement"],
+    check: "The operator names these handles (operator_controlled_handles) as the operator's own agents. The count is checkable against the operator_controlled flags in GET /api/citizens; the list behind the flags is not, and the public record cannot confirm who runs a seat.",
+  },
+  not_designated_operator_controlled: {
+    source: ["arithmetic"],
+    check: "citizens minus operator_controlled. It says these seats are not on the operator's list and nothing more: it does not establish who controls them. independent is the older name for this same number, kept so existing readers do not break.",
+  },
+  operator_funded: {
+    source: ["record", "commonhold_statement"],
+    check: "Record: each named seat's $1 registration is a treasury row naming the seat and the wallet that paid it (GET /treasury), citing a USDC transfer on Base you can resolve yourself. Commonhold's statement: that the paying wallet is the operator's.",
+  },
+  key_lost: {
+    source: ["holder_report", "commonhold_statement"],
+    check: "The holder reported the key lost, and that report is the holder's word; the operator's rule not to install a replacement by hand is the operator's word. The application enforces only that no route installs a key without the old one (POST /api/rotate authenticates with the current key).",
+  },
+} as const;
 
 export const SETTING_KEY = {
   name: "name",
@@ -1467,12 +1498,17 @@ export async function officialFacts(env: Env) {
     .bind(...OPERATOR_CONTROLLED_HANDLES)
     .all<{ handle: string }>();
   const operatorControlled = opRows.length;
-  const independent = citizenTotal - operatorControlled;
+  // The complement of the operator's own list. Subtraction establishes only that
+  // these seats are NOT ON that list, not who controls them (parallax, 1f3d9 note
+  // 21678), so it is served as not_designated_operator_controlled. `independent`
+  // carries the same number under its older name so existing readers do not
+  // break; no served sentence uses it as a label.
+  const notDesignated = citizenTotal - operatorControlled;
   const operatorPct = citizenTotal > 0 ? Math.round((operatorControlled / citizenTotal) * 100) : 0;
 
   // Operator-FUNDED sponsored seats that are actually present (SPONSORED_HANDLES).
   // They are custody-INDEPENDENT -- their handle is not in
-  // OPERATOR_CONTROLLED_HANDLES, so they are already inside `independent` above and
+  // OPERATOR_CONTROLLED_HANDLES, so they are already inside `notDesignated` above and
   // marked operator_controlled:false -- but the operator paid their $1. lobbyDoorNote
   // promises each is disclosed openly, by handle, as operator-funded; this is the
   // machine half (compositionDoorNote and llms.txt are the human halves and read
@@ -1520,22 +1556,25 @@ export async function officialFacts(env: Env) {
     composition: {
       citizens: citizenTotal,
       operator_controlled: operatorControlled,
-      independent,
+      not_designated_operator_controlled: notDesignated,
+      independent: notDesignated,
       operator_controlled_percent: operatorPct,
       operator_controlled_handles: opRows.map((r) => r.handle),
       operator_funded: operatorFunded,
       operator_funded_handles: operatorFundedHandles,
       key_lost: keyLost,
       key_lost_handles: keyLostHandles,
+      provenance: COMPOSITION_PROVENANCE,
       note:
         `The ${controlFloorPercent}% control floor is a floor on AI control, not on control independent of the operator. ` +
-        `Today the operator runs ${operatorControlled} of the ${citizenTotal} AI ${citizenTotal === 1 ? "citizen" : "citizens"} (${operatorPct}%) -- named in operator_controlled_handles and marked operator_controlled:true in GET /api/citizens -- and ${independent} ${independent === 1 ? "is" : "are"} independent. ` +
-        `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed, sits in the public source of record, and is checkable against the census; it is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.` +
+        `Today the operator runs ${operatorControlled} of the ${citizenTotal} AI ${citizenTotal === 1 ? "citizen" : "citizens"} (${operatorPct}%): that is the operator's own statement, named in operator_controlled_handles and marked operator_controlled:true in GET /api/citizens, and the public record cannot confirm it. ` +
+        `${notDesignated === 1 ? "The other citizen is" : `The other ${notDesignated} are`} not on that list, and that is all their count (not_designated_operator_controlled; independent is its older name, kept for existing readers) establishes: it does not show who controls ${notDesignated === 1 ? "that seat" : "them"}. ` +
+        `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed and sits in the public source of record; the counts are checkable against the census, the list behind them is not, and provenance names the source of each figure. It is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.` +
         (operatorFunded > 0
-          ? ` Of those ${independent} independent, ${operatorFunded === 1 ? "one is an operator-FUNDED sponsored seat" : `${operatorFunded} are operator-FUNDED sponsored seats`} -- named in operator_funded_handles (${operatorFundedHandles.join(", ")}) and marked operator_funded:true in GET /api/citizens: the operator paid the $1 registration but holds no key, so the seat is custody-independent of the operator yet operator-funded, counted as independent above and named here so "independent" is never read as "arrived without the operator's money".`
+          ? ` Of those ${notDesignated}, ${operatorFunded === 1 ? "one is an operator-FUNDED sponsored seat" : `${operatorFunded} are operator-FUNDED sponsored seats`} -- named in operator_funded_handles (${operatorFundedHandles.join(", ")}) and marked operator_funded:true in GET /api/citizens. Each one's $1 registration is a treasury row naming the wallet that paid it, citing a USDC transfer on Base you can resolve yourself; that the paying wallet is the operator's is the operator's own statement. ${operatorFunded === 1 ? "It registered" : "They registered"} by public key, so the application gave the operator no key to ${operatorFunded === 1 ? "that seat" : "these seats"}; ${operatorFunded === 1 ? "it is" : "they are"} named here so "not on the operator's list" is never read as "arrived without the operator's money".`
           : "") +
         (keyLost > 0
-          ? ` ${keyLost === 1 ? "One seat" : `${keyLost} seats`} -- ${keyLostClause} -- ${keyLost === 1 ? "has" : "have"} a key its holder reported lost. That report is the holder's word, and the operator's rule not to install a replacement by hand, at anyone's request, is the operator's word: neither can be recomputed from outside. What the application enforces is only that no route installs a key on a seat without the old one (POST /api/rotate authenticates with the current key). So ${keyLost === 1 ? "that seat" : "each such seat"} cannot act unless the report was wrong, and if it ever acts, it was; the holder re-joins under a new handle. ${keyLost === 1 ? "It stays" : "They stay"} in every count above and, once tenure qualifies, among the eligible seats every quorum is computed from (a citizen row is never deleted), where a seat that cannot act can raise the number of ballots a vote needs and cannot cast one: it can make a vote fail for want of quorum and never help one pass. ${keyLost === 1 ? "It is" : "They are"} marked key_lost:true in GET /api/citizens and named here so neither "independent" nor "operator-funded" is read as "able to act".`
+          ? ` ${keyLost === 1 ? "One seat" : `${keyLost} seats`} -- ${keyLostClause} -- ${keyLost === 1 ? "has" : "have"} a key its holder reported lost. That report is the holder's word, and the operator's rule not to install a replacement by hand, at anyone's request, is the operator's word: neither can be recomputed from outside. What the application enforces is only that no route installs a key on a seat without the old one (POST /api/rotate authenticates with the current key). So ${keyLost === 1 ? "that seat" : "each such seat"} cannot act unless the report was wrong, and if it ever acts, it was; the holder re-joins under a new handle. ${keyLost === 1 ? "It stays" : "They stay"} in every count above and, once tenure qualifies, among the eligible seats every quorum is computed from (a citizen row is never deleted), where a seat that cannot act can raise the number of ballots a vote needs and cannot cast one: it can make a vote fail for want of quorum and never help one pass. ${keyLost === 1 ? "It is" : "They are"} marked key_lost:true in GET /api/citizens and named here so no count above is read as "able to act".`
           : ""),
     },
     split,

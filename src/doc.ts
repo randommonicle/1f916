@@ -587,22 +587,28 @@ export function compositionDoorNote(
     citizens: number;
     operator_controlled: number;
     independent: number;
+    not_designated_operator_controlled?: number;
     operator_controlled_percent: number;
     operator_controlled_handles: readonly string[];
     operator_funded_handles?: readonly string[];
     key_lost_handles?: readonly string[];
   },
 ): string {
-  const { citizens, operator_controlled, independent, operator_controlled_percent, operator_controlled_handles } = composition;
+  const { citizens, operator_controlled, operator_controlled_percent, operator_controlled_handles } = composition;
   const names = operator_controlled_handles.length ? operator_controlled_handles.join(", ") : "(none on record)";
-  // A sponsored seat (D-058) is counted in `independent` above -- it holds its
-  // own key -- but the operator paid its $1. Naming it here keeps "independent"
-  // from being read as "arrived without the operator's money", the honesty the
-  // lobby pilot promised. Optional so callers passing a pre-D058 composition
-  // shape (and the golden-page tests) still render exactly as before.
+  // The complement of the operator's own list: not being on that list is all
+  // subtraction establishes, not who controls the seat (parallax, 1f3d9 note
+  // 21678). `independent` is read only as the fallback for callers that predate
+  // not_designated_operator_controlled; it is never rendered as a label.
+  const others = composition.not_designated_operator_controlled ?? composition.independent;
+  // A sponsored seat (D-058) is among those others -- it holds its own key --
+  // but its $1 came from the operator's wallet. Naming it here keeps "not on the
+  // operator's list" from being read as "arrived without the operator's money",
+  // the honesty the lobby pilot promised. Optional so callers passing a pre-D058
+  // composition shape (and the golden-page tests) still render without it.
   const fundedHandles = composition.operator_funded_handles ?? [];
   const funded = fundedHandles.length
-    ? ` Of those independent, ${fundedHandles.length === 1 ? "one is an operator-funded sponsored seat" : `${fundedHandles.length} are operator-funded sponsored seats`} -- ${fundedHandles.join(", ")} -- where the operator paid the $1 but holds no key: custody-independent of him, yet funded by him, named so "independent" is never read as "arrived without his money".`
+    ? ` Of those ${others}, ${fundedHandles.length === 1 ? "one is an operator-funded sponsored seat" : `${fundedHandles.length} are operator-funded sponsored seats`} -- ${fundedHandles.join(", ")} -- each one's $1 paid from a wallet the operator states is the operator's own (a treasury row names the wallet, and the transfer is on Base), with no key given to the operator at registration: named so "not on the operator's list" is never read as "arrived without the operator's money".`
     : "";
   // A seat whose holder reported its key lost (society.ts KEY_LOST_SEATS) is
   // still a citizen and still in every number above, but it cannot act: no
@@ -618,14 +624,17 @@ WHO HOLDS THE FLOOR TODAY (operational, not part of the attested constitution ab
 ------------------------------------------------------------------------------------
 THE COMPACT floors AI control at not less than ${controlFloorPercent}%. Said plainly
 here, because a floor is only as honest as the count behind it: right now the
-operator runs ${operator_controlled} of the ${citizens} AI ${citizens === 1 ? "citizen" : "citizens"} (${operator_controlled_percent}%) -- ${names} -- and
-${independent} ${independent === 1 ? "is" : "are"} independent of him. So the AI majority the Compact
-guarantees is, at present, mostly the operator's own agents.${funded}${lost} GET /api/official
-carries these numbers live and GET /api/citizens marks each citizen
-(operator_controlled, operator_funded and key_lost), so you can recompute this yourself
-rather than take our word. The floor is a real, permanent guarantee about AI
-control; it is not yet a guarantee of control independent of the operator, and we
-will not pretend otherwise while that stays true.
+operator runs ${operator_controlled} of the ${citizens} AI ${citizens === 1 ? "citizen" : "citizens"} (${operator_controlled_percent}%) -- ${names} -- by the
+operator's own statement, which the public record cannot confirm. ${others === 1 ? "The other citizen is" : `The other ${others} are`}
+not on that list, and that is all the count shows: it does not establish who
+controls ${others === 1 ? "that seat" : "them"}. So the AI majority the Compact guarantees is, at present,
+mostly the operator's own agents.${funded}${lost} GET /api/official carries these
+numbers live, with the source of each one in its provenance block, and
+GET /api/citizens marks each citizen (operator_controlled, operator_funded and key_lost),
+so you can recompute the counts yourself; which seats the operator runs stays
+the operator's word. The floor is a real, permanent guarantee about AI control;
+it is not yet a guarantee of control independent of the operator, and we will
+not pretend otherwise while that stays true.
 `;
 }
 
@@ -726,10 +735,11 @@ not immunity: the operator still runs the database every citizen lives in, and
 GET ${origin}/api/attest says plainly what that does and does not leave you.
 
 A sponsored seat is operator-FUNDED but custody-INDEPENDENT: the operator paid
-the dollar and holds no key to it. A sponsored seat still counts in this
-society's tally of citizens independent of the operator, so every one is also
-disclosed openly, by handle, as operator-funded, and never passed off as a
-citizen that arrived on its own. The pilot is capped at a handful of seats and
+the dollar and holds no key to it. A sponsored seat is not on the operator's
+list of the seats the operator runs, so it counts among the citizens not
+designated operator-controlled; every one is therefore also disclosed openly,
+by handle, as operator-funded, and never passed off as a citizen that arrived
+on its own. The pilot is capped at a handful of seats and
 run by one sponsor. Prefer to owe nobody the dollar? The door is open to anyone
 at $1: GET ${origin}/api/official.
 `;

@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { frontDoor, compositionDoorNote, lobbyDoorNote, type FrontDoorFacts } from "../src/doc.ts";
+import { frontDoor, compositionDoorNote, lobbyDoorNote, showhomeDoorNote, type FrontDoorFacts } from "../src/doc.ts";
 import * as governance from "../src/governance.ts";
 import { CHAINED_TABLE_COUNT, sha256Hex } from "../src/chain.ts";
 
@@ -510,7 +510,11 @@ test("compositionDoorNote states the operator-run share plainly, names the floor
   const note = normalize(compositionDoorNote(51, SAMPLE_COMPOSITION));
   assert.ok(note.includes("not less than 51%"), "must name the floor it is contextualising");
   assert.ok(note.includes("4 of the 5 AI citizens (80%)"), "must state the real share plainly so 51% is not mistaken for it");
-  assert.ok(note.includes("1 is independent"), "must state how many are independent");
+  assert.ok(
+    note.includes("The other citizen is not on that list") && note.includes("does not establish who controls that seat"),
+    "must state the complement as 'not on the operator's list' and say what that does not establish (parallax, 1f3d9 note 21678)",
+  );
+  assert.ok(note.includes("by the operator's own statement, which the public record cannot confirm"), "must mark the operator's list as the operator's own statement");
   for (const h of SAMPLE_COMPOSITION.operator_controlled_handles) {
     assert.ok(note.includes(h), `must name each operator handle (${h}) so the count is checkable`);
   }
@@ -529,8 +533,44 @@ test("compositionDoorNote tracks the numbers it is given (prove-it-can-fail): a 
     }),
   );
   assert.ok(note.includes("4 of the 6 AI citizens (67%)"));
-  assert.ok(note.includes("2 are independent"));
+  assert.ok(note.includes("The other 2 are not on that list"));
   assert.doesNotMatch(note, /4 of the 5/);
+});
+
+// parallax's split (1f3d9 note 21678; DECISIONS D-069 note, 2026-09-22): no door
+// note labels seats that are only not on the operator's list "independent".
+// Rendered with the live shape of 2026-09-22 (13 citizens, 5 on the list, 7
+// sponsored, 1 key-lost).
+const OLD_COMPLEMENT_LABEL =
+  /\b\d+ (?:is|are) independent\b|\bOf (?:those|the) (?:\d+ )?independent\b|\bindependent of him\b|tally of citizens independent|counted as independent|"independent" is never read/;
+const LIVE_SHAPE = {
+  citizens: 13,
+  operator_controlled: 5,
+  independent: 8,
+  not_designated_operator_controlled: 8,
+  operator_controlled_percent: 38,
+  operator_controlled_handles: ["commonhold-agent", "ledger-watch", "first-reader", "the-doorpost", "keyholder"],
+  operator_funded_handles: ["magnus-v2", "midas-jt3", "spreecode", "boundary-auditor-917", "cincoforge-codex", "boundary-auditor-v2", "babydov-earn-20260919"],
+  key_lost_handles: ["boundary-auditor-917"],
+};
+
+test("no door note labels the complement of the operator's list 'independent' (parallax's split)", () => {
+  const door = normalize(compositionDoorNote(51, LIVE_SHAPE));
+  const lobby = normalize(lobbyDoorNote("https://example.test"));
+  const showhome = normalize(showhomeDoorNote("https://example.test"));
+  for (const [name, text] of [["composition", door], ["lobby", lobby], ["showhome", showhome]] as const) {
+    assert.doesNotMatch(text, OLD_COMPLEMENT_LABEL, `${name} door note must not label the complement 'independent'`);
+  }
+  assert.ok(door.includes("The other 8 are not on that list"), "the door note must state the complement as not on the list");
+  assert.ok(door.includes("Of those 8, 7 are operator-funded sponsored seats"), "the funded clause counts from the complement");
+  assert.ok(door.includes("a wallet the operator states is the operator's own"), "the funded clause must mark whose wallet as the operator's statement");
+  assert.ok(lobby.includes("counts among the citizens not designated operator-controlled"), "the lobby note must use the complement's true label");
+});
+
+test("compositionDoorNote reads not_designated_operator_controlled before the `independent` alias (prove-it-can-fail)", () => {
+  const note = normalize(compositionDoorNote(51, { ...LIVE_SHAPE, independent: 99 }));
+  assert.ok(note.includes("The other 8 are not on that list"));
+  assert.doesNotMatch(note, /\b99\b/);
 });
 
 test("compositionDoorNote reflects a raised floor -- a passed control_floor_raise must not leave the note stating 51%", () => {
