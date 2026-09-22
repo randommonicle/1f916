@@ -188,7 +188,7 @@ export const COMPOSITION_PROVENANCE = {
     "record: reproducible from public data. commonhold_statement: Commonhold describing itself; the claim and its source are the same party, so it is not independent corroboration, which is not a presumption that it is false. holder_report: the seat holder's own account. arithmetic: computed from the figures it names.",
   citizens: {
     source: ["record"],
-    check: "GET /api/citizens (total is a real COUNT) and GET /api/attest: every citizen row is a registration sealed into the identity chain.",
+    check: "GET /api/citizens (total is a real COUNT) and GET /treasury: each citizen's $1 registration is a treasury row naming the handle, the paying wallet and the Base tx, sealed into the treasury chain (GET /api/attest), and the application creates a citizen only after writing that row.",
   },
   operator_controlled: {
     source: ["commonhold_statement"],
