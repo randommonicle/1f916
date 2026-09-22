@@ -41,18 +41,24 @@
 //     authenticates (secret_hash was rolled); it is still the worker's
 //     MAINTAINER_SECRET, which is a different door.
 //   - the payee is pinned to the CHAIN, not only to the command line.
-//     --wallet-row names the identity-log row (GET /api/events?kind=
-//     wallet_declared) in which the submission's citizen declared that wallet,
-//     and --wallet-row-hash is that row's hash as the operator wrote it down
-//     when reading it. Before the 402 probe, in dry run and execute alike, the
-//     script re-reads the row, recomputes its hash from the served preimage,
-//     requires it to name the pinned payee, to belong to the submission's
-//     citizen and to be that citizen's newest declaration, then asks
+//     --wallet-row names the identity-log wallet row (GET /api/events?kind=
+//     wallet_declared or ?kind=wallet_changed) that made that wallet the
+//     submission's citizen's current one, and --wallet-row-hash is that row's
+//     hash as the operator wrote it down when reading it. Before the 402 probe,
+//     in dry run and execute alike, the script re-reads both wallet kinds,
+//     recomputes the row's hash from the served preimage, requires the row to
+//     make the pinned payee current (the declared address, or the right-hand
+//     side of a change, parsed exactly), to belong to the submission's citizen
+//     and to be that citizen's NEWEST wallet row of either kind, then asks
 //     GET /api/attest?identity_from=<row>&identity_expect=<hash> whether the
 //     chain still holds that hash at that row. A head that moved under the row
 //     the desk pinned is a refusal before any bearer is used (1f916 comment
 //     69513, chit402, 2026-09-19: what should the desk refuse when the
-//     published head moves). All three reads are public and fail CLOSED.
+//     published head moves). Reading both kinds closes the change-away-and-back
+//     pass named in 1f916 comment 73404 (2026-09-21): a declaration of A, then
+//     changes A -> B and B -> A, no longer passes against the stale
+//     declaration of A; the desk must pin the newest row. All four reads are
+//     public and fail CLOSED.
 //
 // Run from society/:
 //   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --wallet-row 24 --wallet-row-hash <64 hex>            # DRY RUN
@@ -275,18 +281,43 @@ export function recomputeIdentityRowHash(row) {
     .digest("hex");
 }
 
-// From the public wallet_declared rows already fetched: does the pinned row bind
-// the pinned payee to the submission's citizen, as the newest declaration, with
-// the hash the operator wrote down? Pure, so every refusal is provable offline.
+// The two identity-log kinds a wallet row can be (src/wallets.ts walletLogEntry):
+// the first declaration and every later change.
+export const WALLET_ROW_KINDS = ["wallet_declared", "wallet_changed"];
+
+// GET /api/events serves at most this many rows per kind, newest first
+// (src/society.ts identityLog, LIMIT 500; a test pins the two together). A page
+// that comes back full may be missing rows, so it is never taken as a wallet
+// history.
+export const EVENTS_PAGE_CAP = 500;
+
+// The address a wallet row makes current, parsed exactly from the served detail
+// (src/wallets.ts walletLogEntry): "wallet declared: <addr>" or "wallet changed:
+// <previous> -> <next>". A substring test would also match a change's PREVIOUS
+// address, so a row that moved the wallet AWAY from the payee would pass for it.
+const DECLARED_DETAIL = /^wallet declared: (0x[0-9a-fA-F]{40})$/;
+const CHANGED_DETAIL = /^wallet changed: 0x[0-9a-fA-F]{40} -> (0x[0-9a-fA-F]{40})$/;
+export function walletRowAddress(row) {
+  const detail = String(row?.detail ?? "");
+  const m = row?.kind === "wallet_declared" ? DECLARED_DETAIL.exec(detail) : row?.kind === "wallet_changed" ? CHANGED_DETAIL.exec(detail) : null;
+  return m ? m[1].toLowerCase() : null;
+}
+
+// From the public wallet rows already fetched (both kinds): does the pinned row
+// make the pinned payee the submission's citizen's current wallet, as that
+// citizen's newest wallet row of either kind, with the hash the operator wrote
+// down? Pure, so every refusal is provable offline.
 export function checkWalletRow({ rows, walletRow, walletRowHash, payee, submitterCitizenId }) {
   const row = rows.find((r) => r && r.id === walletRow);
-  if (!row) return { ok: false, reason: "wallet_row_missing", message: `identity-log row ${walletRow} is not among GET /api/events?kind=wallet_declared. Refusing.` };
-  if (row.kind !== "wallet_declared") return { ok: false, reason: "wallet_row_kind", message: `identity-log row ${walletRow} is a '${row.kind}' row, not wallet_declared. Refusing.` };
-  const detail = String(row.detail ?? "");
-  if (!detail.toLowerCase().includes(payee.toLowerCase())) return { ok: false, reason: "wallet_row_payee", message: `identity-log row ${walletRow} reads "${detail}", which does not name the pinned payee ${payee}. Refusing.` };
+  if (!row) return { ok: false, reason: "wallet_row_missing", message: `identity-log row ${walletRow} is not among GET /api/events?kind=wallet_declared or ?kind=wallet_changed. Refusing.` };
+  if (!WALLET_ROW_KINDS.includes(row.kind)) return { ok: false, reason: "wallet_row_kind", message: `identity-log row ${walletRow} is a '${row.kind}' row, not a wallet row (wallet_declared or wallet_changed). Refusing.` };
+  const current = walletRowAddress(row);
+  if (current === null || current !== payee.toLowerCase()) return { ok: false, reason: "wallet_row_payee", message: `identity-log row ${walletRow} reads "${String(row.detail ?? "")}", which does not make the pinned payee ${payee} the citizen's current wallet. Refusing.` };
   if (row.citizen_id !== submitterCitizenId) return { ok: false, reason: "wallet_row_citizen", message: `identity-log row ${walletRow} belongs to citizen ${row.citizen_id} (${row.citizen ?? "?"}), not to the submission's citizen ${submitterCitizenId}. Refusing.` };
-  const newer = rows.filter((r) => r && r.kind === "wallet_declared" && r.citizen_id === row.citizen_id && r.id > row.id).map((r) => r.id);
-  if (newer.length) return { ok: false, reason: "wallet_row_superseded", message: `citizen ${row.citizen_id} declared a wallet again after row ${walletRow} (row${newer.length > 1 ? "s" : ""} ${newer.join(", ")}). Re-read the newest declaration and re-pin. Refusing.` };
+  // Newer of EITHER kind: a change away and back to the same address is still a
+  // newer wallet row, and the desk pins the newest one (1f916 comment 73404).
+  const newer = rows.filter((r) => r && WALLET_ROW_KINDS.includes(r.kind) && r.citizen_id === row.citizen_id && r.id > row.id).map((r) => r.id);
+  if (newer.length) return { ok: false, reason: "wallet_row_superseded", message: `citizen ${row.citizen_id} has a newer wallet row after row ${walletRow} (row${newer.length > 1 ? "s" : ""} ${newer.join(", ")}), even if it names the same address again. Re-read the citizen's newest wallet row and re-pin. Refusing.` };
   const recomputed = recomputeIdentityRowHash(row);
   if (recomputed !== walletRowHash) return { ok: false, reason: "wallet_row_hash", message: `identity-log row ${walletRow} recomputes to ${recomputed}, not the pinned ${walletRowHash}: this is not the row the operator read. Refusing.` };
   return { ok: true, row };
@@ -386,16 +417,20 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   }
 
   // The wallet-row pin, dry run and execute alike, BEFORE the bearer is used:
-  // the payee on the command line must be the wallet the submission's citizen
-  // declared in the named identity-log row, with the hash the operator wrote
-  // down, and the chain must still hold that hash at that row. Three public
-  // GETs (listing, wallet_declared rows, the attest witness), all fail closed.
+  // the payee on the command line must be the wallet the named identity-log
+  // row made current for the submission's citizen, that row must be the
+  // citizen's newest wallet row of either kind, with the hash the operator
+  // wrote down, and the chain must still hold that hash at that row. Four
+  // public GETs (listing, both wallet kinds, the attest witness), all fail
+  // closed.
   const origin = new URL(target).origin;
   let listingDoc;
-  let eventsDoc;
+  let declaredDoc;
+  let changedDoc;
   try {
     listingDoc = await deps.readJson(`${origin}/api/listing/${listingId}`);
-    eventsDoc = await deps.readJson(`${origin}/api/events?kind=wallet_declared`);
+    declaredDoc = await deps.readJson(`${origin}/api/events?kind=wallet_declared`);
+    changedDoc = await deps.readJson(`${origin}/api/events?kind=wallet_changed`);
   } catch (e) {
     return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `Could not read the public rows the payee pin needs (${e?.message ?? e}). Refusing before any bearer is used.` };
   }
@@ -403,10 +438,18 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   if (!submission || !Number.isSafeInteger(submission.citizen_id)) {
     return { ...base, ok: false, exitCode: 1, reason: "submission_unknown", message: `GET /api/listing/${listingId} does not list submission ${submissionId} with a citizen_id. Refusing before any bearer is used.` };
   }
-  if (!Array.isArray(eventsDoc?.events)) {
-    return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: "GET /api/events?kind=wallet_declared answered without an events array. Refusing before any bearer is used." };
+  for (const [kind, doc] of [["wallet_declared", declaredDoc], ["wallet_changed", changedDoc]]) {
+    if (!Array.isArray(doc?.events)) {
+      return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} answered without an events array. Refusing before any bearer is used.` };
+    }
+    if (doc.events.length >= EVENTS_PAGE_CAP) {
+      return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} returned a full page (${doc.events.length} rows, the route's cap is ${EVENTS_PAGE_CAP}), so older rows may be missing and the newest-row check cannot be trusted. Refusing before any bearer is used.` };
+    }
   }
-  const pin = checkWalletRow({ rows: eventsDoc.events, walletRow, walletRowHash, payee, submitterCitizenId: submission.citizen_id });
+  // One list of both kinds, each row once (by chain id).
+  const byId = new Map();
+  for (const r of [...declaredDoc.events, ...changedDoc.events]) if (r && Number.isSafeInteger(r.id) && !byId.has(r.id)) byId.set(r.id, r);
+  const pin = checkWalletRow({ rows: [...byId.values()], walletRow, walletRowHash, payee, submitterCitizenId: submission.citizen_id });
   if (!pin.ok) return { ...base, ok: false, exitCode: 1, reason: pin.reason, message: pin.message };
   let attestDoc;
   try {
@@ -416,7 +459,7 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   }
   const witness = checkWitness(attestDoc, walletRow, walletRowHash);
   if (!witness.ok) return { ...base, ok: false, exitCode: 1, reason: witness.reason, message: witness.message };
-  const walletRowCheck = { row: walletRow, citizen_id: pin.row.citizen_id, citizen: pin.row.citizen ?? null, submitter_handle: submission.submitter_handle ?? null, attest_status: witness.status, identity_head: witness.head ?? null };
+  const walletRowCheck = { row: walletRow, kind: pin.row.kind, citizen_id: pin.row.citizen_id, citizen: pin.row.citizen ?? null, submitter_handle: submission.submitter_handle ?? null, attest_status: witness.status, identity_head: witness.head ?? null };
 
   const authHeader = { Authorization: `Bearer ${funderSecret}` };
   const bodyStr = JSON.stringify({ submission_id: submissionId });
@@ -738,7 +781,7 @@ async function main() {
   console.log(`Idempotency key: ${result.key}`);
   if (result.walletRowCheck) {
     const w = result.walletRowCheck;
-    console.log(`Wallet row ${w.row}: wallet_declared by citizen ${w.citizen_id} (${w.citizen ?? "?"}), the submitter of submission ${args.submissionId} (${w.submitter_handle ?? "?"}); recomputed hash matches the pin; GET /api/attest holds it at that row (status ${w.attest_status}, identity head ${w.identity_head ?? "?"}).`);
+    console.log(`Wallet row ${w.row}: ${w.kind}, the newest wallet row of citizen ${w.citizen_id} (${w.citizen ?? "?"}), the submitter of submission ${args.submissionId} (${w.submitter_handle ?? "?"}); recomputed hash matches the pin; GET /api/attest holds it at that row (status ${w.attest_status}, identity head ${w.identity_head ?? "?"}).`);
   }
   if (result.reason === "dry_run") {
     console.log("DRY RUN: the 402 matched every expected field (asset, pinned payee, pinned amount, domain, exact resource).");

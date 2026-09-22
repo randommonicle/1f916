@@ -32,8 +32,12 @@ import {
   recomputeIdentityRowHash,
   checkWalletRow,
   checkWitness,
+  walletRowAddress,
+  WALLET_ROW_KINDS,
+  EVENTS_PAGE_CAP,
 } from "../scripts/pay-listing.mjs";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const PAYEE = "0xb7c76e6a9422ae6a6d610be0e7b8fc1b18b7369e";
 const TARGET = `${DEFAULT_URL}/api/listing/3/pay`;
@@ -238,16 +242,18 @@ function sentHeader(from = PAYER, nonce = NONCE, validBefore = VALID_BEFORE) {
   return Buffer.from(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { signature: "0xsig", authorization: { from, to: PAYEE, value: "12000000", validAfter: "1", validBefore: String(validBefore), nonce } } })).toString("base64");
 }
 
-function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any; balance?: bigint | Error; nonceUsed?: boolean | Error; now?: number; listing?: unknown | Error; events?: unknown | Error; attest?: unknown | Error } = {}) {
+function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { status: number; body: unknown; header?: string | null }; existing?: string | null; signThrows?: boolean; writeExclusiveThrows?: any; balance?: bigint | Error; nonceUsed?: boolean | Error; now?: number; listing?: unknown | Error; events?: unknown | Error; changes?: unknown | Error; attest?: unknown | Error } = {}) {
   const calls: Call[] = [];
   let store: string | null = opts.existing ?? null;
   const deps = {
-    // the three public reads the wallet-row pin makes; recorded as fetch:* so every
-    // "no network call" assertion below counts them
+    // the four public reads the wallet-row pin makes (listing, wallet_declared,
+    // wallet_changed, attest); recorded as fetch:* so every "no network call"
+    // assertion below counts them. `events` answers ?kind=wallet_declared,
+    // `changes` answers ?kind=wallet_changed (none by default).
     readJson: async (url: string) => {
-      const which = url.includes("/api/listing/") ? "listing" : url.includes("/api/events") ? "events" : url.includes("/api/attest") ? "attest" : "other";
+      const which = url.includes("/api/listing/") ? "listing" : url.includes("/api/events?kind=wallet_changed") ? "changes" : url.includes("/api/events") ? "events" : url.includes("/api/attest") ? "attest" : "other";
       calls.push({ kind: `fetch:json:${which}`, url });
-      const v = which === "listing" ? (opts.listing ?? goodListingDoc()) : which === "events" ? (opts.events ?? goodEventsDoc()) : which === "attest" ? (opts.attest ?? goodAttestDoc()) : undefined;
+      const v = which === "listing" ? (opts.listing ?? goodListingDoc()) : which === "events" ? (opts.events ?? goodEventsDoc()) : which === "changes" ? (opts.changes ?? goodEventsDoc([])) : which === "attest" ? (opts.attest ?? goodAttestDoc()) : undefined;
       if (v instanceof Error) throw v;
       return v;
     },
@@ -278,7 +284,7 @@ function fakeDeps(opts: { first?: { status: number; body: unknown }; second?: { 
 }
 
 const RUN = { ...PURCHASE, ...PIN, maxAmountCents: 2000, target: TARGET, funderSecret: "commonhold_sk_" + "1".repeat(64), payer: PAYER };
-const PIN_READS = ["fetch:json:listing", "fetch:json:events", "fetch:json:attest"];
+const PIN_READS = ["fetch:json:listing", "fetch:json:events", "fetch:json:changes", "fetch:json:attest"];
 
 test("dry run: one authenticated 402 probe with redirect:error, requirements validated, NEVER signs, writes nothing", async () => {
   const { deps, calls } = fakeDeps();
@@ -462,15 +468,16 @@ test("payListing re-validates its numeric arguments at the exported boundary, be
 
 // ---------- the wallet-row pin: what the desk refuses when the published head moves (1f916 69513, chit402) ----------
 
-test("pin: the three public reads run BEFORE the bearer is used, in dry run and execute alike, and the dry run reports what was checked", async () => {
+test("pin: the four public reads run BEFORE the bearer is used, in dry run and execute alike, and the dry run reports what was checked", async () => {
   const dry = fakeDeps();
   const r1 = await payListing({ ...RUN, execute: false }, dry.deps);
   assert.equal(r1.reason, "dry_run", JSON.stringify(r1));
-  assert.deepEqual(dry.calls.slice(0, 3).map((c) => c.kind), PIN_READS);
+  assert.deepEqual(dry.calls.slice(0, 4).map((c) => c.kind), PIN_READS);
   assert.match(dry.calls[0].url, new RegExp(`^${DEFAULT_URL}/api/listing/3$`));
   assert.equal(dry.calls[1].url, `${DEFAULT_URL}/api/events?kind=wallet_declared`);
-  assert.equal(dry.calls[2].url, `${DEFAULT_URL}/api/attest?identity_from=${WALLET_ROW_ID}&identity_expect=${WALLET_ROW_HASH}`);
-  assert.deepEqual(r1.walletRowCheck, { row: WALLET_ROW_ID, citizen_id: SUBMITTER_ID, citizen: "midas-jt3", submitter_handle: "midas-jt3", attest_status: "verified", identity_head: "0x" + "cd".repeat(32) });
+  assert.equal(dry.calls[2].url, `${DEFAULT_URL}/api/events?kind=wallet_changed`);
+  assert.equal(dry.calls[3].url, `${DEFAULT_URL}/api/attest?identity_from=${WALLET_ROW_ID}&identity_expect=${WALLET_ROW_HASH}`);
+  assert.deepEqual(r1.walletRowCheck, { row: WALLET_ROW_ID, kind: "wallet_declared", citizen_id: SUBMITTER_ID, citizen: "midas-jt3", submitter_handle: "midas-jt3", attest_status: "verified", identity_head: "0x" + "cd".repeat(32) });
 
   const exec = fakeDeps();
   const r2 = await payListing({ ...RUN, execute: true }, exec.deps);
@@ -538,7 +545,7 @@ test("pin: through payListing, a row naming another wallet, another citizen's ro
   const otherWallet = fakeDeps({ events: goodEventsDoc([{ ...WALLET_ROW, detail: "wallet declared: 0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16" }]) });
   const r1 = await payListing({ ...RUN, execute: true }, otherWallet.deps);
   assert.equal(r1.reason, "wallet_row_payee");
-  assert.deepEqual(otherWallet.calls.map((c) => c.kind), ["exists", "fetch:json:listing", "fetch:json:events"]);
+  assert.deepEqual(otherWallet.calls.map((c) => c.kind), ["exists", "fetch:json:listing", "fetch:json:events", "fetch:json:changes"]);
 
   const otherCitizen = fakeDeps({ listing: { listing: { id: 3 }, submissions: [{ id: 1, citizen_id: 12, submitter_handle: "boundary-auditor-v2" }] } });
   const r2 = await payListing({ ...RUN, execute: true }, otherCitizen.deps);
@@ -559,13 +566,95 @@ test("pin: through payListing, a row naming another wallet, another citizen's ro
 });
 
 test("pin: an unreadable public row refuses (fail closed), with nothing signed and no tombstone", async () => {
-  for (const opts of [{ listing: new Error("HTTP 503") }, { events: new Error("HTTP 503") }, { attest: new Error("timeout") }, { events: { events: "not-an-array" } }]) {
+  for (const opts of [{ listing: new Error("HTTP 503") }, { events: new Error("HTTP 503") }, { changes: new Error("HTTP 503") }, { attest: new Error("timeout") }, { events: { events: "not-an-array" } }, { changes: { events: "not-an-array" } }, { changes: {} }]) {
     const { deps, calls, store } = fakeDeps(opts);
     const r = await payListing({ ...RUN, execute: true }, deps);
     assert.equal(r.reason, "wallet_row_unreadable", JSON.stringify(opts));
     assert.ok(!calls.some((c) => c.kind === "fetch:leg1" || c.kind === "sign" || c.kind === "writeExclusive"));
     assert.equal(store(), null);
   }
+});
+
+// ---------- both wallet kinds: the change-away-and-back pass (1f916 comment 73404) ----------
+
+// A declaration of A (row 24, the fixture), then A -> B (row 26) and B -> A (row 27),
+// in the shapes src/wallets.ts walletLogEntry writes; each hash recomputed from its
+// own preimage.
+const WALLET_B = "0x2e9bfe770d8fac9e3cfed9c67f260922ef0614a0";
+function walletEventRow(id: number, prev: string, detail: string, kind = "wallet_changed") {
+  const base = { id, citizen_id: SUBMITTER_ID, kind, detail, created_at: WALLET_ROW.created_at + id, prev_hash: prev, citizen: "midas-jt3" };
+  return { ...base, hash: recomputeIdentityRowHash(base) };
+}
+const AWAY = walletEventRow(26, WALLET_ROW_HASH, `wallet changed: ${PAYEE} -> ${WALLET_B}`);
+const BACK = walletEventRow(27, AWAY.hash, `wallet changed: ${WALLET_B} -> ${PAYEE}`);
+
+test("pin: a change away and back (A -> B -> A) refuses against the stale declaration of A, and passes only on the newest row", () => {
+  const rows = [WALLET_ROW, AWAY, BACK];
+  const stale = checkWalletRow({ rows, walletRow: WALLET_ROW_ID, walletRowHash: WALLET_ROW_HASH, payee: PAYEE, submitterCitizenId: SUBMITTER_ID });
+  assert.equal(stale.reason, "wallet_row_superseded");
+  assert.match(String(stale.message), /rows 26, 27/);
+  assert.match(String(stale.message), /even if it names the same address again/);
+  const newest = checkWalletRow({ rows, walletRow: 27, walletRowHash: BACK.hash, payee: PAYEE, submitterCitizenId: SUBMITTER_ID });
+  assert.equal(newest.ok, true, JSON.stringify(newest));
+  // A -> B alone: the stale declaration of A now refuses at the pin, not only later at the 402's payTo
+  assert.equal(checkWalletRow({ rows: [WALLET_ROW, AWAY], walletRow: WALLET_ROW_ID, walletRowHash: WALLET_ROW_HASH, payee: PAYEE, submitterCitizenId: SUBMITTER_ID }).reason, "wallet_row_superseded");
+});
+
+test("pin: through payListing, change rows come from GET /api/events?kind=wallet_changed; the stale pin refuses before the attest read, the newest pin reaches the 402", async () => {
+  const stale = fakeDeps({ changes: goodEventsDoc([AWAY, BACK]) });
+  const r1 = await payListing({ ...RUN, execute: true }, stale.deps);
+  assert.equal(r1.reason, "wallet_row_superseded");
+  assert.ok(!stale.calls.some((c) => c.kind === "fetch:json:attest" || c.kind === "fetch:leg1" || c.kind === "sign" || c.kind === "writeExclusive"));
+  assert.equal(stale.store(), null);
+  const fresh = fakeDeps({ changes: goodEventsDoc([AWAY, BACK]) });
+  const r2 = await payListing({ ...RUN, walletRow: 27, walletRowHash: BACK.hash, execute: false }, fresh.deps);
+  assert.equal(r2.reason, "dry_run", JSON.stringify(r2));
+  assert.equal(r2.walletRowCheck?.kind, "wallet_changed");
+  assert.equal(fresh.calls[3].url, `${DEFAULT_URL}/api/attest?identity_from=27&identity_expect=${BACK.hash}`);
+});
+
+test("pin: a change row makes only its RIGHT-hand address current; the address it moved away from, a malformed detail, or the other kind's shape refuses", () => {
+  // AWAY (A -> B) names A as well; a substring test would pass it for A
+  const base = { rows: [WALLET_ROW, AWAY], walletRow: 26, walletRowHash: AWAY.hash, submitterCitizenId: SUBMITTER_ID };
+  assert.equal(checkWalletRow({ ...base, payee: PAYEE }).reason, "wallet_row_payee");
+  assert.equal(checkWalletRow({ ...base, payee: WALLET_B }).ok, true);
+  assert.equal(walletRowAddress(AWAY), WALLET_B);
+  assert.equal(walletRowAddress(WALLET_ROW), PAYEE);
+  assert.equal(walletRowAddress({ kind: "wallet_changed", detail: `wallet changed: ${PAYEE}` }), null);
+  assert.equal(walletRowAddress({ kind: "wallet_declared", detail: `wallet changed: ${WALLET_B} -> ${PAYEE}` }), null);
+  assert.equal(walletRowAddress({ kind: "wallet_changed", detail: `wallet declared: ${PAYEE}` }), null);
+  assert.equal(walletRowAddress({ kind: "wallet_declared", detail: `wallet declared: ${PAYEE} ` }), null);
+  assert.equal(walletRowAddress({ kind: "moderation", detail: `wallet declared: ${PAYEE}` }), null);
+  assert.deepEqual(WALLET_ROW_KINDS, ["wallet_declared", "wallet_changed"]);
+});
+
+test("pin: a full page from either wallet kind refuses (older rows may be missing), with nothing signed", async () => {
+  const filler = Array.from({ length: EVENTS_PAGE_CAP - 1 }, (_, i) => ({ ...WALLET_ROW, id: 10_000 + i, citizen_id: 999 }));
+  for (const opts of [{ events: goodEventsDoc([WALLET_ROW, ...filler]) }, { changes: goodEventsDoc([...filler, AWAY]) }]) {
+    const { deps, calls, store } = fakeDeps(opts);
+    const r = await payListing({ ...RUN, execute: true }, deps);
+    assert.equal(r.reason, "wallet_row_unreadable", Object.keys(opts).join());
+    assert.match(String(r.message), /full page/);
+    assert.ok(!calls.some((c) => c.kind === "fetch:leg1" || c.kind === "sign" || c.kind === "writeExclusive"));
+    assert.equal(store(), null);
+  }
+  // one short of the cap is a complete answer
+  const ok = fakeDeps({ events: goodEventsDoc([WALLET_ROW, ...filler.slice(1)]) });
+  assert.equal((await payListing({ ...RUN, execute: false }, ok.deps)).reason, "dry_run");
+});
+
+test("pin: EVENTS_PAGE_CAP is the identity log route's own LIMIT (src/society.ts identityLog)", () => {
+  const src = readFileSync(new URL("../src/society.ts", import.meta.url), "utf8");
+  const start = src.indexOf("export async function identityLog(");
+  assert.ok(start >= 0, "identityLog must exist");
+  // the function's own closing brace, whatever the checkout's line endings
+  const rest = src.slice(start);
+  const end = rest.search(/\r?\n\}\r?\n/);
+  assert.ok(end > 0, "identityLog's closing brace must be found");
+  const body = rest.slice(0, end);
+  const limits = [...body.matchAll(/LIMIT (\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(limits.length >= 1, "identityLog must carry a LIMIT");
+  for (const l of limits) assert.equal(l, EVENTS_PAGE_CAP, `identityLog serves LIMIT ${l}; the pin's full-page refusal assumes ${EVENTS_PAGE_CAP}`);
 });
 
 // ---------- GEMINI round 1: balance pre-check, refused leg 2, retry rule ----------
