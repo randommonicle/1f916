@@ -17,7 +17,9 @@
 param([switch]$DryRun)
 $ErrorActionPreference = "Stop"
 $B = "https://commonhold.randommonicle.workers.dev"
-$COLS = @("kind", "topic_state", "topic_closed_at")
+# PowerShell variable names are case-insensitive: this list must never share a name with a local (a function-local
+# $cols once shadowed $COLS and the presence check compared against the query result, reading 0/3 on a complete catalogue).
+$TOPIC_COLUMNS = @("kind", "topic_state", "topic_closed_at")
 $INDEX = "idx_posts_kind"
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
@@ -27,7 +29,7 @@ function Read-Catalogue() {
   $idx = Read-D1Json (npx wrangler d1 execute commonhold --remote --json --command "PRAGMA index_list(posts)")
   $colRows = @($cols[0].results); $idxNames = @($idx[0].results | ForEach-Object { $_.name })
   if ($colRows.Count -lt 9) { Stop-Here "the catalogue read parsed fewer than 9 posts columns; refusing to reason from a bad read" }
-  $present = @($COLS | Where-Object { $c = $_; @($colRows | Where-Object { $_.name -eq $c }).Count -eq 1 })
+  $present = @($TOPIC_COLUMNS | Where-Object { $c = $_; @($colRows | Where-Object { $_.name -eq $c }).Count -eq 1 })
   return @{ cols = $colRows; colsPresent = $present; indexPresent = ($idxNames -contains $INDEX); idxNames = $idxNames }
 }
 
