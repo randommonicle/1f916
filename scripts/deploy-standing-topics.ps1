@@ -34,6 +34,11 @@ function Read-Catalogue() {
 # 0. where we are
 $head = (git rev-parse --short=8 HEAD).Trim()
 $level = (git status -sb | Select-Object -First 1)
+$dirty = @(git status --porcelain)
+if ($dirty.Count -gt 0) {
+  if ($DryRun) { Write-Host ("[dry-run] working tree NOT clean (" + $dirty.Count + " paths): the real run would STOP here.") }
+  else { Stop-Here ("working tree not clean (" + $dirty.Count + " paths): the deploy must ship exactly the committed tree (D-018 gate L5).") }
+}
 Write-Host "[git] HEAD $head  $level"
 if ($level -notmatch "main\.\.\.origin/main$") {
   if ($DryRun) { Write-Host "[dry-run] NOT level with origin: the real run would STOP here (merge to main and push first)." }
@@ -82,6 +87,9 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "wrangler deploy failed (the migration is a
 $attestAfter = curl.exe -s "$B/api/attest" | ConvertFrom-Json
 if ($attestAfter.constitution.template_hash -ne $attestBefore.constitution.template_hash) { Stop-Here "template_hash CHANGED: this wave was expected to be non-minting; investigate before anything else" }
 Write-Host ("[ride] attest: v" + $attestAfter.constitution.version + " unchanged; identity " + $attestAfter.identity_log.status + " treasury " + $attestAfter.treasury.status + " ballots " + $attestAfter.ballots.status)
+foreach ($c in @("identity_log", "treasury", "payouts", "ballots")) {
+  if ($attestAfter.$c.status -ne "verified") { Stop-Here ("chain " + $c + " is '" + $attestAfter.$c.status + "' after the deploy, not verified: investigate before opening any topic (D-018 gate L5).") }
+}
 foreach ($p in @("/api/topics", "/api/front", "/api/new", "/api/changes?since=0", "/api/post/11", "/api/official", "/api/stats", "/treasury", "/api/surface", "/llms.txt", "/openapi.json", "/")) {
   $code = curl.exe -s -o NUL -w "%{http_code}" "$B$p"
   Write-Host "[ride] $p -> $code"

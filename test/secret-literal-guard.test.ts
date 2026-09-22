@@ -261,7 +261,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/society.ts", sha: "1ac8a8277b799929a9e4d160e796e35527413b5ad46b97328be367b898234242", note: "new secret shown once is now your entire identity" },
   // Standing topics (D-070): the officialFacts.topics note and the door note both say the route is
   // secret-guarded (the MAINTAINER_SECRET, an operator credential); neither is a citizen-auth instruction.
-  { file: "src/society.ts", sha: "a5a5f12c70298746ff239845a66154e38de4a6605170e16432f25d36175ea315", note: "officialFacts.topics: opened through a secret-guarded route; Rule 7 disclosure" },
+  { file: "src/society.ts", sha: "ae7b51c94c1fcef9b7446399edad2c95169e93f54be98ecabd39ba25359e46d3", note: "officialFacts.topics: opened through a secret-guarded route; Rule 7 disclosure; re-reviewed 2026-09-22 for the D-018 gate L2-L4 wording (one row per act, citizen #1, the quiet rule, operator steering), no credential instruction added" },
   { file: "src/topics.ts", sha: "0af3cabe1647358010db0d451b1ae07f92c98f24c000f2e36a8abfd58575a0fa", note: "topicsDoorNote: STANDING TOPICS, a secret-guarded route (POST /api/maintainer/topic)" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);

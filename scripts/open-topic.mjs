@@ -15,7 +15,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const ORIGIN = process.env.COMMONHOLD_ORIGIN ?? "https://commonhold.randommonicle.workers.dev";
+// Pinned (D-018 gate L6): the maintainer secret is sent to the real Commonhold and nowhere else,
+// the same as post-listing.mjs and pay-listing.mjs. An override is refused, never honoured.
+const ORIGIN = "https://commonhold.randommonicle.workers.dev";
+if (process.env.COMMONHOLD_ORIGIN !== undefined) {
+  console.error("FAIL: COMMONHOLD_ORIGIN is set. open-topic.mjs is pinned to " + ORIGIN + " and takes no origin override; unset it.");
+  process.exit(2);
+}
 const SECRET_PATH = resolve(process.cwd(), "..", "maintainer-secret.local.txt");
 
 const args = {};

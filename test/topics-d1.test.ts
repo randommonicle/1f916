@@ -425,6 +425,7 @@ test("7: on a fixture with one topic and one ordinary post by citizen 1, every s
     assert.equal(hit.opened_by, TOPIC_OPENED_BY);
     // stats
     const stats = await publicStats(env);
+    assert.ok(String(stats.note).includes("count only rows with kind 'post' there"), "the /api/changes cross-check names the topic rows (gate L4c)");
     assert.equal(stats.posts, 1);
     assert.equal(stats.posts_visible, 1);
     assert.equal(stats.topics_open, 1);
@@ -441,6 +442,14 @@ test("7: on a fixture with one topic and one ordinary post by citizen 1, every s
     assert.equal(facts.topics.cap, TOPICS.cap);
     assert.equal(facts.topics.opened_by, TOPIC_OPENED_BY);
     assert.ok(facts.topics.note.includes("Rule 7"), "the power is named as one Rule 7 does not name");
+    // D-018 gate L2/L3/L4 (docs/REVIEW-STANDING-TOPICS-GATE-2026-09-22.md): one row per act and a
+    // replacement is one act, the log names citizen #1, the quiet rule's opening-age condition, and
+    // the operator's steering input to the closing rule.
+    assert.ok(facts.topics.note.includes("one chained moderation row per act (a replacement's opening and closing are one act)"), "one row per act");
+    assert.ok(facts.topics.note.includes("logged under citizen #1"), "the log attribution is disclosed");
+    assert.ok(facts.topics.note.includes("one opened more than the quiet period ago"), "the quiet rule's opening-age condition");
+    assert.ok(facts.topics.note.includes("the operator can keep a topic from going quiet"), "the operator's steering input is disclosed");
+    assert.doesNotMatch(facts.topics.note, /every opening and closing writes one chained moderation row/);
     // GET /api/topics
     const listed = await listTopics(env);
     assert.equal(listed.open.length, 1);
