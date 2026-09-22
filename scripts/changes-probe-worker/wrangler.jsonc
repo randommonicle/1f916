@@ -1,0 +1,15 @@
+// Throwaway probe worker (scripts/deploy-standing-topics.ps1 pre-step): `npx wrangler dev --remote --config scripts/changes-probe-worker/wrangler.jsonc`, then GET http://127.0.0.1:8787/run.
+// Bound to the SCRATCH D1 only (commonhold-migtest). Never deploy this; never point it at "commonhold".
+{
+  "name": "commonhold-changes-probe",
+  "main": "index.mjs",
+  "compatibility_date": "2026-08-04",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "commonhold-migtest",
+      "database_id": "465f489c-f1ca-446e-8f5f-d35ea53fd720",
+      "preview_database_id": "465f489c-f1ca-446e-8f5f-d35ea53fd720"
+    }
+  ]
+}

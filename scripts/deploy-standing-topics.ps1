@@ -6,11 +6,13 @@
 # Then open the five topics: node scripts/open-topic.mjs --file ../drafts/topics/<n>.txt --execute (five runs, in order).
 # What it does NOT do: the D-018 gate (Ben's call), the push (first, on Ben's word), the topic openings.
 # PRE-STEP, Ben's hand, BEFORE the first `open-topic.mjs --execute` (the one real ride whose failure has no repair):
-# the chained-row gate relies on SQLite's changes() inside a batch, ridden only on the LOCAL engine so far. Prove it on prod
-# against throwaway tables, then drop them:
-#   npx wrangler d1 execute commonhold --remote --file "scripts/changes-probe.sql"      # expect notes: changes=1, changes=0 (unconditional), changes=1
-#   npx wrangler d1 execute commonhold --remote --command "DROP TABLE probe_t; DROP TABLE probe_log;"
-# If the probe does not read 1 / 0 / 1, do NOT open a topic: a gate that fails on the winner leaves a topic with no chained row.
+# the chained-row gate relies on SQLite's changes() inside env.DB.batch([...]). Prove it through the Worker API on MANAGED D1
+# (CODEX build review r2: `wrangler d1 execute --file` is a different path), against the SCRATCH database commonhold-migtest,
+# never prod. The probe worker creates two namespaced tables WITHOUT "IF NOT EXISTS" (a collision fails the run) and drops them:
+#   npx wrangler dev --remote --config "scripts/changes-probe-worker/wrangler.jsonc"    # leave running; in a second shell:
+#   curl.exe -s http://127.0.0.1:8787/run                                                # expect "pass":true ([1,1] [0,0] [1,0,0] [1,1,1])
+# Then stop the dev server (Ctrl+C). If the answer is not "pass":true, do NOT open a topic: a gate that fails on the winner
+# leaves a topic with no chained row.
 # PowerShell 5.1: never merge a native command's stderr under ErrorActionPreference Stop; read exit codes and stdout.
 param([switch]$DryRun)
 $ErrorActionPreference = "Stop"

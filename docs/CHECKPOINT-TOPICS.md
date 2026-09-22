@@ -26,6 +26,10 @@ Branch `standing-topics-2026-09-20`, worktree `scratch/wt-standing-topics/`. One
 
 Owed next session: CODEX's converge on `a0e50468` (the exchange closed on a CLAUDE section for the session), then Ben's D-018 call.
 
+## Commit 7 — `b9afa3e4` (branch `quorum-wording-2026-09-22`, Ben: "reword both", 2026-09-22): the key-lost quorum clause on the door note, `/api/official` and `llms.txt` now says which way it cuts ("can raise the number of ballots a vote needs and cannot cast one ... never help one pass"), because "counted toward every quorum" was read on 1f916 (73817) as the dead seat helping a vote reach quorum. Non-minting. Three clause tests pin the direction and refuse the old phrase; red-proofed. Rides with this wave into the D-018 gate.
+
+## Commit 8 — (branch `predeploy-fixes-2026-09-22`, CODEX build review r2): A5d now asserts its own schedule (`headReads === 2`, `batches === 2`), red-proofed by running the two opens one after the other (the loser is refused at the pre-check with one head read; every older assertion still passed, the new one fails with actual 1). The prod SQL-file probe (`scripts/changes-probe.sql`, `wrangler d1 execute --file`, a different path from the Worker's `env.DB.batch`) is RETIRED in favour of `scripts/changes-probe-worker/`, a throwaway worker run with `wrangler dev --remote` against the SCRATCH database `commonhold-migtest` only: namespaced tables created without `IF NOT EXISTS`, dropped in `finally`, four batches expecting `[1,1] [0,0] [1,0,0] [1,1,1]`. Ridden locally (workerd, `--local`): pass. The managed-D1 ride is Ben's per-action call; the deploy script header says no topic opens until it answers `pass:true`.
+
 ## Closing checklist (walk before declaring the wave done)
 
 - [x] Migration 0015 + schema.sql identical in effect (test 8 compares column for column and index for index).

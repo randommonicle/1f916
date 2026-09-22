@@ -731,6 +731,11 @@ test("A5d (CODEX build review r1): a loser that prepares its chained row AFTER t
     const refused = outcomes.filter((o) => o.status === "rejected") as PromiseRejectedResult[];
     assert.equal(ok.length, 1, JSON.stringify(outcomes));
     assert.equal(refused.length, 1);
+    // The schedule itself, asserted (CODEX build review r2): both attempts reached the
+    // chain-head read and both ran a batch, so the 409 below is the loser's GATE, not an
+    // earlier pre-check that never reached the head read.
+    assert.equal(headReads, 2, "both attempts must reach the chain-head read");
+    assert.equal(batches, 2, "both attempts must run their batch");
     assert.equal((refused[0].reason as SocietyError).status, 409, `the loser is refused honestly, not a 500 after a false row: ${(refused[0].reason as SocietyError).message}`);
     assert.equal(modRows(d1).length, rowsBefore + 1, "exactly one moderation row: the loser's gate did not match the winner's rows");
     assert.equal((await topicCounts(d1.DB)).opened_ever, TOPIC_CAP + 1);
