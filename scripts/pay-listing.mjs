@@ -63,10 +63,15 @@
 //     is never dropped), and the witness must answer a recognised status.
 //     What the pin does NOT close: the rows are read once per run, so a wallet
 //     change made between that read and the settlement is not seen (CODEX,
-//     exchange/REVIEW_pin-wallet-changed-2026-09-22.md round 1). Only a pin the
-//     server checks when it records the payment closes that window:
-//     DEFERRED-SERVER-SIDE-WALLET-PIN (it lands in src/listings.ts, where the
-//     payments-book row is written).
+//     exchange/REVIEW_pin-wallet-changed-2026-09-22.md round 1). Only the
+//     server can close that window, and only BEFORE money moves: the pay
+//     request carries the pinned row and hash, the pay route checks them
+//     against the citizen's newest wallet row inside payAndSettle's
+//     afterVerify (the free-exit boundary, before settlement), and the
+//     payments-book row records them afterwards for audit. A check made when
+//     the book row is written comes after settlement and is audit only
+//     (CODEX, same exchange, round 2): DEFERRED-SERVER-SIDE-WALLET-PIN (lands
+//     in src/listings.ts's pay route).
 //
 // Run from society/:
 //   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --wallet-row 24 --wallet-row-hash <64 hex>            # DRY RUN
@@ -795,7 +800,7 @@ async function main() {
   console.log(`Pay listing ${args.listingId}, submission ${args.submissionId}`);
   console.log(`Pinned payee ${args.payee}; pinned amount $${(args.amountCents / 100).toFixed(2)} (cap $${(args.maxAmountCents / 100).toFixed(2)})`);
   console.log(`Target (pinned): POST ${target}`);
-  console.log(`Pinned wallet row ${args.walletRow} (hash ${args.walletRowHash.slice(0, 8)}...): the payee must be that row's declared wallet, by the submission's citizen, still held by the chain.`);
+  console.log(`Pinned wallet row ${args.walletRow} (hash ${args.walletRowHash.slice(0, 8)}...): the payee must be the wallet that row makes current, the row must be the newest wallet row of the submission's citizen, and the chain must still hold it.`);
 
   const result = await payListing(
     { listingId: args.listingId, submissionId: args.submissionId, payee: args.payee, amountCents: args.amountCents, maxAmountCents: args.maxAmountCents, walletRow: args.walletRow, walletRowHash: args.walletRowHash, target, funderSecret, execute: args.execute, payer: account?.address ?? null },
