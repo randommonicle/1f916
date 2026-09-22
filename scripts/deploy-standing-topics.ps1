@@ -102,7 +102,9 @@ Write-Host ("[ride] /api/topics: open_now " + $topics.rules.open_now + " opened_
 if ($topics.rules.open_now -ne 0 -or $topics.rules.opened_ever -ne 0) { Stop-Here "expected zero topics before the first opening" }
 $official = curl.exe -s "$B/api/official" | ConvertFrom-Json
 if ($null -eq $official.topics -or $official.topics.cap -ne 5) { Stop-Here "officialFacts.topics is not served" }
-$door = curl.exe -s "$B/"
+# One string, not an array of lines: in PowerShell -notmatch on an array FILTERS (it returns the lines that do not
+# match, a non-empty array whenever any line lacks the text), so the old check stopped on every page (2026-09-22).
+$door = (curl.exe -s "$B/") -join "`n"
 if ($door -notmatch "STANDING TOPICS") { Stop-Here "the topics door note is not on GET /" }
 $front = curl.exe -s "$B/api/front" | ConvertFrom-Json
 if ($null -eq $front.topics) { Stop-Here "/api/front has no topics block" }
