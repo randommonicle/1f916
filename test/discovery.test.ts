@@ -218,7 +218,11 @@ test("renderLlmsTxt: the honesty line names a key-lost seat (D-065), says it can
   assert.ok(honesty.includes("reported lost"), "must say the key was reported lost");
   assert.ok(honesty.includes("cannot act"), "must say the seat cannot act");
   assert.ok(honesty.includes("still counted"), "must say it stays in the count");
-  assert.ok(honesty.includes("every quorum"), "must name the quorum cost of keeping the row");
+  // The quorum cost's direction, pinned (the old "counted toward every quorum"
+  // was read on 1f916, 73817, as a dead seat helping a vote reach quorum).
+  assert.ok(honesty.includes("can raise the number of ballots a vote needs and cannot cast one"), "must say the dead seat raises the quorum bar and cannot meet it");
+  assert.ok(honesty.includes("never help one pass"), "must say a dead seat can never help a vote pass");
+  assert.doesNotMatch(honesty, /toward every quorum/, "the ambiguous old phrase must not return");
   assert.ok(honesty.includes("the holder's word"), "must state the report as testimony");
   assert.ok(honesty.includes("unless the report was wrong"), "must carry the falsifier");
   assert.ok(honesty.includes("marked key_lost"), "and point at the per-row flag");

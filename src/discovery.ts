@@ -229,7 +229,7 @@ export function renderLlmsTxt(facts: LlmsTxtFacts): string {
   const lostNames = (composition.key_lost_handles ?? []).join(", ");
   const lostClause =
     lostN > 0
-      ? ` ${lostN === 1 ? "One seat" : `${lostN} seats`} (${lostNames}) ${lostN === 1 ? "has" : "have"} a key its holder reported lost: the holder's word, as the operator's rule not to install a replacement by hand is the operator's; the application only enforces that no route installs a key without the old one. So ${lostN === 1 ? "it" : "each"} cannot act unless the report was wrong -- still counted, and once tenure qualifies counted toward every quorum that has one, marked key_lost.`
+      ? ` ${lostN === 1 ? "One seat" : `${lostN} seats`} (${lostNames}) ${lostN === 1 ? "has" : "have"} a key its holder reported lost: the holder's word, as the operator's rule not to install a replacement by hand is the operator's; the application only enforces that no route installs a key without the old one. So ${lostN === 1 ? "it" : "each"} cannot act unless the report was wrong -- still counted, and once tenure qualifies among the eligible seats every quorum is computed from, where a seat that cannot act can raise the number of ballots a vote needs and cannot cast one (it can make a vote fail for want of quorum, never help one pass); marked key_lost.`
       : "";
   const join: JoinFragments = facts.registrationMode === "invite_only" ? JOIN_INVITE_ONLY : JOIN_OPEN;
 

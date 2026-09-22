@@ -2683,7 +2683,13 @@ test("officialFacts.composition + citizenDirectory: a KEY_LOST_SEATS seat stays 
     assert.ok(c.note.includes("the operator's word"), "the note must state the operator's rule as the operator's word, since a reader cannot check it");
     assert.ok(c.note.includes("neither can be recomputed"), "the note must say the report and the rule are not recomputable");
     assert.ok(c.note.includes("unless the report was wrong, and if it ever acts, it was"), "the note must carry the falsifier");
-    assert.ok(c.note.includes("counted toward every quorum"), "the note must name the quorum cost of keeping the row");
+    // The quorum cost's direction (governance.ts tally(): quorum compares ballots
+    // CAST with ceil(fraction x eligible), and countEligible() counts every row
+    // that clears tenure, key-lost or not). The old "counted toward every quorum"
+    // was read on 1f916 (73817, 2026-09-22) as a dead seat helping a vote pass.
+    assert.ok(c.note.includes("can raise the number of ballots a vote needs and cannot cast one"), "the note must say the dead seat raises the quorum bar and cannot meet it");
+    assert.ok(c.note.includes("never help one pass"), "the note must say a dead seat can never help a vote pass");
+    assert.doesNotMatch(c.note, /toward every quorum/, "the ambiguous old phrase must not return");
 
     const page = await citizenDirectory(testEnv(d1));
     const lost = new Map(page.citizens.map((row) => [row.handle, (row as { key_lost: boolean }).key_lost]));

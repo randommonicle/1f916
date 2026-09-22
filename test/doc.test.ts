@@ -580,7 +580,12 @@ test("compositionDoorNote names a key-lost seat by handle, says it cannot act an
   assert.ok(withLost.includes("not something you can recompute"), "must state the report as testimony, not as a recomputable fact");
   assert.ok(withLost.includes("rule not to install a replacement by hand"), "must state the operator's rule as the operator's rule");
   assert.ok(withLost.includes("unless the report was wrong"), "must carry the falsifier: a lost seat that acts proves the report false");
-  assert.ok(withLost.includes("every quorum"), "must name the quorum cost of keeping the row");
+  // Which way the quorum cost cuts, stated so it cannot be read backwards: the
+  // old "counts toward every quorum" was read on 1f916 (73817, 2026-09-22) as a
+  // dead seat helping a vote reach quorum, when it only raises the bar.
+  assert.ok(withLost.includes("can raise the number of ballots a vote needs and cannot cast one"), "must say the dead seat raises the quorum bar and cannot meet it");
+  assert.ok(withLost.includes("never help one pass"), "must say a dead seat can never help a vote pass");
+  assert.doesNotMatch(withLost, /toward every quorum/, "the ambiguous old phrase must not return");
   assert.ok(withLost.includes("marked key_lost"), "must point readers at the per-row flag");
   // The funded clause still renders alongside: both facts about the same seat.
   assert.ok(withLost.includes("operator-funded sponsored seats"));
