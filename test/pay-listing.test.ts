@@ -35,6 +35,7 @@ import {
   walletRowAddress,
   WALLET_ROW_KINDS,
   EVENTS_PAGE_CAP,
+  collectWalletRows,
 } from "../scripts/pay-listing.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -655,6 +656,44 @@ test("pin: EVENTS_PAGE_CAP is the identity log route's own LIMIT (src/society.ts
   const limits = [...body.matchAll(/LIMIT (\d+)/g)].map((m) => Number(m[1]));
   assert.ok(limits.length >= 1, "identityLog must carry a LIMIT");
   for (const l of limits) assert.equal(l, EVENTS_PAGE_CAP, `identityLog serves LIMIT ${l}; the pin's full-page refusal assumes ${EVENTS_PAGE_CAP}`);
+});
+
+// ---------- CODEX, pin review round 1: nothing served is normalised away ----------
+
+test("pin: every served wallet row is validated; a malformed newer row, a row of the wrong kind for its list, or an id served twice refuses before the attest read and the 402", async () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["a newer change row with a string id", { changes: goodEventsDoc([AWAY, { ...BACK, id: "27" }]) }],
+    ["a float id", { changes: goodEventsDoc([{ ...AWAY, id: 26.5 }]) }],
+    ["a negative id", { changes: goodEventsDoc([{ ...AWAY, id: -26 }]) }],
+    ["another kind in the change list", { changes: goodEventsDoc([{ ...AWAY, kind: "moderation" }]) }],
+    ["a declared row in the change list", { changes: goodEventsDoc([{ ...WALLET_ROW, id: 26 }]) }],
+    ["no citizen_id", { changes: goodEventsDoc([{ ...AWAY, citizen_id: undefined }]) }],
+    ["a detail that is not a string", { changes: goodEventsDoc([{ ...AWAY, detail: null }]) }],
+    ["a null row", { changes: goodEventsDoc([null]) }],
+    ["the same id twice in one list", { changes: goodEventsDoc([AWAY, { ...BACK, id: 26 }]) }],
+    ["the same id across both lists", { changes: goodEventsDoc([{ ...AWAY, id: WALLET_ROW_ID }]) }],
+  ];
+  for (const [label, opts] of cases) {
+    const { deps, calls, store } = fakeDeps(opts as Parameters<typeof fakeDeps>[0]);
+    const r = await payListing({ ...RUN, execute: true }, deps);
+    assert.equal(r.reason, "wallet_row_unreadable", label);
+    assert.ok(!calls.some((c) => c.kind === "fetch:json:attest" || c.kind === "fetch:leg1" || c.kind === "sign" || c.kind === "writeExclusive"), label);
+    assert.equal(store(), null, label);
+  }
+  // the pure helper agrees, and a clean pair passes through whole
+  const clean = collectWalletRows(goodEventsDoc([WALLET_ROW]), goodEventsDoc([AWAY, BACK]));
+  assert.equal(clean.ok, true);
+  assert.deepEqual((clean as { rows: { id: number }[] }).rows.map((r) => r.id), [WALLET_ROW_ID, 26, 27]);
+});
+
+test("pin: the witness must answer a recognised walk beside the match; no status, an unknown one, or a contradictory 'mismatch' refuses", () => {
+  for (const status of [undefined, "weird", "mismatch", ""]) {
+    const r = checkWitness(goodAttestDoc({ status }), WALLET_ROW_ID, WALLET_ROW_HASH);
+    assert.equal(r.ok, false, String(status));
+    assert.equal(r.reason, "wallet_row_unreadable", String(status));
+  }
+  assert.equal(checkWitness(goodAttestDoc({ status: "verified" }), WALLET_ROW_ID, WALLET_ROW_HASH).ok, true);
+  assert.equal(checkWitness(goodAttestDoc({ status: "incomplete" }), WALLET_ROW_ID, WALLET_ROW_HASH).ok, true);
 });
 
 // ---------- GEMINI round 1: balance pre-check, refused leg 2, retry rule ----------

@@ -58,7 +58,15 @@
 //     pass named in 1f916 comment 73404 (2026-09-21): a declaration of A, then
 //     changes A -> B and B -> A, no longer passes against the stale
 //     declaration of A; the desk must pin the newest row. All four reads are
-//     public and fail CLOSED.
+//     public and fail CLOSED: every served row is validated (a malformed row,
+//     a row of the wrong kind for its list, or an id served twice refuses; it
+//     is never dropped), and the witness must answer a recognised status.
+//     What the pin does NOT close: the rows are read once per run, so a wallet
+//     change made between that read and the settlement is not seen (CODEX,
+//     exchange/REVIEW_pin-wallet-changed-2026-09-22.md round 1). Only a pin the
+//     server checks when it records the payment closes that window:
+//     DEFERRED-SERVER-SIDE-WALLET-PIN (it lands in src/listings.ts, where the
+//     payments-book row is written).
 //
 // Run from society/:
 //   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --wallet-row 24 --wallet-row-hash <64 hex>            # DRY RUN
@@ -303,6 +311,27 @@ export function walletRowAddress(row) {
   return m ? m[1].toLowerCase() : null;
 }
 
+// Both wallet answers, validated whole before any row is trusted: an answer
+// that is not an array, a full page, a row that is not a well-formed row of
+// the kind its list was asked for, or an id served twice REFUSES. Nothing is
+// normalised away, because a dropped newer row is exactly how a stale pin
+// would pass (CODEX, exchange/REVIEW_pin-wallet-changed-2026-09-22.md round 1).
+// Pure, so every refusal is provable offline.
+export function collectWalletRows(declaredDoc, changedDoc) {
+  const byId = new Map();
+  for (const [kind, doc] of [["wallet_declared", declaredDoc], ["wallet_changed", changedDoc]]) {
+    if (!Array.isArray(doc?.events)) return { ok: false, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} answered without an events array. Refusing before any bearer is used.` };
+    if (doc.events.length >= EVENTS_PAGE_CAP) return { ok: false, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} returned a full page (${doc.events.length} rows; the route's cap is ${EVENTS_PAGE_CAP}), so it may not be the citizen's whole wallet history. Refusing before any bearer is used.` };
+    for (const r of doc.events) {
+      const wellFormed = r !== null && typeof r === "object" && Number.isSafeInteger(r.id) && r.id > 0 && r.kind === kind && Number.isSafeInteger(r.citizen_id) && r.citizen_id > 0 && typeof r.detail === "string";
+      if (!wellFormed) return { ok: false, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} served a row that is not a well-formed ${kind} row (${String(JSON.stringify(r)).slice(0, 160)}). Refusing before any bearer is used.` };
+      if (byId.has(r.id)) return { ok: false, reason: "wallet_row_unreadable", message: `identity-log row ${r.id} was served more than once across the two wallet answers. Refusing before any bearer is used.` };
+      byId.set(r.id, r);
+    }
+  }
+  return { ok: true, rows: [...byId.values()] };
+}
+
 // From the public wallet rows already fetched (both kinds): does the pinned row
 // make the pinned payee the submission's citizen's current wallet, as that
 // citizen's newest wallet row of either kind, with the hash the operator wrote
@@ -328,12 +357,16 @@ export function checkWalletRow({ rows, walletRow, walletRowHash, payee, submitte
 // attestTable, `expect_matches`). Anything but a definite match refuses; a
 // chain reported broken after the row refuses too. 'incomplete' (a chain longer
 // than one verify page, no break found) is accepted only with the match, since
-// the match is the pin and the page limit is not a tamper report.
+// the match is the pin and the page limit is not a tamper report. Any other
+// status beside a match (none, an unknown one, or a contradictory 'mismatch')
+// refuses: only a recognised walk is taken as the witness's word.
+const WITNESS_STATUSES_OK = ["verified", "incomplete"];
 export function checkWitness(attest, walletRow, walletRowHash) {
   const il = attest && typeof attest === "object" ? attest.identity_log : undefined;
   if (!il || typeof il !== "object") return { ok: false, reason: "wallet_row_unreadable", message: "GET /api/attest answered without an identity_log block. Refusing." };
   if (il.expect_matches !== true) return { ok: false, reason: "wallet_row_moved", message: `the identity chain no longer holds ${walletRowHash} at row ${walletRow} (status ${il.status ?? "?"}, the chain's hash there is now ${il.anchor_at_from ?? "?"}): the published head moved under the row the desk pinned. Refusing; re-read the row by eye and decide whether the record or the pin is wrong before anything is paid.` };
   if (il.status === "broken") return { ok: false, reason: "wallet_row_chain_broken", message: `the identity chain verifies as broken after row ${walletRow}${il.reason ? `: ${il.reason}` : ""}. Refusing.` };
+  if (!WITNESS_STATUSES_OK.includes(il.status)) return { ok: false, reason: "wallet_row_unreadable", message: `GET /api/attest answered expect_matches:true beside status '${il.status ?? "(none)"}', which is not a recognised walk (verified or incomplete). Refusing.` };
   return { ok: true, status: il.status, head: il.head };
 }
 
@@ -438,18 +471,9 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   if (!submission || !Number.isSafeInteger(submission.citizen_id)) {
     return { ...base, ok: false, exitCode: 1, reason: "submission_unknown", message: `GET /api/listing/${listingId} does not list submission ${submissionId} with a citizen_id. Refusing before any bearer is used.` };
   }
-  for (const [kind, doc] of [["wallet_declared", declaredDoc], ["wallet_changed", changedDoc]]) {
-    if (!Array.isArray(doc?.events)) {
-      return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} answered without an events array. Refusing before any bearer is used.` };
-    }
-    if (doc.events.length >= EVENTS_PAGE_CAP) {
-      return { ...base, ok: false, exitCode: 1, reason: "wallet_row_unreadable", message: `GET /api/events?kind=${kind} returned a full page (${doc.events.length} rows, the route's cap is ${EVENTS_PAGE_CAP}), so older rows may be missing and the newest-row check cannot be trusted. Refusing before any bearer is used.` };
-    }
-  }
-  // One list of both kinds, each row once (by chain id).
-  const byId = new Map();
-  for (const r of [...declaredDoc.events, ...changedDoc.events]) if (r && Number.isSafeInteger(r.id) && !byId.has(r.id)) byId.set(r.id, r);
-  const pin = checkWalletRow({ rows: [...byId.values()], walletRow, walletRowHash, payee, submitterCitizenId: submission.citizen_id });
+  const walletRows = collectWalletRows(declaredDoc, changedDoc);
+  if (!walletRows.ok) return { ...base, ok: false, exitCode: 1, reason: walletRows.reason, message: walletRows.message };
+  const pin = checkWalletRow({ rows: walletRows.rows, walletRow, walletRowHash, payee, submitterCitizenId: submission.citizen_id });
   if (!pin.ok) return { ...base, ok: false, exitCode: 1, reason: pin.reason, message: pin.message };
   let attestDoc;
   try {
