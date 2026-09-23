@@ -143,3 +143,50 @@ None of them is inside `FRONT_DOOR_TEMPLATE`, so the change is non-minting. That
 - Signed intents on the submission, the declaration and the book row. That is the next step in the agreed order.
 - A public log of refusals.
 - Making the two wallet writes atomic. It is tempting, but it does not change what this check closes, so it is a separate decision if wanted.
+
+## Amendments after exchange round 1 (GEMINI + CODEX, 2026-09-23; every point re-derived at source; these OVERRIDE the text above where they conflict)
+
+**A1 (GEMINI 1a; CODEX 2). §3(a) overclaimed.** Check 2 runs at the reservation, not at settlement. What it closes is a wallet change landing between the funder's read and the reservation, the last free exit before settlement. A wallet row appended after the reservation does not cancel the in-flight payment: `wallets.ts:38-88` never consults listing reservations. That payment goes to the pinned address, which was the payee's newest wallet row at the reservation. This is the existing doctrine that "a successful reservation FREEZES eligibility" (`listings.ts:632-634`). Served wording: "newest at the reservation".
+
+**A2 (GEMINI 1b). Check 1 needs two reads.** The single-row read cannot see a newer row, so add `SELECT MAX(id) AS newest FROM identity_events WHERE citizen_id = ? AND kind IN ('wallet_declared','wallet_changed')`. Refuse `wallet_row_superseded` when `newest` is not the pinned id.
+
+**A3 (GEMINI 1c). §3(c) holds only under R (§5).** Under O it is true only of rows whose funder pinned.
+
+**A4 (CODEX 1). The facilitator dependency, stated.**
+- **The dependency.** `payAndSettle` decodes `X-PAYMENT`, forwards it with `reqs` and trusts `verdict.isValid === true` (`x402.ts:134-156`). It never compares the signed destination or amount with `reqs` itself. So "the funder signs for `payTo`" holds only if the facilitator validates the signed authorisation against these requirements and settles exactly that authorisation. That is a trust dependency, not evidence of a fault.
+- **Where it is stated.** Name it in §3 ("does not close") and in §4.4.
+- **Proposed hardening (recommended; Ben and the gate decide scope).**
+  - **The check:** before `/verify`, compare the decoded payload's `payload.authorization.to` with `reqs.payTo`, and `payload.authorization.value` with `reqs.maxAmountRequired`. Case-fold the address only; compare the value exactly as a string. On a mismatch, refuse 400 `payment_payload_mismatch`.
+  - **The cost:** it touches the shared x402 core, so registration gets the same check. Both callers need tests, and the D-018 gate covers both.
+  - **What it achieves:** it removes the destination half of the dependency. It cannot verify the signature itself, which stays the facilitator's job.
+
+**A5 (CODEX 3). The reservation's binding order,** written out with A6's two SET fields:
+
+```sql
+UPDATE listings SET status = 'paying', paying_since = ?, paying_wallet_row_id = ?, paying_wallet_row_hash = ?
+ WHERE id = ? AND status = 'open' AND expires_at > ? AND mod_state IS NULL
+   AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ? AND s.listing_id = listings.id AND s.status = 'open' AND s.mod_state IS NULL)
+   AND EXISTS (SELECT 1 FROM identity_events e WHERE e.id = ? AND e.citizen_id = ? AND e.kind IN ('wallet_declared','wallet_changed') AND e.hash = ?)
+   AND NOT EXISTS (SELECT 1 FROM identity_events e2 WHERE e2.citizen_id = ? AND e2.kind IN ('wallet_declared','wallet_changed') AND e2.id > ?)
+```
+
+The binds, in order: `at, walletRowId, walletRowHash, listingId, at, submissionId, walletRowId, submission.citizen_id, walletRowHash, submission.citizen_id, walletRowId`. Add a test that asserts the bind count, and one that asserts each clause refuses on its own (§6 already requires this for the NOT EXISTS and hash clauses).
+
+**A6 (CODEX 4). Recovery keeps the checked pair.** The book row is written only on the clean path. On the 502 `settlement_unconfirmed` path (`:670-681`) and the 500 "settled but unrecorded" path (`:716-737`) nothing durable records which row was checked. An on-chain destination cannot say which declaration was checked when several name the same address.
+- **Where the pair lives.** The reservation UPDATE records it on the listing row in the same statement: `paying_wallet_row_id` and `paying_wallet_row_hash`. The pair is cleared wherever `paying_since` is cleared (the release at `:693`, the paid update at `:712`), and it is copied to the book row on success.
+- **Recovery surfaces.** The 502 body and both error log lines carry the pair. `GET /api/listing/:id` serves it while the listing is `paying` or unresolved.
+- **Reconciliation.** Operator reconciliation uses the recorded pair and **never** reconstructs it from whichever wallet row is newest at reconciliation time. Say so in `docs/` and in the pay script's recovery message.
+- **Migration 0016 grows to four columns,** all additive and nullable: `listing_payments.wallet_row_id`, `listing_payments.wallet_row_hash`, `listings.paying_wallet_row_id`, `listings.paying_wallet_row_hash`. Its verification query checks both tables. Recall the listings-table lesson, L-016: add columns, never rebuild; eleven foreign keys point at citizens, and listings is referenced too.
+
+**A7 (GEMINI 2). R is costly for an outside funder unless the server shows the row to pin.** Under R, `GET /api/listing/:id` serves, for each submission, the payee's newest wallet row: id, hash and the address it makes current (through §4.3's helper). The funder pins what it read, and the server checks that the pin is still newest at the reservation. The pin's value is "what I read is what gets paid". It is not independent verification, which the funder does with `GET /api/attest`. Under O, the NULL ambiguity could be removed with an explicit column state instead of a bare NULL. That belongs in O's case. The recommendation stays R.
+
+**A8 (GEMINI 3). §7's two decisions, argued.**
+- **Stored hash, not a recompute.** A server-side recompute detects only an edit that forgot to recompute the hash. The database holder, the only party who can edit the row, can recompute. The chain-wide recompute is `GET /api/attest`, open to any funder. A funder who echoes the served hash binds to what it read, which is the pin's purpose.
+- **Refusals not logged publicly.** A refusal is the funder's own failed attempt before any money moves, not a society event. Logging it would add a public write path to a money route.
+
+**A9 (GEMINI 1d, in part).** §3 "does not close" gains: "the server compares the stored hash; it does not recompute the chain, and a stranger checks the chain with `GET /api/attest`." Rejected: GEMINI said the book row "records no recipient address". It records `payee_address` and `tx` (`schema.sql:393`, `:396`).
+
+**Tests added to §6.**
+- 9: under A4, a payload whose `to` or `value` differs from the requirements is refused before `/verify`, for both the pay route and registration. Mutation: remove the comparison.
+- 10: under A6, on the 502 path the listing keeps the pair and `GET /api/listing/:id` serves it; on release both fields are cleared; on success they are copied to the book row.
+- 11: under A7, `GET /api/listing/:id` serves each submission's payee newest wallet row.
