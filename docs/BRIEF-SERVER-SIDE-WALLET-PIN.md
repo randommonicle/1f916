@@ -1,6 +1,6 @@
 # BRIEF — the server-side wallet pin (`DEFERRED-SERVER-SIDE-WALLET-PIN`): the pay route checks the funder's pinned wallet row before settlement, and the book row records it
 
-2026-09-23. Money path: D-018 gate before deploy. Status: BRIEF, for exchange (GEMINI + CODEX) and Ben's ruling on §5 before any build. Nothing here is built.
+2026-09-23. Money path: D-018 gate before deploy. Status: BRIEF, exchange closed (GEMINI converged; CODEX converged on its stated A4 wording, applied). **Ben RULED (2026-09-23, AskUserQuestion): §5 = R, the pin is REQUIRED; A4's local payload check is built in the SAME wave.** Nothing here is built; the build is a fresh session.
 
 ## 1. Provenance
 
@@ -158,7 +158,7 @@ None of them is inside `FRONT_DOOR_TEMPLATE`, so the change is non-minting. That
 - **Proposed hardening (recommended; Ben and the gate decide scope).**
   - **The check:** before `/verify`, compare the decoded payload's `payload.authorization.to` with `reqs.payTo`, and `payload.authorization.value` with `reqs.maxAmountRequired`. Case-fold the address only; compare the value exactly as a string. On a mismatch, refuse 400 `payment_payload_mismatch`.
   - **The cost:** it touches the shared x402 core, so registration gets the same check. Both callers need tests, and the D-018 gate covers both.
-  - **What it achieves:** it removes the destination half of the dependency. It cannot verify the signature itself, which stays the facilitator's job.
+  - **What it achieves** (CODEX's wording, round 2): it removes reliance on `/verify` for the payload-to-requirements destination and amount comparison. Signature verification and faithful settlement remain facilitator dependencies: `/settle` is still an external call whose reported success the Worker trusts (`x402.ts:141-157`).
 
 **A5 (CODEX 3). The reservation's binding order,** written out with A6's two SET fields:
 
