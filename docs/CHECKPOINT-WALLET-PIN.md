@@ -95,3 +95,12 @@ accepted, 1 red. Catalogue verification query for the rehearsal and the deploy:
 `SELECT name FROM pragma_table_info('listings') WHERE name LIKE 'paying_wallet_row_%' UNION ALL
 SELECT name FROM pragma_table_info('listing_payments') WHERE name LIKE 'wallet_row_%'` must return
 exactly four rows.
+
+**2a. Correction to note 2.** Note 2 says 1191/1191. It was false when written: the full run before
+that commit reported 1190 pass, 1 fail, and the commit went in anyway. The failure was a SECOND
+schema drift detector (`test/listings-pledge-d1.test.ts:122`, the listings table only), which went red
+correctly because `schema.sql` gained the 0016 columns; the sweep for detectors had found only the one
+in `test/listings-migration-d1.test.ts`. That detector now applies 0016 too. A grep for every test that
+loads 0014 or reads the listings tables' `pragma_table_info` finds exactly three files, all now
+applying 0016 where they compare. 1191/1191 after this commit. Practice from here: read the fail count
+before writing the note, not after.

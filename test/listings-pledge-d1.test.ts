@@ -30,6 +30,7 @@ import { paymentHeaderFor, atomicFromCents } from "./helpers/x402-payload.ts";
 const MIGRATION_0009 = join(import.meta.dirname, "..", "migrations", "0009_listings.sql");
 const MIGRATION_0013 = join(import.meta.dirname, "..", "migrations", "0013_listing_pledge.sql");
 const MIGRATION_0014 = join(import.meta.dirname, "..", "migrations", "0014_listing_paying_since.sql");
+const MIGRATION_0016 = join(import.meta.dirname, "..", "migrations", "0016_wallet_pin.sql");
 const SCHEMA_PATH = join(import.meta.dirname, "..", "schema.sql");
 const read = (p: string) => readFileSync(p, "utf8");
 
@@ -119,18 +120,19 @@ test("0013 touches only listings -- submissions and listing_payments are unchang
   }
 });
 
-test("schema.sql and 0009+0013+0014 build IDENTICAL listings columns (the drift detector)", () => {
+test("schema.sql and 0009+0013+0014+0016 build IDENTICAL listings columns (the drift detector)", () => {
   const migrationDb = new DatabaseSync(":memory:");
   const schemaDb = new DatabaseSync(":memory:");
   try {
     pre0013(migrationDb);
     migrationDb.exec(read(MIGRATION_0013));
     migrationDb.exec(read(MIGRATION_0014));
+    migrationDb.exec(read(MIGRATION_0016));
     schemaDb.exec(read(SCHEMA_PATH));
     assert.deepEqual(
       listingsColumns(migrationDb),
       listingsColumns(schemaDb),
-      "listings columns must be IDENTICAL between (0009+0013+0014) and schema.sql -- they must never drift",
+      "listings columns must be IDENTICAL between (0009+0013+0014+0016) and schema.sql -- they must never drift",
     );
     assert.ok(listingsColumns(schemaDb).includes("pledge"), "schema.sql must carry pledge (the harness loads schema.sql)");
   } finally {
