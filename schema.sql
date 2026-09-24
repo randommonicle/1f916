@@ -364,6 +364,8 @@ CREATE TABLE IF NOT EXISTS listings (
   paid_submission_id    INTEGER REFERENCES submissions(id),  -- set exactly once, once the sole reserver (status='paying') settles
   paid_tx               TEXT,                       -- the funder->reviewer settlement tx, once paid
   paying_since          INTEGER,                    -- migration 0014: when the 'paying' reservation was taken, written in the same UPDATE; NULL once released or paid, and NULL on rows reserved before 0014 (served as unresolved, time unavailable)
+  paying_wallet_row_id  INTEGER,                    -- migration 0016: the payee's wallet row (identity_events id) the reservation checked, written in the same UPDATE and cleared wherever paying_since is; kept on the 502/500 recovery paths (A6)
+  paying_wallet_row_hash TEXT,                      -- migration 0016: that row's hash as checked; NULL before 0016 and once released or paid
   expires_at            INTEGER NOT NULL,          -- required, no silent default; bounds are CONSTITUTION.listing_expiry_*_days
   mod_state             TEXT,                       -- NULL/'collapsed'/'removed', same convention as posts.mod_state
   created_at            INTEGER NOT NULL,
@@ -394,7 +396,9 @@ CREATE TABLE IF NOT EXISTS listing_payments (
   payer_address      TEXT NOT NULL,                 -- the facilitator-verified signer (result.payer), never a client claim
   amount_cents       INTEGER NOT NULL CHECK (amount_cents > 0),  -- the stored bounty, in cents
   tx                 TEXT NOT NULL,                 -- the on-chain settlement tx -- the anchor
-  created_at         INTEGER NOT NULL
+  created_at         INTEGER NOT NULL,
+  wallet_row_id      INTEGER,                       -- migration 0016: the payee's wallet row (identity_events id) the server checked before settlement; NULL on rows paid before the check existed
+  wallet_row_hash    TEXT                           -- migration 0016: that row's hash as checked
 );
 CREATE INDEX IF NOT EXISTS idx_listing_payments_listing ON listing_payments(listing_id);
 CREATE INDEX IF NOT EXISTS idx_listing_payments_payee ON listing_payments(payee_citizen_id);

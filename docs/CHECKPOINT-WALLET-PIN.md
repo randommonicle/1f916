@@ -79,3 +79,19 @@ typecheck 0. Red-proofs (restored byte-exact, sha256 `a66876a0…`): M1 the call
 address comparison disabled, 4 red; M3 the value comparison disabled, 3 red. Decision: the value is
 compared as the scheme's decimal string, so a number-typed `1000000` refuses (the brief's "exactly as a
 string"; our own clients and x402's send strings).
+
+**2. Migration 0016, `schema.sql`, and `walletAddressFromRow`.** Four additive nullable columns
+(`listings.paying_wallet_row_id|_hash`, `listing_payments.wallet_row_id|_hash`), mirrored in
+`schema.sql`; the drift detector now applies 0016. `walletAddressFromRow(kind, detail)` in
+`src/wallets.ts` is the exact inverse of `walletLogEntry` and accepts only the normalised form
+(0x + 40 lowercase hex). New `test/wallet-pin-d1.test.ts` parts 1-2: 0016 adds exactly the four
+columns (types, nullable, no default), existing rows read NULL (brief test 7), 0016 is once-only
+(a second apply fails "duplicate column"); the helper's inverse property; parity with the pay
+script's `walletRowAddress` on eleven fixtures. **One stated difference:** a mixed-case address,
+which the application cannot write, is null on the server (refused) and lowercased by the script;
+stricter on the server is the safe side. 1191/1191, typecheck 0. Red-proofs (restored byte-exact):
+M4 one ALTER dropped, 3 red; M5 a change returns its previous address, 2 red; M6 mixed case
+accepted, 1 red. Catalogue verification query for the rehearsal and the deploy:
+`SELECT name FROM pragma_table_info('listings') WHERE name LIKE 'paying_wallet_row_%' UNION ALL
+SELECT name FROM pragma_table_info('listing_payments') WHERE name LIKE 'wallet_row_%'` must return
+exactly four rows.

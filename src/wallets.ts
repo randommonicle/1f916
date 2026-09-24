@@ -35,6 +35,22 @@ export function walletLogEntry(
   return { kind: "wallet_changed", detail: `wallet changed: ${previous} -> ${next}` };
 }
 
+// Pure, no D1: the exact inverse of walletLogEntry -- the address a wallet row
+// makes CURRENT. "wallet declared: X" gives X; "wallet changed: A -> X" gives
+// X, never A (a substring test would also match a change's PREVIOUS address,
+// so a row that moved the wallet AWAY from an address would pass for it).
+// Only the normalised form both writes use is accepted (0x + 40 lowercase
+// hex, normalizeAddress); anything else is null, which the pay route refuses
+// as wallet_row_address. scripts/pay-listing.mjs walletRowAddress parses the
+// same shapes on the funder's side; test/wallet-pin-d1.test.ts runs both over
+// one fixture set so the two cannot drift.
+const DECLARED_DETAIL = /^wallet declared: (0x[0-9a-f]{40})$/;
+const CHANGED_DETAIL = /^wallet changed: 0x[0-9a-f]{40} -> (0x[0-9a-f]{40})$/;
+export function walletAddressFromRow(kind: string, detail: string): string | null {
+  const m = kind === "wallet_declared" ? DECLARED_DETAIL.exec(detail) : kind === "wallet_changed" ? CHANGED_DETAIL.exec(detail) : null;
+  return m ? m[1] : null;
+}
+
 export async function declareWallet(env: Env, citizen: { id: number }, address: unknown, credential: string | null) {
   const normalized = normalizeAddress(address);
   // D-056: the declared wallet is where every future payout goes, so a key
