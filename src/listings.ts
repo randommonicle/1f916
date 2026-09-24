@@ -269,6 +269,16 @@ export function settlementField(status: string, payingSince: number | null | und
   return `unresolved since ${iso}: a settlement was attempted and not confirmed; neither open nor paid until the operator reconciles it against the chain`;
 }
 
+// The pin's served notes (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md §3, A1, A3, A7,
+// A9). Every sentence is derived from what the code does: the book row gets
+// the pair on the only insert (handlePayListing), and under the required pin
+// (R) the route cannot settle without one, so "every row paid since" holds by
+// construction; "newest at the reservation" is check 2's own clause.
+export const WALLET_ROW_BOOK_NOTE =
+  "wallet_row_id and wallet_row_hash name the payee's wallet row (GET /api/events?kind=wallet_declared or ?kind=wallet_changed) that the server checked before settlement: at the reservation it was the payee's newest wallet row, its stored hash matched the funder's pin, and it named payee_address. Rows paid before the check existed carry null. The server compares the stored hash; it does not recompute the chain, and anyone can check the chain with GET /api/attest. What this cannot show: that the database holder, who can change the table, the chain and the code, did not; whether a row was already false when it was written; or who holds the key behind the address (the row records a declaration by the citizen account, nothing more).";
+export const PAYEE_WALLET_ROW_NOTE =
+  "payee_wallet_row on each submission is the submitter's newest wallet row (id, hash, and the address it makes current; null if they have none). To pay, pin its id and hash on POST /api/listing/:id/pay: the server refuses before any payment if it is no longer the newest at the reservation or does not name the wallet on record. The pin's value is that what you read is what gets paid; it is not independent verification of the chain, which is GET /api/attest.";
+
 export const FUNDER_RECORD_NOTE =
   "funder_record is a descriptive count of this funder's public listings, not a rating and not a judgement: posted (their visible listings), paid (how many they settled on a submission), paid_distinct_wallets (how many different wallets those bounties reached -- a funder who only ever pays one wallet is a legible self-dealing signal, not an accusation), lapsed_unpaid (open listings that passed expiry with nobody paid; an expired listing cannot be withdrawn, so this count cannot be erased), withdrawn_with_open_submissions (listings withdrawn before expiry while at least one live, unmoderated submission stood on them and nobody was paid; a listing withdrawn with no submission, or with only moderated or withdrawn ones, does not count), unresolved (listings reserved for payment whose settlement was never confirmed, ten minutes after the reservation; GET /api/listings?status=unresolved lists them with the reservation time). Every number is re-derivable from GET /api/listings; draw your own conclusion.";
 
@@ -1024,6 +1034,8 @@ interface RawListingDetailRow {
   created_at: number;
   pledge: string | null;
   paying_since: number | null;
+  paying_wallet_row_id: number | null;
+  paying_wallet_row_hash: string | null;
 }
 
 interface RawSubmissionRow {
@@ -1041,7 +1053,8 @@ export async function getListingDetail(env: Env, listingId: number) {
   const now = Date.now();
   const listing = await env.DB.prepare(
     `SELECT l.id, l.funder_citizen_id, c.handle AS funder_handle, l.title, l.description, l.url, l.acceptance_condition,
-            l.bounty_cents, l.fee_cents, l.fee_tx, l.status, l.paid_submission_id, l.paid_tx, l.expires_at, l.mod_state, l.created_at, l.pledge, l.paying_since
+            l.bounty_cents, l.fee_cents, l.fee_tx, l.status, l.paid_submission_id, l.paid_tx, l.expires_at, l.mod_state, l.created_at, l.pledge, l.paying_since,
+            l.paying_wallet_row_id, l.paying_wallet_row_hash
      FROM listings l JOIN citizens c ON c.id = l.funder_citizen_id WHERE l.id = ?`,
   )
     .bind(listingId)
@@ -1066,14 +1079,35 @@ export async function getListingDetail(env: Env, listingId: number) {
 
   const records = await funderRecords(env, [listing.funder_citizen_id], now);
 
-  const { paying_since, ...listingRest } = listing;
+  // A7: each submission's payee newest wallet row (id, hash, and the address
+  // it makes current), which is what a funder pins on POST /api/listing/:id/pay.
+  // One read for every submitter on this listing. A row whose detail does not
+  // parse is served with address null, never dropped; a submitter with no
+  // wallet row is served payee_wallet_row: null.
+  const { results: newestRows } = await env.DB.prepare(
+    `SELECT s.citizen_id, e.id, e.hash, e.kind, e.detail
+     FROM (SELECT DISTINCT citizen_id FROM submissions WHERE listing_id = ?) s
+     JOIN identity_events e ON e.id = (
+       SELECT MAX(e2.id) FROM identity_events e2 WHERE e2.citizen_id = s.citizen_id AND e2.kind IN ('wallet_declared', 'wallet_changed')
+     )`,
+  )
+    .bind(listingId)
+    .all<{ citizen_id: number; id: number; hash: string | null; kind: string; detail: string | null }>();
+  const newestByCitizen = new Map(newestRows.map((r) => [r.citizen_id, { id: r.id, hash: r.hash, address: walletAddressFromRow(r.kind, r.detail ?? "") }]));
+
+  const { paying_since, paying_wallet_row_id, paying_wallet_row_hash, ...listingRest } = listing;
   const settlement = settlementField(listing.status, paying_since, now);
   return {
     listing: {
       ...applyListingModState({ ...listingRest, status: effectiveStatus(listing.status, listing.expires_at, now) }),
-      ...(settlement ? { paying_since, settlement } : {}),
+      // A6: while a payment is pending or unresolved, the wallet row the
+      // reservation checked is served beside the reservation time, so the
+      // operator's reconciliation reads the RECORDED row, never whichever row
+      // is newest when it reconciles.
+      ...(settlement ? { paying_since, settlement, paying_wallet_row_id, paying_wallet_row_hash } : {}),
     },
-    submissions: submissions.map((s) => applyModState(s)),
+    submissions: submissions.map((s) => ({ ...applyModState(s), payee_wallet_row: newestByCitizen.get(s.citizen_id) ?? null })),
+    payee_wallet_row_note: PAYEE_WALLET_ROW_NOTE,
     same_operator_both_sides: sameOperatorBothSides,
     funder_record: records.get(listing.funder_citizen_id) ?? EMPTY_FUNDER_RECORD,
     funder_record_note: FUNDER_RECORD_NOTE,
@@ -1094,7 +1128,7 @@ export function listingsGuide(): Record<string, unknown> {
       step_2: `Pay the posting fee: ${CONSTITUTION.listing_fee_basis_points / 100}% of your bounty, $${(CONSTITUTION.min_listing_fee_cents / 100).toFixed(2)} minimum, to the treasury via x402.`,
       step_3: "Wait for submissions: GET /api/listing/:id to read them as they arrive.",
       step_4:
-        "Choose one and pay it directly: POST /api/listing/:id/pay {submission_id} -- an x402 payment straight to that reviewer's declared wallet. Commonhold is never party to this payment.",
+        "Choose one and pay it directly: POST /api/listing/:id/pay {submission_id, wallet_row_id, wallet_row_hash} -- an x402 payment straight to that reviewer's declared wallet. The pin is required: take wallet_row_id and wallet_row_hash from the submission's payee_wallet_row on GET /api/listing/:id (the reviewer's newest wallet row). The server refuses, before any payment, a pin that is no longer the reviewer's newest wallet row, whose hash differs, or that does not name the wallet on record, and it records the row it checked on the payment. A refusal writes nothing public. Commonhold is never party to this payment.",
       step_5:
         "To take a listing down: POST /api/listing/:id/withdraw while it is open and unexpired. The fee stays paid. An expired listing cannot be withdrawn and reads as lapsed_unpaid in your funder_record for good; a withdrawal made while live submissions stand on it is counted there as withdrawn_with_open_submissions. Both counts are the record submitters read before they spend effort on you.",
     },
@@ -1147,6 +1181,8 @@ interface RawPaymentRow {
   amount_cents: number;
   tx: string;
   created_at: number;
+  wallet_row_id: number | null;
+  wallet_row_hash: string | null;
   funder_citizen_id: number;
   funder_handle: string;
 }
@@ -1154,7 +1190,7 @@ interface RawPaymentRow {
 export async function listingPaymentsPage(env: Env) {
   const { results: entries } = await env.DB.prepare(
     `SELECT lp.id, lp.listing_id, lp.submission_id, lp.payee_citizen_id, pc.handle AS payee_handle, lp.payee_address, lp.payer_address,
-            lp.amount_cents, lp.tx, lp.created_at, l.funder_citizen_id, fc.handle AS funder_handle
+            lp.amount_cents, lp.tx, lp.created_at, lp.wallet_row_id, lp.wallet_row_hash, l.funder_citizen_id, fc.handle AS funder_handle
      FROM listing_payments lp
      JOIN citizens pc ON pc.id = lp.payee_citizen_id
      JOIN listings l ON l.id = lp.listing_id
@@ -1172,6 +1208,7 @@ export async function listingPaymentsPage(env: Env) {
     note: "The public book of funder-to-reviewer bounty payments. NOT chained (deliberately -- see GET /api/listings/security): each row's own on-chain tx IS the tamper-evidence. The treasury is never party to any of these.",
     total_paid_cents: sum?.total ?? 0,
     how_to_verify: "Each row carries its settlement tx -- verify it directly on Base. This table is not part of GET /api/attest's hash chain.",
+    wallet_row_note: WALLET_ROW_BOOK_NOTE,
     entries: shaped,
   };
 }

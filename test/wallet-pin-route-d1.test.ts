@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { createLocalD1, insertCitizen, insertListing, insertSubmission, type LocalD1 } from "./helpers/local-d1.ts";
 import { declareTestWallet, type WalletRowPin } from "./helpers/wallet-pin.ts";
 import { paymentHeaderFor, atomicFromCents } from "./helpers/x402-payload.ts";
-import { handlePayListing } from "../src/listings.ts";
+import { handlePayListing, getListingDetail, listingPaymentsPage } from "../src/listings.ts";
 import { appendChained } from "../src/chain.ts";
 import { SocietyError, type Env } from "../src/society.ts";
 
@@ -347,5 +347,83 @@ test("test 10, the pay-route half (A6): a /settle whose answer cannot be read ->
       stub.restore();
       f.d1.close();
     }
+  }
+});
+
+type Detail = {
+  listing: { status: string; paying_wallet_row_id?: number | null; paying_wallet_row_hash?: string | null; settlement?: string };
+  submissions: { id: number; payee_wallet_row: { id: number; hash: string | null; address: string | null } | null }[];
+  payee_wallet_row_note: string;
+};
+
+test("test 10, the served half (A6): while a payment is unresolved GET /api/listing/:id serves the checked pair beside the settlement; an open listing serves neither", async () => {
+  const f = await fixture();
+  const stub = stubFacilitator({ settle: "unreadable" });
+  try {
+    const before = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.equal(before.listing.settlement, undefined);
+    assert.equal("paying_wallet_row_id" in before.listing, false, "an open listing serves no reserved pair");
+    const res = await handlePayListing(payReq(f, pinOf(f.row)), f.env, f.funder, f.listingId);
+    assert.equal(res.status, 502);
+    const during = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.ok(during.listing.settlement?.startsWith("pending since"), during.listing.settlement);
+    assert.equal(during.listing.paying_wallet_row_id, f.row.id);
+    assert.equal(during.listing.paying_wallet_row_hash, f.row.hash);
+  } finally {
+    stub.restore();
+    f.d1.close();
+  }
+});
+
+test("test 11 (A7): GET /api/listing/:id serves each submission's payee newest wallet row -- id, hash and the address it makes current -- following a change, null for a submitter with no wallet row, and address null (never dropped) for a row that does not parse", async () => {
+  const f = await fixture();
+  try {
+    let d = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.deepEqual({ ...d.submissions[0].payee_wallet_row }, { id: f.row.id, hash: f.row.hash, address: WALLET_A });
+    assert.match(d.payee_wallet_row_note, /pin its id and hash/);
+
+    const changed = await declareTestWallet(f.d1, f.reviewerId, WALLET_B);
+    d = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.deepEqual({ ...d.submissions[0].payee_wallet_row }, { id: changed.id, hash: changed.hash, address: WALLET_B }, "the newest row, not the first");
+
+    const walletless = insertCitizen(f.d1);
+    const subNoWallet = insertSubmission(f.d1, { listing_id: f.listingId, citizen_id: walletless });
+    d = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.equal(d.submissions.find((s) => s.id === subNoWallet)?.payee_wallet_row, null);
+
+    f.d1.raw.prepare("UPDATE identity_events SET detail = 'wallet changed: garbage' WHERE id = ?").run(changed.id);
+    d = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    const served = d.submissions.find((s) => s.id === f.submissionId)?.payee_wallet_row;
+    assert.equal(served?.id, changed.id, "the row is still served");
+    assert.equal(served?.address, null, "its address is null, not guessed");
+  } finally {
+    f.d1.close();
+  }
+});
+
+test("test 1, the book half: GET /api/listings/payments serves wallet_row_id and wallet_row_hash on a pinned payment, null on a row recorded without them, and the note that says both", async () => {
+  const f = await fixture();
+  const stub = stubFacilitator();
+  try {
+    const now = Date.now();
+    const oldListing = insertListing(f.d1, { funder_citizen_id: f.funder.id, bounty_cents: 500 });
+    const oldSub = insertSubmission(f.d1, { listing_id: oldListing, citizen_id: f.reviewerId });
+    f.d1.raw
+      .prepare("INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, 500, ?, ?)")
+      .run(oldListing, oldSub, f.reviewerId, WALLET_A, "0x" + "fa".repeat(20), "0x" + "01".repeat(32), now - 86_400_000);
+    const res = await handlePayListing(payReq(f, pinOf(f.row)), f.env, f.funder, f.listingId);
+    assert.equal(res.status, 200);
+    const book = (await listingPaymentsPage(f.env)) as unknown as { wallet_row_note: string; entries: { listing_id: number; wallet_row_id: number | null; wallet_row_hash: string | null }[] };
+    const pinned = book.entries.find((e) => e.listing_id === f.listingId);
+    const old = book.entries.find((e) => e.listing_id === oldListing);
+    assert.equal(pinned?.wallet_row_id, f.row.id);
+    assert.equal(pinned?.wallet_row_hash, f.row.hash);
+    assert.equal(old?.wallet_row_id, null, "a row recorded before the check carries null");
+    assert.equal(old?.wallet_row_hash, null);
+    assert.match(book.wallet_row_note, /Rows paid before the check existed carry null/);
+    assert.match(book.wallet_row_note, /does not recompute the chain/);
+  } finally {
+    stub.restore();
+    f.d1.close();
   }
 });

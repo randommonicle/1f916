@@ -126,3 +126,17 @@ The policing invariant at `test/listings-policing.test.ts:89` is now three field
 NOT EXISTS neutralised -> test 4; M9 reservation hash clause neutralised -> test 5; M10 check-1
 superseded off -> test 2; M11 check-1 hash off -> test 2; M12 pair not recorded at the reservation
 -> test 10; M13 release keeps the pair -> test 10; M14 book row without the pair -> test 1.
+
+**4. The served half: A7, A6's served pair, the book's pair, and the text.** `getListingDetail`
+serves each submission's `payee_wallet_row` ({id, hash, address}; null with no wallet row; a row
+whose detail does not parse is served with address null, never dropped) from one read, and a
+`payee_wallet_row_note`; while a payment is pending or unresolved it serves the reserved
+`paying_wallet_row_id|_hash` beside `paying_since` and `settlement`. `listingPaymentsPage` serves
+`wallet_row_id|_hash` on every entry and a `wallet_row_note` (null before the check; the stored hash
+compared, the chain not recomputed; what it cannot show). The guide's step 4 and the discovery entry
+(from which `llms.txt` is built) name the required pin, where to read it, the refusals, and that a
+refusal writes nothing public. Non-minting: the v5 template pin (`test/topics-d1.test.ts:619`,
+`fa11788d…`) stays green. The root design doc's §6.2 claim gets a dated note (paperwork, outside
+git). 1203/1203, typecheck 0. Red-proofs (restored byte-exact): M15 A7 serves the first row -> test
+11 red; M16 the A6 pair not served -> test 10 red; M17 the book pair not served -> test 1 red; M18 an
+unparseable row dropped -> test 11 red.
