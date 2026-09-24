@@ -156,3 +156,19 @@ fixture carries the pair, three new tests (both legs carry the pin; the code is 
 nothing signed; a receipt without the pair, or with another row or hash, stays `signing`). 1205/1205,
 typecheck 0. Red-proofs (restored byte-exact): M19 body without the pin -> 2 red; M20 receipt row
 unchecked -> 1 red; M21 server code not surfaced -> 1 red.
+
+**6. The deploy script, `scripts/deploy-wallet-pin.ps1`** (L-046, L-069; modelled on
+`deploy-standing-topics.ps1`). Gates: clean tree, level with `origin/main`, typecheck, the suite.
+Live before: attest, both tables' catalogues (17 `listings` and 9 `listing_payments` columns before
+0016), the row counts, and a refusal if any listing is `paying`. 0016 applies only from a clean state
+(0/4); 4/4 skips; anything between stops. After: four columns with the right types, nullable, no
+default; row counts unchanged; every existing row NULL in them. Then the worker. The ride: attest
+non-minting and all four chains verified; nine GETs 200; the payments book serves `wallet_row_id` on
+every row and its note; `/api/listing/3` serves `payee_wallet_row` on every submission; the guide
+names the pin; and ONE refusal-only POST to `/api/listing/3/pay` with no pin, as commonhold-agent
+(bearer read from custody, never printed), which must return 400 `wallet_row_required`. A bug caught
+before any run: the `listings` minimum was 18, which would have stopped the real run on a correct
+catalogue; it is 17. **Dry run ridden against prod, 2026-09-24 ~21:50Z** (reads only): constitution
+v5 `fa11788d`, identity 36 / treasury 17 / ballots 14, 0016 columns 0/4 (clean), listings 4,
+listing_payments 3, paying 0; stopped before the migration as designed (tree not clean only because
+of this script, uncommitted at that moment; not level, as expected on the branch).
