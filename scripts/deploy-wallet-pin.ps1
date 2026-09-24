@@ -155,7 +155,11 @@ try {
   $r = $_.Exception.Response
   if ($null -eq $r) { $secret = $null; Stop-Here "the refusal ride got no HTTP response: $($_.Exception.Message)" }
   $status = [string][int]$r.StatusCode
-  $bodyText = (New-Object System.IO.StreamReader($r.GetResponseStream())).ReadToEnd()
+  # PowerShell 5.1 has already consumed the error response's stream by the time the catch runs; the body is in
+  # ErrorDetails.Message (found at the 2026-09-24 deploy: the ride read an empty body and stopped on a 400 that was
+  # in fact wallet_row_required, confirmed by a separate in-process fetch). The stream is only a fallback.
+  if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $bodyText = $_.ErrorDetails.Message }
+  else { $bodyText = (New-Object System.IO.StreamReader($r.GetResponseStream())).ReadToEnd() }
 }
 $secret = $null
 $json = $bodyText | ConvertFrom-Json

@@ -251,3 +251,21 @@ the ride's catch is PowerShell 5.1-specific; a facilitator refusal without a boo
 wedges a listing in `paying` for reconciliation (deliberate; the first real refusal shows PayAI's
 shape). **1212/1212** (read before writing), typecheck 0. Red-proof: M27 the log line removed -> 1 red;
 restored byte-exact.
+
+**11. DEPLOYED, 2026-09-24, on Ben's word ("merge and push everything"; "if valid we can also deploy").**
+The re-gate's notes fixed (note 10), then `main` fast-forwarded to `149e6d44` and pushed
+(`4066677c..149e6d44`, verified by `ls-remote`). From `society/`: `-DryRun` clean (HEAD `149e6d44` level
+with origin, custody present, gates green, v5 `fa11788d`, chains 36/17/14, 0016 0/4, listings 4, book 3,
+paying 0). The real run: 0016 applied and catalogue-verified (four nullable columns, no defaults, row
+counts unchanged, every existing row NULL); `wrangler deploy` -> **worker version
+`b3d43744-c2a2-4008-acc0-707f6f2d53d5`**; attest v5 unchanged and all four chains verified; nine GETs
+200; the book serves `wallet_row_id` on all 3 rows (null, before the check); `/api/listing/3` serves
+`payee_wallet_row`. The script's last step STOPPED on a false alarm: the refusal POST returned 400 but
+the ride read an empty body. The refusal itself was confirmed by a separate in-process fetch at
+21:44:24Z (clock read): **400 `wallet_row_required`** with the served message. Cause, reproduced
+locally with a red/green pair: on a response carrying `Content-Length` (as Cloudflare's does),
+PowerShell 5.1 has already buffered the error body into `ErrorDetails.Message` and the stream reads
+empty; a chunked response reads fine, which is why the first local probe (chunked) passed the old block
+too. The ride now reads `ErrorDetails.Message` first. Live text checked: the front door names the pin;
+`llms.txt` carries the new x402 label and not the old "$1"; the pay note is on `/api/surface` (llms.txt
+renders descriptions, which carry the pin body, by design).
