@@ -104,3 +104,25 @@ in `test/listings-migration-d1.test.ts`. That detector now applies 0016 too. A g
 loads 0014 or reads the listings tables' `pragma_table_info` finds exactly three files, all now
 applying 0016 where they compare. 1191/1191 after this commit. Practice from here: read the fail count
 before writing the note, not after.
+
+**3. The pay route: the required pin, check 1, check 2, and the pair through every exit.**
+`parseWalletPin` (free 400s: `wallet_row_required` when either field is absent or null,
+`wallet_row_malformed` for a non-number id, id <= 0, or a hash that is not 64 lowercase hex) runs
+beside `submission_id`, before any read. `assertWalletPinCurrent` (check 1, two reads) runs after
+`walletFor` and before the requirements, so the 402 probe itself refuses: 409 `wallet_row_missing`,
+`_kind`, `_citizen`, `_superseded` (by `MAX(id)`, A2), `_hash` (stored column, not recomputed), and
+`_address` (CODEX's binding: `walletAddressFromRow(row)` must equal `walletFor`'s value, which then
+becomes `payTo`). Check 2 is A5's statement verbatim, eleven binds, recording the pair on the listing
+(A6). The pair is cleared on release and on paid, carried by the 502 body, both error log lines and
+the success body, and copied to the book row; the 502 message says reconciliation uses the recorded
+row, never the newest at reconciliation time. Deviation from the checkpoint plan: the route tests
+live in their own file, `test/wallet-pin-route-d1.test.ts` (a heredoc append hit the Bash
+backslash trap, nothing landed, and a separate file written whole was cleaner). Harness:
+`test/helpers/wallet-pin.ts` (`declareTestWallet` through the real `appendChained`,
+`newestWalletRow`, `PLACEHOLDER_PIN`); every listings-d1 wallet is now declared with its chained
+row, its 21 short test addresses padded to 40 hex, and every pay request carries the newest row.
+The policing invariant at `test/listings-policing.test.ts:89` is now three fields, as ruled.
+1199/1199, typecheck 0. Red-proofs (restored byte-exact): M7 address check off -> test 3 red; M8
+NOT EXISTS neutralised -> test 4; M9 reservation hash clause neutralised -> test 5; M10 check-1
+superseded off -> test 2; M11 check-1 hash off -> test 2; M12 pair not recorded at the reservation
+-> test 10; M13 release keeps the pair -> test 10; M14 book row without the pair -> test 1.

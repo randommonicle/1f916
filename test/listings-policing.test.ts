@@ -83,13 +83,16 @@ test("positive control: handlePayListing DOES derive payTo from walletFor and am
 });
 
 // Same guarantee restated as an END-TO-END proof over the request body's
-// OWN shape: submission_id is the only field this handler is allowed to
-// read off it. If a future edit adds any other field read here, this test
-// names the offending property directly.
-test("handlePayListing reads exactly ONE field off the parsed request body: submission_id", () => {
+// OWN shape: submission_id and the wallet-row pin (wallet_row_id,
+// wallet_row_hash) are the only fields this handler is allowed to read off
+// it. The pin was added by the server-side wallet pin wave (Ben's ruling R,
+// 2026-09-23): it names a ROW for the server to check, never an address or an
+// amount, so the payTo/amount scan above is unchanged. If a future edit adds
+// any other field read here, this test names the offending property directly.
+test("handlePayListing reads exactly THREE fields off the parsed request body: submission_id, wallet_row_id, wallet_row_hash", () => {
   const body = extractExportBody(SRC, "export async function handlePayListing");
   const accesses = [...body.matchAll(/\bb\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(accesses)], ["submission_id"], `handlePayListing must read only b.submission_id off the request body; found: ${JSON.stringify([...new Set(accesses)])}`);
+  assert.deepEqual([...new Set(accesses)].sort(), ["submission_id", "wallet_row_hash", "wallet_row_id"], `handlePayListing must read only b.submission_id, b.wallet_row_id and b.wallet_row_hash off the request body; found: ${JSON.stringify([...new Set(accesses)])}`);
 });
 
 // ---------- (b) the bounty payment is never booked to the treasury ledger ----------

@@ -37,6 +37,7 @@ import {
 import { handleCreateListing, createSubmission, handlePayListing, withdrawListing, listListings, getListingDetail, listingPaymentsPage, computeListingFeeCents, UNRESOLVED_AFTER_MS } from "../src/listings.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { paymentHeaderFor, atomicFromCents } from "./helpers/x402-payload.ts";
+import { declareTestWallet, newestWalletRow, PLACEHOLDER_PIN } from "./helpers/wallet-pin.ts";
 import type { Env } from "../src/society.ts";
 
 const TREASURY_ADDRESS = "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9";
@@ -401,7 +402,7 @@ test("createSubmission: a listing WITHDRAWN between the open-check and the inser
   try {
     const submitterId = insertCitizen(d1);
     const submitter = await loadCitizen(d1, submitterId);
-    insertWallet(d1, submitterId, "0x00000000000000000000000000000000000ee5");
+    await declareTestWallet(d1, submitterId, "0x0000000000000000000000000000000000000ee5");
     const listingId = insertListing(d1, { expires_at: Date.now() + 60_000 });
 
     const realDb = testEnv(d1).DB;
@@ -577,8 +578,15 @@ function listingFeeHeader(bountyCents: unknown): string {
   return paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(fee));
 }
 
-function insertWallet(d1: LocalD1, citizenId: number, address: string): void {
-  d1.raw.prepare("INSERT INTO wallets (citizen_id, address, added_at) VALUES (?, ?, ?)").run(citizenId, address, Date.now());
+// The wallet-row pin a real funder sends (the wallet-pin wave, Ben's ruling R:
+// required on every pay request): the submission's citizen's NEWEST wallet
+// row, as GET /api/listing/:id serves it (A7). A submission whose citizen has
+// no wallet row gets the placeholder, which passes the free format check and
+// is refused later for another reason (no wallet) without being compared.
+function pinFromDb(d1: LocalD1, submissionId: number): { wallet_row_id: number; wallet_row_hash: string } {
+  const s = d1.raw.prepare("SELECT citizen_id FROM submissions WHERE id = ?").get(submissionId) as { citizen_id: number } | undefined;
+  const pin = (s && newestWalletRow(d1, s.citizen_id)) || PLACEHOLDER_PIN;
+  return { wallet_row_id: pin.id, wallet_row_hash: pin.hash };
 }
 
 function listingCreateRequest(bodyOverrides: Record<string, unknown> = {}, withPayment = true): Request {
@@ -597,7 +605,7 @@ function listingCreateRequest(bodyOverrides: Record<string, unknown> = {}, withP
 }
 
 function payRequest(d1: LocalD1, listingId: number, submissionId: number, extra: Record<string, unknown> = {}): Request {
-  const body = { submission_id: submissionId, ...extra };
+  const body = { submission_id: submissionId, ...pinFromDb(d1, submissionId), ...extra };
   return new Request(`https://example.test/api/listing/${listingId}/pay`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-PAYMENT": payHeaderFromDb(d1, listingId, submissionId) },
@@ -612,7 +620,7 @@ function payRequestFromIp(d1: LocalD1, listingId: number, submissionId: number, 
   return new Request(`https://example.test/api/listing/${listingId}/pay`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-PAYMENT": payHeaderFromDb(d1, listingId, submissionId), "CF-Connecting-IP": ip },
-    body: JSON.stringify({ submission_id: submissionId }),
+    body: JSON.stringify({ submission_id: submissionId, ...pinFromDb(d1, submissionId) }),
   });
 }
 
@@ -641,7 +649,7 @@ function stubFacilitatorFetch(settle: { payer?: string; transaction?: string } =
       const parsed = typeof init?.body === "string" ? (JSON.parse(init.body) as { paymentRequirements?: { payTo?: string; maxAmountRequired?: string } }) : {};
       lastSettleReqs = parsed.paymentRequirements ?? null;
       return new Response(
-        JSON.stringify({ success: true, payer: settle.payer ?? "0x00000000000000000000000000000000000abc", transaction: settle.transaction ?? "0xfeedfeedfeed" }),
+        JSON.stringify({ success: true, payer: settle.payer ?? "0x0000000000000000000000000000000000000abc", transaction: settle.transaction ?? "0xfeedfeedfeed" }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
@@ -880,7 +888,7 @@ test("createSubmission: a walleted citizen submits successfully against an open 
     const env = testEnv(d1);
     const listingId = insertListing(d1);
     const citizenId = insertCitizen(d1);
-    insertWallet(d1, citizenId, "0x000000000000000000000000000000000000cc");
+    await declareTestWallet(d1, citizenId, "0x00000000000000000000000000000000000000cc");
     const citizen = await loadCitizen(d1, citizenId);
     const result = await createSubmission(env, citizen, listingId, "a genuinely careful review", "https://gist.example/review");
     assert.ok(result.submission_id);
@@ -904,7 +912,7 @@ test("createSubmission: refused against a listing that has expired", async () =>
     const env = testEnv(d1);
     const listingId = insertListing(d1, { expires_at: Date.now() - 1000 });
     const citizenId = insertCitizen(d1);
-    insertWallet(d1, citizenId, "0x000000000000000000000000000000000000cc");
+    await declareTestWallet(d1, citizenId, "0x00000000000000000000000000000000000000cc");
     const citizen = await loadCitizen(d1, citizenId);
     await assert.rejects(
       () => createSubmission(env, citizen, listingId, "too late", null),
@@ -925,9 +933,9 @@ test("handlePayListing: payTo is derived from the submission's citizen -> wallet
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    const REAL_WALLET = "0x00000000000000000000000000000000000ee1";
-    const ATTACKER_WALLET = "0x00000000000000000000000000000000000bad";
-    insertWallet(d1, reviewerId, REAL_WALLET);
+    const REAL_WALLET = "0x0000000000000000000000000000000000000ee1";
+    const ATTACKER_WALLET = "0x0000000000000000000000000000000000000bad";
+    await declareTestWallet(d1, reviewerId, REAL_WALLET);
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 2500 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -980,16 +988,16 @@ test("A4: a pay request whose X-PAYMENT signs for another address or another amo
       const funderId = insertCitizen(d1);
       const funder = await loadCitizen(d1, funderId);
       const reviewerId = insertCitizen(d1);
-      insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee1");
+      await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee1");
       const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 2500 });
       const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
       const header = label === "another address"
         ? paymentHeaderFor("0x00000000000000000000000000000000000bad00", atomicFromCents(2500))
-        : paymentHeaderFor("0x00000000000000000000000000000000000ee1", atomicFromCents(1));
+        : paymentHeaderFor("0x0000000000000000000000000000000000000ee1", atomicFromCents(1));
       const request = new Request(`https://example.test/api/listing/${listingId}/pay`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-PAYMENT": header },
-        body: JSON.stringify({ submission_id: submissionId }),
+        body: JSON.stringify({ submission_id: submissionId, ...pinFromDb(d1, submissionId) }),
       });
       await assert.rejects(
         () => handlePayListing(request, env, funder, listingId),
@@ -1028,7 +1036,7 @@ test("handlePayListing: a listing that EXPIRES during /verify is refused 409 at 
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee2");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee2");
     listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1073,7 +1081,7 @@ test("handlePayListing: a submission MODERATED during /verify (real moderateCont
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee3");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee3");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1111,7 +1119,7 @@ test("handlePayListing: moderation landing AFTER the reservation (during /settle
     if (href === `${FACILITATOR_URL}/settle`) {
       settleCalls++;
       await moderateContent(env, maintainerCitizen, "submission", submissionId, "collapse", "flagged late", null);
-      return new Response(JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000000abc", transaction: "0xlate" }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ success: true, payer: "0x0000000000000000000000000000000000000abc", transaction: "0xlate" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     throw new Error(`unexpected fetch in the freeze test: ${href}`);
   }) as typeof fetch;
@@ -1122,7 +1130,7 @@ test("handlePayListing: moderation landing AFTER the reservation (during /settle
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee4");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee4");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1160,7 +1168,7 @@ test("handlePayListing: a /settle whose answer cannot be read keeps the reservat
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee6");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee6");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1230,7 +1238,7 @@ test("handlePayListing: a /verify whose answer cannot be read throws the facilit
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee7");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee7");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     await assert.rejects(
@@ -1258,7 +1266,7 @@ test("handlePayListing: paying_since is cleared on a refused settle (release) an
     if (href === `${FACILITATOR_URL}/settle`) {
       return refuse
         ? new Response(JSON.stringify({ success: false, errorReason: "insufficient funds" }), { status: 200, headers: { "content-type": "application/json" } })
-        : new Response(JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000000abc", transaction: "0xok" }), { status: 200, headers: { "content-type": "application/json" } });
+        : new Response(JSON.stringify({ success: true, payer: "0x0000000000000000000000000000000000000abc", transaction: "0xok" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     throw new Error(`unexpected fetch in the clear test: ${href}`);
   }) as typeof fetch;
@@ -1267,7 +1275,7 @@ test("handlePayListing: paying_since is cleared on a refused settle (release) an
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee8");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee8");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1319,7 +1327,7 @@ test("handlePayListing: only the listing's funder may pay -- another citizen is 
     const strangerId = insertCitizen(d1);
     const stranger = await loadCitizen(d1, strangerId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x000000000000000000000000000000000000dd");
+    await declareTestWallet(d1, reviewerId, "0x00000000000000000000000000000000000000dd");
     const listingId = insertListing(d1, { funder_citizen_id: funderId });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     await assert.rejects(
@@ -1339,7 +1347,7 @@ test("handlePayListing: the 21st pay attempt from one IP within an hour is refus
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000dd1");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000dd1");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     const ip = "203.0.113.93";
@@ -1383,8 +1391,8 @@ test("concurrent double-click: two truly-interleaved pay attempts for the same l
     const funder = await loadCitizen(d1, funderId);
     const reviewerAId = insertCitizen(d1);
     const reviewerBId = insertCitizen(d1);
-    insertWallet(d1, reviewerAId, "0x00000000000000000000000000000000000aaa");
-    insertWallet(d1, reviewerBId, "0x00000000000000000000000000000000000bbb");
+    await declareTestWallet(d1, reviewerAId, "0x0000000000000000000000000000000000000aaa");
+    await declareTestWallet(d1, reviewerBId, "0x0000000000000000000000000000000000000bbb");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionAId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerAId });
     const submissionBId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerBId });
@@ -1460,7 +1468,7 @@ test("handlePayListing: a request that fails BEFORE reserving must NOT release a
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ccc");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ccc");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1503,7 +1511,7 @@ test("handlePayListing: a pay attempt against a listing already reserved by a co
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee3");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee3");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000, status: "paying" });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1526,7 +1534,7 @@ test("handlePayListing: a second pay attempt against an already-'paid' listing i
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee2");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee2");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1560,7 +1568,7 @@ test("handlePayListing: a settle failure after a successful reserve releases the
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee4");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee4");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1605,7 +1613,7 @@ test("handlePayListing: an invalid signature (verify fails) never even reaches t
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee5");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ee5");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1650,7 +1658,7 @@ test("handlePayListing: a simulated record-batch failure after a successful sett
     const funderId = insertCitizen(d1);
     const funder = await loadCitizen(d1, funderId);
     const reviewerId = insertCitizen(d1);
-    insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ccc");
+    await declareTestWallet(d1, reviewerId, "0x0000000000000000000000000000000000000ccc");
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
@@ -1874,7 +1882,7 @@ test("listingPaymentsPage: carries the same_operator_both_sides disclosure and i
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     d1.raw
       .prepare("INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(listingId, submissionId, reviewerId, "0x00000000000000000000000000000000000ffe", "0x00000000000000000000000000000000000ffd", 500, "0xpaytx", Date.now());
+      .run(listingId, submissionId, reviewerId, "0x0000000000000000000000000000000000000ffe", "0x0000000000000000000000000000000000000ffd", 500, "0xpaytx", Date.now());
 
     const page = await listingPaymentsPage(env);
     assert.equal(page.total_paid_cents, 500);

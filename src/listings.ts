@@ -26,7 +26,7 @@
 import { appendChained } from "./chain.ts";
 import { buildPaymentRequirements, payAndSettle, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
-import { walletFor } from "./wallets.ts";
+import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
   type Env,
   SocietyError,
@@ -550,6 +550,85 @@ async function loadPayableSubmission(env: Env, submissionId: number, listingId: 
   return row;
 }
 
+// ---------- the server-side wallet pin (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md) ----------
+//
+// DEFERRED-SERVER-SIDE-WALLET-PIN, built. The funder pins the payee's wallet
+// row: the chained identity-log row (wallet_declared or wallet_changed) that
+// made the payee's address current, by id and hash, as GET /api/listing/:id
+// serves it. The pin is REQUIRED on every pay request (Ben's ruling R,
+// 2026-09-23: D-064 rule 2 as amended by D-068, enforced server-side for every
+// funder, not only the operator's script). Check 1 is a free refusal before
+// any 402 (D-042); check 2 re-checks inside the one reservation UPDATE; the
+// settlement destination is bound to the address the pinned row names
+// (CODEX's counterexample: a table that says B while the chain says A must
+// not pay B). What it does not close is served as such: the database holder,
+// who can change the table, the chain and the code; a row already false when
+// written; who holds the key behind the address; and refusals write nothing
+// public.
+
+export interface WalletPin {
+  walletRowId: number;
+  walletRowHash: string;
+}
+
+const WALLET_ROW_HASH_RE = /^[0-9a-f]{64}$/;
+const WALLET_ROW_KINDS = ["wallet_declared", "wallet_changed"] as const;
+
+// Pure, free (before any read): both fields present and well formed. The id is
+// a JSON number (a positive safe integer); the hash is the chain's own
+// lowercase hex, with no case folding (the stored column is lowercase).
+export function parseWalletPin(idRaw: unknown, hashRaw: unknown): WalletPin {
+  if (idRaw === undefined || idRaw === null || hashRaw === undefined || hashRaw === null) {
+    throw new SocietyError(
+      400,
+      "wallet_row_id and wallet_row_hash are required: pin the payee's newest wallet row (GET /api/listing/:id serves it for each submission) so the payment goes where that row says.",
+      "wallet_row_required",
+    );
+  }
+  if (typeof idRaw !== "number" || !Number.isSafeInteger(idRaw) || idRaw <= 0) {
+    throw new SocietyError(400, "wallet_row_id must be a positive integer (the identity-log row id).", "wallet_row_malformed");
+  }
+  if (typeof hashRaw !== "string" || !WALLET_ROW_HASH_RE.test(hashRaw)) {
+    throw new SocietyError(400, "wallet_row_hash must be 64 lowercase hex characters (the row's hash as GET /api/events serves it).", "wallet_row_malformed");
+  }
+  return { walletRowId: idRaw, walletRowHash: hashRaw };
+}
+
+// Check 1 (brief §4.2 with A2): two reads, run after walletFor and before the
+// requirements are built, so a stale or wrong pin is refused on the 402 probe
+// itself, before anything is signed. "Newest" is by id, which fixes chain
+// order; created_at does not. The hash is compared with the stored column,
+// not recomputed (§7, A8: a recompute buys nothing against the database
+// holder, and GET /api/attest is the chain-wide check anyone can run).
+async function assertWalletPinCurrent(env: Env, pin: WalletPin, payeeCitizenId: number, payTo: string): Promise<void> {
+  const row = await env.DB.prepare("SELECT id, citizen_id, kind, detail, hash FROM identity_events WHERE id = ?")
+    .bind(pin.walletRowId)
+    .first<{ id: number; citizen_id: number; kind: string; detail: string | null; hash: string | null }>();
+  if (!row) {
+    throw new SocietyError(409, `Identity-log row ${pin.walletRowId} does not exist. Re-read the payee's newest wallet row (GET /api/listing/:id) and pin that. Nothing was issued or settled.`, "wallet_row_missing");
+  }
+  if (!(WALLET_ROW_KINDS as readonly string[]).includes(row.kind)) {
+    throw new SocietyError(409, `Identity-log row ${row.id} is a '${row.kind}' row, not a wallet row (wallet_declared or wallet_changed). Nothing was issued or settled.`, "wallet_row_kind");
+  }
+  if (row.citizen_id !== payeeCitizenId) {
+    throw new SocietyError(409, `Identity-log row ${row.id} belongs to citizen ${row.citizen_id}, not to the submission's citizen ${payeeCitizenId}. Nothing was issued or settled.`, "wallet_row_citizen");
+  }
+  const newest = await env.DB.prepare(
+    "SELECT MAX(id) AS newest FROM identity_events WHERE citizen_id = ? AND kind IN ('wallet_declared', 'wallet_changed')",
+  )
+    .bind(payeeCitizenId)
+    .first<{ newest: number | null }>();
+  if (newest?.newest !== row.id) {
+    throw new SocietyError(409, `Citizen ${payeeCitizenId} has a newer wallet row (${newest?.newest}) than the pinned row ${row.id}, even if it names the same address again. Re-read the newest row and re-pin. Nothing was issued or settled.`, "wallet_row_superseded");
+  }
+  if (row.hash !== pin.walletRowHash) {
+    throw new SocietyError(409, `Identity-log row ${row.id}'s stored hash is not the pinned hash: this is not the row the funder read. Nothing was issued or settled.`, "wallet_row_hash");
+  }
+  if (walletAddressFromRow(row.kind, row.detail ?? "") !== payTo) {
+    throw new SocietyError(409, `Identity-log row ${row.id} does not make ${payTo} (the payee's declared wallet on record) current: the wallet table and the chained row disagree, so nothing is paid until they agree. Nothing was issued or settled.`, "wallet_row_address");
+  }
+}
+
 export async function handlePayListing(request: Request, env: Env, citizen: Citizen, listingId: number): Promise<Response> {
   const origin = new URL(request.url).origin;
 
@@ -570,6 +649,10 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   if (!Number.isInteger(submissionId)) {
     throw new SocietyError(400, "submission_id must be an integer");
   }
+  // The wallet-row pin (required, R): format only here, free; checked
+  // against the chain after walletFor below (check 1) and again inside the
+  // reservation (check 2).
+  const pin = parseWalletPin(b.wallet_row_id, b.wallet_row_hash);
 
   // Step 1: load and validate, free refusals.
   const listing = await loadPayableListing(env, listingId);
@@ -580,12 +663,19 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
 
   // Step 2: resolve payTo SERVER-SIDE from the stored submission's citizen
   // -> their CURRENTLY declared wallet, read fresh -- NEVER from the
-  // request body, which carries only submission_id (§7.2). A wallet-less
+  // request body, which carries submission_id and the wallet-row pin and
+  // nothing else this handler reads (§7.2, as amended by the pin wave: the
+  // pin names a ROW to check, never an address to pay). A wallet-less
   // reviewer is refused here, for free -- nowhere to pay them.
   const reviewerWallet = await walletFor(env, submission.citizen_id);
   if (!reviewerWallet) {
     throw new SocietyError(409, `Citizen ${submission.citizen_id} (the submitter) has no declared wallet. Nowhere to pay them -- ask them to POST /api/wallet first.`);
   }
+  // Check 1 (free, before any 402): the pinned row is the payee's newest
+  // wallet row, carries the pinned hash, and makes reviewerWallet current.
+  // From here the destination is fixed: payTo below is the value this check
+  // compared, and the funder signs for it (A4 holds the signed `to` to it).
+  await assertWalletPinCurrent(env, pin, submission.citizen_id, reviewerWallet);
 
   // Step 3: build requirements. payTo = the reviewer's wallet, amount = the
   // STORED bounty -- never a request-supplied figure or address. This is
@@ -632,6 +722,18 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // so two statements in a batch would not protect each other. A successful
   // reservation FREEZES eligibility: moderation committed after it changes
   // visibility, not the in-flight payment the funder already chose to make.
+  // Check 2 (the pin, brief §4.4 with A5/A6): the same one statement also
+  // requires the pinned row to exist unchanged for the payee (id, citizen,
+  // kind, hash) and no newer wallet row, so a wallet row appended between
+  // check 1 and here makes changes = 0 and the 409 fires before settlement.
+  // The address is not re-read: from check 1 the destination is fixed, the
+  // funder signed for it, and the pinned row is append-only through the
+  // application. A wallet row appended AFTER the reservation does not cancel
+  // this payment (A1): it goes to the address that was the payee's newest
+  // wallet row at the reservation. The statement records the checked pair on
+  // the listing (A6), so the 502 and 500 recovery paths keep it. Binds, in
+  // order: at, walletRowId, walletRowHash, listingId, at, submissionId,
+  // walletRowId, citizen, walletRowHash, citizen, walletRowId.
   let reservedByMe = false;
   let reservedAt = 0;
   let result: Awaited<ReturnType<typeof payAndSettle>>;
@@ -639,16 +741,18 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     result = await payAndSettle(env, request, reqs, async () => {
       const at = Date.now();
       const reserved = await env.DB.prepare(
-        `UPDATE listings SET status = 'paying', paying_since = ?
+        `UPDATE listings SET status = 'paying', paying_since = ?, paying_wallet_row_id = ?, paying_wallet_row_hash = ?
          WHERE id = ? AND status = 'open' AND expires_at > ? AND mod_state IS NULL
-           AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ? AND s.listing_id = listings.id AND s.status = 'open' AND s.mod_state IS NULL)`,
+           AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ? AND s.listing_id = listings.id AND s.status = 'open' AND s.mod_state IS NULL)
+           AND EXISTS (SELECT 1 FROM identity_events e WHERE e.id = ? AND e.citizen_id = ? AND e.kind IN ('wallet_declared', 'wallet_changed') AND e.hash = ?)
+           AND NOT EXISTS (SELECT 1 FROM identity_events e2 WHERE e2.citizen_id = ? AND e2.kind IN ('wallet_declared', 'wallet_changed') AND e2.id > ?)`,
       )
-        .bind(at, listingId, at, submissionId)
+        .bind(at, pin.walletRowId, pin.walletRowHash, listingId, at, submissionId, pin.walletRowId, submission.citizen_id, pin.walletRowHash, submission.citizen_id, pin.walletRowId)
         .run();
       if (reserved.meta.changes !== 1) {
         throw new SocietyError(
           409,
-          "This listing can no longer be paid: it is already being paid, paid, withdrawn, expired or moderated, or the submission is no longer open. Nothing was settled.",
+          "This listing can no longer be paid: it is already being paid, paid, withdrawn, expired or moderated, or the submission is no longer open, or the pinned wallet row is no longer the payee's newest. Nothing was settled.",
         );
       }
       reservedByMe = true;
@@ -669,14 +773,16 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // for the signed nonce, after validBefore, at a two-RPC quorum.
     if (!reservedByMe) throw e;
     const reason = e instanceof Error ? e.message : String(e);
-    console.log(JSON.stringify({ level: "error", event: "listing_pay_settle_unconfirmed", listing_id: listingId, submission_id: submissionId, paying_since: reservedAt, reason }));
+    console.log(JSON.stringify({ level: "error", event: "listing_pay_settle_unconfirmed", listing_id: listingId, submission_id: submissionId, paying_since: reservedAt, wallet_row_id: pin.walletRowId, wallet_row_hash: pin.walletRowHash, reason }));
     return Response.json(
       {
         error: "settlement_unconfirmed",
         listing_id: listingId,
         submission_id: submissionId,
         paying_since: reservedAt,
-        message: `The settle request was sent and no answer was read (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that. GET /api/listing/${listingId} serves the state.`,
+        wallet_row_id: pin.walletRowId,
+        wallet_row_hash: pin.walletRowHash,
+        message: `The settle request was sent and no answer was read (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that, against the wallet row recorded here (${pin.walletRowId}), never whichever row is newest at reconciliation time. GET /api/listing/${listingId} serves the state.`,
       },
       { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
     );
@@ -690,7 +796,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // lock so the funder can retry. A refused settle is an ANSWER (the
     // facilitator said no), unlike the unread one caught above.
     if (reservedByMe) {
-      await env.DB.prepare("UPDATE listings SET status = 'open', paying_since = NULL WHERE id = ? AND status = 'paying'").bind(listingId).run();
+      await env.DB.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying'").bind(listingId).run();
     }
     return result.response;
   }
@@ -707,9 +813,11 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // and must never silently drop the payment record either.
   const now = Date.now();
   const insertStmt = env.DB.prepare(
-    "INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now);
-  const updateStmt = env.DB.prepare("UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL WHERE id = ?").bind(submissionId, result.tx, listingId);
+    "INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at, wallet_row_id, wallet_row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now, pin.walletRowId, pin.walletRowHash);
+  const updateStmt = env.DB.prepare(
+    "UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ?",
+  ).bind(submissionId, result.tx, listingId);
 
   try {
     await env.DB.batch([insertStmt, updateStmt]);
@@ -723,6 +831,8 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
         amount_cents: listing.bounty_cents,
         listing_id: listingId,
         submission_id: submissionId,
+        wallet_row_id: pin.walletRowId,
+        wallet_row_hash: pin.walletRowHash,
         reason: e instanceof Error ? e.message : String(e),
       }),
     );
@@ -746,6 +856,8 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
       payer_address: result.payer,
       amount_cents: listing.bounty_cents,
       tx: result.tx,
+      wallet_row_id: pin.walletRowId,
+      wallet_row_hash: pin.walletRowHash,
       listing_marked_paid: true,
       note: "Payment settled and this listing is now marked paid to this submission.",
       verify: "GET /api/listings/payments",
