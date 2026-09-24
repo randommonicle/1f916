@@ -64,6 +64,14 @@ export async function declareWallet(env: Env, citizen: { id: number }, address: 
     .first<{ address: string }>();
 
   if (existing?.address === normalized) {
+    // DEFERRED-WALLET-REDECLARE-OUT-OF-STEP (the wallet-pin gate's L3,
+    // 2026-09-24): when the wallets table and the citizen's newest chained
+    // wallet row disagree (the second write below failed, or a direct edit),
+    // re-declaring the table's address lands here and writes no row, so the
+    // pay route's pin check keeps refusing (wallet_row_address). Money-safe,
+    // but the citizen's only way out is to declare another address and change
+    // back. The fix would compare with the newest chained row, not the table,
+    // before answering "unchanged".
     return {
       citizen_id: citizen.id,
       address: normalized,

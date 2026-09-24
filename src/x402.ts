@@ -187,6 +187,20 @@ export async function payAndSettle(
   if (afterVerify) await afterVerify();
 
   const settlement = await facilitator(env, "/settle", rpcBody);
+  // Only a well-formed answer is an answer (CODEX, build review 2026-09-24,
+  // finding 1). facilitator() returns any parseable body whatever the HTTP
+  // status, so an intermediary's JSON error page, or a reply without a
+  // boolean `success`, used to read as a refusal here: handlePayListing then
+  // released its reservation and a retry could pay twice if the facilitator
+  // had in fact broadcast. Such a body says nothing about whether the money
+  // moved, so it takes the unknown-outcome path an unreadable body already
+  // takes: thrown, never read as a refusal. handlePayListing keeps its
+  // reservation (settlement_unconfirmed); the other callers answer 502,
+  // "unknown until the chain is checked", instead of a 402 that invites a
+  // second payment. An explicit `success: false` is still a refusal.
+  if (typeof settlement.success !== "boolean") {
+    throw new SocietyError(502, "The facilitator's answer to /settle was not a settlement result (no boolean success). The settle request was sent; whether the money moved is unknown until the chain is checked.");
+  }
   if (settlement.success !== true) {
     return {
       ok: false,

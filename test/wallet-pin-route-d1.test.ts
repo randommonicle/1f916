@@ -46,7 +46,7 @@ async function loadCitizen(d1: LocalD1, id: number) {
 
 // The facilitator: onVerify runs in the window between check 1 and the
 // reservation (the race window); `settle` picks the /settle answer.
-function stubFacilitator(hooks: { onVerify?: () => Promise<void> | void; settle?: "ok" | "refused" | "unreadable" } = {}) {
+function stubFacilitator(hooks: { onVerify?: () => Promise<void> | void; settle?: "ok" | "refused" | "unreadable" | "json-error" } = {}) {
   const original = globalThis.fetch;
   const calls = { verify: 0, settle: 0, settlePayTo: null as string | null };
   globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
@@ -60,6 +60,7 @@ function stubFacilitator(hooks: { onVerify?: () => Promise<void> | void; settle?
       calls.settle++;
       calls.settlePayTo = (JSON.parse(String(init?.body)) as { paymentRequirements: { payTo: string } }).paymentRequirements.payTo;
       if (hooks.settle === "unreadable") return new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+      if (hooks.settle === "json-error") return new Response(JSON.stringify({ error: "upstream timeout" }), { status: 502, headers: { "content-type": "application/json" } });
       if (hooks.settle === "refused") return new Response(JSON.stringify({ success: false, errorReason: "insufficient_funds" }), { status: 200, headers: { "content-type": "application/json" } });
       return new Response(JSON.stringify({ success: true, payer: "0x00000000000000000000000000000000000000fa", transaction: "0x" + "ab".repeat(32) }), { status: 200, headers: { "content-type": "application/json" } });
     }
@@ -422,6 +423,70 @@ test("test 1, the book half: GET /api/listings/payments serves wallet_row_id and
     assert.equal(old?.wallet_row_hash, null);
     assert.match(book.wallet_row_note, /Rows paid before the check existed carry null/);
     assert.match(book.wallet_row_note, /does not recompute the chain/);
+  } finally {
+    stub.restore();
+    f.d1.close();
+  }
+});
+
+test("CODEX build finding 1 on the route: a /settle answered by a JSON 502 with no success field keeps the reservation AND the pair (settlement_unconfirmed), and a retry never reaches /settle again", async () => {
+  const f = await fixture();
+  const stub = stubFacilitator({ settle: "json-error" });
+  try {
+    const res = await handlePayListing(payReq(f, pinOf(f.row)), f.env, f.funder, f.listingId);
+    assert.equal(res.status, 502);
+    assert.equal(((await res.json()) as { error: string }).error, "settlement_unconfirmed");
+    const l = listingRow(f);
+    assert.equal(l.status, "paying", "not released: whether the money moved is unknown");
+    assert.equal(l.paying_wallet_row_id, f.row.id);
+    assert.equal(l.paying_wallet_row_hash, f.row.hash);
+    await assert.rejects(handlePayListing(payReq(f, pinOf(f.row)), f.env, f.funder, f.listingId), (e: unknown) => e instanceof SocietyError && e.status === 409);
+    assert.equal(stub.calls.settle, 1, "the retry never reaches /settle: no second payment");
+  } finally {
+    stub.restore();
+    f.d1.close();
+  }
+});
+
+test("gate L2b: a payee whose NEWEST identity row is not a wallet row (a later model correction) is still payable with its wallet row pinned, and A7 serves the wallet row", async () => {
+  const f = await fixture();
+  const stub = stubFacilitator();
+  try {
+    await appendChained(f.d1.DB, "identity_events", { citizen_id: f.reviewerId, kind: "model_correction", detail: "model: a -> b", created_at: Date.now() });
+    const d = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.equal(d.submissions[0].payee_wallet_row?.id, f.row.id, "the served row is the wallet row, not the newer model row");
+    const res = await handlePayListing(payReq(f, pinOf(f.row)), f.env, f.funder, f.listingId);
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assert.deepEqual(bookRows(f), [{ payee_address: WALLET_A, wallet_row_id: f.row.id, wallet_row_hash: f.row.hash }]);
+  } finally {
+    stub.restore();
+    f.d1.close();
+  }
+});
+
+test("gate L2c: settled but unrecorded (the record batch fails after settlement) -> 500, the listing stays paying and KEEPS the checked pair, and GET /api/listing/:id serves it", async () => {
+  const f = await fixture();
+  const stub = stubFacilitator();
+  try {
+    const brokenEnv = {
+      ...f.env,
+      DB: {
+        prepare: (sql: string) => f.env.DB.prepare(sql),
+        batch: async (stmts: unknown[]) => {
+          const broken = f.env.DB.prepare("INSERT INTO listing_payments (listing_id) VALUES (?)").bind(f.listingId);
+          return f.env.DB.batch([broken, stmts[1]] as never[]);
+        },
+      },
+    } as unknown as Env;
+    await assert.rejects(handlePayListing(payReq(f, pinOf(f.row)), brokenEnv, f.funder, f.listingId), (e: unknown) => e instanceof SocietyError && e.status === 500);
+    assert.equal(stub.calls.settle, 1, "the money moved");
+    const l = listingRow(f);
+    assert.equal(l.status, "paying");
+    assert.equal(l.paying_wallet_row_id, f.row.id, "the pair survives for reconciliation");
+    assert.equal(l.paying_wallet_row_hash, f.row.hash);
+    const d = (await getListingDetail(f.env, f.listingId)) as unknown as Detail;
+    assert.equal(d.listing.paying_wallet_row_id, f.row.id);
+    assert.equal(bookRows(f).length, 0, "nothing recorded: the operator reconciles from the chain");
   } finally {
     stub.restore();
     f.d1.close();

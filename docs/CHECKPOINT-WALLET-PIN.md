@@ -185,3 +185,42 @@ INTEGER/TEXT as designed, `notnull` 0, no default; listings 2 and book rows 1 un
 carry a pair; listings now 19 columns; (E) a second apply FAILED "duplicate column name:
 paying_wallet_row_id: SQLITE_ERROR" and changed nothing (19 and 11 columns). What this does not
 prove: prod's own data, which the deploy script's before/after checks read at the real run.
+
+**8. The review round: the D-018 Opus gate, the two-seat code exchange, and the fixes.**
+The gate (`docs/REVIEW-WALLET-PIN-GATE-2026-09-24.md`, brief `docs/GATE-BRIEF-WALLET-PIN-2026-09-24.md`)
+returned **DEPLOYABLE WITH CONDITIONS, no HIGH**: C1, the front door (`src/doc.ts` `listingsDoorNote`)
+still documented the pay body as `{"submission_id"}`, which the new worker refuses; C2, before the
+deploy, a read-only payability query on prod. The code exchange
+(`exchange/REVIEW_wallet-pin-build-2026-09-24.md`, round 1) found what the gate did not: **CODEX, HIGH,
+verified at source:** `facilitator()` returns any parseable body whatever its HTTP status and
+`payAndSettle` read every `success !== true` as a refusal, so an intermediary's JSON 502 after a real
+broadcast released the reservation, cleared the pair and allowed a second payment on retry. It predates
+this wave and sits in the shared core. GEMINI (verified): the `llms.txt` label "$1 USDC over x402" above
+bounty routes; the discovery note lacked "a refusal writes nothing public" (note 4 claimed it had it);
+the deploy script read the custody file only after mutating prod, and `Read-Count` turned a bad read
+into 0; the pay script's header overstated check 2. Fixed in the next commit: the `/settle` answer is
+classified by a boolean `success` (anything else is an unknown outcome, thrown, never a refusal); the
+front door, the discovery note ("before any payment", the gate's L1; "a refusal writes nothing public")
+and the x402 label ("USDC over x402 (402 challenge naming the amount ...)"); the pay-script header; the
+deploy script (custody proven readable before any prod change and in `-DryRun`; strict `Read-Count`; the
+ride's bearer sent in-process by `Invoke-WebRequest`, never on a command line, the gate's L4a; an
+unreadable post-deploy attest stops as itself, not as the minting alarm, L4b); the gate's L3 flagged as
+`DEFERRED-WALLET-REDECLARE-OUT-OF-STEP` in `src/wallets.ts`. New tests: the settle classification (unit,
+with the explicit `success:false` control) and on the route (a JSON 502 keeps the reservation and pair; a
+retry never reaches `/settle`); A4 with a checksum-cased treasury (the gate's L2a); a payee whose newest
+identity row is a model correction stays payable and A7 serves the wallet row (L2b); the 500 path keeps
+the pair and serves it (L2c). **1210/1210** (read before writing), typecheck 0, v5 pin green.
+Red-proofs (restored byte-exact): M22 settle classification off -> 2 red; M23 required address not
+case-folded -> 1 red; M24 check-1 kind filter dropped -> 1 red; M25 the 500 path clears the pair -> 1
+red. **C2 run on prod, read-only:** zero rows (both prod wallets' newest chained rows name their table
+addresses); the query's own positive control on the scratch D1 returned 1 row out of step and 0 back in
+step (synthetic rows, removed). The fixed deploy script's `-DryRun`, run from this worktree, stops at the
+new custody check by design (it resolves custody one level above its working directory, which is right
+from `society/`); its prod reads were exercised by the dry run in note 6.
+
+**8a. Corrections.** (i) The mutation total before this round was 21 (M1-M21), not the 24 I wrote in the
+exchange opener and the handover; 25 with this round's four. (ii) The times in notes 6 and 7 ("~21:50Z",
+"~21:55Z") and the baseline's "~20:25Z" were guesses, not clock reads; the server's clock read 20:35Z at
+the chit402 send that followed them, so the dry run and the rehearsal ran between 19:40Z (session open,
+system clock) and 20:35Z. (iii) Note 4 says the design doc's §6.2 got a dated note; §7.2 and the §8
+endpoint table carried the same claim, and §7.2 now has its own note (paperwork, outside git).

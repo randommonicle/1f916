@@ -36,7 +36,14 @@ function Read-Catalogue() {
   $presentP = @($PIN_PAYMENTS_COLUMNS | Where-Object { $n = $_; @($paymentsInfo | Where-Object { $_.name -eq $n }).Count -eq 1 })
   return @{ listingsInfo = $listingsInfo; paymentsInfo = $paymentsInfo; present = ($presentL.Count + $presentP.Count); presentNames = (@($presentL) + @($presentP)) }
 }
-function Read-Count($sql) { $r = Read-D1Json (npx wrangler d1 execute commonhold --remote --json --command $sql); return [int](@($r[0].results)[0].n) }
+# Strict (GEMINI build review G2.2): a missing or non-numeric result STOPS; [int]$null would silently read 0 and pass
+# every "must be 0" gate below without reading anything.
+function Read-Count($sql) {
+  $r = Read-D1Json (npx wrangler d1 execute commonhold --remote --json --command $sql)
+  $rows = @($r[0].results)
+  if ($rows.Count -ne 1 -or $null -eq $rows[0].n -or "$($rows[0].n)" -notmatch "^[0-9]+$") { Stop-Here "a count query returned no usable number ($sql); refusing to reason from a bad read" }
+  return [int]$rows[0].n
+}
 
 # 0. where we are
 $head = (git rev-parse --short=8 HEAD).Trim()
@@ -52,6 +59,12 @@ if ($level -notmatch "main\.\.\.origin/main$") {
   else { Stop-Here "push first: the deploy must ship the same commit the public fork carries (R-4 / D-006)." }
 }
 if (-not (Test-Path "migrations/0016_wallet_pin.sql")) { Stop-Here "migrations/0016_wallet_pin.sql is not in this checkout: wrong branch or directory" }
+# The ride's custody file is proven readable BEFORE anything on prod changes (GEMINI build review G2.1), in -DryRun too.
+# Its secret is checked for presence only and never printed.
+$CUSTODY = Join-Path (Resolve-Path "..").Path "commonhold-agent-registration.local.json"
+if (-not (Test-Path $CUSTODY)) { Stop-Here "custody file for the refusal ride not found (commonhold-agent-registration.local.json one level up)" }
+if (-not (Get-Content $CUSTODY -Raw | ConvertFrom-Json).secret) { Stop-Here "custody file for the refusal ride did not parse to a secret" }
+Write-Host "[custody] the refusal ride's bearer is present (not printed)"
 
 # 1. the wave's own gates, re-run here so a stale checkout cannot deploy
 Write-Host "[gate] npm run typecheck"
@@ -101,6 +114,8 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "wrangler deploy failed (the migration is a
 
 # 5. the ride: public GETs, then one refusal-only POST
 $attestAfter = curl.exe -s "$B/api/attest" | ConvertFrom-Json
+# An unreadable attest is its own stop, never the minting alarm (gate L4b).
+if ($null -eq $attestAfter -or $null -eq $attestAfter.constitution -or -not $attestAfter.constitution.template_hash) { Stop-Here "GET /api/attest was unreadable after the deploy; re-read it by hand before anything else (this is NOT a minting signal)" }
 if ($attestAfter.constitution.template_hash -ne $attestBefore.constitution.template_hash) { Stop-Here "template_hash CHANGED: this wave was expected to be non-minting; investigate before anything else" }
 foreach ($c in @("identity_log", "treasury", "payouts", "ballots")) {
   if ($attestAfter.$c.status -ne "verified") { Stop-Here ("chain " + $c + " is '" + $attestAfter.$c.status + "' after the deploy, not verified: investigate") }
@@ -123,19 +138,21 @@ Write-Host ("[ride] /api/listing/3: payee_wallet_row served on " + $served.Count
 # One string, not an array of lines (L-080 family: -notmatch on an array filters).
 $guide = (curl.exe -s "$B/api/listings/guide") -join "`n"
 if ($guide -notmatch "wallet_row_id, wallet_row_hash") { Stop-Here "the guide does not name the pin" }
-# The refusal-only POST: commonhold-agent's bearer is read from its custody file and never printed.
-$custody = Join-Path (Resolve-Path "..").Path "commonhold-agent-registration.local.json"
-if (-not (Test-Path $custody)) { Stop-Here "custody file not found for the refusal ride; the deploy is done, ride by hand" }
-$secret = (Get-Content $custody -Raw | ConvertFrom-Json).secret
-if (-not $secret) { Stop-Here "custody file did not parse; the deploy is done, ride by hand" }
-$tmp = [System.IO.Path]::GetTempFileName()
-[System.IO.File]::WriteAllText($tmp, '{"submission_id":1}', (New-Object System.Text.UTF8Encoding($false)))
-$resp = curl.exe -s -w "`n%{http_code}" -X POST "$B/api/listing/3/pay" -H "content-type: application/json" -H "Authorization: Bearer $secret" --data-binary "@$tmp"
-Remove-Item $tmp
+# The refusal-only POST: commonhold-agent's bearer is read from its custody file, sent in-process (never on a command
+# line other processes can read, gate L4a), and never printed.
+$secret = (Get-Content $CUSTODY -Raw | ConvertFrom-Json).secret
+$status = ""; $bodyText = ""
+try {
+  $ok = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$B/api/listing/3/pay" -ContentType "application/json" -Headers @{ Authorization = "Bearer $secret" } -Body '{"submission_id":1}'
+  $status = [string][int]$ok.StatusCode; $bodyText = $ok.Content
+} catch [System.Net.WebException] {
+  $r = $_.Exception.Response
+  if ($null -eq $r) { $secret = $null; Stop-Here "the refusal ride got no HTTP response: $($_.Exception.Message)" }
+  $status = [string][int]$r.StatusCode
+  $bodyText = (New-Object System.IO.StreamReader($r.GetResponseStream())).ReadToEnd()
+}
 $secret = $null
-$lines = @($resp -split "`n")
-$status = $lines[-1].Trim()
-$json = ($lines[0..($lines.Count - 2)] -join "`n") | ConvertFrom-Json
+$json = $bodyText | ConvertFrom-Json
 Write-Host ("[ride] POST /api/listing/3/pay with no pin -> " + $status + " " + $json.code)
 if ($status -ne "400" -or $json.code -ne "wallet_row_required") { Stop-Here "the new worker did not refuse a pin-less pay request with 400 wallet_row_required" }
 Write-Host "[done] wave deployed and ridden (refusal-only). Log the worker version id and these lines in HANDOVER.md. The happy path is ridden by the next real payment (scripts/pay-listing.mjs, dry run first)."

@@ -682,7 +682,8 @@ wallet to wallet. Commonhold never holds the bounty, only a posting fee.
   GET  ${origin}/api/listings/security                (the trust model — read this first)
   POST ${origin}/api/listing        {"title","description","acceptance_condition","bounty_cents","expires_at"}
   POST ${origin}/api/submission     {"listing_id","body"}
-  POST ${origin}/api/listing/:id/pay        {"submission_id"}
+  POST ${origin}/api/listing/:id/pay        {"submission_id","wallet_row_id","wallet_row_hash"}
+       (pin the payee's newest wallet row: payee_wallet_row on GET /api/listing/:id)
   POST ${origin}/api/listing/:id/withdraw
 
 Not escrow: the society verifies and publishes, it never holds your money.

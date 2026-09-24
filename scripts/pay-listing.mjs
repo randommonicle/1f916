@@ -68,8 +68,9 @@
 //     wallet pin, docs/BRIEF-SERVER-SIDE-WALLET-PIN.md): both legs carry
 //     {submission_id, wallet_row_id, wallet_row_hash}; the pay route refuses
 //     a pin that is not the payee's newest wallet row, has another hash, or
-//     does not name the wallet on record, on the 402 probe and again inside
-//     the one reservation UPDATE; and it records the row it checked on the
+//     does not name the wallet on record, on the 402 probe, then re-checks
+//     newest-and-hash (not the address, which check 1 fixed) inside the one
+//     reservation UPDATE; and it records the row it checked on the
 //     payments-book row. This script requires that row back on the receipt:
 //     a receipt without it is a server that did not check, so the tombstone
 //     stays 'signing' and the operator reconciles.

@@ -173,6 +173,37 @@ test("A4 inside payAndSettle: a mismatched payload throws BEFORE the facilitator
   }
 });
 
+test("CODEX build finding 1: a /settle answer without a boolean `success` (an intermediary's JSON 502, an empty object, a string 'true') is an UNKNOWN outcome, thrown as 502 -- never read as a refusal; an explicit success:false still is one", async () => {
+  const reqs = testRequirements();
+  const original = globalThis.fetch;
+  const good = btoa(JSON.stringify(payloadFor(authFor(reqs))));
+  const run = async (settleStatus: number, settleBody: unknown) => {
+    globalThis.fetch = (async (url: unknown) => {
+      const href = String(url);
+      if (href.endsWith("/verify")) return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(settleBody), { status: settleStatus, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    return payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs);
+  };
+  try {
+    for (const [status, body] of [[502, { error: "upstream timeout" }], [200, {}], [200, { success: "true" }], [200, { success: null }]] as const) {
+      await assert.rejects(run(status, body), (e: unknown) => e instanceof SocietyError && e.status === 502 && /unknown until the chain is checked/.test(e.message), `HTTP ${status} ${JSON.stringify(body)} is unknown, not a refusal`);
+    }
+    const refused = await run(200, { success: false, errorReason: "insufficient_funds" });
+    assert.equal(refused.ok, false, "an explicit success:false is still a refusal");
+    if (!refused.ok) assert.equal(refused.response.status, 402);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("A4 with the production shape: a checksum-cased TREASURY_ADDRESS (wrangler.jsonc) and a payload signed for exactly that string pass; the lowercase form passes too", () => {
+  const env = { ...FAKE_ENV, TREASURY_ADDRESS: "0xA7f7985eb19B8c44F12a0654dF1EF89D1dD527c9" } as Env;
+  const reqs = buildPaymentRequirements(env, { resource: "https://example.test/api/register", description: "checksum-cased treasury", priceAtomic: "1000000" });
+  assertPayloadMatchesRequirements(payloadFor(authFor(reqs)), reqs);
+  assertPayloadMatchesRequirements(payloadFor(authFor(reqs, { to: reqs.payTo.toLowerCase() })), reqs);
+});
+
 test("errorBody: an error with no code serialises exactly as before codes existed ({ error }); a coded one adds `code` and keeps the prose in `error`", () => {
   assert.deepEqual(errorBody(new SocietyError(409, "listing 3 is paid, not open")), { error: "listing 3 is paid, not open" });
   assert.deepEqual(Object.keys(errorBody(new SocietyError(409, "x"))), ["error"]);
