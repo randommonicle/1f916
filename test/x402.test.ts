@@ -186,12 +186,32 @@ test("CODEX build finding 1: a /settle answer without a boolean `success` (an in
     return payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs);
   };
   try {
-    for (const [status, body] of [[502, { error: "upstream timeout" }], [200, {}], [200, { success: "true" }], [200, { success: null }]] as const) {
+    for (const [status, body] of [[502, { error: "upstream timeout" }], [200, {}], [200, { success: "true" }], [200, { success: null }], [200, null], [200, [true]], [200, "success"]] as const) {
       await assert.rejects(run(status, body), (e: unknown) => e instanceof SocietyError && e.status === 502 && /unknown until the chain is checked/.test(e.message), `HTTP ${status} ${JSON.stringify(body)} is unknown, not a refusal`);
     }
     const refused = await run(200, { success: false, errorReason: "insufficient_funds" });
     assert.equal(refused.ok, false, "an explicit success:false is still a refusal");
     if (!refused.ok) assert.equal(refused.response.status, 402);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("CODEX build round 2: a /verify answer that is JSON null is no answer -- a 502 'money was not taken', never a TypeError, and /settle is never called", async () => {
+  const reqs = testRequirements();
+  const original = globalThis.fetch;
+  let settles = 0;
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).endsWith("/settle")) settles++;
+    return new Response("null", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const good = btoa(JSON.stringify(payloadFor(authFor(reqs))));
+    await assert.rejects(
+      payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs),
+      (e: unknown) => e instanceof SocietyError && e.status === 502 && /money was not taken/.test(e.message),
+    );
+    assert.equal(settles, 0);
   } finally {
     globalThis.fetch = original;
   }

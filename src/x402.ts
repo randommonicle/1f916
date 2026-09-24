@@ -79,14 +79,21 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   // that could move money, so "not taken" is true; an unreadable answer to
   // /settle is exactly the case where whether the money moved is UNKNOWN,
   // and the caller (handlePayListing) keeps its reservation and says so.
+  // A body that parses but is not a JSON object (null, a string, an array)
+  // is no more an answer than one that does not parse (CODEX, build review
+  // round 2: a `null` body used to reach `settlement.success` and throw a
+  // TypeError, an opaque 500, instead of the unknown-outcome 502).
+  let answer: unknown;
   try {
-    return (await res.json()) as Record<string, unknown>;
+    answer = await res.json();
   } catch {
-    if (path === "/settle") {
-      throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). The settle request was sent; whether the money moved is unknown until the chain is checked.`);
-    }
-    throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`);
+    answer = undefined;
   }
+  if (answer !== null && typeof answer === "object" && !Array.isArray(answer)) return answer as Record<string, unknown>;
+  if (path === "/settle") {
+    throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). The settle request was sent; whether the money moved is unknown until the chain is checked.`);
+  }
+  throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`);
 }
 
 export type SettleResult =

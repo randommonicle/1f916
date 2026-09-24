@@ -224,3 +224,13 @@ exchange opener and the handover; 25 with this round's four. (ii) The times in n
 the chit402 send that followed them, so the dry run and the rehearsal ran between 19:40Z (session open,
 system clock) and 20:35Z. (iii) Note 4 says the design doc's §6.2 got a dated note; §7.2 and the §8
 endpoint table carried the same claim, and §7.2 now has its own note (paperwork, outside git).
+
+**9. Exchange round 2.** GEMINI converged on every point in its remit. CODEX conceded finding 1's fix
+and found one edge, verified at source: a `/settle` body of JSON `null` reached `settlement.success`
+and threw a `TypeError` (the pay route still kept its reservation, since its catch treats any throw
+after reserving as unknown, but the other callers answered an opaque 500). The same shape reached
+`verdict.isValid` on `/verify`. Fixed once, in `facilitator()`: a body that parses but is not a JSON
+object (null, a string, an array) is treated exactly as an unreadable one (the path-aware 502s). Tests:
+`null`, `[true]` and `"success"` added to the settle table; a new test for a `/verify` answer of `null`
+(502 "money was not taken", `/settle` never called). **1211/1211** (read before writing), typecheck 0.
+Red-proof: M26 the object-shape guard loosened -> 2 red; restored byte-exact.
