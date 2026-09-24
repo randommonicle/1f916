@@ -792,7 +792,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
         paying_since: reservedAt,
         wallet_row_id: pin.walletRowId,
         wallet_row_hash: pin.walletRowHash,
-        message: `The settle request was sent and no answer was read (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that, against the wallet row recorded here (${pin.walletRowId}), never whichever row is newest at reconciliation time. GET /api/listing/${listingId} serves the state.`,
+        message: `The settle request was sent and no settlement result was read (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that, against the wallet row recorded here (${pin.walletRowId}), never whichever row is newest at reconciliation time. GET /api/listing/${listingId} serves the state.`,
       },
       { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
     );

@@ -193,10 +193,15 @@ export async function payAndSettle(
 
   if (afterVerify) await afterVerify();
 
-  const settlement = await facilitator(env, "/settle", rpcBody);
+  // Every unknown /settle outcome is logged here, for every caller (re-gate
+  // L1, 2026-09-24): registration, the patron line and listing creation
+  // answer a SocietyError 502, which the router serves without logging, so
+  // money that did move would otherwise be findable only on the chain. The
+  // pay route also logs its own line with the listing's ids.
+  //
   // Only a well-formed answer is an answer (CODEX, build review 2026-09-24,
-  // finding 1). facilitator() returns any parseable body whatever the HTTP
-  // status, so an intermediary's JSON error page, or a reply without a
+  // finding 1). facilitator() returns any parsed JSON object whatever the
+  // HTTP status, so an intermediary's JSON error page, or a reply without a
   // boolean `success`, used to read as a refusal here: handlePayListing then
   // released its reservation and a retry could pay twice if the facilitator
   // had in fact broadcast. Such a body says nothing about whether the money
@@ -205,8 +210,15 @@ export async function payAndSettle(
   // reservation (settlement_unconfirmed); the other callers answer 502,
   // "unknown until the chain is checked", instead of a 402 that invites a
   // second payment. An explicit `success: false` is still a refusal.
-  if (typeof settlement.success !== "boolean") {
-    throw new SocietyError(502, "The facilitator's answer to /settle was not a settlement result (no boolean success). The settle request was sent; whether the money moved is unknown until the chain is checked.");
+  let settlement: Record<string, unknown>;
+  try {
+    settlement = await facilitator(env, "/settle", rpcBody);
+    if (typeof settlement.success !== "boolean") {
+      throw new SocietyError(502, "The facilitator's answer to /settle was not a settlement result (no boolean success). The settle request was sent; whether the money moved is unknown until the chain is checked.");
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ level: "error", event: "x402_settle_outcome_unknown", resource: reqs.resource, pay_to: reqs.payTo, amount_atomic: reqs.maxAmountRequired, reason: e instanceof Error ? e.message : String(e) }));
+    throw e;
   }
   if (settlement.success !== true) {
     return {

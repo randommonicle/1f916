@@ -21,6 +21,11 @@ $PIN_PAYMENTS_COLUMNS = @("wallet_row_id", "wallet_row_hash")
 $PIN_TYPES = @{ paying_wallet_row_id = "INTEGER"; paying_wallet_row_hash = "TEXT"; wallet_row_id = "INTEGER"; wallet_row_hash = "TEXT" }
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
+# The custody file is parsed inside try/catch and nothing from a parse error is ever printed: PowerShell 5.1's
+# ConvertFrom-Json error text quotes the input, bearer included (re-gate M1, 2026-09-24). $null on any failure.
+function Read-CustodySecret($path) {
+  try { return (Get-Content $path -Raw | ConvertFrom-Json).secret } catch { return $null }
+}
 function Read-D1Json($lines) { $txt = ($lines | Out-String); $i = $txt.IndexOf("["); if ($i -lt 0) { Stop-Here "d1 returned no JSON: $txt" }; return ($txt.Substring($i) | ConvertFrom-Json) }
 function Read-TableInfo($table, $minColumns) {
   $info = Read-D1Json (npx wrangler d1 execute commonhold --remote --json --command "PRAGMA table_info($table)")
@@ -63,7 +68,7 @@ if (-not (Test-Path "migrations/0016_wallet_pin.sql")) { Stop-Here "migrations/0
 # Its secret is checked for presence only and never printed.
 $CUSTODY = Join-Path (Resolve-Path "..").Path "commonhold-agent-registration.local.json"
 if (-not (Test-Path $CUSTODY)) { Stop-Here "custody file for the refusal ride not found (commonhold-agent-registration.local.json one level up)" }
-if (-not (Get-Content $CUSTODY -Raw | ConvertFrom-Json).secret) { Stop-Here "custody file for the refusal ride did not parse to a secret" }
+if (-not (Read-CustodySecret $CUSTODY)) { Stop-Here "custody file for the refusal ride did not parse to a secret (its content is not shown)" }
 Write-Host "[custody] the refusal ride's bearer is present (not printed)"
 
 # 1. the wave's own gates, re-run here so a stale checkout cannot deploy
@@ -140,7 +145,8 @@ $guide = (curl.exe -s "$B/api/listings/guide") -join "`n"
 if ($guide -notmatch "wallet_row_id, wallet_row_hash") { Stop-Here "the guide does not name the pin" }
 # The refusal-only POST: commonhold-agent's bearer is read from its custody file, sent in-process (never on a command
 # line other processes can read, gate L4a), and never printed.
-$secret = (Get-Content $CUSTODY -Raw | ConvertFrom-Json).secret
+$secret = Read-CustodySecret $CUSTODY
+if (-not $secret) { Stop-Here "custody file did not parse at the ride (its content is not shown); the deploy is done, ride by hand" }
 $status = ""; $bodyText = ""
 try {
   $ok = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$B/api/listing/3/pay" -ContentType "application/json" -Headers @{ Authorization = "Bearer $secret" } -Body '{"submission_id":1}'

@@ -234,3 +234,20 @@ object (null, a string, an array) is treated exactly as an unreadable one (the p
 `null`, `[true]` and `"success"` added to the settle table; a new test for a `/verify` answer of `null`
 (502 "money was not taken", `/settle` never called). **1211/1211** (read before writing), typecheck 0.
 Red-proof: M26 the object-shape guard loosened -> 2 red; restored byte-exact.
+
+**10. The narrow re-gate of `4f07460c..f20eefdf` (record `docs/REVIEW-WALLET-PIN-REGATE-2026-09-24.md`):
+CLEAR WITH NOTES.** No path in the delta misroutes money, drops a reservation it should keep, or
+changes the constitution hash. Fixed before anything runs: **M1 (MEDIUM)** the deploy script parsed the
+custody file with `ConvertFrom-Json` under Stop with no `try`, so a malformed file would print its
+text, bearer included (reproduced by the re-gate with dummy values); now `Read-CustodySecret` parses
+inside try/catch and prints nothing, proven on dummy files (malformed: null, nothing printed;
+well-formed: the value; the dummy secret never appeared in the output). **L1** every unknown `/settle`
+outcome now logs `x402_settle_outcome_unknown` (resource, payee, amount) for every caller, since the
+router serves the 502 without a log line; one check, inside the logged `try`. **L2** the pay route's
+502 message says "no settlement result was read" (true of both unknown cases). Recorded, not changed:
+a copy of the bearer header can survive in `$Error` until the script's process ends (the documented
+`-File` invocation ends it); an HTML body on the ride crashes the parse after the bearer is blanked;
+the ride's catch is PowerShell 5.1-specific; a facilitator refusal without a boolean `success` now
+wedges a listing in `paying` for reconciliation (deliberate; the first real refusal shows PayAI's
+shape). **1212/1212** (read before writing), typecheck 0. Red-proof: M27 the log line removed -> 1 red;
+restored byte-exact.

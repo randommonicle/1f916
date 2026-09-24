@@ -217,6 +217,30 @@ test("CODEX build round 2: a /verify answer that is JSON null is no answer -- a 
   }
 });
 
+test("re-gate L1: an unknown /settle outcome is LOGGED for every caller (event x402_settle_outcome_unknown, with the resource, payee and amount), because the router serves the 502 without a log line", async () => {
+  const reqs = testRequirements();
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const lines: string[] = [];
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).endsWith("/verify")) return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ error: "upstream timeout" }), { status: 502, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try {
+    const good = btoa(JSON.stringify(payloadFor(authFor(reqs))));
+    await assert.rejects(payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs), SocietyError);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+  }
+  const events = lines.map((l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return null; } }).filter((e) => e?.event === "x402_settle_outcome_unknown");
+  assert.equal(events.length, 1, "exactly one unknown-outcome line");
+  assert.equal(events[0]!.resource, reqs.resource);
+  assert.equal(events[0]!.pay_to, reqs.payTo);
+  assert.equal(events[0]!.amount_atomic, reqs.maxAmountRequired);
+});
+
 test("A4 with the production shape: a checksum-cased TREASURY_ADDRESS (wrangler.jsonc) and a payload signed for exactly that string pass; the lowercase form passes too", () => {
   const env = { ...FAKE_ENV, TREASURY_ADDRESS: "0xA7f7985eb19B8c44F12a0654dF1EF89D1dD527c9" } as Env;
   const reqs = buildPaymentRequirements(env, { resource: "https://example.test/api/register", description: "checksum-cased treasury", priceAtomic: "1000000" });
