@@ -172,3 +172,16 @@ catalogue; it is 17. **Dry run ridden against prod, 2026-09-24 ~21:50Z** (reads 
 v5 `fa11788d`, identity 36 / treasury 17 / ballots 14, 0016 columns 0/4 (clean), listings 4,
 listing_payments 3, paying 0; stopped before the migration as designed (tree not clean only because
 of this script, uncommitted at that moment; not level, as expected on the branch).
+
+**7. 0016 rehearsed on the scratch D1 `commonhold-migtest` (`465f489c…`), 2026-09-24 ~21:55Z, under
+Ben's grant ("Yes, scratch only"); prod untouched.** Every command went through
+`scripts/changes-probe-worker/wrangler.jsonc`, which binds the scratch database and nothing else
+(checked first). The scratch database was BEHIND prod: its `listings` had 0009's fifteen columns,
+with neither 0013's `pledge` nor 0014's `paying_since`, and no rows. So: (A) 0013 and 0014 applied to
+the scratch first, giving prod's pre-0016 shape (listings 17 columns, listing_payments 9); (B)
+synthetic rows seeded (a paid listing with its submission and book row, an open listing); (C) 0016
+applied, exit 0, four statements; (D) the catalogue query returned exactly the four columns,
+INTEGER/TEXT as designed, `notnull` 0, no default; listings 2 and book rows 1 unchanged; zero rows
+carry a pair; listings now 19 columns; (E) a second apply FAILED "duplicate column name:
+paying_wallet_row_id: SQLITE_ERROR" and changed nothing (19 and 11 columns). What this does not
+prove: prod's own data, which the deploy script's before/after checks read at the real run.
