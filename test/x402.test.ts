@@ -10,8 +10,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPaymentRequirements, payAndSettle, USDC_BASE } from "../src/x402.ts";
-import { SocietyError } from "../src/society.ts";
+import { buildPaymentRequirements, payAndSettle, assertPayloadMatchesRequirements, USDC_BASE } from "../src/x402.ts";
+import { SocietyError, errorBody } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 
 const FAKE_ENV = {
@@ -93,4 +93,88 @@ test("a malformed X-PAYMENT header throws a 400, not a silent pass or an opaque 
     headers: { "X-PAYMENT": "not-valid-base64-json!!!" },
   });
   await assert.rejects(() => payAndSettle(FAKE_ENV, request, reqs), SocietyError);
+});
+
+// ---------- A4 (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md): the local payload check ----------
+// payAndSettle compares the decoded payload's signed `to` and `value` with the
+// requirements BEFORE /verify. It removes reliance on the facilitator for that
+// comparison only; signature verification and settlement stay the
+// facilitator's (the stub below never checks a signature).
+
+function payloadFor(auth: unknown): unknown {
+  return { x402Version: 1, scheme: "exact", network: "base", payload: { signature: "0x" + "11".repeat(65), authorization: auth } };
+}
+function authFor(reqs: { payTo: string; maxAmountRequired: string }, overrides: Record<string, unknown> = {}) {
+  return { from: "0x00000000000000000000000000000000000000fa", to: reqs.payTo, value: reqs.maxAmountRequired, validAfter: "0", validBefore: "9999999999", nonce: "0x" + "00".repeat(32), ...overrides };
+}
+function assertMismatch(fn: () => void, fragment: RegExp) {
+  assert.throws(fn, (e: unknown) => {
+    assert.ok(e instanceof SocietyError, "a SocietyError");
+    assert.equal(e.status, 400);
+    assert.equal(e.code, "payment_payload_mismatch");
+    assert.match(e.message, fragment);
+    return true;
+  });
+}
+
+test("A4: a payload signed for exactly the requirements passes; an EIP-55 checksum-cased `to` passes too (case is presentation)", () => {
+  const reqs = testRequirements();
+  assertPayloadMatchesRequirements(payloadFor(authFor(reqs)), reqs);
+  assertPayloadMatchesRequirements(payloadFor(authFor(reqs, { to: "0xA7F7985EB19B8C44F12A0654DF1EF89D1DD527C9" })), reqs);
+});
+
+test("A4: a payload signed for another destination is refused 400 payment_payload_mismatch", () => {
+  const reqs = testRequirements();
+  assertMismatch(() => assertPayloadMatchesRequirements(payloadFor(authFor(reqs, { to: "0x00000000000000000000000000000000000bad00" })), reqs), /pays "0x00000000000000000000000000000000000bad00".*requires payTo/);
+});
+
+test("A4: a payload signed for another amount is refused, including the same amount carried as a number rather than the scheme's decimal string", () => {
+  const reqs = testRequirements();
+  assertMismatch(() => assertPayloadMatchesRequirements(payloadFor(authFor(reqs, { value: "999999" })), reqs), /value "999999".*requires exactly "1000000"/);
+  assertMismatch(() => assertPayloadMatchesRequirements(payloadFor(authFor(reqs, { value: 1000000 })), reqs), /value 1000000/);
+});
+
+test("A4: an absent, null, array-shaped or field-less authorization is refused, never guessed at", () => {
+  const reqs = testRequirements();
+  for (const p of [{ fake: "payment-payload-for-a-test-stub" }, null, 42, "x", { payload: null }, payloadFor(null), payloadFor([authFor(reqs)])]) {
+    assertMismatch(() => assertPayloadMatchesRequirements(p, reqs), /no payload\.authorization object/);
+  }
+  assertMismatch(() => assertPayloadMatchesRequirements(payloadFor({ value: reqs.maxAmountRequired }), reqs), /pays undefined/);
+  assertMismatch(() => assertPayloadMatchesRequirements(payloadFor({ to: reqs.payTo }), reqs), /value undefined/);
+});
+
+test("A4 inside payAndSettle: a mismatched payload throws BEFORE the facilitator is called at all (no /verify, no afterVerify, no /settle)", async () => {
+  const reqs = testRequirements();
+  const original = globalThis.fetch;
+  let fetches = 0;
+  let afterVerifyCalls = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    return new Response(JSON.stringify({ isValid: true, success: true }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const bad = btoa(JSON.stringify(payloadFor(authFor(reqs, { to: "0x00000000000000000000000000000000000bad00" }))));
+    const request = new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": bad } });
+    await assert.rejects(
+      () => payAndSettle(FAKE_ENV, request, reqs, async () => { afterVerifyCalls++; }),
+      (e: unknown) => e instanceof SocietyError && e.status === 400 && e.code === "payment_payload_mismatch",
+    );
+    assert.equal(fetches, 0, "nothing reaches the facilitator");
+    assert.equal(afterVerifyCalls, 0);
+    // Positive control: the same harness with a matching payload DOES reach
+    // the facilitator (so the zero above is the check, not a broken stub).
+    const good = btoa(JSON.stringify(payloadFor(authFor(reqs))));
+    const ok = await payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs, async () => { afterVerifyCalls++; });
+    assert.equal(ok.ok, true);
+    assert.equal(fetches, 2, "/verify then /settle");
+    assert.equal(afterVerifyCalls, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("errorBody: an error with no code serialises exactly as before codes existed ({ error }); a coded one adds `code` and keeps the prose in `error`", () => {
+  assert.deepEqual(errorBody(new SocietyError(409, "listing 3 is paid, not open")), { error: "listing 3 is paid, not open" });
+  assert.deepEqual(Object.keys(errorBody(new SocietyError(409, "x"))), ["error"]);
+  assert.deepEqual(errorBody(new SocietyError(400, "bad payload", "payment_payload_mismatch")), { error: "bad payload", code: "payment_payload_mismatch" });
 });

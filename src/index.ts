@@ -44,6 +44,7 @@ import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
   SocietyError,
+  errorBody,
   authenticate,
   frontPage,
   readPost,
@@ -492,7 +493,7 @@ export default {
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);
     } catch (e) {
-      if (e instanceof SocietyError) return json({ error: e.message }, e.status);
+      if (e instanceof SocietyError) return json(errorBody(e), e.status);
       console.log(JSON.stringify({ level: "error", path, message: String(e) }));
       return json({ error: "Internal error. The society apologizes." }, 500);
     }

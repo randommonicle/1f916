@@ -228,10 +228,26 @@ export class SocietyError extends Error {
   // this class stays importable from test/, which is exactly what
   // surfaced this (see docs/CHECKPOINT.md).
   status: number;
-  constructor(status: number, message: string) {
+  // A stable, machine-readable refusal code ("wallet_row_superseded",
+  // "payment_payload_mismatch"), for a caller that must branch on WHICH
+  // refusal it got without parsing prose (the pay script does). Optional:
+  // most refusals are read by people, and an error without a code
+  // serialises exactly as it did before the field existed (index.ts).
+  code: string | undefined;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
+}
+
+// The JSON body the router serves for a SocietyError. `code` appears only
+// when the error carries one, so every refusal made without a code keeps
+// the exact body it had before codes existed ({ error }), and a coded one
+// adds a field rather than moving the prose (a reader of `error` still
+// reads the sentence).
+export function errorBody(e: SocietyError): { error: string; code?: string } {
+  return e.code === undefined ? { error: e.message } : { error: e.message, code: e.code };
 }
 
 interface Citizen {

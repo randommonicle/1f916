@@ -110,6 +110,38 @@ export type SettleResult =
 // cannot drift apart.
 export const PAYMENT_MAX_TIMEOUT_SECONDS = 300;
 
+// A4 (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md, CODEX): the decoded payload's
+// signed destination and amount must BE the requirements this route issued,
+// checked here before /verify. payAndSettle used to forward the payload with
+// reqs and trust verdict.isValid, so "the payer signs for payTo" held only if
+// the facilitator compared the two. This removes reliance on /verify for the
+// payload-to-requirements destination and amount comparison ONLY: signature
+// verification and faithful settlement remain facilitator dependencies
+// (/settle is still an external call whose reported success the Worker
+// trusts). The address is compared case-folded (EIP-55 casing is
+// presentation, not identity); the value exactly, as the decimal string the
+// x402 "exact" scheme carries (scripts/register-maintainer.mjs
+// buildAuthorization + encodePaymentHeader). A missing, malformed or
+// wrong-typed authorization refuses: nothing about it is guessed. Pure, so
+// every refusal is provable offline; every caller of payAndSettle (patron,
+// register, listing create, listing pay) inherits it.
+export const PAYMENT_PAYLOAD_MISMATCH = "payment_payload_mismatch";
+const shown = (v: unknown) => JSON.stringify(v)?.slice(0, 100) ?? String(v);
+export function assertPayloadMatchesRequirements(paymentPayload: unknown, reqs: PaymentRequirements): void {
+  const inner = paymentPayload !== null && typeof paymentPayload === "object" ? (paymentPayload as { payload?: unknown }).payload : undefined;
+  const auth = inner !== null && typeof inner === "object" ? (inner as { authorization?: unknown }).authorization : undefined;
+  if (auth === null || typeof auth !== "object" || Array.isArray(auth)) {
+    throw new SocietyError(400, "X-PAYMENT carries no payload.authorization object (the x402 'exact' scheme's signed transfer). Nothing was sent to the facilitator.", PAYMENT_PAYLOAD_MISMATCH);
+  }
+  const { to, value } = auth as { to?: unknown; value?: unknown };
+  if (typeof to !== "string" || to.toLowerCase() !== reqs.payTo.toLowerCase()) {
+    throw new SocietyError(400, `The signed authorization pays ${shown(to)}, but this request requires payTo ${reqs.payTo}. Nothing was sent to the facilitator; sign for the requirements this route issued.`, PAYMENT_PAYLOAD_MISMATCH);
+  }
+  if (typeof value !== "string" || value !== reqs.maxAmountRequired) {
+    throw new SocietyError(400, `The signed authorization is for value ${shown(value)}, but this request requires exactly "${reqs.maxAmountRequired}" (atomic USDC, a decimal string). Nothing was sent to the facilitator; sign for the requirements this route issued.`, PAYMENT_PAYLOAD_MISMATCH);
+  }
+}
+
 export async function payAndSettle(
   env: Env,
   request: Request,
@@ -137,6 +169,7 @@ export async function payAndSettle(
   } catch {
     throw new SocietyError(400, "X-PAYMENT must be base64-encoded JSON (x402 payment payload)");
   }
+  assertPayloadMatchesRequirements(paymentPayload, reqs);
 
   const rpcBody = { x402Version: 1, paymentPayload, paymentRequirements: reqs };
 

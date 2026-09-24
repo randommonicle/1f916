@@ -36,6 +36,7 @@ import {
 } from "../src/society.ts";
 import { handleCreateListing, createSubmission, handlePayListing, withdrawListing, listListings, getListingDetail, listingPaymentsPage, computeListingFeeCents, UNRESOLVED_AFTER_MS } from "../src/listings.ts";
 import { sha256Hex } from "../src/chain.ts";
+import { paymentHeaderFor, atomicFromCents } from "./helpers/x402-payload.ts";
 import type { Env } from "../src/society.ts";
 
 const TREASURY_ADDRESS = "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9";
@@ -556,8 +557,24 @@ test("me(): a different citizen's listing/submission activity does not affect th
 // its real HTTP-shaped handlers.
 // ============================================================================
 
-function fakePaymentHeader(): string {
-  return btoa(JSON.stringify({ fake: "payment-payload-for-a-test-stub" }));
+// The X-PAYMENT a real funder signs for a pay request (A4: payAndSettle now
+// refuses a payload whose signed `to`/`value` differ from the requirements):
+// to = the submission's citizen's CURRENT wallet, value = the listing's stored
+// bounty, both read from the DB exactly as the route derives them. A row the
+// route refuses before payAndSettle (no wallet, unknown listing) gets a
+// placeholder that is never compared.
+function payHeaderFromDb(d1: LocalD1, listingId: number, submissionId: number): string {
+  const l = d1.raw.prepare("SELECT bounty_cents FROM listings WHERE id = ?").get(listingId) as { bounty_cents: number } | undefined;
+  const w = d1.raw.prepare("SELECT w.address FROM submissions s JOIN wallets w ON w.citizen_id = s.citizen_id WHERE s.id = ?").get(submissionId) as { address: string } | undefined;
+  return paymentHeaderFor(w?.address ?? "0x" + "0".repeat(40), atomicFromCents(l?.bounty_cents ?? 0));
+}
+
+// The posting fee a real funder signs for: the treasury, and the fee the
+// route computes from the bounty (a bounty the route refuses for free never
+// reaches the comparison, so its placeholder value is never read).
+function listingFeeHeader(bountyCents: unknown): string {
+  const fee = typeof bountyCents === "number" && Number.isSafeInteger(bountyCents) && bountyCents > 0 ? computeListingFeeCents(bountyCents) : 0;
+  return paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(fee));
 }
 
 function insertWallet(d1: LocalD1, citizenId: number, address: string): void {
@@ -575,15 +592,15 @@ function listingCreateRequest(bodyOverrides: Record<string, unknown> = {}, withP
     ...bodyOverrides,
   };
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (withPayment) headers["X-PAYMENT"] = fakePaymentHeader();
+  if (withPayment) headers["X-PAYMENT"] = listingFeeHeader(body.bounty_cents);
   return new Request("https://example.test/api/listing", { method: "POST", headers, body: JSON.stringify(body) });
 }
 
-function payRequest(listingId: number, submissionId: number, extra: Record<string, unknown> = {}): Request {
+function payRequest(d1: LocalD1, listingId: number, submissionId: number, extra: Record<string, unknown> = {}): Request {
   const body = { submission_id: submissionId, ...extra };
   return new Request(`https://example.test/api/listing/${listingId}/pay`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-PAYMENT": fakePaymentHeader() },
+    headers: { "Content-Type": "application/json", "X-PAYMENT": payHeaderFromDb(d1, listingId, submissionId) },
     body: JSON.stringify(body),
   });
 }
@@ -591,10 +608,10 @@ function payRequest(listingId: number, submissionId: number, extra: Record<strin
 // F2: identical to payRequest above, but carrying a CF-Connecting-IP header
 // -- needed only by the throttle end-to-end proof, which must drive real
 // requests from a consistent, known IP.
-function payRequestFromIp(listingId: number, submissionId: number, ip: string): Request {
+function payRequestFromIp(d1: LocalD1, listingId: number, submissionId: number, ip: string): Request {
   return new Request(`https://example.test/api/listing/${listingId}/pay`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-PAYMENT": fakePaymentHeader(), "CF-Connecting-IP": ip },
+    headers: { "Content-Type": "application/json", "X-PAYMENT": payHeaderFromDb(d1, listingId, submissionId), "CF-Connecting-IP": ip },
     body: JSON.stringify({ submission_id: submissionId }),
   });
 }
@@ -919,7 +936,7 @@ test("handlePayListing: payTo is derived from the submission's citizen -> wallet
     // inflated amount. The regression this test would catch: a version of
     // handlePayListing that trusted request.payTo or request.amount_cents
     // instead of deriving them from the stored row.
-    const request = payRequest(listingId, submissionId, { payTo: ATTACKER_WALLET, amount_cents: 999_999_999 });
+    const request = payRequest(d1, listingId, submissionId, { payTo: ATTACKER_WALLET, amount_cents: 999_999_999 });
     const res = await handlePayListing(request, env, funder, listingId);
     assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
 
@@ -948,6 +965,50 @@ test("handlePayListing: payTo is derived from the submission's citizen -> wallet
   }
 });
 
+// A4 ridden through the pay route (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md test
+// 9): an X-PAYMENT whose signed transfer is not the requirements this route
+// issued -- another destination, or another amount -- is refused 400
+// payment_payload_mismatch before /verify. The listing is never reserved and
+// nothing is recorded. The server no longer relies on the facilitator to
+// notice that the signature commits to something other than payTo.
+test("A4: a pay request whose X-PAYMENT signs for another address or another amount is refused 400 before /verify; the listing stays open, nothing recorded", async () => {
+  for (const label of ["another address", "another amount"] as const) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitatorFetch();
+    try {
+      const env = testEnv(d1);
+      const funderId = insertCitizen(d1);
+      const funder = await loadCitizen(d1, funderId);
+      const reviewerId = insertCitizen(d1);
+      insertWallet(d1, reviewerId, "0x00000000000000000000000000000000000ee1");
+      const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 2500 });
+      const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+      const header = label === "another address"
+        ? paymentHeaderFor("0x00000000000000000000000000000000000bad00", atomicFromCents(2500))
+        : paymentHeaderFor("0x00000000000000000000000000000000000ee1", atomicFromCents(1));
+      const request = new Request(`https://example.test/api/listing/${listingId}/pay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": header },
+        body: JSON.stringify({ submission_id: submissionId }),
+      });
+      await assert.rejects(
+        () => handlePayListing(request, env, funder, listingId),
+        (e: unknown) => e instanceof SocietyError && e.status === 400 && e.code === "payment_payload_mismatch",
+        `${label}: refused with the stable code`,
+      );
+      assert.equal(stub.verifyCalls(), 0, `${label}: /verify never called`);
+      assert.equal(stub.settleCalls(), 0, `${label}: /settle never called`);
+      const row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
+      assert.equal(row.status, "open", `${label}: never reserved`);
+      assert.equal(row.paying_since, null);
+      assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments").get() as { n: number }).n, 0, `${label}: no payment row`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
 // Finding 2 (outside review 2026-09-17, MEDIUM): loadPayableListing checked
 // expiry BEFORE /verify; the reservation checked status only, so a listing
 // that expired during the facilitator round trip was still settled and
@@ -972,7 +1033,7 @@ test("handlePayListing: a listing that EXPIRES during /verify is refused 409 at 
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409 && /expired/.test(e.message) && /Nothing was settled/.test(e.message),
     );
     assert.equal(stub.verifyCalls(), 1, "the signed payment did reach /verify");
@@ -1017,7 +1078,7 @@ test("handlePayListing: a submission MODERATED during /verify (real moderateCont
     submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409 && /submission is no longer open/.test(e.message),
     );
     assert.equal(stub.settleCalls(), 0, "never reached /settle");
@@ -1065,7 +1126,7 @@ test("handlePayListing: moderation landing AFTER the reservation (during /settle
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
-    const res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    const res = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
     assert.equal(settleCalls, 1);
     const row = d1.raw.prepare("SELECT status, paid_submission_id FROM listings WHERE id = ?").get(listingId) as { status: string; paid_submission_id: number };
@@ -1104,7 +1165,7 @@ test("handlePayListing: a /settle whose answer cannot be read keeps the reservat
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
     const before = Date.now();
-    const res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    const res = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     assert.equal(res.status, 502);
     const body = (await res.json()) as { error: string; listing_id: number; submission_id: number; paying_since: number; message: string };
     assert.equal(body.error, "settlement_unconfirmed", "a stable code the pay script can branch on");
@@ -1144,7 +1205,7 @@ test("handlePayListing: a /settle whose answer cannot be read keeps the reservat
 
     // A retry against the kept reservation is refused for free, before any settle: the tombstone holds.
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409 && /is paying, not open/.test(e.message),
     );
   } finally {
@@ -1173,7 +1234,7 @@ test("handlePayListing: a /verify whose answer cannot be read throws the facilit
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 502 && /money was not taken/i.test(e.message),
     );
     const row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
@@ -1210,14 +1271,14 @@ test("handlePayListing: paying_since is cleared on a refused settle (release) an
     const listingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
-    const refused = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    const refused = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     assert.equal(refused.status, 402);
     let row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
     assert.equal(row.status, "open", "a refused settle is an answer: released");
     assert.equal(row.paying_since, null, "and the reservation time goes with it");
 
     refuse = false;
-    const paid = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    const paid = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     assert.equal(paid.status, 200);
     row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
     assert.equal(row.status, "paid");
@@ -1240,7 +1301,7 @@ test("handlePayListing: a wallet-less reviewer is refused for free -- the facili
     const listingId = insertListing(d1, { funder_citizen_id: funderId });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409,
     );
     assert.equal(stub.verifyCalls(), 0, "a wallet-less reviewer must be refused before any payment is even requested");
@@ -1262,7 +1323,7 @@ test("handlePayListing: only the listing's funder may pay -- another citizen is 
     const listingId = insertListing(d1, { funder_citizen_id: funderId });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, stranger, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, stranger, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 403,
     );
   } finally {
@@ -1287,7 +1348,7 @@ test("handlePayListing: the 21st pay attempt from one IP within an hour is refus
     const verifyCallsBefore = stub.verifyCalls();
     const settleCallsBefore = stub.settleCalls();
     await assert.rejects(
-      () => handlePayListing(payRequestFromIp(listingId, submissionId, ip), env, funder, listingId),
+      () => handlePayListing(payRequestFromIp(d1, listingId, submissionId, ip), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 429,
     );
     assert.equal(stub.verifyCalls(), verifyCallsBefore, "the 21st attempt must never reach the facilitator's /verify either -- capped before the round trip, not during it");
@@ -1345,7 +1406,7 @@ test("concurrent double-click: two truly-interleaved pay attempts for the same l
       if (href === `${FACILITATOR_URL}/verify`) {
         const myVerifyIndex = ++verifyCalls; // captured immediately, before any nested recursion can move the shared counter further
         if (myVerifyIndex === 1) {
-          const bRes = await handlePayListing(payRequest(listingId, submissionBId), env, funder, listingId);
+          const bRes = await handlePayListing(payRequest(d1, listingId, submissionBId), env, funder, listingId);
           const bBody = (await bRes.json()) as { listing_marked_paid: boolean };
           assert.equal(bRes.status, 200);
           assert.equal(bBody.listing_marked_paid, true, "B's own nested flow, running to completion while A is still mid-verify, must win the reserve and settle cleanly");
@@ -1364,7 +1425,7 @@ test("concurrent double-click: two truly-interleaved pay attempts for the same l
 
     try {
       await assert.rejects(
-        () => handlePayListing(payRequest(listingId, submissionAId), env, funder, listingId),
+        () => handlePayListing(payRequest(d1, listingId, submissionAId), env, funder, listingId),
         (e: unknown) => e instanceof SocietyError && e.status === 409,
         "A's own reserve attempt must be refused -- B already flipped 'open'->'paying'->'paid' while A was mid-verify",
       );
@@ -1423,7 +1484,7 @@ test("handlePayListing: a request that fails BEFORE reserving must NOT release a
       throw new Error(`unexpected fetch in F5 lock-steal test: ${href}`);
     }) as typeof fetch;
 
-    const res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    const res = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     assert.equal(res.status, 402, "B's invalid payment is refused");
 
     const row = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
@@ -1447,7 +1508,7 @@ test("handlePayListing: a pay attempt against a listing already reserved by a co
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409 && /not open/i.test(e.message),
     );
     assert.equal(stub.verifyCalls(), 0, "a 'paying' listing is refused at loadPayableListing, BEFORE payAndSettle is even called -- a free refusal, like every other non-open status");
@@ -1469,14 +1530,14 @@ test("handlePayListing: a second pay attempt against an already-'paid' listing i
     const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1000 });
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
-    const first = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+    const first = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     assert.equal(first.status, 200, JSON.stringify(await first.clone().json()));
     const settleCallsAfterFirst = stub.settleCalls();
     const verifyCallsAfterFirst = stub.verifyCalls();
 
     const secondSubmissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, secondSubmissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, secondSubmissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409,
     );
     // The refusal must be FREE -- loadPayableListing's own status check
@@ -1521,7 +1582,7 @@ test("handlePayListing: a settle failure after a successful reserve releases the
 
     let res: Response;
     try {
-      res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+      res = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     } finally {
       globalThis.fetch = original;
     }
@@ -1564,7 +1625,7 @@ test("handlePayListing: an invalid signature (verify fails) never even reaches t
 
     let res: Response;
     try {
-      res = await handlePayListing(payRequest(listingId, submissionId), env, funder, listingId);
+      res = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
     } finally {
       globalThis.fetch = original;
     }
@@ -1615,7 +1676,7 @@ test("handlePayListing: a simulated record-batch failure after a successful sett
     };
 
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, submissionId), brokenEnv, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, submissionId), brokenEnv, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 500 && /settled.*but recording it failed/i.test(e.message),
     );
 
@@ -1645,7 +1706,7 @@ test("handlePayListing: a simulated record-batch failure after a successful sett
     const retrySubmissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
     const settleCallsBeforeRetry = stub.settleCalls();
     await assert.rejects(
-      () => handlePayListing(payRequest(listingId, retrySubmissionId), env, funder, listingId),
+      () => handlePayListing(payRequest(d1, listingId, retrySubmissionId), env, funder, listingId),
       (e: unknown) => e instanceof SocietyError && e.status === 409,
       "a retry against a 'paying' listing must be refused, never a second settle",
     );

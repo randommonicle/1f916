@@ -39,6 +39,7 @@ import { handleRegisterGate } from "../src/register-gate.ts";
 import { SocietyError } from "../src/society.ts";
 import { sha256Hex } from "../src/chain.ts";
 import type { Env } from "../src/society.ts";
+import { paymentHeaderFor } from "./helpers/x402-payload.ts";
 
 const TREASURY_ADDRESS = "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9";
 const FACILITATOR_URL = "https://facilitator.example.invalid";
@@ -52,15 +53,17 @@ function testEnv(d1: LocalD1): Env {
   } as unknown as Env;
 }
 
-// A syntactically valid X-PAYMENT header (base64 JSON). Its content is
-// irrelevant here: the facilitator stub below never inspects it, only the
-// request path (/verify vs /settle). Only real signature verification (the
-// facilitator's own job) would care what is inside, and this file has no
+// A real-shaped X-PAYMENT header for the $1 registration: since the
+// wallet-pin wave (A4) payAndSettle compares the payload's signed `to` and
+// `value` with the requirements before /verify, so the payload names the
+// treasury and exactly 1000000 atomic USDC, as the real client would. The
+// facilitator stub below still never inspects it; real signature
+// verification stays the facilitator's job, and this file has no
 // facilitator to satisfy honestly -- so it fakes the one HTTP dependency it
 // cannot otherwise reach, exactly as maintainer-judgment-d1.test.ts fakes
 // the Anthropic API.
-function fakePaymentHeader(): string {
-  return btoa(JSON.stringify({ fake: "payment-payload-for-a-test-stub" }));
+function registrationPaymentHeader(): string {
+  return paymentHeaderFor(TREASURY_ADDRESS, "1000000");
 }
 
 // Stubs the facilitator's /verify and /settle, exactly as
@@ -102,7 +105,7 @@ function stubFacilitatorFetch(): { verifyCalls: () => number; settleCalls: () =>
 function registerRequest(body: Record<string, unknown>, ip?: string): Request {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "X-PAYMENT": fakePaymentHeader(),
+    "X-PAYMENT": registrationPaymentHeader(),
   };
   if (ip) headers["CF-Connecting-IP"] = ip;
   return new Request("https://example.test/api/register", { method: "POST", headers, body: JSON.stringify(body) });
@@ -137,6 +140,40 @@ test("positive control: a valid, unthrottled registration proceeds through settl
   } finally {
     stub.restore();
     d1.close();
+  }
+});
+
+// A4 ridden through registration (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md test
+// 9): a payload signed for another destination, or for another amount, is
+// refused 400 payment_payload_mismatch before the facilitator is asked
+// anything -- the Worker no longer relies on /verify to notice that the
+// signed transfer is not the $1 to the treasury this route issued.
+test("A4: a registration whose X-PAYMENT signs for another address or another amount is refused 400 before /verify; nothing settles, nothing is written", async () => {
+  for (const [label, header] of [
+    ["another address", paymentHeaderFor("0x00000000000000000000000000000000000bad00", "1000000")],
+    ["another amount", paymentHeaderFor(TREASURY_ADDRESS, "1")],
+  ] as const) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitatorFetch();
+    try {
+      const request = new Request("https://example.test/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": header },
+        body: JSON.stringify({ handle: "mismatched-payer", model: "test-model" }),
+      });
+      await assert.rejects(
+        () => handleRegisterGate(request, testEnv(d1)),
+        (e: unknown) => e instanceof SocietyError && e.status === 400 && e.code === "payment_payload_mismatch",
+        `a payload signed for ${label} must be refused with the stable code`,
+      );
+      assert.equal(stub.verifyCalls(), 0, `${label}: /verify must never be called`);
+      assert.equal(stub.settleCalls(), 0, `${label}: /settle must never be called`);
+      assert.equal(d1.raw.prepare("SELECT id FROM citizens WHERE handle = ?").get("mismatched-payer"), undefined, `${label}: no citizen`);
+      assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM ledger").get() as { n: number }).n, 0, `${label}: no ledger entry`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
   }
 });
 

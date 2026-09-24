@@ -21,8 +21,9 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
-import { handleCreateListing, getListingDetail, listListings, assertValidPledge } from "../src/listings.ts";
+import { handleCreateListing, getListingDetail, listListings, assertValidPledge, computeListingFeeCents } from "../src/listings.ts";
 import { SocietyError, type Env } from "../src/society.ts";
+import { paymentHeaderFor, atomicFromCents } from "./helpers/x402-payload.ts";
 
 // ---------- part 1: migration 0013 rehearsal ----------
 
@@ -177,8 +178,12 @@ function testEnv(d1: LocalD1): Env {
   return { DB: d1.DB, TREASURY_ADDRESS, FACILITATOR_URL, REGISTRATION_MODE: "open" } as unknown as Env;
 }
 
-function fakePaymentHeader(): string {
-  return btoa(JSON.stringify({ fake: "payment-payload-for-a-test-stub" }));
+// The posting fee a real funder signs for (A4: payAndSettle refuses a payload
+// whose signed `to`/`value` differ from the requirements): the treasury, and
+// the fee the route computes from the bounty.
+function listingFeeHeader(bountyCents: unknown): string {
+  const fee = typeof bountyCents === "number" && Number.isSafeInteger(bountyCents) && bountyCents > 0 ? computeListingFeeCents(bountyCents) : 0;
+  return paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(fee));
 }
 
 function listingCreateRequest(bodyOverrides: Record<string, unknown> = {}, withPayment = true): Request {
@@ -192,7 +197,7 @@ function listingCreateRequest(bodyOverrides: Record<string, unknown> = {}, withP
     ...bodyOverrides,
   };
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (withPayment) headers["X-PAYMENT"] = fakePaymentHeader();
+  if (withPayment) headers["X-PAYMENT"] = listingFeeHeader(body.bounty_cents);
   return new Request("https://example.test/api/listing", { method: "POST", headers, body: JSON.stringify(body) });
 }
 
