@@ -169,13 +169,15 @@ function goodReceipt(overrides: Record<string, unknown> = {}) {
     payer_address: "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16",
     amount_cents: 1200,
     tx: "0x" + "ab".repeat(32),
+    wallet_row_id: WALLET_ROW_ID,
+    wallet_row_hash: WALLET_ROW_HASH,
     listing_marked_paid: true,
     ...overrides,
   };
 }
 
 test("validatePayReceipt accepts the receipt that describes our purchase", () => {
-  assert.deepEqual(validatePayReceipt(goodReceipt(), { ...PURCHASE, payer: PAYER }), []);
+  assert.deepEqual(validatePayReceipt(goodReceipt(), { ...PURCHASE, ...PIN, payer: PAYER }), []);
   // GEMINI r1 p3: a receipt naming another payer is a contradiction
   assert.match(validatePayReceipt(goodReceipt({ payer_address: PAYEE }), { ...PURCHASE, payer: PAYER }).join(), /payer_address: expected the signing account/);
   assert.match(validatePayReceipt(goodReceipt(), PURCHASE as any).join(), /payer_address/, "no payer supplied means no receipt can pass");
@@ -296,7 +298,9 @@ test("dry run: one authenticated 402 probe with redirect:error, requirements val
   const leg1 = calls[PIN_READS.length];
   assert.equal(leg1.redirect, "error");
   assert.equal(leg1.hasBearer, true);
-  assert.equal(leg1.body, JSON.stringify({ submission_id: 1 }));
+  // The server-side pin: the probe carries the pinned row, so a stale pin is
+  // refused before anything is signed.
+  assert.equal(leg1.body, JSON.stringify({ submission_id: 1, wallet_row_id: WALLET_ROW_ID, wallet_row_hash: WALLET_ROW_HASH }));
 });
 
 test("execute: mkdir + exclusive tombstone BEFORE sign, then leg 2, then the settled receipt", async () => {
@@ -321,6 +325,38 @@ test("execute: a 402 whose payTo is another wallet is refused with nothing signe
   assert.equal(r.reason, "reqs_rejected");
   assert.match(String(r.message), /payTo: expected the pinned payee/);
   assert.ok(!calls.some((c) => c.kind === "sign" || c.kind === "writeExclusive"));
+});
+
+test("the server-side pin: both legs carry {submission_id, wallet_row_id, wallet_row_hash}, byte-identical", async () => {
+  const { deps, calls } = fakeDeps();
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const pinned = JSON.stringify({ submission_id: 1, wallet_row_id: WALLET_ROW_ID, wallet_row_hash: WALLET_ROW_HASH });
+  assert.equal(calls.find((c) => c.kind === "fetch:leg1")?.body, pinned);
+  assert.equal(calls.find((c) => c.kind === "fetch:leg2")?.body, pinned);
+});
+
+test("the server-side pin: a leg-1 pin refusal is surfaced with the server's code, and nothing is signed or written", async () => {
+  const { deps, calls } = fakeDeps({ first: { status: 409, body: { error: "Citizen 8 has a newer wallet row (40) than the pinned row 31.", code: "wallet_row_superseded" } } });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "leg1_not_402");
+  assert.equal((r as { serverCode?: string }).serverCode, "wallet_row_superseded");
+  assert.match(String(r.message), /\(wallet_row_superseded\)/);
+  assert.ok(!calls.some((c) => c.kind === "sign" || c.kind === "writeExclusive"));
+});
+
+test("the server-side pin: a 200 receipt without the pinned row, or naming another row or hash, leaves the tombstone 'signing'", async () => {
+  for (const [label, receipt] of [
+    ["no pair (a server that did not check)", goodReceipt({ wallet_row_id: undefined, wallet_row_hash: undefined })],
+    ["another row", goodReceipt({ wallet_row_id: WALLET_ROW_ID + 1 })],
+    ["another hash", goodReceipt({ wallet_row_hash: "f".repeat(64) })],
+  ] as const) {
+    const { deps, store } = fakeDeps({ second: { status: 200, body: receipt } });
+    const r = await payListing({ ...RUN, execute: true }, deps);
+    assert.equal(r.reason, "leg2_bad_body", label);
+    assert.match(String(r.message), /wallet_row_(id|hash)/, label);
+    assert.equal(JSON.parse(store()!).status, "signing", `${label}: the tombstone stays 'signing'`);
+  }
 });
 
 test("execute: a non-402 first leg (e.g. 409 'no declared wallet') ends the run with nothing signed", async () => {

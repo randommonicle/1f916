@@ -61,17 +61,18 @@
 //     public and fail CLOSED: every served row is validated (a malformed row,
 //     a row of the wrong kind for its list, or an id served twice refuses; it
 //     is never dropped), and the witness must answer a recognised status.
-//     What the pin does NOT close: the rows are read once per run, so a wallet
-//     change made between that read and the settlement is not seen (CODEX,
-//     exchange/REVIEW_pin-wallet-changed-2026-09-22.md round 1). Only the
-//     server can close that window, and only BEFORE money moves: the pay
-//     request carries the pinned row and hash, the pay route checks them
-//     against the citizen's newest wallet row inside payAndSettle's
-//     afterVerify (the free-exit boundary, before settlement), and the
-//     payments-book row records them afterwards for audit. A check made when
-//     the book row is written comes after settlement and is audit only
-//     (CODEX, same exchange, round 2): DEFERRED-SERVER-SIDE-WALLET-PIN (lands
-//     in src/listings.ts's pay route).
+//     What the script alone could not close: the rows are read once per run,
+//     so a wallet change made between that read and the settlement went
+//     unseen (CODEX, exchange/REVIEW_pin-wallet-changed-2026-09-22.md round
+//     1). The server closes it now, BEFORE money moves (the server-side
+//     wallet pin, docs/BRIEF-SERVER-SIDE-WALLET-PIN.md): both legs carry
+//     {submission_id, wallet_row_id, wallet_row_hash}; the pay route refuses
+//     a pin that is not the payee's newest wallet row, has another hash, or
+//     does not name the wallet on record, on the 402 probe and again inside
+//     the one reservation UPDATE; and it records the row it checked on the
+//     payments-book row. This script requires that row back on the receipt:
+//     a receipt without it is a server that did not check, so the tombstone
+//     stays 'signing' and the operator reconciles.
 //
 // Run from society/:
 //   node scripts/pay-listing.mjs --listing 3 --submission 1 --payee 0x... --amount-cents 1200 --wallet-row 24 --wallet-row-hash <64 hex>            # DRY RUN
@@ -154,7 +155,7 @@ export function validatePayRequirements(reqs, { payee, amountCents, maxAmountCen
 
 // The 200 receipt must describe the purchase we authorised, or the tombstone
 // stays 'signing' and the operator reconciles from chain.
-export function validatePayReceipt(body, { listingId, submissionId, payee, amountCents, payer }) {
+export function validatePayReceipt(body, { listingId, submissionId, payee, amountCents, payer, walletRow, walletRowHash }) {
   const problems = [];
   if (!body || typeof body !== "object") return ["receipt is not a JSON object"];
   if (body.listing_id !== listingId) problems.push(`listing_id: expected ${listingId}, got ${JSON.stringify(body.listing_id)}`);
@@ -163,6 +164,11 @@ export function validatePayReceipt(body, { listingId, submissionId, payee, amoun
   if (body.amount_cents !== amountCents) problems.push(`amount_cents: expected ${amountCents}, got ${JSON.stringify(body.amount_cents)}`);
   if (typeof body.tx !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(body.tx)) problems.push(`tx: expected a 0x-prefixed 32-byte hash, got ${JSON.stringify(body.tx)}`);
   if (body.listing_marked_paid !== true) problems.push(`listing_marked_paid: expected true, got ${JSON.stringify(body.listing_marked_paid)}`);
+  // The server records the wallet row it checked before settlement (the
+  // server-side pin) and returns it: it must be the row we pinned. A receipt
+  // without it is a server that did not check the pin.
+  if (body.wallet_row_id !== walletRow) problems.push(`wallet_row_id: expected the pinned row ${walletRow}, got ${JSON.stringify(body.wallet_row_id)}`);
+  if (body.wallet_row_hash !== walletRowHash) problems.push(`wallet_row_hash: expected the pinned hash ${walletRowHash}, got ${JSON.stringify(body.wallet_row_hash)}`);
   // The receipt must name OUR signing account as the payer, or the permanent
   // record would certify a payer identity it never verified (GEMINI r1 p3).
   if (typeof body.payer_address !== "string" || typeof payer !== "string" || body.payer_address.toLowerCase() !== payer.toLowerCase()) problems.push(`payer_address: expected the signing account ${payer}, got ${JSON.stringify(body.payer_address)}`);
@@ -491,7 +497,9 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   const walletRowCheck = { row: walletRow, kind: pin.row.kind, citizen_id: pin.row.citizen_id, citizen: pin.row.citizen ?? null, submitter_handle: submission.submitter_handle ?? null, attest_status: witness.status, identity_head: witness.head ?? null };
 
   const authHeader = { Authorization: `Bearer ${funderSecret}` };
-  const bodyStr = JSON.stringify({ submission_id: submissionId });
+  // Both legs carry the pin: the server checks it on the 402 probe (a free
+  // refusal before anything is signed) and again at the reservation.
+  const bodyStr = JSON.stringify({ submission_id: submissionId, wallet_row_id: walletRow, wallet_row_hash: walletRowHash });
 
   // Leg 1: POST with no payment -> expect 402. redirect:"error" so a 307 cannot
   // forward the bearer to another origin. Every free refusal the server makes
@@ -508,7 +516,10 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
   try { firstJson = JSON.parse(firstText); } catch {}
 
   if (first.status !== 402) {
-    return { ...base, ok: false, exitCode: 1, reason: "leg1_not_402", message: `Server responded HTTP ${first.status} (expected 402). Nothing paid.`, detail: firstText };
+    // A pin refusal (wallet_row_*) or any other free refusal arrives here with
+    // a stable code; it is surfaced so the operator can act on WHICH refusal.
+    const serverCode = typeof firstJson?.code === "string" ? firstJson.code : null;
+    return { ...base, ok: false, exitCode: 1, reason: "leg1_not_402", serverCode, message: `Server responded HTTP ${first.status}${serverCode ? ` (${serverCode})` : ""} (expected 402). Nothing paid.`, detail: firstText };
   }
   if (!firstJson || firstJson.x402Version !== 1 || !Array.isArray(firstJson.accepts) || firstJson.accepts.length === 0) {
     return { ...base, ok: false, exitCode: 1, reason: "leg1_bad_402", message: "402 was not a valid v1 x402 challenge. Refusing.", detail: firstText };
@@ -601,7 +612,7 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
       // keep going: the tombstone still records the status and the detail
     }
     deps.writeAtomic(tombPath, JSON.stringify({ status: "signing", key, target, ...purchase, ...ident, http_status: second.status, unconfirmed_at: deps.nowSeconds(), detail: secondText.slice(0, 2000) }, null, 2));
-    return { ...base, ok: false, exitCode: 1, reason: "leg2_unconfirmed", message: `The server sent the settle request and could not read the facilitator's answer (HTTP ${second.status}, settlement_unconfirmed); it keeps the listing reserved and so does this record. Outcome AMBIGUOUS: the money may or may not have moved. DO NOT re-run. After the authorization's validBefore${ident.valid_before ? ` (${new Date((ident.valid_before + RETRY_MARGIN_SECONDS) * 1000).toISOString()} with the ${RETRY_MARGIN_SECONDS}s margin)` : ""}, the operator checks authorizationState(from, nonce) on two RPCs and reconciles the listing from that; the identity is in the 'signing' record.\n${recoveryMessage(tombPath)}`, detail: secondText };
+    return { ...base, ok: false, exitCode: 1, reason: "leg2_unconfirmed", message: `The server sent the settle request and could not read the facilitator's answer (HTTP ${second.status}, settlement_unconfirmed); it keeps the listing reserved and so does this record. Outcome AMBIGUOUS: the money may or may not have moved. DO NOT re-run. After the authorization's validBefore${ident.valid_before ? ` (${new Date((ident.valid_before + RETRY_MARGIN_SECONDS) * 1000).toISOString()} with the ${RETRY_MARGIN_SECONDS}s margin)` : ""}, the operator checks authorizationState(from, nonce) on two RPCs and reconciles the listing from that, against the wallet row the server recorded at the reservation (the 502 body's wallet_row_id, served on GET /api/listing/${listingId} while unresolved), never whichever row is newest at reconciliation time; the identity is in the 'signing' record.\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
 
   // The server's own settled-but-unrecorded case is a 500 carrying the tx and
@@ -624,7 +635,7 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
     }
     return { ...base, ok: false, exitCode: 1, reason: "leg2_not_200", message: `Bounty not confirmed paid after the signed request: HTTP ${second.status}.\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
-  const problems = validatePayReceipt(secondJson, { listingId, submissionId, payee, amountCents, payer });
+  const problems = validatePayReceipt(secondJson, { listingId, submissionId, payee, amountCents, payer, walletRow, walletRowHash });
   // Belt to the body's braces (exchange 2026-09-15, CODEX): the worker also
   // returns the facilitator's settlement verbatim in X-PAYMENT-RESPONSE
   // (listings.ts, the 200's headers). It must be present and name the SAME

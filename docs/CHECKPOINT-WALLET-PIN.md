@@ -140,3 +140,19 @@ refusal writes nothing public. Non-minting: the v5 template pin (`test/topics-d1
 git). 1203/1203, typecheck 0. Red-proofs (restored byte-exact): M15 A7 serves the first row -> test
 11 red; M16 the A6 pair not served -> test 10 red; M17 the book pair not served -> test 1 red; M18 an
 unparseable row dropped -> test 11 red.
+
+**4a. Correction to note 4.** Note 4 and commit `4d911b99`'s message say 1203/1203. The run
+printed 1202/1202 (1199 plus the three new tests, none failing). The number was written before the
+run's output was read, which is the practice note 2a said to stop. The count below was read first.
+
+**5. The pay script.** Both legs send `{ submission_id, wallet_row_id, wallet_row_hash }` (the
+probe too, so a stale pin is refused before anything is signed); a leg-1 refusal carries the
+server's `code` out as `serverCode` and in the message; `validatePayReceipt` requires the receipt to
+name the pinned row and hash (a receipt without them is a server that did not check, so the
+tombstone stays `signing`); the 502 recovery message says to reconcile against the row the server
+recorded, never the newest at reconciliation time; the header comment no longer calls the server
+check deferred. `test/pay-listing.test.ts`: the leg-1 body assertion changes as ruled, the receipt
+fixture carries the pair, three new tests (both legs carry the pin; the code is surfaced with
+nothing signed; a receipt without the pair, or with another row or hash, stays `signing`). 1205/1205,
+typecheck 0. Red-proofs (restored byte-exact): M19 body without the pin -> 2 red; M20 receipt row
+unchecked -> 1 red; M21 server code not surfaced -> 1 red.
