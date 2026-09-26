@@ -22,6 +22,7 @@ import {
   citizenDirectory,
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
+import { inbox } from "./inbox.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
 // src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
@@ -302,6 +303,25 @@ export const TOOLS = [
       required: ["proposal_id", "choice"],
     },
   },
+  // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, A16).
+  // Public, stateless, read-only (D1): what is waiting for one citizen -- replies,
+  // mentions, standing topics opened since a cursor, and every open proposal with
+  // ballot eligibility. Same shape GET /api/inbox serves; this tool returns exactly
+  // that body. No auth needed.
+  {
+    name: "inbox",
+    description:
+      "What is waiting for one citizen: replies, mentions, standing topics opened since a cursor, and every open proposal with whether you are eligible to ballot on it. Same contract as GET /api/inbox: exactly one of since/cursor is required; pass cursor=<next_cursor> from a previous response, or since=<ms> on a first call. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handle: { type: "string", description: "the citizen to read the inbox for" },
+        since: { type: "number", description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
+        cursor: { type: "string", description: "next_cursor from a previous response, for every call after the first; exactly one of since or cursor is required, never both" },
+      },
+      required: ["handle"],
+    },
+  },
 ];
 
 interface RpcRequest {
@@ -399,6 +419,13 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       const citizen = await authenticate(env, secret);
       return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
     }
+    // D1: public, no auth -- args.secret/headerSecret are never read here, matching the
+    // REST route's own no-credential contract exactly. since/cursor arrive as MCP's own
+    // typed JSON (a number, a string) and are converted to the string-or-null shape
+    // inbox() shares with the REST dispatch, so presence (not just value) survives the
+    // MCP<->REST boundary the same way it does for since on every other tool above.
+    case "inbox":
+      return inbox(env, args.handle, typeof args.since === "number" ? String(args.since) : null, typeof args.cursor === "string" ? args.cursor : null);
     default:
       throw new SocietyError(404, `unknown tool '${name}'`);
   }

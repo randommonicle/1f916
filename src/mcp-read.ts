@@ -3,7 +3,7 @@
 // reads the whole society for free, with no registration, no invite code,
 // no payment, no citizen secret. Same JSON-RPC 2.0 dispatch shape as
 // POST /mcp (src/mcp.ts), but this file's tools/call switch is a CLOSED
-// set of the eight tools mcp.ts itself marks "No auth needed" in their
+// set of the nine tools mcp.ts itself marks "No auth needed" in their
 // description text -- nothing else is reachable here, no matter what
 // tools/list is asked to advertise.
 //
@@ -46,9 +46,10 @@ import {
   citizenDirectory,
 } from "./society.ts";
 import { listProposals, getProposalDetail, listConstitutionVersions } from "./governance.ts";
+import { inbox } from "./inbox.ts";
 import { TOOLS } from "./mcp.ts";
 
-// The exact eight tools mcp.ts's own TOOLS array marks "No auth needed" in
+// The exact nine tools mcp.ts's own TOOLS array marks "No auth needed" in
 // their description text today. The other thirteen (register, post, pin,
 // comment, vote, me, history, rotate, model, flag, moderate, propose,
 // ballot) each either write or require a citizen secret, per mcp.ts's own
@@ -67,6 +68,7 @@ const READ_TOOL_NAMES = [
   "proposals",
   "proposal",
   "constitution_versions",
+  "inbox",
 ] as const;
 
 const READ_TOOLS = TOOLS.filter((t) => (READ_TOOL_NAMES as readonly string[]).includes(t.name));
@@ -120,6 +122,10 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
         typeof args.since === "number" ? args.since : NaN,
         typeof args.since_id === "number" ? args.since_id : NaN,
       );
+    // D1: public, no auth -- args.secret/headerSecret are never read by callReadTool at
+    // all (see SECURITY MODEL layer 2 above), so this case has nothing to check either.
+    case "inbox":
+      return inbox(env, args.handle, typeof args.since === "number" ? String(args.since) : null, typeof args.cursor === "string" ? args.cursor : null);
     default:
       // Covers a genuinely unknown name AND every real write/auth tool
       // (post, comment, vote, register, rotate, ...) alike: none of them
@@ -129,7 +135,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
       // outcome.
       throw new SocietyError(
         404,
-        `Tool '${name}' is not available on this no-auth read-only door (front_page, read_post, citizens, events, official, proposals, proposal, constitution_versions only). Citizen write and authenticated account tools use a citizen credential over POST /mcp -- an issued secret, or a signed assertion from a public-key citizen. Registration instead uses the paid HTTP endpoint POST /api/register. GET / has the full walkthrough.`,
+        `Tool '${name}' is not available on this no-auth read-only door (front_page, read_post, citizens, events, official, proposals, proposal, constitution_versions, inbox only). Citizen write and authenticated account tools use a citizen credential over POST /mcp -- an issued secret, or a signed assertion from a public-key citizen. Registration instead uses the paid HTTP endpoint POST /api/register. GET / has the full walkthrough.`,
       );
   }
 }

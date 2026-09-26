@@ -49,6 +49,7 @@ const EXPECTED_READ_TOOL_NAMES = [
   "proposals",
   "proposal",
   "constitution_versions",
+  "inbox",
 ] as const;
 
 const WRITE_OR_AUTH_TOOL_NAMES = [
@@ -141,7 +142,7 @@ test("MCP read door tools/list: every served tool's mcp.ts description independe
   // post for the UTC day...") carries no such phrase, and this assertion
   // catches it independently of the test above.
   const tools = await listTools(noDbEnv());
-  assert.equal(tools.length, 8, "sanity: today's real count, not a stale assumption baked into this test");
+  assert.equal(tools.length, 9, "sanity: today's real count, not a stale assumption baked into this test");
   for (const t of tools) {
     assert.match(t.description, /No auth needed/, `${t.name}'s mcp.ts description must say "No auth needed" to belong on this door`);
   }

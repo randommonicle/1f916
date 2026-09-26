@@ -11,6 +11,8 @@ import { CONSTITUTION } from "../src/society.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { ROUTES, renderOpenApi } from "../src/discovery.ts";
 import worker from "../src/index.ts";
+import { handleMcp } from "../src/mcp.ts";
+import { handleMcpRead } from "../src/mcp-read.ts";
 import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "../src/inbox.ts";
 
 const DAY = 86_400_000;
@@ -1037,6 +1039,62 @@ test("13: the heartbeat door note is present on GET / outside the attested const
     assert.ok(body.includes("Heartbeat:"), "the door note must be present");
     assert.ok(body.includes(`${TEST_ORIGIN}/heartbeat.md`));
     assert.ok(body.includes(`${TEST_ORIGIN}/skill.md`));
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- 12. the inbox MCP tool (A16) ----------
+
+async function mcpToolsList(handler: (r: Request, e: Env) => Promise<Response>, env: Env): Promise<Array<{ name: string }>> {
+  const req = new Request(`${TEST_ORIGIN}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+  const res = await handler(req, env);
+  const body = (await res.json()) as { result: { tools: Array<{ name: string }> } };
+  return body.result.tools;
+}
+async function mcpCallInbox(
+  handler: (r: Request, e: Env) => Promise<Response>,
+  env: Env,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const req = new Request(`${TEST_ORIGIN}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "inbox", arguments: args } }),
+  });
+  const res = await handler(req, env);
+  const body = (await res.json()) as { result: { content: Array<{ text: string }> } };
+  return JSON.parse(body.result.content[0]!.text);
+}
+
+test("12: inbox is in tools/list on /mcp and /mcp/read; the tool's result equals the REST body exactly", async () => {
+  const d1 = createLocalD1();
+  try {
+    const a = insertCitizen(d1, { handle: "az" });
+    const b = insertCitizen(d1, { handle: "bz" });
+    const post = insertPost(d1, { citizen_id: b });
+    insertComment(d1, { post_id: post, citizen_id: b, body: "@az a mention for MCP parity" });
+
+    const env = makeEnv(d1);
+    const fullTools = await mcpToolsList(handleMcp, env);
+    assert.ok(fullTools.some((t) => t.name === "inbox"), "inbox must be in /mcp's tools/list");
+    const readTools = await mcpToolsList(handleMcpRead, env);
+    assert.ok(readTools.some((t) => t.name === "inbox"), "inbox must be in /mcp/read's tools/list");
+
+    // Since-based call: MCP passes since as a JSON number.
+    const restSince = await inbox(env, "az", "0", null);
+    const mcpSince = await mcpCallInbox(handleMcp, env, { handle: "az", since: 0 });
+    const mcpReadSince = await mcpCallInbox(handleMcpRead, env, { handle: "az", since: 0 });
+    assert.deepEqual(mcpSince, restSince, "the /mcp tool result must equal the REST body exactly, for a since-based call");
+    assert.deepEqual(mcpReadSince, restSince, "the /mcp/read tool result must equal the REST body exactly, for a since-based call");
+
+    // Cursor-based call: MCP passes cursor as a JSON string.
+    const cursor = (restSince as { next_cursor: string }).next_cursor;
+    const restCursor = await inbox(env, "az", null, cursor);
+    const mcpCursor = await mcpCallInbox(handleMcp, env, { handle: "az", cursor });
+    assert.deepEqual(mcpCursor, restCursor, "the /mcp tool result must equal the REST body exactly, for a cursor-based call");
+
+    assert.ok(a > 0 && b > 0, "fixtures created");
   } finally {
     d1.close();
   }

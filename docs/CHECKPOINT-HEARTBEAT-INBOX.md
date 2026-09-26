@@ -289,4 +289,51 @@ test as the brief's own test list asks for, not against `src/`.
 **Commit 5 (step (b)):** as above. 12 new tests (8, 9, 10, 11, 11b, 13, plus the
 `served-auth-both-path.test.ts` extension folds into its existing test count), 3 new
 mutations red-proofed. Suite 1247/1247, typecheck clean.
-(c), (d) still NOT STARTED.
+
+## Step (c): the inbox MCP tool (A16)
+
+**Registration points, all five:** `TOOLS` in `src/mcp.ts` (the `inbox` entry, its
+description ending "No auth needed" per `test/mcp-read.test.ts`'s own cross-check);
+a `callTool` case in `mcp.ts` (public, no auth -- `args.secret`/`headerSecret` never
+read for this tool, same as every other no-auth tool); `READ_TOOL_NAMES` in
+`src/mcp-read.ts`; a `callReadTool` case there; `EXPECTED_READ_TOOL_NAMES` in
+`test/mcp-read.test.ts` (the `tools.length === 8` sanity assertion becomes 9).
+`test/l002-residue.test.ts` needed no edit -- it scans every `src/**/*.ts` file, so
+`inbox.ts`'s existing content is covered with no registration of its own.
+
+**A real, unplanned-for failure: `test/secret-literal-guard.test.ts`.** Adding
+"inbox" to `mcp-read.ts`'s hand-written refusal-message tool list changed that
+literal's exact text, which changed its sha256, which broke this D-061 guard (it
+allowlists secret-bearing string literals BY HASH of their decoded value, so any
+edit to an allowlisted sentence -- even one word appended elsewhere in it -- makes
+the OLD hash stale and the NEW text unreviewed). Fixed the only way the guard's own
+message says to: recomputed the sha256 of the changed literal (the template
+literal's second quasi segment, the text after `${name}`) and updated the existing
+`PROSE_ALLOW` entry in place (same file, same note plus a line on why, new sha) --
+not a new entry alongside the old one, which would have left the old sha as a
+second, now-genuinely-stale entry the guard's own `stale` check would then catch.
+
+**File list:**
+- `src/mcp.ts` (edit): the `inbox` tool entry (`TOOLS`); a `callTool` case; imports
+  `inbox` from `./inbox.ts`.
+- `src/mcp-read.ts` (edit): `READ_TOOL_NAMES` gains `"inbox"`; a `callReadTool` case;
+  the header comment's "eight tools" corrected to "nine"; the refusal message's
+  hand-listed tool names gain `, inbox`.
+- `test/mcp-read.test.ts` (edit): `EXPECTED_READ_TOOL_NAMES` gains `"inbox"`; the
+  `tools.length === 8` sanity assertion becomes `9`.
+- `test/secret-literal-guard.test.ts` (edit): the `src/mcp-read.ts` `PROSE_ALLOW`
+  entry for the refusal message updated to the new sha256 (see above).
+- `test/inbox-d1.test.ts` (edit): test 12 (`handleMcp`/`handleMcpRead` imported;
+  `tools/list` presence on both doors; a since-based and a cursor-based call, each
+  compared for exact deep-equality between the MCP tool result and the REST body --
+  the response was already designed with no wall-clock-sensitive top-level field
+  during step (a), so this equality holds with no special-casing).
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M17 | `mcp.ts`'s `callTool` case for `"inbox"` | inbox-d1.test.ts | yes |
+| M18 | `mcp-read.ts`'s `READ_TOOL_NAMES` entry for `"inbox"` (and, transitively, its `callReadTool` case, since `READ_TOOLS`/the advertised list is filtered from it) | inbox-d1.test.ts, mcp-read.test.ts | yes |
+
+**Commit 6 (step (c)):** as above. 1 new test (12), 2 new mutations red-proofed, plus
+the unplanned secret-literal-guard fix. Suite 1248/1248, typecheck clean.
+(d) still NOT STARTED.
