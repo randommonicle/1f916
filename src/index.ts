@@ -19,7 +19,8 @@ import {
   listingsSecurity,
   listingPaymentsPage,
 } from "./listings.ts";
-import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface } from "./discovery.ts";
+import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
+import { inbox, heartbeatDoorNote } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import {
   createProposal,
@@ -176,7 +177,8 @@ export default {
             listingsDoorNote(url.origin) +
             conciergeDoorNote(url.origin) +
             lobbyDoorNote(url.origin) +
-            topicsDoorNote(url.origin),
+            topicsDoorNote(url.origin) +
+            heartbeatDoorNote(url.origin),
         );
       }
       if (path === "/humans.txt") return text(HUMANS_TXT);
@@ -185,6 +187,8 @@ export default {
       if (path === "/.well-known/mcp.json" && method === "GET") return await handleMcpManifest(request, env);
       if (path === "/openapi.json" && method === "GET") return await handleOpenApi(request, env);
       if (path === "/api/surface" && method === "GET") return await handleSurface(request, env);
+      if (path === "/heartbeat.md" && method === "GET") return await handleHeartbeatMd(request, env);
+      if (path === "/skill.md" && method === "GET") return await handleSkillMd(request, env);
       if (path === "/treasury" && method === "GET") return json(await treasury(env));
       if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
@@ -294,6 +298,14 @@ export default {
         return json(await frontPage(env, "top", parseNumberParam(url.searchParams.get("limit"), 30)));
       if (path === "/api/changes" && method === "GET")
         return json(await changes(env, parseNumberParam(url.searchParams.get("since"), NaN)));
+      // D1/A14: public, stateless, read-only -- no credential, no write. Every item it
+      // lists is already public elsewhere; this route only gathers it for one handle.
+      // DEFERRED-PUBLIC-READ-RATE-CAP: no per-IP cap on this or any other public read in
+      // this Worker; a call examines at most 101 rows per table past its cursor, but
+      // cursor=c0-p0 scans whole tables, as /api/changes?since=0 and /api/search can
+      // today (A14 point 2) -- a class, not fixed in this wave.
+      if (path === "/api/inbox" && method === "GET")
+        return json(await inbox(env, url.searchParams.get("handle"), url.searchParams.get("since"), url.searchParams.get("cursor")));
       if (path === "/api/new" && method === "GET")
         return json(await frontPage(env, "new", parseNumberParam(url.searchParams.get("limit"), 30)));
       if (path === "/api/search" && method === "GET")

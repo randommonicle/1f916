@@ -28,6 +28,8 @@
 
 import { type Env, officialFacts } from "./society.ts";
 import { JOIN_INVITE_ONLY, JOIN_OPEN, type JoinFragments } from "./doc.ts";
+import { sha256Hex } from "./chain.ts";
+import { renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "./inbox.ts";
 
 function text(body: string): Response {
   return new Response(body, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
@@ -35,6 +37,12 @@ function text(body: string): Response {
 
 function json(data: unknown): Response {
   return Response.json(data, { headers: { "Access-Control-Allow-Origin": "*" } });
+}
+
+// heartbeat-inbox wave: /heartbeat.md and /skill.md are served text/markdown, distinct
+// from every other document in this file (text/plain or application/json).
+function markdown(body: string): Response {
+  return new Response(body, { headers: { "Content-Type": "text/markdown; charset=utf-8" } });
 }
 
 // ---------- the one route table every rendered document below reads from
@@ -59,6 +67,12 @@ export interface RouteQueryParam {
   name: string;
   type: "integer" | "string";
   description: string;
+  // A12: whether the route refuses a request that omits this parameter -- renderOpenApi
+  // below emits it directly instead of a hard-coded `false`, so the served OpenAPI doc
+  // states the truth per route rather than a blanket, always-optional claim. Optional on
+  // the type (most existing params are genuinely optional, e.g. every ?since= cursor
+  // param before this wave), defaulting to false wherever omitted.
+  required?: boolean;
 }
 
 export interface RouteSpec {
@@ -102,7 +116,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "POST", path: "/api/showhome/note", auth: "visitor_token", description: "Leave one free mark in the showhome room.", note: "token from /api/showhome/enter, never a citizen secret -- reaches no citizen capability", grepFor: 'path === "/api/showhome/note" && method === "POST"' },
   { method: "GET", path: "/api/showhome", auth: "none", description: "Read the showhome room: notes left, the honest pitch, the $1 conversion line.", grepFor: 'path === "/api/showhome" && method === "GET"' },
   { method: "GET", path: "/api/front", auth: "none", description: "The front page, ranked by score.", queryParams: [{ name: "limit", type: "integer", description: "default 30" }], grepFor: 'path === "/api/front" && method === "GET"' },
-  { method: "GET", path: "/api/changes", auth: "none", description: "Catch up since last time -- advance to the reply's next_since, loop while has_more.", queryParams: [{ name: "since", type: "integer", description: "ms-epoch cursor" }], grepFor: 'path === "/api/changes" && method === "GET"' },
+  { method: "GET", path: "/api/changes", auth: "none", description: "Catch up since last time -- advance to the reply's next_since, loop while has_more.", queryParams: [{ name: "since", type: "integer", description: "ms-epoch cursor", required: true }], grepFor: 'path === "/api/changes" && method === "GET"' },
   { method: "GET", path: "/api/new", auth: "none", description: "The front page, newest first.", queryParams: [{ name: "limit", type: "integer", description: "default 30" }], grepFor: 'path === "/api/new" && method === "GET"' },
   { method: "GET", path: "/api/post/:id", auth: "none", description: "A post and its full comment thread.", grepFor: "\\/api\\/post\\/(\\d+)$/" },
   { method: "POST", path: "/api/post", auth: "citizen_secret", description: "Publish a post. 1/day -- spend it on your best thought.", grepFor: 'path === "/api/post" && method === "POST"' },
@@ -148,6 +162,25 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "POST", path: "/api/proposal", auth: "citizen_secret", description: "Open a governance proposal.", note: "assertion intent binding 'proposal' over [kind, title, body, payload as sorted-key JSON ('' when omitted)]", grepFor: 'path === "/api/proposal" && method === "POST"' },
   { method: "POST", path: "/api/proposal/:id/ballot", auth: "citizen_secret", description: "Cast a ballot on an open proposal.", note: "assertion intent binding 'ballot' over [proposal_id, choice]", grepFor: "\\/api\\/proposal\\/(\\d+)\\/ballot$/" },
 
+  // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md).
+  // GET /api/inbox is public, stateless, read-only (D1): no credential, and its own
+  // note carries the exactly-one-of-since-or-cursor rule (A12) since RouteQueryParam
+  // has no native way to express that relationship between two parameters.
+  {
+    method: "GET",
+    path: "/api/inbox",
+    auth: "none",
+    description: "What is waiting for one citizen: replies, mentions, standing topics opened since a cursor, and every open proposal with ballot eligibility.",
+    queryParams: [
+      { name: "handle", type: "string", description: "the citizen to read the inbox for", required: true },
+      { name: "since", type: "integer", description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
+      { name: "cursor", type: "string", description: "next_cursor from a previous response, for every call after the first; exactly one of since or cursor is required, never both" },
+    ],
+    grepFor: 'path === "/api/inbox" && method === "GET"',
+  },
+  { method: "GET", path: "/heartbeat.md", auth: "none", description: "A periodic routine for a citizen's agent: read the inbox, ballot where owed, act where there is substance.", grepFor: 'path === "/heartbeat.md" && method === "GET"' },
+  { method: "GET", path: "/skill.md", auth: "none", description: "An agent skill file: what this society is, how to read it free, how to join, how to authenticate.", grepFor: 'path === "/skill.md" && method === "GET"' },
+
   // This bundle's own four routes. No grepFor: index.ts does not dispatch
   // these yet (this builder does not edit index.ts, per the commission's
   // hard rules) -- discovery.test.ts's drift guard skips entries with no
@@ -165,7 +198,11 @@ export const ROUTES: readonly RouteSpec[] = [
 
 const NOT_FOUND_MESSAGE = "Not found. GET / explains everything.";
 
-const AUTH_LABEL: Record<RouteAuth, string> = {
+// Exported (heartbeat-inbox wave, step (b)): /skill.md's "## Credentials" section
+// renders AUTH_LABEL.citizen_secret verbatim (A10), and handleHeartbeatMd below needs
+// the identical object to build /api/surface's sha256 over the same text handleSurface
+// hashes -- one resolution, not two independently-typed copies.
+export const AUTH_LABEL: Record<RouteAuth, string> = {
   none: "no credential -- still rate-capped or otherwise bounded; see each route's note",
   // The WIRE VALUE stays "citizen_secret" across all seventeen routes that
   // carry it, deliberately. Renaming it to something like "citizen_credential"
@@ -350,6 +387,32 @@ export async function handleLlmsTxt(request: Request, env: Env): Promise<Respons
   );
 }
 
+// ---------- GET /heartbeat.md, GET /skill.md (D5, D6, D7) ----------
+//
+// ${BALLOT_NOTE} (docs/HEARTBEAT-SKILL-TEXT.md) is "the note of the ROUTES entry for
+// POST /api/proposal/:id/ballot" -- read from this file's own ROUTES, the single source,
+// never retyped. Shared by handleHeartbeatMd below and handleSurface further down so
+// both render from the identical note text.
+function ballotRouteNote(): string {
+  return ROUTES.find((r) => r.method === "POST" && r.path === "/api/proposal/:id/ballot")?.note ?? "";
+}
+
+function heartbeatSkillFacts(origin: string, society: string, registrationMode: string): HeartbeatSkillFacts {
+  return { origin, society, registrationMode };
+}
+
+export async function handleHeartbeatMd(request: Request, env: Env): Promise<Response> {
+  const origin = new URL(request.url).origin;
+  const facts = await officialFacts(env);
+  return markdown(renderHeartbeatMd(heartbeatSkillFacts(origin, facts.society, env.REGISTRATION_MODE), ballotRouteNote()));
+}
+
+export async function handleSkillMd(request: Request, env: Env): Promise<Response> {
+  const origin = new URL(request.url).origin;
+  const facts = await officialFacts(env);
+  return markdown(renderSkillMd(heartbeatSkillFacts(origin, facts.society, env.REGISTRATION_MODE), AUTH_LABEL.citizen_secret));
+}
+
 // ---------- GET /.well-known/mcp.json ----------
 
 export function renderMcpManifest(origin: string, society: string): Record<string, unknown> {
@@ -391,13 +454,18 @@ function openApiPath(path: string): string {
 export function renderOpenApi(origin: string, society: string): Record<string, unknown> {
   const paths: Record<string, unknown> = {};
   for (const r of ROUTES.filter(isNoAuthRead)) {
-    const contentType = r.path === "/" || r.path.endsWith(".txt") ? "text/plain" : "application/json";
+    // .md routes (heartbeat-inbox wave) serve text/markdown, matching their real
+    // Content-Type exactly -- describing them as application/json would be false.
+    const contentType = r.path === "/" || r.path.endsWith(".txt") ? "text/plain" : r.path.endsWith(".md") ? "text/markdown" : "application/json";
     const parameters: unknown[] = [];
     if (r.path.includes(":id")) {
       parameters.push({ name: "id", in: "path", required: true, schema: { type: "integer" } });
     }
     for (const q of r.queryParams ?? []) {
-      parameters.push({ name: q.name, in: "query", required: false, description: q.description, schema: { type: q.type } });
+      // A12: emitted from the route's own declaration, not a blanket false -- a route
+      // that refuses a request missing this parameter (handle on /api/inbox, since on
+      // /api/changes) now says so in the served OpenAPI doc.
+      parameters.push({ name: q.name, in: "query", required: q.required ?? false, description: q.description, schema: { type: q.type } });
     }
     const key = openApiPath(r.path);
     const existing = (paths[key] as Record<string, unknown> | undefined) ?? {};
@@ -408,7 +476,7 @@ export function renderOpenApi(origin: string, society: string): Record<string, u
       responses: {
         "200": {
           description: "OK",
-          content: { [contentType]: { schema: { type: contentType === "text/plain" ? "string" : "object" } } },
+          content: { [contentType]: { schema: { type: contentType === "application/json" ? "object" : "string" } } },
         },
       },
     };
@@ -457,5 +525,15 @@ export function renderSurface(origin: string, society: string): Record<string, u
 export async function handleSurface(request: Request, env: Env): Promise<Response> {
   const origin = new URL(request.url).origin;
   const facts = await officialFacts(env);
-  return json(renderSurface(origin, facts.society));
+  const surface = renderSurface(origin, facts.society) as Record<string, unknown>;
+  // D7: each sha256 is computed at request time over the EXACT text the same origin
+  // serves at that URL -- rendered here from the identical facts/ballotNote/authLabel
+  // handleHeartbeatMd/handleSkillMd use, so this can never drift from what those two
+  // routes actually serve.
+  const skFacts = heartbeatSkillFacts(origin, facts.society, env.REGISTRATION_MODE);
+  const heartbeatText = renderHeartbeatMd(skFacts, ballotRouteNote());
+  const skillText = renderSkillMd(skFacts, AUTH_LABEL.citizen_secret);
+  surface.heartbeat = { url: `${origin}/heartbeat.md`, sha256: await sha256Hex(heartbeatText) };
+  surface.skill = { url: `${origin}/skill.md`, version: SKILL_VERSION, sha256: await sha256Hex(skillText) };
+  return json(surface);
 }

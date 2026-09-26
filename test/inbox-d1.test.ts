@@ -1,15 +1,30 @@
 // GET /api/inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, amendments A1-A20),
 // against real node:sqlite through the D1-shaped helper and the committed schema.sql.
-// Brief tests 1-7 plus A13, A19 and A20; every guard was red-proofed by mutation before
-// it was trusted (docs/CHECKPOINT-HEARTBEAT-INBOX.md carries the ledger).
+// Brief tests 1-13; every guard was red-proofed by mutation before it was trusted
+// (docs/CHECKPOINT-HEARTBEAT-INBOX.md carries the ledger).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { type Env } from "../src/society.ts";
 import { castBallot } from "../src/governance.ts";
-import { inbox, mentionsHandle } from "../src/inbox.ts";
+import { CONSTITUTION } from "../src/society.ts";
+import { sha256Hex } from "../src/chain.ts";
+import { ROUTES, renderOpenApi } from "../src/discovery.ts";
+import worker from "../src/index.ts";
+import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "../src/inbox.ts";
 
 const DAY = 86_400_000;
+const TEST_ORIGIN = "https://commonhold.example.invalid";
+// Fixed placeholders for tests that render served text directly (not through a route,
+// so the real ballot-route note / AUTH_LABEL text is not in scope) -- distinct strings
+// so a bug swapping one for the other would be visible in a failing assertion, not silent.
+const TEST_BALLOT_NOTE = "TEST_BALLOT_NOTE_PLACEHOLDER";
+const TEST_AUTH_LABEL = "TEST_AUTH_LABEL_PLACEHOLDER";
+
+const ctx = { waitUntil: () => {}, passThroughOnException: () => {} };
+async function callFetch(request: Request, env: Env): Promise<Response> {
+  return (worker.fetch as unknown as (r: Request, e: Env, c: unknown) => Promise<Response>)(request, env, ctx);
+}
 
 function makeEnv(d1: LocalD1, overrides: Partial<{ registrationMode: string }> = {}): Env {
   return {
@@ -864,6 +879,164 @@ test("F2 (gate review, corrected): the cursor branch (not just the first-call fl
     const res = await inbox(env, "az", null, `c${before}-p0`);
     const mentionIds = (res.mentions as Array<{ id: number }>).map((m) => m.id);
     assert.deepEqual(mentionIds, [id1], "delivered because its id is past the cursor -- created_at plays no part in a cursor-based call");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- 8-11, 13. served text and routes (D5-D8, A8-A12, A14, A18) ----------
+
+function parseFrontmatter(text: string): Record<string, string> {
+  const m = /^---\n([\s\S]*?)\n---/.exec(text);
+  assert.ok(m, "must have YAML frontmatter delimited by ---");
+  const out: Record<string, string> = {};
+  for (const line of m![1]!.split("\n")) {
+    const kv = /^(\w+):\s*(.*)$/.exec(line);
+    if (kv) out[kv[1]!] = kv[2]!;
+  }
+  return out;
+}
+
+test("8: /heartbeat.md and /skill.md are 200 text/markdown; charset=utf-8; the rendered caps equal CONSTITUTION values; the skill frontmatter parses with name, description, version", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1);
+    const hbRes = await callFetch(new Request(`${TEST_ORIGIN}/heartbeat.md`), env);
+    assert.equal(hbRes.status, 200);
+    assert.match(hbRes.headers.get("Content-Type") ?? "", /text\/markdown; charset=utf-8/);
+    const hbText = await hbRes.text();
+    assert.ok(hbText.includes(`${CONSTITUTION.comments_per_day} comments a day`), "comments_per_day must render live from CONSTITUTION");
+    assert.ok(hbText.includes(`${CONSTITUTION.votes_per_day} votes a day`), "votes_per_day must render live from CONSTITUTION");
+    assert.ok(hbText.includes(`${CONSTITUTION.posts_per_day} post a day`), "posts_per_day must render live from CONSTITUTION");
+    const fmHb = parseFrontmatter(hbText);
+    assert.ok(fmHb.name, "heartbeat frontmatter must carry name");
+    assert.ok(fmHb.description, "heartbeat frontmatter must carry description");
+
+    const skRes = await callFetch(new Request(`${TEST_ORIGIN}/skill.md`), env);
+    assert.equal(skRes.status, 200);
+    assert.match(skRes.headers.get("Content-Type") ?? "", /text\/markdown; charset=utf-8/);
+    const skText = await skRes.text();
+    const fmSk = parseFrontmatter(skText);
+    assert.ok(fmSk.name, "skill frontmatter must carry name");
+    assert.ok(fmSk.description, "skill frontmatter must carry description");
+    assert.equal(fmSk.version, SKILL_VERSION, "skill frontmatter version must equal the live SKILL_VERSION");
+  } finally {
+    d1.close();
+  }
+});
+
+// A path this checker scans for is written as "GET <origin><path>" / "POST <origin><path>"
+// in the served text (the hub own template style); this extracts the path portion up to
+// the first whitespace or a question mark (a query string or human-readable placeholder
+// text follows), then strips trailing sentence punctuation the surrounding prose attaches.
+function extractServedPaths(text: string, origin: string): string[] {
+  const escaped = origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(escaped + "(/[^\\s?]*)", "g");
+  const paths: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    paths.push(m[1]!.replace(/[.,:;]+$/, ""));
+  }
+  return paths;
+}
+
+test("9: every /api/... and /mcp... path named in /heartbeat.md or /skill.md is a real ROUTES path (mutation: a bogus path in the checked text goes red)", () => {
+  const routePaths = new Set(ROUTES.map((r) => r.path));
+  const facts: HeartbeatSkillFacts = { origin: TEST_ORIGIN, society: "Commonhold", registrationMode: "open" };
+  const hbText = renderHeartbeatMd(facts, TEST_BALLOT_NOTE);
+  const skText = renderSkillMd(facts, TEST_AUTH_LABEL);
+  const found = [...extractServedPaths(hbText, TEST_ORIGIN), ...extractServedPaths(skText, TEST_ORIGIN)];
+  assert.ok(found.length > 5, "sanity: the extractor actually found paths, not zero -- otherwise this test proves nothing");
+  const unknown = found.filter((p) => !routePaths.has(p));
+  assert.deepEqual(unknown, [], "every extracted path must be a real ROUTES path -- a served routine must never name a route that does not exist");
+
+  // Mutation: a bogus path planted in the same served text must be caught by this check.
+  const withBogus = hbText + `\nGET ${TEST_ORIGIN}/api/this-route-does-not-exist\n`;
+  const foundBogus = extractServedPaths(withBogus, TEST_ORIGIN).filter((p) => !routePaths.has(p));
+  assert.deepEqual(foundBogus, ["/api/this-route-does-not-exist"], "the checker must flag a bogus path, proving it can fail");
+});
+
+test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served at the SAME origin (mutation: a different origin renders and hashes differently); the skill text is pinned to SKILL_VERSION", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1);
+    const surfaceRes = await callFetch(new Request(`${TEST_ORIGIN}/api/surface`), env);
+    const surface = (await surfaceRes.json()) as {
+      heartbeat: { url: string; sha256: string };
+      skill: { url: string; version: string; sha256: string };
+    };
+
+    const hbBody = await (await callFetch(new Request(`${TEST_ORIGIN}/heartbeat.md`), env)).text();
+    const skBody = await (await callFetch(new Request(`${TEST_ORIGIN}/skill.md`), env)).text();
+    assert.equal(surface.heartbeat.sha256, await sha256Hex(hbBody), "heartbeat sha256 must equal the sha256 of the body served at the same origin");
+    assert.equal(surface.skill.sha256, await sha256Hex(skBody), "skill sha256 must equal the sha256 of the body served at the same origin");
+    assert.equal(surface.heartbeat.url, `${TEST_ORIGIN}/heartbeat.md`);
+    assert.equal(surface.skill.url, `${TEST_ORIGIN}/skill.md`);
+    assert.equal(surface.skill.version, SKILL_VERSION);
+
+    // Mutation: a DIFFERENT origin render must hash differently, proving the check
+    // actually depends on origin rather than being vacuously true for any two texts.
+    const otherOrigin = "https://a-different-origin.example.invalid";
+    const otherBody = await (await callFetch(new Request(`${otherOrigin}/heartbeat.md`), env)).text();
+    assert.notEqual(await sha256Hex(otherBody), surface.heartbeat.sha256, "a different origin render must not equal this origin served sha256");
+
+    // The version/sha pin (a fixed test origin/facts/ballotNote/authLabel, computed once
+    // and hardcoded here): an edit to the rendered skill text that does not bump
+    // SKILL_VERSION fails this exact assertion.
+    const pinnedFacts: HeartbeatSkillFacts = { origin: "https://commonhold.example.invalid", society: "Commonhold", registrationMode: "open" };
+    const pinnedText = renderSkillMd(pinnedFacts, "TEST_AUTH_LABEL_PLACEHOLDER");
+    assert.equal(await sha256Hex(pinnedText), "e37cf8ed08acfbd136b2ddfe1bb68f85aff298f8542ca1456e40c20978e89441", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.0.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+  } finally {
+    d1.close();
+  }
+});
+
+// Test 11 (discovery.test.ts's own generic drift guard, plus its "every ROUTES entry is
+// mentioned in llms.txt/openapi/surface" tests, already cover the three new routes once
+// they carry a grepFor entry and appear in ROUTES -- nothing new to write there; this test
+// pins that the three routes are genuinely present with the right shape, which the
+// generic tests do not name individually.
+test("11: /api/inbox, /heartbeat.md and /skill.md are present in ROUTES with method GET and auth none, each carrying a grepFor", () => {
+  for (const path of ["/api/inbox", "/heartbeat.md", "/skill.md"]) {
+    const r = ROUTES.find((x) => x.path === path);
+    assert.ok(r, `${path} missing from ROUTES`);
+    assert.equal(r!.method, "GET");
+    assert.equal(r!.auth, "none");
+    assert.ok(r!.grepFor, `${path} must carry a grepFor -- index.ts dispatches it in this wave`);
+  }
+  const inboxRoute = ROUTES.find((x) => x.path === "/api/inbox")!;
+  const handleParam = inboxRoute.queryParams?.find((q) => q.name === "handle");
+  assert.equal(handleParam?.required, true, "A12: /api/inbox handle must be required");
+  const changesRoute = ROUTES.find((x) => x.path === "/api/changes")!;
+  const sinceParam = changesRoute.queryParams?.find((q) => q.name === "since");
+  assert.equal(sinceParam?.required, true, "A12: /api/changes since must be required");
+});
+
+// A12: RouteQueryParam.required must actually reach the SERVED OpenAPI document, not
+// just sit on the ROUTES data structure -- renderOpenApi is the code path that has to
+// emit it (mutation: renderOpenApi hard-codes required: false -> red).
+test("11b: the served OpenAPI doc emits required: true for /api/inbox handle and /api/changes since, and required: false for /api/inbox since/cursor (neither alone is mandatory)", () => {
+  const doc = renderOpenApi(TEST_ORIGIN, "Commonhold") as { paths: Record<string, { get: { parameters: Array<{ name: string; required: boolean }> } }> };
+  const inboxParams = doc.paths["/api/inbox"]!.get.parameters;
+  const handleParam = inboxParams.find((p) => p.name === "handle");
+  assert.equal(handleParam?.required, true);
+  const sinceParam = inboxParams.find((p) => p.name === "since");
+  assert.equal(sinceParam?.required, false, "since alone is not mandatory -- exactly one of since/cursor is, which OpenAPI's per-parameter required cannot express");
+  const changesParams = doc.paths["/api/changes"]!.get.parameters;
+  const changesSince = changesParams.find((p) => p.name === "since");
+  assert.equal(changesSince?.required, true);
+});
+
+test("13: the heartbeat door note is present on GET / outside the attested constitution (the v5 template pin is checked in topics-d1.test.ts and stays green across the whole suite)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1);
+    const res = await callFetch(new Request(`${TEST_ORIGIN}/`), env);
+    const body = await res.text();
+    assert.ok(body.includes("Heartbeat:"), "the door note must be present");
+    assert.ok(body.includes(`${TEST_ORIGIN}/heartbeat.md`));
+    assert.ok(body.includes(`${TEST_ORIGIN}/skill.md`));
   } finally {
     d1.close();
   }

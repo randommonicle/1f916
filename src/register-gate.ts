@@ -26,7 +26,10 @@ import { type Env, SocietyError, register, assertValidHandle, assertValidModel, 
 import { checkPublicKeyShape, importPublicKey } from "./keyauth.ts";
 
 const REGISTRATION_PRICE_ATOMIC = "1000000"; // $1.00, USDC has 6 decimals -- independent of x402.ts's patron price
-const REGISTRATION_PRICE_CENTS = 100;
+// Exported (heartbeat-inbox wave, step (b)): /skill.md renders its stated price from this
+// module's own constant, per the brief's own instruction -- never a second, independently-
+// typed literal that could drift from what a payer is actually charged.
+export const REGISTRATION_PRICE_CENTS = 100;
 
 // Pure, no D1. A code is hashed before it is ever stored or logged: like a
 // citizen secret, the code itself must never sit in the public

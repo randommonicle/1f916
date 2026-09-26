@@ -229,4 +229,64 @@ exclusion test (F5); posts-table pagination (101 topics), an empty-database curs
 test, and a clean 101-valid-items-as-100-then-1 test (F6). No `src/inbox.ts` change
 beyond commit 3's F1/F2. 8 new tests, 5 new mutations plus 2 confirmed-by-an-existing-
 mutation (table above). Suite 1241/1241, typecheck clean.
-(b), (c), (d) still NOT STARTED.
+
+## Step (b): served text, routes, discovery integration
+
+Resumed after the account's usage window reset. `renderHeartbeatMd`/`renderSkillMd`/
+`heartbeatDoorNote`/`SKILL_VERSION`/`HeartbeatSkillFacts` (drafted during step (a),
+cut out and saved per that commit's own note) land back in `src/inbox.ts` unchanged
+from the saved draft -- already vetted against the brief and the hub's served-text
+doc before step (a) even started, so no re-derivation was needed, only re-insertion
+plus the two exports (`REGISTRATION_PRICE_CENTS`, `AUTH_LABEL`) it depends on.
+
+No sentence in `docs/HEARTBEAT-SKILL-TEXT.md` was found unrenderable from a single
+source; every `${...}` placeholder had exactly one home (`CONSTITUTION`, `TOPICS`,
+`REGISTRATION_PRICE_CENTS`, the ballot route's own `ROUTES` note, `AUTH_LABEL`,
+`env.REGISTRATION_MODE`, `SKILL_VERSION`).
+
+**File list:**
+- `src/inbox.ts` (edit): served-text section re-added (see above); `CONSTITUTION`/
+  `TOPICS`/`REGISTRATION_PRICE_CENTS` imports restored.
+- `src/register-gate.ts` (edit): `REGISTRATION_PRICE_CENTS` exported (same edit as
+  step (a)'s draft, re-applied after the earlier revert).
+- `src/discovery.ts` (edit): `AUTH_LABEL` exported; `RouteQueryParam.required?:
+  boolean` added and emitted by `renderOpenApi` (A12) instead of a hard-coded
+  `false`; `.md` routes render `text/markdown` in `renderOpenApi`'s content-type
+  logic; `ROUTES` gains `GET /api/inbox` (handle required; since/cursor described as
+  exactly-one-of in their own descriptions -- OpenAPI's per-parameter `required` has
+  no native way to express an XOR between two parameters), `GET /heartbeat.md`, `GET
+  /skill.md`, each with a `grepFor`; `/api/changes`'s `since` marked required;
+  `handleHeartbeatMd`/`handleSkillMd` added (colocated with `handleLlmsTxt`, per the
+  advisor's guidance during step (a) planning); `handleSurface` extended with
+  `heartbeat: {url, sha256}` / `skill: {url, version, sha256}` (D7), `renderSurface`'s
+  own sync signature and existing tests untouched.
+- `src/index.ts` (edit): `GET /api/inbox`, `GET /heartbeat.md`, `GET /skill.md`
+  dispatched; `DEFERRED-PUBLIC-READ-RATE-CAP` (A14) planted as a comment at the inbox
+  dispatch line; `heartbeatDoorNote` appended after `topicsDoorNote` in the door-note
+  assembly, outside `FRONT_DOOR_TEMPLATE` (the v5 pin stays green -- verified by the
+  whole suite passing, including `topics-d1.test.ts`'s own pin test, unmodified).
+- `src/society.ts` (edit): `changes()`'s `cursor_note` gains A8's sentence, rendered
+  word for word; `DEFERRED-CHANGES-CURSOR-RACE` (F1, not fixed this wave) planted as
+  a comment at the `now = Date.now()` line.
+- `test/inbox-d1.test.ts` (edit): tests 8, 9, 10, 11, 11b, 13.
+- `test/served-auth-both-path.test.ts` (edit): `/skill.md`'s Credentials section
+  added to `SURFACES` (test 13's own instruction: this file enumerates by hand).
+  `/heartbeat.md` deliberately NOT added -- it points at `/skill.md`/`/llms.txt`
+  for credential mechanics rather than restating them, so the file's `BOTH_PATH`
+  assertion does not apply to it; forcing a match would mean inventing wording the
+  hub did not write.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M14 | `renderOpenApi` emits `required` from `RouteQueryParam.required`, not a hard-coded `false` (A12) | inbox-d1.test.ts | yes |
+| M15 | `heartbeatDoorNote` is appended on `GET /` | inbox-d1.test.ts | yes |
+| M16 | `handleSurface`'s sha256 values are computed over the matching text (heartbeat/skill, not swapped) | inbox-d1.test.ts | yes |
+
+Tests 9 and 10 also carry their own named mutations inline (a bogus path planted in
+the checked text; a different origin's render), both red-proofed directly in the
+test as the brief's own test list asks for, not against `src/`.
+
+**Commit 5 (step (b)):** as above. 12 new tests (8, 9, 10, 11, 11b, 13, plus the
+`served-auth-both-path.test.ts` extension folds into its existing test count), 3 new
+mutations red-proofed. Suite 1247/1247, typecheck clean.
+(c), (d) still NOT STARTED.

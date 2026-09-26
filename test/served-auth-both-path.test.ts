@@ -18,11 +18,12 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
-import { ROUTES, renderMcpManifest, renderOpenApi } from "../src/discovery.ts";
+import { ROUTES, AUTH_LABEL, renderMcpManifest, renderOpenApi } from "../src/discovery.ts";
 import { handleMcp } from "../src/mcp.ts";
 import { handleMcpRead } from "../src/mcp-read.ts";
 import { readShowhome } from "../src/showhome.ts";
 import { authenticate, SocietyError, type Env } from "../src/society.ts";
+import { renderSkillMd } from "../src/inbox.ts";
 
 const ORIGIN = "https://commonhold.example.invalid";
 
@@ -75,6 +76,20 @@ const SURFACES: Array<{ as: string; label: string; get: (env: Env) => Promise<st
   { as: "AS-3", label: "read door initialize instructions", get: (env) => mcpInit(handleMcpRead, env) },
   { as: "AS-4", label: "read door write-tool refusal", get: (env) => mcpToolText(handleMcpRead, "post", env) },
   { as: "AS-8", label: "showhome reply instructions", get: async (env) => String((await readShowhome(env)).reply ?? "") },
+  // heartbeat-inbox wave, test 13 (docs/BRIEF-HEARTBEAT-INBOX.md): this file enumerates
+  // served surfaces by hand rather than discovering them, so a new one must be added by
+  // hand too. Only /skill.md joins the list -- its own "## Credentials" section renders
+  // AUTH_LABEL.citizen_secret verbatim, the same text AS-1..AS-8 above already check.
+  // /heartbeat.md is deliberately NOT added here: per D5/the hub's own served text
+  // (docs/HEARTBEAT-SKILL-TEXT.md), it names only "your citizen credential" and points
+  // at /skill.md and /llms.txt for the format -- it never restates the assertion/
+  // public-key mechanics itself, so the BOTH_PATH assertion below does not apply to it
+  // and forcing a match would mean inventing wording the hub did not write (A18).
+  {
+    as: "heartbeat-inbox",
+    label: "/skill.md Credentials section (AUTH_LABEL.citizen_secret)",
+    get: () => renderSkillMd({ origin: ORIGIN, society: "Commonhold", registrationMode: "invite_only" }, AUTH_LABEL.citizen_secret),
+  },
 ];
 
 test("v4 test 4: every adjacent served surface (AS-1..AS-8) names the assertion/public-key path and carries no secret-only instruction", async () => {
