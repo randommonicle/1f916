@@ -166,6 +166,34 @@ genuinely older); the mutation (filter comments by `m.created_at > ` instead of
 `m.id > `) now visibly reddens it (and, incidentally, two other tests that share the
 same query path -- recorded as expected fallout, not a separate defect).
 
+## Round 2 continued: F3-F6 (comprehensive coverage, second commit)
+
+New tests only -- no source change in `src/inbox.ts` beyond F1/F2 above. Two of the new
+guards turned out to already be covered by an EXISTING mutation once the new test was
+added (recorded as such below, not given a redundant new id): `M3` (self-exclusion)
+also reddens F5's self-comment-on-own-post test, and `M6` (the look-ahead slice) also
+reddens both of F6's pagination tests. Three genuinely new mutation points: the
+per-side boundary check (F4, `boundaryOk`'s two operands had only ever been mutated
+together, M2), the windowing mechanism as a whole (F5), and the empty-table cursor
+fallback (F6).
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M11 | mention boundary, BEFORE side only (`boundaryOk(before)` dropped from the AND) | inbox-d1.test.ts | yes |
+| M12 | mention boundary, AFTER side only (`boundaryOk(after)` dropped from the AND) | inbox-d1.test.ts | yes |
+| F4-body | `mentionsHandle(row.body, ...)` dropped from post AND topic classification (one mutation, both red) | inbox-d1.test.ts | yes |
+| M-window | `idFloorExpr` forced to always 0 (no windowing at all) | inbox-d1.test.ts | yes |
+| M13 | the empty-table cursor fallback (`snapshotMax ?? startId`) forced to ignore `startId` | inbox-d1.test.ts | yes |
+| M3 (recheck) | self-exclusion (`m.citizen_id != ?`) ALSO reddens F5's self-comment-on-own-post test | inbox-d1.test.ts | yes (confirmed, not a new id) |
+| M6 (recheck) | the look-ahead slice ALSO reddens F6's posts-pagination and 101-valid-items tests | inbox-d1.test.ts | yes (confirmed, not a new id) |
+
+F3 (the ballots parity matrix) and the F4 post/topic-body test add coverage of the
+EXISTING M5/M5b/M4b guards across more cells (four vote classes, tenure boundaries,
+a founding-gated-with-false kind); their own new assertions were verified to actually
+distinguish eligible from ineligible outcomes (the matrix's own "not vacuously green"
+assertion) rather than mutation-tested a second time on the same source lines M5/M5b/M4b
+already cover.
+
 ## Commit log
 
 **Commit 2 (`src/inbox.ts` core + `test/inbox-d1.test.ts` + the two supporting exports):**
@@ -190,4 +218,15 @@ commit and deferred to (b) on the hub's instruction, because they need `register
 every entry (F7). F3-F6 (comprehensive ballots parity, body/underscore mention
 vectors, window/self-comment tests, posts-table pagination) land in a following
 commit -- see below. 6/6 new mutations red-proofed, table above.
+
+**Commit 4 (gate review fixes F3-F6, test coverage only):** a full ballots parity
+matrix (F3: four vote classes, tenure boundaries either side of the 7- and 14-day
+thresholds, a founding-gated kind with `founding_ratified` false against both a
+founder and non-founders, every one of the 20 (citizen, proposal) pairs compared
+against a real `castBallot`); post-body and topic-body mention vectors plus the two
+underscore-boundary cases (F4); a reply-window test and a self-comment-on-own-post
+exclusion test (F5); posts-table pagination (101 topics), an empty-database cursor
+test, and a clean 101-valid-items-as-100-then-1 test (F6). No `src/inbox.ts` change
+beyond commit 3's F1/F2. 8 new tests, 5 new mutations plus 2 confirmed-by-an-existing-
+mutation (table above). Suite 1241/1241, typecheck clean.
 (b), (c), (d) still NOT STARTED.

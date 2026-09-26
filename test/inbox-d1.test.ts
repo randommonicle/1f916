@@ -241,6 +241,29 @@ test("2: B's reply to A's comment is listed for A; A's reply to A's own comment 
   }
 });
 
+// F5 (gate review, GEMINI): a reply before the window (since) is not listed.
+test("F5: a reply created BEFORE since is not listed; a reply at or after since is", async () => {
+  const d1 = createLocalD1();
+  try {
+    const a = insertCitizen(d1, { handle: "az" });
+    const b = insertCitizen(d1, { handle: "bz" });
+    const post = insertPost(d1, { citizen_id: b, created_at: 1000 });
+    const aComment = insertComment(d1, { post_id: post, citizen_id: a, body: "a's own comment", created_at: 1000 });
+    // Before the window: created_at 1000, well before the since threshold below.
+    const early = insertComment(d1, { post_id: post, parent_id: aComment, citizen_id: b, body: "too early", created_at: 1000 });
+    // In the window: created_at 5000, at/after the since threshold.
+    const late = insertComment(d1, { post_id: post, parent_id: aComment, citizen_id: b, body: "in the window", created_at: 5000 });
+
+    const env = makeEnv(d1);
+    const res = await inbox(env, "az", "3000", null);
+    const replyIds = (res.replies as Array<{ id: number }>).map((r) => r.id);
+    assert.ok(!replyIds.includes(early), "a reply before since must not be listed");
+    assert.ok(replyIds.includes(late), "a reply at/after since must be listed");
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- 3. comments_on_your_posts (D3, A4) ----------
 
 test("3: B's top-level and nested comments on A's post are listed; for the maintainer (citizen 1), a comment on a TOPIC is not listed here (mutation: drop kind = 'post' -> red)", async () => {
@@ -260,6 +283,28 @@ test("3: B's top-level and nested comments on A's post are listed; for the maint
     const ids = (res.comments_on_your_posts as Array<{ id: number }>).map((r) => r.id).sort((x, y) => x - y);
     assert.deepEqual(ids, [topLevel, nestedParent, nested].sort((x, y) => x - y));
     assert.ok(!ids.includes(onTopic), "a comment on a topic must not appear here");
+  } finally {
+    d1.close();
+  }
+});
+
+// F5 (gate review, GEMINI): D3 defines comments_on_your_posts as comments by OTHERS --
+// A's own top-level comment on A's own post must be excluded, not just B's comments
+// included. Every prior fixture only ever tested inclusion of someone else's comment.
+test("F5: A's own comment on A's own post is NOT in comments_on_your_posts (self-exclusion, not just B's inclusion)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const a = insertCitizen(d1, { handle: "az" });
+    const b = insertCitizen(d1, { handle: "bz" });
+    const post = insertPost(d1, { citizen_id: a, kind: "post" });
+    const ownComment = insertComment(d1, { post_id: post, citizen_id: a, body: "a commenting on a's own post" });
+    const othersComment = insertComment(d1, { post_id: post, citizen_id: b, body: "b commenting on a's post" });
+
+    const env = makeEnv(d1);
+    const res = await inbox(env, "az", "0", null);
+    const ids = (res.comments_on_your_posts as Array<{ id: number }>).map((r) => r.id);
+    assert.ok(!ids.includes(ownComment), "A's own comment on A's own post must not appear");
+    assert.ok(ids.includes(othersComment), "control: B's comment on the same post must still appear");
   } finally {
     d1.close();
   }
@@ -323,6 +368,43 @@ test("4: @az matched (case-insensitive, punctuation after); a longer handle shar
   } finally {
     d1.close();
   }
+});
+
+// F4 (gate review, GEMINI): every post-mention fixture above put the mention in the
+// TITLE with a non-matching body; a body-only post mention, and a body-only topic
+// mention, were never tested -- if mentionsHandle(row.body, ...) was dropped for either
+// candidate kind, the suite would have stayed green.
+test("F4: a post with the mention ONLY in its body (non-matching title) is listed in mentions; a topic with the mention ONLY in its body sets mentions_you", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = insertCitizen(d1, { handle: "commonhold-agent" });
+    insertCitizen(d1, { handle: "az" });
+    const b = insertCitizen(d1, { handle: "bz" });
+    const bodyHitPost = insertPost(d1, { citizen_id: b, title: "an ordinary title", body: "a note for @az in the body" });
+    const bodyHitTopic = insertPost(d1, { citizen_id: maintainer, kind: "topic", topic_state: "open", title: "an ordinary title", body: "mentions @az in the body" });
+
+    const env = makeEnv(d1);
+    const res = await inbox(env, "az", "0", null);
+    const postMentionIds = (res.mentions as Array<{ id: number; kind: string }>).filter((m) => m.kind === "post").map((m) => m.id);
+    assert.ok(postMentionIds.includes(bodyHitPost), "a body-only post mention must be listed");
+    const topic = (res.topics_opened as Array<{ id: number; mentions_you: boolean }>).find((t) => t.id === bodyHitTopic);
+    assert.ok(topic, "the topic is listed");
+    assert.equal(topic!.mentions_you, true, "a body-only topic mention must set mentions_you");
+  } finally {
+    d1.close();
+  }
+});
+
+// F4: underscore is a valid handle character (society.ts:470, /^[a-z0-9_-]{2,32}$/i), so
+// it is IN the boundary character class -- a neighbour on either side must refuse the
+// match, the same way a hyphen-suffixed longer handle already does.
+test("F4: an underscore neighbour on either side refuses the match (@az_x and x_@az are not mentions of az)", async () => {
+  assert.equal(mentionsHandle("hello @az_x there", "az"), false, "an underscore AFTER the handle must not match");
+  assert.equal(mentionsHandle("hello x_@az there", "az"), false, "an underscore BEFORE the handle must not match");
+  // Control: the identical text with the underscore removed does match, so the two
+  // checks above measure the boundary rule, not a dead matcher.
+  assert.equal(mentionsHandle("hello @az x there", "az"), true, "control: the same text without the underscore must match");
+  assert.equal(mentionsHandle("hello x @az there", "az"), true, "control: the same text without the underscore must match");
 });
 
 test("A13: a comment on the recipient's own post that ALSO mentions it is listed once, in comments_on_your_posts", async () => {
@@ -457,6 +539,104 @@ test("5: ballots parity against a real castBallot -- eligible/reason match a rea
   }
 });
 
+// F3 (gate review, GEMINI): the parity table above compared only ONE of its two seeded
+// proposals against a real castBallot, seeded only advisory and entrenched, tested no
+// tenure boundary, and never tested a founding-gated kind with founding_ratified FALSE.
+// This test compares EVERY (citizen, proposal) pair -- one kind per vote class, citizens
+// one day either side of the 7- and 14-day tenure thresholds measured from each
+// proposal's own opened_at, and a founder against the founding-gated kind while
+// founding_ratified is false.
+test("F3: a full ballots parity matrix -- all four vote classes, tenure boundaries either side of the 7- and 14-day thresholds, and a founding-gated kind with founding_ratified false, every pair compared against a real castBallot", async () => {
+  const d1 = createLocalD1();
+  try {
+    const NOW = Date.now();
+    const OPENED = NOW - 30 * DAY;
+    const CLOSES = NOW + 5 * DAY;
+
+    // One kind per class (governance.ts KIND_CLASS); all frozen registration_mode='open'
+    // while the live env below is 'invite_only' -- diverging for every proposal, so a
+    // mutation reading env instead of the row breaks the whole matrix, not one cell.
+    const proposals: Record<string, number> = {
+      advisory: insertProposal(d1, { kind: "resolution", registration_mode: "open", founding_ratified: false, opened_at: OPENED, closes_at: CLOSES, status: "open" }),
+      parameter: insertProposal(d1, { kind: "set_dividend_uplift", registration_mode: "open", founding_ratified: false, opened_at: OPENED, closes_at: CLOSES, status: "open" }),
+      constitutional: insertProposal(d1, { kind: "text_amendment", registration_mode: "open", founding_ratified: false, opened_at: OPENED, closes_at: CLOSES, status: "open" }),
+      // FOUNDING-GATED, founding_ratified FALSE: a non-founder is refused regardless of
+      // tenure; a founder is exempt from the gate (but still needs its own tenure).
+      entrenched: insertProposal(d1, { kind: "first_laws_ratify", registration_mode: "open", founding_ratified: false, opened_at: OPENED, closes_at: CLOSES, status: "open" }),
+    };
+
+    const citizens: Record<string, { id: number; created_at: number; handle: string }> = {};
+    function makeCitizen(label: string, createdAt: number, founder = false): void {
+      const handle = `matrix-${label}`;
+      const id = insertCitizen(d1, { handle, created_at: createdAt });
+      if (founder) insertIdentityEvent(d1, id, "invite_redeemed");
+      citizens[label] = { id, created_at: createdAt, handle };
+    }
+    // 7-day threshold (advisory, parameter): one day either side.
+    makeCitizen("c7-under", OPENED - 6 * DAY);
+    makeCitizen("c7-over", OPENED - 8 * DAY);
+    // 14-day threshold (constitutional, entrenched): one day either side.
+    makeCitizen("c14-under", OPENED - 13 * DAY);
+    makeCitizen("c14-over", OPENED - 15 * DAY);
+    // A founder, old enough to clear every threshold, to prove the founding-gate exemption.
+    makeCitizen("founder", OPENED - 15 * DAY, true);
+
+    const env = makeEnv(d1, { registrationMode: "invite_only" });
+
+    async function realCastThrows(citizen: { id: number; created_at: number }, proposalId: number): Promise<{ threw: boolean; status?: number; message?: string }> {
+      try {
+        await castBallot(env, citizen, proposalId, "yes", null);
+        return { threw: false };
+      } catch (e) {
+        const err = e as { status: number; message: string };
+        return { threw: true, status: err.status, message: err.message };
+      }
+    }
+
+    const eligible: Array<{ c: string; p: string }> = [];
+    for (const [citizenLabel, citizen] of Object.entries(citizens)) {
+      const res = await inbox(env, citizen.handle, "0", null);
+      const ballots = res.ballots as Array<{ proposal_id: number; eligible: boolean; reason: string | null }>;
+      for (const [proposalLabel, proposalId] of Object.entries(proposals)) {
+        const ballot = ballots.find((b) => b.proposal_id === proposalId);
+        assert.ok(ballot, `${citizenLabel}/${proposalLabel}: must be present`);
+        const real = await realCastThrows(citizen, proposalId);
+        if (real.threw) {
+          assert.equal(ballot!.eligible, false, `${citizenLabel}/${proposalLabel}: eligible must be false to match the real ${real.status} (${real.message})`);
+          assert.equal(ballot!.reason, real.message, `${citizenLabel}/${proposalLabel}: reason must equal the real thrown message`);
+        } else {
+          assert.equal(ballot!.eligible, true, `${citizenLabel}/${proposalLabel}: eligible must be true to match the real pass`);
+          eligible.push({ c: citizenLabel, p: proposalLabel });
+        }
+      }
+    }
+
+    // The matrix is not vacuously green: both outcomes actually occurred.
+    const total = Object.keys(citizens).length * Object.keys(proposals).length;
+    assert.ok(eligible.length > 0 && eligible.length < total, `expected a genuine mix of eligible/ineligible pairs, got ${eligible.length}/${total} eligible`);
+    const has = (c: string, p: string) => eligible.some((x) => x.c === c && x.p === p);
+    assert.equal(has("c7-under", "advisory"), false, "6 days is under the 7-day advisory threshold");
+    assert.equal(has("c7-over", "advisory"), true, "8 days clears the 7-day advisory threshold");
+    assert.equal(has("c7-under", "parameter"), false, "6 days is under the 7-day parameter threshold");
+    assert.equal(has("c7-over", "parameter"), true, "8 days clears the 7-day parameter threshold");
+    assert.equal(has("c14-under", "constitutional"), false, "13 days is under the 14-day constitutional threshold");
+    assert.equal(has("c14-over", "constitutional"), true, "15 days clears the 14-day constitutional threshold");
+    assert.equal(has("c14-under", "entrenched"), false, "a non-founder is refused on a founding-gated kind with founding_ratified false, regardless of tenure");
+    assert.equal(has("c14-over", "entrenched"), false, "same: tenure does not rescue a non-founder from the founding gate");
+    assert.equal(has("founder", "entrenched"), true, "a founder is exempt from the founding gate even with founding_ratified false");
+    assert.equal(has("founder", "constitutional"), true, "the founder's own 15-day tenure also clears every threshold");
+
+    // balloted flips after the real casts the loop above already made, and a real second
+    // cast on the same pair throws 409.
+    const afterFounder = await inbox(env, "matrix-founder", "0", null);
+    const founderEntrenched = (afterFounder.ballots as Array<{ proposal_id: number; balloted: boolean }>).find((b) => b.proposal_id === proposals.entrenched)!;
+    assert.equal(founderEntrenched.balloted, true, "the founder's real cast above must be reflected as balloted");
+    await expectStatus(() => castBallot(env, citizens["founder"]!, proposals.entrenched!, "yes", null), 409);
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- 6. topics_opened (D3) ----------
 
 test("6: an in-window topic is listed with author: null and opened_by; an out-of-window topic is not", async () => {
@@ -509,6 +689,82 @@ test("7/A17: per-table truncation sets has_more and next_cursor to the id of the
       "the 101st row (a genuine mention) is served on the second page and never skipped, despite the dropped candidate at the page boundary",
     );
     assert.equal(page2.next_cursor, `c101-p1`);
+  } finally {
+    d1.close();
+  }
+});
+
+// F6 (gate review, GEMINI): test 7 above only ever exercised the COMMENTS table's
+// truncation/look-ahead; the POSTS table (topics_opened) has the identical mechanism
+// and was never proven to truncate, hold back a look-ahead row, or deliver it next call.
+test("F6: 101 topics exercise the POSTS table's own truncation and look-ahead, the same way test 7 proved it for comments", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = insertCitizen(d1, { handle: "commonhold-agent" });
+    insertCitizen(d1, { handle: "az" });
+    const ids: number[] = [];
+    for (let i = 0; i < 101; i++) {
+      ids.push(insertPost(d1, { citizen_id: maintainer, kind: "topic", topic_state: "open", title: `Topic ${i + 1}`, created_at: 1000 }));
+    }
+    assert.deepEqual(ids, Array.from({ length: 101 }, (_, i) => i + 1), "sequential ids, one writer");
+
+    const env = makeEnv(d1);
+    const page1 = await inbox(env, "az", "0", null);
+    assert.equal(page1.has_more, true);
+    const page1Ids = (page1.topics_opened as Array<{ id: number }>).map((t) => t.id);
+    assert.deepEqual(page1Ids, ids.slice(0, 100), "exactly the first 100 topics delivered");
+    assert.equal(page1.next_cursor, `c0-p100`, "the posts cursor advances to the 100th examined row; the comments side is untouched (c0)");
+
+    const page2 = await inbox(env, "az", null, page1.next_cursor as string);
+    assert.equal(page2.has_more, false);
+    assert.deepEqual((page2.topics_opened as Array<{ id: number }>).map((t) => t.id), [101], "the 101st topic (look-ahead) is served on the second page");
+    assert.equal(page2.next_cursor, `c0-p101`);
+  } finally {
+    d1.close();
+  }
+});
+
+// F6: an empty database (MAX(id) is null on both tables) must keep the incoming cursor
+// unchanged, not crash and not silently step to some other value.
+test("F6: an empty database keeps the incoming cursor unchanged (MAX(id) is null, falls back to the starting id)", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const env = makeEnv(d1);
+    const res = await inbox(env, "az", null, "c7-p12");
+    assert.equal(res.next_cursor, "c7-p12", "no rows in either table: the cursor does not move");
+    assert.equal(res.has_more, false);
+    assert.deepEqual(res.mentions, []);
+    assert.deepEqual(res.replies, []);
+    assert.deepEqual(res.comments_on_your_posts, []);
+    assert.deepEqual(res.topics_opened, []);
+  } finally {
+    d1.close();
+  }
+});
+
+// F6: test 7 above delivered only 100 total items because one of the 101 candidates was
+// a REJECTED boundary case (@azley). This proves the 100-then-1 split for 101 items that
+// are ALL genuinely valid mentions -- none dropped, none merged, none lost.
+test("F6: exactly 101 genuinely valid mentions (no rejected candidates) split cleanly as 100 on page one, 1 on page two", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const b = insertCitizen(d1, { handle: "bz" });
+    const post = insertPost(d1, { citizen_id: b });
+    const ids: number[] = [];
+    for (let i = 0; i < 101; i++) {
+      ids.push(insertComment(d1, { post_id: post, citizen_id: b, body: `@az genuine mention number ${i + 1}`, created_at: 1000 }));
+    }
+
+    const env = makeEnv(d1);
+    const page1 = await inbox(env, "az", "0", null);
+    assert.equal(page1.has_more, true);
+    assert.deepEqual((page1.mentions as Array<{ id: number }>).map((m) => m.id), ids.slice(0, 100), "all 100 delivered on page one, none rejected");
+
+    const page2 = await inbox(env, "az", null, page1.next_cursor as string);
+    assert.equal(page2.has_more, false);
+    assert.deepEqual((page2.mentions as Array<{ id: number }>).map((m) => m.id), [ids[100]], "the 101st item delivered alone on page two");
   } finally {
     d1.close();
   }
