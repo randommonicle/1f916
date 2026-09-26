@@ -147,6 +147,17 @@ export function createLocalD1(opts: { onExec?: (kind: "d1") => void } = {}): Loc
     // omitted `success` entirely and omitted `results` on a write, so caller
     // code checking either could read a false negative that real D1 would
     // never produce).
+    //
+    // DEFERRED-LOCAL-D1-UNDEFINED-BIND (GEMINI, exchange/REVIEW_inbox-core-build-2026-09-26.md,
+    // "Could It Make a Test Pass That Real D1 Would Fail?" point 2): real Cloudflare D1
+    // rejects an `undefined` bind value outright (`D1_ERROR: Type 'undefined' is not
+    // supported as a bind value`); node:sqlite, underneath this shim, can be more
+    // lenient, so a test could pass here on an `undefined` bind that would 400 on the
+    // real edge. A genuine fidelity gap in this shim -- NOT fixed in this wave: CODEX's
+    // own pass over src/inbox.ts (same review, round 1) verified every one of its binds
+    // lines up positionally with its placeholders and none is ever undefined, so nothing
+    // this wave ships is known to rely on the gap. Recorded as a follow-up for whoever
+    // next adds a batch() call, not closed here (CLAUDE round 2, "Not adopted (b)").
     async batch<T = unknown>(stmts: D1StatementLike[]): Promise<T[]> {
       raw.exec("BEGIN");
       try {

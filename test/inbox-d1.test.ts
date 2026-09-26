@@ -807,18 +807,26 @@ test("A19 (CODEX round 2 reproduction): rows (id 1, created_at 200) and (id 2, c
   }
 });
 
-test("A20: a mention hidden by moderation when the cursor passed it is not delivered even if later restored", async () => {
+test("A20 (gate review): a mention hidden by moderation when the cursor passed it is not delivered even if later restored -- the cursor advances to the LAST EXAMINED row, not the last DELIVERED one (mutation: cursor-by-last-delivered -> red)", async () => {
   const d1 = createLocalD1();
   try {
     insertCitizen(d1, { handle: "az" });
     const b = insertCitizen(d1, { handle: "bz" });
     const post = insertPost(d1, { citizen_id: b });
+    // genuine (delivered) comes BEFORE hidden (dropped, larger id) so a cursor computed
+    // from "the last DELIVERED row" (genuine) and one computed from "the last EXAMINED
+    // row" (hidden) are two DIFFERENT values -- the two designs are distinguishable.
+    const genuine = insertComment(d1, { post_id: post, citizen_id: b, body: "@az a genuine mention, delivered" });
     const hidden = insertComment(d1, { post_id: post, citizen_id: b, body: "@az but collapsed", mod_state: "collapsed" });
+    assert.ok(hidden > genuine, "test setup invariant: hidden must be the LATER row (larger id)");
 
     const env = makeEnv(d1);
     const page1 = await inbox(env, "az", "0", null);
-    assert.deepEqual(page1.mentions, [], "hidden by moderation: not delivered");
-    assert.equal(page1.next_cursor, `c${hidden}-p${post}`, "the cursor still advances past it");
+    assert.deepEqual((page1.mentions as Array<{ id: number }>).map((m) => m.id), [genuine], "only the genuine mention delivered");
+    // The direct proof: next_cursor names the LAST EXAMINED row (hidden), not the last
+    // DELIVERED one (genuine) -- a cursor-by-last-delivered design would serve
+    // c${genuine}-p${post} here instead, and this assertion alone would catch it.
+    assert.equal(page1.next_cursor, `c${hidden}-p${post}`, "the cursor advances to the last EXAMINED row (hidden), never the last DELIVERED one (genuine)");
 
     setCommentModState(d1, hidden, null); // the maintainer restores it
     const page2 = await inbox(env, "az", null, page1.next_cursor as string);

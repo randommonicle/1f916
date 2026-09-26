@@ -336,4 +336,37 @@ second, now-genuinely-stale entry the guard's own `stale` check would then catch
 
 **Commit 6 (step (c)):** as above. 1 new test (12), 2 new mutations red-proofed, plus
 the unplanned secret-literal-guard fix. Suite 1248/1248, typecheck clean.
+
+## Two items owed from the review, addressed directly (not part of (b)/(c)/(d))
+
+**The A20 test did not directly prove its own named property.** The original test
+asserted only `page2.mentions === []` after a restore -- true, but true for more
+than one reason (it would also read true if page1's OWN cursor never advanced past
+`hidden` at all, a different bug). Redesigned with a genuine, DELIVERED mention
+inserted before the hidden one, so "the cursor advances to the last EXAMINED row"
+and "the cursor advances to the last DELIVERED row" produce two different, named
+values (`c<hidden>-...` vs `c<genuine>-...`), and the test now asserts the id
+DIRECTLY, not only the downstream consequence. Red-proofed with the review's own
+suggested mutation: track the last row actually pushed into a section during
+classification and use IT as the cursor instead of the real (last-examined)
+value -- confirmed red on the new direct assertion, reverted, `git diff` against
+HEAD confirmed byte-identical.
+
+**`DEFERRED-LOCAL-D1-UNDEFINED-BIND`** planted as a comment at `test/helpers/
+local-d1.ts`'s `batch()` function: real D1 rejects an `undefined` bind value
+outright; `node:sqlite` underneath this shim can be more lenient, a genuine
+fidelity gap GEMINI's review named and CLAUDE round 2 declined to fix this wave
+(CODEX verified every bind in `src/inbox.ts` lines up and none is ever undefined).
+No functional change -- documentation only, matching how every other `DEFERRED-*`
+flag in this codebase is recorded (a grep-able marker, not an enforced check).
+
+**Commit 7 (the two review-owed items):** `test/inbox-d1.test.ts` (A20 test
+redesigned and re-proofed), `test/helpers/local-d1.ts` (the flag). 1 new mutation
+red-proofed (table below). Suite unchanged in count (1248/1248 -- the A20 test was
+replaced, not added), typecheck clean.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| A20-recheck | the comments cursor advances to the last EXAMINED row, never the last DELIVERED one | inbox-d1.test.ts | yes |
+
 (d) still NOT STARTED.
