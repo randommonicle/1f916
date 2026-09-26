@@ -104,6 +104,31 @@ test("helper sanity: env.DB.batch() returns .results for a SELECT statement, not
   }
 });
 
+// F7 (exchange/REVIEW_inbox-core-build-2026-09-26.md): real D1's batch<T>() gives every
+// entry `success: true`, and a write's `results` is `[]`, never absent; a CTE (leading
+// WITH) is a read too, not routed through .run().
+test("F7: batch() carries success: true on every entry, results: [] on a write (never absent), and recognises a leading WITH as a read", async () => {
+  const d1 = createLocalD1();
+  try {
+    const citizenId = insertCitizen(d1, { handle: "batchcheck" });
+    const results = await d1.DB.batch([
+      d1.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES ('x', 1)"),
+      d1.DB.prepare("WITH one AS (SELECT 1 AS x) SELECT x FROM one"),
+    ]);
+    const write = results[0] as unknown as { success: boolean; results: unknown[]; meta: { changes: number } };
+    const withRead = results[1] as unknown as { success: boolean; results: Array<{ x: number }> };
+    assert.equal(write.success, true, "a write must carry success: true, matching real D1");
+    assert.deepEqual(write.results, [], "a write's results must be [] (present, not absent), matching real D1");
+    assert.equal(write.meta.changes, 1);
+    assert.equal(withRead.success, true);
+    assert.equal(withRead.results.length, 1, "a leading WITH must be treated as a read, not routed through .run()");
+    assert.equal(withRead.results[0]!.x, 1);
+    assert.ok(citizenId > 0);
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- 1. validation and 404 (D2, A1) ----------
 
 test("1: 400 for a missing/malformed handle, missing/non-numeric/negative/fractional since, both since and cursor, neither, and a malformed cursor; 404 for an unknown handle", async () => {
@@ -121,6 +146,59 @@ test("1: 400 for a missing/malformed handle, missing/non-numeric/negative/fracti
     await expectStatus(() => inbox(env, "az", null, "not-a-cursor"), 400, "cursor must look like");
     await expectStatus(() => inbox(env, "az", null, "c1-1"), 400, "cursor must look like");
     await expectStatus(() => inbox(env, "nobody-here", "0", null), 404);
+  } finally {
+    d1.close();
+  }
+});
+
+// F1 (gate review): one test per rule, each red-proofed separately (see the ledger).
+
+test("F1 rule 1 (presence): an EMPTY value still counts as present -- ?since=&cursor=c0-p0 and ?since=0&cursor= are both 400 'exactly one of', never silently routed to the other branch", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const env = makeEnv(d1);
+    await expectStatus(() => inbox(env, "az", "", "c0-p0"), 400, "exactly one of");
+    await expectStatus(() => inbox(env, "az", "0", ""), 400, "exactly one of");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F1 rule 2 (since shape): whitespace-only, a leading sign, a decimal point or an exponent are all 400, never silently coerced by Number()", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const env = makeEnv(d1);
+    for (const bad of ["   ", "+5", "5.0", "5e2", " 5", "5 "]) {
+      await expectStatus(() => inbox(env, "az", bad, null), 400, "digits only");
+    }
+    // Control: a genuinely valid since still passes, so the rule above is not vacuous.
+    const res = await inbox(env, "az", "0", null);
+    assert.equal(res.handle, "az");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F1 rule 3 (since magnitude): a digits-only since too large to represent exactly as a safe integer is 400", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const env = makeEnv(d1);
+    await expectStatus(() => inbox(env, "az", "99999999999999999999999", null), 400, "digits only");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F1 rule 4 (cursor magnitude): a cursor whose comment id or post id parses to an unsafe integer is 400, never served back mangled in next_cursor", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const env = makeEnv(d1);
+    await expectStatus(() => inbox(env, "az", null, "c1000000000000000000000-p0"), 400, "safe integer");
+    await expectStatus(() => inbox(env, "az", null, "c0-p1000000000000000000000"), 400, "safe integer");
   } finally {
     d1.close();
   }
@@ -510,15 +588,21 @@ test("A4: self-exclusion does NOT apply to a topic (citizen_id = 1 is the FK pla
   }
 });
 
-test("the cursor branch (not just the first-call floor) is by id, not created_at: a row with an OLDER created_at but a LARGER id, already past the cursor, is still delivered by a cursor-based call", async () => {
+test("F2 (gate review, corrected): the cursor branch (not just the first-call floor) is by id, not created_at -- a row with a SMALLER (older) created_at than the cursor's own row, but a LARGER id, is still delivered by a cursor-based call (mutation: cursor by created_at -> red)", async () => {
   const d1 = createLocalD1();
   try {
     insertCitizen(d1, { handle: "az" });
     const b = insertCitizen(d1, { handle: "bz" });
     const post = insertPost(d1, { citizen_id: b, created_at: 1 });
-    const before = insertComment(d1, { post_id: post, citizen_id: b, body: "@az before the cursor", created_at: 1 });
-    const id1 = insertComment(d1, { post_id: post, citizen_id: b, body: "@az newer id, older clock", created_at: 1 });
-    setCommentCreatedAt(d1, id1, 100); // older created_at than `before`'s own 1ms would suggest, but a larger id
+    const before = insertComment(d1, { post_id: post, citizen_id: b, body: "@az before the cursor", created_at: 1000 });
+    const id1 = insertComment(d1, { post_id: post, citizen_id: b, body: "@az newer id, older clock", created_at: 1000 });
+    // id1's id is LARGER than before's (inserted after it), but its created_at is set
+    // SMALLER (older) than before's own 1000ms -- a writer-clock-skew shape. A cursor
+    // that filtered by `created_at > before.created_at` (1000) would exclude id1 (500 is
+    // not > 1000); the real, id-based cursor (`id > before`) includes it regardless.
+    setCommentCreatedAt(d1, id1, 500);
+    assert.ok(id1 > before, "test setup invariant: id1 must have the larger id");
+    assert.ok(500 < 1000, "test setup invariant: id1's created_at must be older than before's");
 
     const env = makeEnv(d1);
     const res = await inbox(env, "az", null, `c${before}-p0`);

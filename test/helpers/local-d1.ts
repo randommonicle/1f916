@@ -139,22 +139,26 @@ export function createLocalD1(opts: { onExec?: (kind: "d1") => void } = {}): Loc
     // inside a batch (the inbox's candidate-query-plus-MAX(id) pair, A17:
     // "one env.DB.batch([...]), one transaction, so one snapshot") needs
     // its rows back, which `.run()` alone never collects. Detected by the
-    // statement's own leading keyword, not a caller-supplied flag, so
-    // nothing already green has to change how it calls batch(): a SELECT
-    // now also carries `.results`; everything else is byte-identical to
-    // before (`.meta` only, same two fields).
+    // statement's own leading keyword (SELECT or a CTE's leading WITH), not
+    // a caller-supplied flag, so nothing already green has to change how it
+    // calls batch(). Both branches now carry `success: true` and `results`
+    // (a write's `results` is `[]`, matching real D1 exactly -- gate review
+    // F7, exchange/REVIEW_inbox-core-build-2026-09-26.md: the earlier shape
+    // omitted `success` entirely and omitted `results` on a write, so caller
+    // code checking either could read a false negative that real D1 would
+    // never produce).
     async batch<T = unknown>(stmts: D1StatementLike[]): Promise<T[]> {
       raw.exec("BEGIN");
       try {
         const out: unknown[] = [];
         for (const stmt of stmts) {
           onExec?.("d1");
-          if (/^\s*select\b/i.test(stmt.__sql)) {
+          if (/^\s*(with|select)\b/i.test(stmt.__sql)) {
             const rows = raw.prepare(stmt.__sql).all(...(stmt.__args as never[]));
-            out.push({ results: rows, meta: { changes: 0, last_row_id: 0 } });
+            out.push({ results: rows, success: true, meta: { changes: 0, last_row_id: 0 } });
           } else {
             const result = raw.prepare(stmt.__sql).run(...(stmt.__args as never[]));
-            out.push({ meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } });
+            out.push({ results: [], success: true, meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } });
           }
         }
         raw.exec("COMMIT");

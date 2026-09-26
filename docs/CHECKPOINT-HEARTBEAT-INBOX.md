@@ -134,6 +134,38 @@ Each was applied, run alone to confirm the named test(s) went red, reverted, and
 `git diff --stat` / a byte-diff against a pristine copy confirmed nothing remained, then
 the full suite was re-run green before moving to the next mutation.
 
+## Round 2: gate review fixes F1-F7 (exchange/REVIEW_inbox-core-build-2026-09-26.md, "## [CLAUDE round 2]")
+
+Both external seats (CODEX, GEMINI) re-derived the code and the test file at source
+against the committed `80c26552`. CODEX found F1 (two real 400-bypasses: empty-but-present
+params, an unrepresentable cursor/since magnitude). GEMINI found F2 (my own A13 test could
+not go red for the defect it names -- a genuine test bug, not a source bug) and F3-F6
+(missing/thin coverage: the ballots parity table only ever compared one of two seeded
+proposals; every mention test placed the mention in a title, never a body; no reply-window
+or self-comment-on-own-post test; no posts-table pagination test). GEMINI also found F7
+(the `batch()` shim's shape gap: no `success`, no `results` on a write) and two DEFERRED,
+not-adopted items the hub records but this build does not fix (`Promise.all` risking
+`SQLITE_BUSY` on real D1 -- rejected, both are reads at one primary; the helper accepting
+`undefined` binds where real D1 refuses them -- `DEFERRED-LOCAL-D1-UNDEFINED-BIND`, no bind
+in `inbox.ts` is actually undefined, CODEX confirmed).
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M8 | F1 rule 1: presence is `!== null`, not `!== null && !== ""` | inbox-d1.test.ts | yes |
+| M9 | F1 rule 2: `SINCE_PATTERN` (digits only) checked before `Number()` | inbox-d1.test.ts | yes |
+| M10a | F1 rule 4: cursor parts must each be a safe integer | inbox-d1.test.ts | yes |
+| M10b | F1 rule 3: `since` must be a safe integer | inbox-d1.test.ts | yes |
+| F2 | the cursor branch filters by `id`, not `created_at` (the corrected A13 test's own mutation, GEMINI's finding) | inbox-d1.test.ts | yes |
+| F7 | `batch()` carries `success: true` on every entry and `results: []` on a write, and reads a leading `WITH` as well as `SELECT` | local-d1.ts | yes |
+
+F2's fix: `before` was stamped `created_at: 1` and `id1`'s `created_at` was set to `100`
+-- 100 is NEWER than 1, so the test could not distinguish an id cursor from a
+created_at cursor (GEMINI's finding, confirmed by re-deriving the two numbers directly).
+Restamped `before: 1000`, `id1: 500` (id1's id is still larger, its clock is now
+genuinely older); the mutation (filter comments by `m.created_at > ` instead of
+`m.id > `) now visibly reddens it (and, incidentally, two other tests that share the
+same query path -- recorded as expected fallout, not a separate defect).
+
 ## Commit log
 
 **Commit 2 (`src/inbox.ts` core + `test/inbox-d1.test.ts` + the two supporting exports):**
@@ -151,4 +183,11 @@ fix (render functions take `ballotNote`/`authLabel` as parameters, not imports) 
 commit and deferred to (b) on the hub's instruction, because they need `register-gate.ts`/
 `discovery.ts` exports that are step (b)'s own registration points. 16/16 new tests green
 (10 mutations red-proofed, table above), suite 1228/1228, typecheck clean.
-(b), (c), (d) NOT STARTED.
+
+**Commit 3 (gate review fixes F1-F7):** presence/shape/magnitude hardening on
+`since`/`cursor` (F1, four rules, four mutations); the corrected A13 cursor-by-id test
+(F2); `test/helpers/local-d1.ts`'s `batch()` now matches real D1's `D1Result` shape on
+every entry (F7). F3-F6 (comprehensive ballots parity, body/underscore mention
+vectors, window/self-comment tests, posts-table pagination) land in a following
+commit -- see below. 6/6 new mutations red-proofed, table above.
+(b), (c), (d) still NOT STARTED.

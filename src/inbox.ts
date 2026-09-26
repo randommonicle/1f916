@@ -41,6 +41,9 @@ import { serveTopic, ACTIVITY_SQL } from "./topics.ts";
 export const INBOX_SECTION_LIMIT = 100;
 
 const CURSOR_PATTERN = /^c(\d+)-p(\d+)$/;
+// F1: bare decimal digits only -- no sign, no decimal point, no exponent, no surrounding
+// whitespace. Checked before Number(sinceRaw) ever runs (see inbox()'s own comment).
+const SINCE_PATTERN = /^\d+$/;
 
 // ---------- the mention matcher (D3, A3, A4, A5) ----------
 
@@ -249,8 +252,13 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
   assertValidHandle(handleInput);
   const handleQuery = handleInput as string;
 
-  const hasSince = sinceRaw !== null && sinceRaw !== "";
-  const hasCursor = cursorRaw !== null && cursorRaw !== "";
+  // F1 (gate review, exchange/REVIEW_inbox-core-build-2026-09-26.md): presence is
+  // "the query key was sent at all" (!== null), NOT "sent with a non-empty value" -- an
+  // empty value is present AND, once selected below, invalid. Treating "" as absent let
+  // ?since=&cursor=c0-p0 silently pick the cursor branch (both were actually present) and
+  // ?since=0&cursor= silently pick the since branch, neither the 400 A1 requires.
+  const hasSince = sinceRaw !== null;
+  const hasCursor = cursorRaw !== null;
   if (hasSince === hasCursor) {
     throw new SocietyError(
       400,
@@ -268,10 +276,25 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
     }
     cursorC = Number(m[1]);
     cursorP = Number(m[2]);
+    // F1: CURSOR_PATTERN's \d+ accepts arbitrarily many digits, so a string like
+    // "c1000000000000000000000-p0" matches the shape but Number() cannot represent it
+    // exactly -- next_cursor would then serve a mangled value the pattern itself refuses
+    // on the following call. Reject before it is ever used as a row-id bound.
+    if (!Number.isSafeInteger(cursorC) || !Number.isSafeInteger(cursorP)) {
+      throw new SocietyError(400, "cursor's comment id and post id must each be a safe integer");
+    }
   } else {
+    // F1: SINCE_PATTERN (bare decimal digits only) is checked BEFORE Number() ever runs,
+    // because Number() coerces some non-numeric strings to a number that then looks valid:
+    // whitespace-only ("   ") becomes 0, and a leading "+"/decimal point/exponent form
+    // would otherwise slip through Number.isFinite. Number.isSafeInteger, after the
+    // pattern, refuses a since so large it cannot be represented exactly.
+    if (!SINCE_PATTERN.test(sinceRaw!)) {
+      throw new SocietyError(400, "since must be a non-negative integer millisecond epoch timestamp, digits only");
+    }
     sinceVal = Number(sinceRaw);
-    if (!Number.isFinite(sinceVal) || sinceVal < 0 || !Number.isInteger(sinceVal)) {
-      throw new SocietyError(400, "since must be a non-negative integer millisecond epoch timestamp");
+    if (!Number.isSafeInteger(sinceVal)) {
+      throw new SocietyError(400, "since must be a non-negative integer millisecond epoch timestamp, digits only");
     }
   }
 
