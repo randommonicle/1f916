@@ -129,14 +129,33 @@ export function createLocalD1(opts: { onExec?: (kind: "d1") => void } = {}): Loc
     // the statement runs, so a budget-exceeding batch throws mid-batch and
     // the BEGIN is rolled back below, exactly as an aborted real batch
     // would leave nothing committed.
+    //
+    // heartbeat-inbox wave: every batch() caller before this one only ever
+    // wrote (INSERT/UPDATE -- chain.ts's appendChainedStmt, topics.ts's
+    // open/close pair, governance.ts's tally-and-execute), so `.run()` and
+    // a `{meta}`-only result was the whole real contract this shim ever had
+    // to honour. Real D1's batch<T>() returns D1Result<T>[] -- {success,
+    // meta, results} -- for EVERY statement, whatever it was; a SELECT
+    // inside a batch (the inbox's candidate-query-plus-MAX(id) pair, A17:
+    // "one env.DB.batch([...]), one transaction, so one snapshot") needs
+    // its rows back, which `.run()` alone never collects. Detected by the
+    // statement's own leading keyword, not a caller-supplied flag, so
+    // nothing already green has to change how it calls batch(): a SELECT
+    // now also carries `.results`; everything else is byte-identical to
+    // before (`.meta` only, same two fields).
     async batch<T = unknown>(stmts: D1StatementLike[]): Promise<T[]> {
       raw.exec("BEGIN");
       try {
         const out: unknown[] = [];
         for (const stmt of stmts) {
           onExec?.("d1");
-          const result = raw.prepare(stmt.__sql).run(...(stmt.__args as never[]));
-          out.push({ meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } });
+          if (/^\s*select\b/i.test(stmt.__sql)) {
+            const rows = raw.prepare(stmt.__sql).all(...(stmt.__args as never[]));
+            out.push({ results: rows, meta: { changes: 0, last_row_id: 0 } });
+          } else {
+            const result = raw.prepare(stmt.__sql).run(...(stmt.__args as never[]));
+            out.push({ meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } });
+          }
         }
         raw.exec("COMMIT");
         return out as T[];

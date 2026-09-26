@@ -6,9 +6,21 @@ amendments A1-A20 (e4281b23 is the latest brief commit read before any code here
 
 ## File list
 
-- `src/inbox.ts` (new): `inbox()`, the mention matcher, `renderHeartbeatMd`,
-  `renderSkillMd`, `heartbeatDoorNote`, `SKILL_VERSION`, `INBOX_SECTION_LIMIT`.
-- `test/inbox-d1.test.ts` (new): brief tests 1-7, A13, A19, A20.
+Split across the suggested commit sequence; (a) below is commit 2 (this checkpoint doc was
+commit 1). `renderHeartbeatMd`/`renderSkillMd`/`heartbeatDoorNote`/`SKILL_VERSION` were
+drafted alongside the core in the same sitting, then CUT BACK OUT of this commit on the
+hub's own instruction (a budget message mid-build): they depend on
+`register-gate.ts`'s `REGISTRATION_PRICE_CENTS` and `discovery.ts`'s `AUTH_LABEL`/`ROUTES`,
+which are step (b)'s own registration points, so committing them here would have committed
+half of (b) inside (a). The full text is saved and lands with (b).
+
+- `src/inbox.ts` (new, THIS commit): `inbox()` and the mention matcher only --
+  `INBOX_SECTION_LIMIT`, `CURSOR_PATTERN`, `mentionsHandle`, `idFloorExpr`,
+  `runTablePage`, `commentsSql`/`postsSql`, `inbox()`. Served-text rendering
+  (`renderHeartbeatMd`, `renderSkillMd`, `heartbeatDoorNote`, `SKILL_VERSION`,
+  `HeartbeatSkillFacts`) is written but held out of this commit -- see above -- and lands
+  with (b), which also needs the `discovery.ts`/`register-gate.ts` edits below.
+- `test/inbox-d1.test.ts` (new, THIS commit): brief tests 1-7, A13, A19, A20.
 - `test/helpers/local-d1.ts` (edit): `batch()` learns to run a `SELECT` statement with
   `.all()` and carry its rows as `.results`, alongside the existing `.meta`-only path for
   writes. Additive: no existing caller reads `.results` off a batch element.
@@ -81,6 +93,62 @@ whatever the statement was -- so the fix is to make the local shim match that fo
 existing caller only ever batches writes and only ever reads `.meta`, so nothing already
 green can regress.
 
+**The `kind = 'post'` filter lives in ONE place (classification), not the SQL prefilter
+too.** First-drafted with the check in both the comments candidate query's on-my-post OR
+clause AND the TypeScript classification step -- defense in depth, but it meant the
+brief's own named red-proof ("mutation: drop kind = 'post' -> red", test 3) had NO single
+mutation that produced red, because dropping either copy alone left the other one still
+enforcing it. Simplified to enforce it in TypeScript only (the SQL clause is now bare
+`p.citizen_id = ?`): a topic's own comments become SQL-level candidates for the topic's
+citizen_id = 1 placeholder too, correctly classified away in TS, at the cost of an
+occasional wasted candidate slot. Recorded here because it was found by watching the
+brief's own named mutation fail to redden anything, not by design foresight -- see M1 in
+the mutation table below.
+
+**A real bug in my own first test, not the code: comments and posts do not share an id
+space.** `schema.sql`'s two AUTOINCREMENT sequences are independent, so a comment id and a
+post id can be numerically equal. Test 4's `mentions` array holds items from BOTH tables;
+checking `mentionIds.includes(rawId)` without also checking `kind` let a legitimate
+comment-mention (id 3) mask a wrongly-included moderated post-mention that happened to
+also land on id 3 -- the assertion read green for the wrong reason. Fixed by scoping every
+mentions check to `(kind, id)`, never bare `id`. Left here because it is exactly the kind
+of error `verify-the-effect`/`prove-it-can-fail` exist to catch, and it did not show up
+until a moderated-post-mention test was added specifically to red-proof M4b.
+
+## Mutations (M1-M8, this commit's guards)
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M1 | `comments_on_your_posts` requires `post_kind === "post"` (classification, not SQL -- see above) | inbox-d1.test.ts | yes |
+| M2 | mention boundary check (`boundaryOk`) | inbox-d1.test.ts | yes |
+| M3 | self-exclusion, comments (`m.citizen_id != ?`) | inbox-d1.test.ts | yes |
+| M3b | self-exclusion does NOT apply to a topic row (A4) | inbox-d1.test.ts | yes |
+| M4a | moderation excludes a comment from `mentions` | inbox-d1.test.ts | yes |
+| M4b | moderation excludes a post/topic from `mentions` | inbox-d1.test.ts | yes |
+| M5 | ballot eligibility reads the row's frozen `registration_mode`, never `env.REGISTRATION_MODE` | inbox-d1.test.ts | yes |
+| M5b | ballot eligibility reads the row's frozen `founding_ratified`, never a live signal | inbox-d1.test.ts | yes |
+| M6 | the look-ahead row (101st) is never served on a truncated page | inbox-d1.test.ts | yes |
+| M7 | the first-call floor (A19), vs A1's superseded naive rule | inbox-d1.test.ts | yes |
+
+Each was applied, run alone to confirm the named test(s) went red, reverted, and
+`git diff --stat` / a byte-diff against a pristine copy confirmed nothing remained, then
+the full suite was re-run green before moving to the next mutation.
+
 ## Commit log
 
-(each commit below adds its own entry here, in order, before the commit lands)
+**Commit 2 (`src/inbox.ts` core + `test/inbox-d1.test.ts` + the two supporting exports):**
+built `inbox()` end to end per A1/A2/A17/A19/A20 (id cursor per table, one candidate
+stream per table classified in TypeScript, the look-ahead row, the conservative
+first-call floor inlined as a scalar subquery so it shares the candidate query's own
+batch, A20's restoration case, which needed no code change -- the classify-then-advance
+design already has that property). Exported `serveTopic`/`ACTIVITY_SQL` from
+`topics.ts` (A2's single-source instruction) and extended
+`test/helpers/local-d1.ts`'s `batch()` to return `.results` for a `SELECT` statement
+(additive; see the design-decision note above). Key decisions: the import-direction
+fix (render functions take `ballotNote`/`authLabel` as parameters, not imports) and the
+`kind = 'post'` single-source-of-enforcement fix, both above. Deviation: `renderHeartbeatMd`/
+`renderSkillMd`/`heartbeatDoorNote`/`SKILL_VERSION` were written, then held out of this
+commit and deferred to (b) on the hub's instruction, because they need `register-gate.ts`/
+`discovery.ts` exports that are step (b)'s own registration points. 16/16 new tests green
+(10 mutations red-proofed, table above), suite 1228/1228, typecheck clean.
+(b), (c), (d) NOT STARTED.

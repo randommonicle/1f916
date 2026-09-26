@@ -52,8 +52,10 @@ export const CLOSED_PAGE = 50;
 // never counts. Inlined as a correlated subquery wherever a topic is read so
 // the served last_activity_at and the closing rule are the same expression.
 // The `p` alias is the posts row under inspection; the one bind is
-// MAINTAINER_ID.
-const ACTIVITY_SQL = `MAX(p.created_at, COALESCE((SELECT MAX(m.created_at) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL AND m.citizen_id != ?), 0))`;
+// MAINTAINER_ID. Exported (heartbeat-inbox wave, A2): the inbox's own posts
+// candidate query reuses this exact expression for its last_activity_at
+// column rather than retyping it, so the two can never independently drift.
+export const ACTIVITY_SQL = `MAX(p.created_at, COALESCE((SELECT MAX(m.created_at) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL AND m.citizen_id != ?), 0))`;
 
 interface TopicRow {
   id: number;
@@ -78,7 +80,11 @@ function topicSelect(where: string, orderBy: string, limit: number): string {
      ORDER BY ${orderBy} LIMIT ${limit}`;
 }
 
-function serveTopic(row: TopicRow, now: number) {
+// Exported (heartbeat-inbox wave, A2: "projected through topics.ts's own serveTopic, the
+// single source") so GET /api/inbox's topics_opened section renders a topic exactly as
+// GET /api/topics and the front page already do, not a second, independently-drifting
+// projection.
+export function serveTopic(row: TopicRow, now: number) {
   const r = applyModState(row);
   return {
     id: r.id,
