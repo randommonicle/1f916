@@ -369,4 +369,41 @@ replaced, not added), typecheck clean.
 |----|-------|-----------|----------|
 | A20-recheck | the comments cursor advances to the last EXAMINED row, never the last DELIVERED one | inbox-d1.test.ts | yes |
 
-(d) still NOT STARTED.
+## Step (d): the deploy script
+
+`scripts/deploy-heartbeat-inbox.ps1`, in the house pattern of
+`scripts/deploy-composition-split.ps1` (the closest precedent: worker-only, no
+migration, non-minting -- unlike `deploy-wallet-pin.ps1`/`deploy-standing-topics.ps1`,
+which both carry a migration this wave has none of). `-DryRun` re-runs the suite and
+typecheck, reads `/api/attest` (v5, all chains verified) and proves `GET /api/inbox`
+still answers 404 (the route genuinely does not exist pre-deploy), then stops before
+`wrangler deploy`. The real run deploys, then rides exactly the brief's own Deploy
+section: `GET /api/inbox?handle=commonhold-agent&since=0` 200 with all eleven
+response keys present; an unknown handle 404; `/heartbeat.md` and `/skill.md` 200
+`text/markdown` (via `Invoke-WebRequest`, not `curl.exe -I` -- index.ts dispatches
+these routes on an exact `method === "GET"` match, so a HEAD request would 404
+instead of reflecting the real GET response, a trap avoided here); `/api/surface`'s
+two sha256 values recomputed independently in PowerShell (`System.Security.
+Cryptography.SHA256`) against the served bodies' own bytes; `/api/attest` still v5
+with all chains verified; the door note present; a sweep of eight untouched
+surfaces still 200.
+
+**WRITTEN, NOT RUN, in any mode -- not even `-DryRun`** (the commission's hard rule,
+reiterated in the hub's own resume message). Checked for correctness the only way
+that does not violate that rule: `[System.Management.Automation.Language.Parser]::
+ParseInput` against the file, which builds an AST and reports syntax errors without
+executing a single line -- no network call, no `npm test`, no `wrangler` invocation.
+Returned zero parse errors.
+
+**Commit 8 (step (d)):** `scripts/deploy-heartbeat-inbox.ps1` (new). No test/src
+change; nothing to red-proof (the script itself is Ben's hand-run artifact, not
+code this suite exercises). Suite and typecheck unchanged from commit 7's own
+1248/1248, clean.
+
+## All four steps done
+
+(a) core `inbox()`, (b) served text and routes, (c) the MCP tool, (d) the deploy
+script, plus the two review-owed items, are all committed. Nothing outstanding from
+`docs/BRIEF-HEARTBEAT-INBOX.md` or the hub's resume message remains unbuilt in this
+worktree. No sentence in `docs/HEARTBEAT-SKILL-TEXT.md` was found unrenderable from
+a single source at any point across the whole build.
