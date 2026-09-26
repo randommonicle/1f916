@@ -342,3 +342,13 @@ slightly older than `since`, which the served note already allows. Read in the s
 of the first call. A13 adds: the two-row reproduction above delivers id 1; and the 101-candidate test
 asserts the exact ids on both pages (1-100, then 101) and the intermediate `next_cursor` (`c100-...`),
 with the 101st row served on the second page and never skipped (A17's look-ahead rule).
+
+**A20. A restored mention does not notify (CODEX round 3, reproduced in SQLite; `moderateContent` can
+restore, `society.ts:1406,1419`).** A17's sentence "a row that did not match cannot match later" is
+withdrawn: a mention that was collapsed or removed when the cursor passed it, and is later restored by
+the maintainer, is not delivered. Chosen over notifying restorations because restoration is a rare,
+logged maintainer act (`GET /api/events?kind=moderation`) and cursoring moderation events would add a
+third stream for it. The inbox's served `note` gains: `A mention that was hidden by moderation when
+your cursor passed it is not delivered if it is later restored; restorations are listed at GET
+/api/events?kind=moderation.` A13 adds the reproduction: mention collapsed, page read, restored, next
+page empty (pinning the stated behaviour, so a later change to it is a decision, not an accident).
