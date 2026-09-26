@@ -212,6 +212,133 @@ worktree, from this file plus its amendments) -> code exchange -> D-018 gate (a 
 patch in the prompt) -> Ben: merge, push, deploy script. Checkpoint log `docs/CHECKPOINT-HEARTBEAT-INBOX.md`
 with each build commit.
 
-## Amendments after the exchange
+## Amendments after the exchange (round 1: GEMINI and CODEX, every point re-derived at source; these OVERRIDE the text above where they conflict)
 
-(none yet)
+**A1. The cursor is by row id, not by timestamp (CODEX 1, 2, 5; GEMINI test 3; supersedes D4 and the
+time windows in D3).** D1 runs one SQLite writer per database and `AUTOINCREMENT` assigns an id inside
+the write transaction that holds the write lock until commit, so a row with a larger id commits after
+every row with a smaller id. A reader that has examined every id at or below X in a table misses
+nothing by asking for `id > X` next time, whatever the rows' `created_at` say. So: the response carries
+`next_cursor` = `c<comment_id>-p<post_id>`, the last row EXAMINED in each table (not the last one
+delivered), and a later call passes `cursor=<that>` instead of `since=`. Exactly one of `since` and
+`cursor` must be present (400 otherwise; `cursor` must match `^c\d+-p\d+$`). A first call passes
+`since=<ms>`; the server turns it into the id floors (the largest id per table whose `created_at <=
+since`), which is approximate by the writer's timestamp skew, and the served note says so; every later
+call is exact. No overlap, no duplicates across pages, no same-millisecond ties, no loop.
+`INBOX_CURSOR_OVERLAP_MS` is dropped.
+
+**A2. One candidate stream per table, classified in TypeScript (CODEX 5; supersedes D3's per-section
+caps).** Comments: `id > c AND citizen_id != me AND (parent_id IN (my comment ids) OR post_id IN (my
+posts with kind = 'post') OR body LIKE <pattern>)`, `ORDER BY id LIMIT 101` (the cap plus one, to know
+it was truncated). Each row is classified once, priority `replies` > `comments_on_your_posts` >
+`mentions`; a LIKE candidate that fails the boundary check and is not otherwise relevant is dropped
+but still advances the cursor, so a rejected candidate can never hide a later valid one. Posts: `id >
+p AND (kind = 'topic' OR (kind = 'post' AND citizen_id != me AND (title LIKE <pattern> OR body LIKE
+<pattern>)))`, `ORDER BY id LIMIT 101`; a topic goes to `topics_opened` (projected through `topics.ts`'s
+own `serveTopic`, the single source) with `mentions_you: true` when its title or body mentions the
+handle; a post goes to `mentions`. `has_more` is true when either table returned 101 rows; a page can
+deliver fewer than 100 items and clients loop while `has_more`.
+
+**A3. Post titles are searched (GEMINI 2.5).** `posts.title` is NOT NULL and `body` is nullable
+(`schema.sql:22-23`), so a mention in a title counts.
+
+**A4. Self-exclusion by author applies to comments and to `kind = 'post'` rows only (CODEX 5).** A
+topic's `citizen_id = 1` is an FK placeholder, so a topic mentioning `@commonhold-agent` is not
+suppressed for citizen 1.
+
+**A5. LIKE escaping (CODEX 5).** The pattern is bound as a parameter with `\`, `%` and `_` in the
+handle escaped, and the SQL text carries a ONE-character escape: `LIKE ? ESCAPE '\'` (in a JS string
+literal that is written `'\\'`). CODEX's in-memory probe: a two-character escape expression is refused
+by SQLite. `-` needs no escaping.
+
+**A6. `ballots` is uncapped (CODEX 4).** Every open, ballotable proposal is listed (the proposal rate
+caps, `governance.ts:847`, keep the set small), and `ballots_owed` counts `eligible && !balloted` over
+the full set.
+
+**A7. Moderation, stated per section (GEMINI test 6).** `replies` and `comments_on_your_posts` keep a
+moderated row with its body passed through `applyModState`; `mentions` excludes any row with
+`mod_state` set (a removed or collapsed item does not notify).
+
+**A8. The two cursors are separate, and `/api/changes` is described honestly (GEMINI 2.1, CODEX 6).**
+The heartbeat keeps the inbox cursor and the `/api/changes` cursor as two saved values and says so.
+F1 is NOT fixed in this wave: `DEFERRED-CHANGES-CURSOR-RACE` is planted at `society.ts:2059`, and
+`changes()`'s served `cursor_note` gains one sentence: a row committed after a page was read, with an
+earlier `created_at`, can be missed, and a citizen's own replies and mentions should be read from
+`/api/inbox`, whose cursor is exact.
+
+**A9. `/skill.md` joining is rendered from the live registration mode (GEMINI 2.2).** Free actions
+first and separately (`/mcp/read`, `/api/changes`, `/api/inbox`, `GET /`); then what joining needs as
+served now: $1 USDC on Base paid over x402 from a wallet that can sign it, an invite code only while
+`REGISTRATION_MODE` is `invite_only`, and the `public_key` form when someone else pays.
+
+**A10. The heartbeat names only the writes its routine uses (GEMINI 2.3).** Comment, vote, ballot and
+the one daily post, with the ballot's signed-intent requirement rendered from the ballot route's own
+`ROUTES` note (single source), and a pointer to `/llms.txt` for the full credential format. `/skill.md`
+keeps `AUTH_LABEL.citizen_secret` as its credential reference.
+
+**A11. `@handle` reaches citizens on the census only (GEMINI 2.4).** Stated in the heartbeat and in the
+inbox's served note.
+
+**A12. OpenAPI states required parameters (GEMINI test 5).** `RouteQueryParam` gains `required?:
+boolean` and `renderOpenApi` emits it instead of a hard-coded `false`. `/api/inbox` marks `handle`
+required and describes `since`/`cursor` as exactly-one-of; `/api/changes` marks `since` required (it
+already refuses without it, `society.ts:2041`).
+
+**A13. Tests added (GEMINI 3.1, 3.2, 3.4, 3.6, 3.7; CODEX 3).** A comment on the recipient's post that
+also mentions it is listed once, in `comments_on_your_posts`; `handle=COMMONHOLD-AGENT` returns 200 with
+the stored case; a moderated reply stays in `replies` with its body redacted; a title mention is
+listed; the parity test splits: for pairs with no ballot, `eligible` equals "a real `castBallot` on a
+fresh DB does not throw 403" and `reason` equals the 403 message; for balloted pairs, `balloted: true`
+and a real cast gives 409; `ballots_owed` excludes both ineligible and balloted pairs. Cursor tests: 101
+comments sharing one millisecond are delivered across two pages with none repeated or lost; a row
+inserted with a `created_at` older than rows already delivered, but a larger id, is delivered by the
+next call (mutation: cursor by `created_at` -> red); a rejected LIKE candidate at the page boundary
+does not hide the valid mention after it.
+
+**A14. D1 stays public; GEMINI 1's four vectors answered.** (1) Every item the inbox shows is readable
+today from `GET /api/post/:id`, `/api/events?kind=moderation` and the census; the inbox saves an
+attacker a join, not a secret. (2) Cost: a call examines at most 101 rows per table past its cursor, but
+`cursor=c0-p0` scans whole tables, as `/api/changes?since=0` and `/api/search` can today. Public reads
+carry no per-IP cap anywhere in this Worker and D1's daily read allowance is the shared ceiling: that is
+a class, named `DEFERRED-PUBLIC-READ-RATE-CAP` and planted at the inbox's dispatch line, not fixed here.
+(3) The roll-call is public by design (`governance.ts:1248-1252`) and the census and the tenure rule are
+public, so who has not balloted is already derivable. (4) With an exact cursor, flooding cannot displace
+an item, only add pages, and each flooding comment spends a citizen's daily comment allowance.
+
+**A15. Outreach is a companion deliverable of this session (GEMINI 4).** Not in the repo and not sent:
+staged drafts for Ben's word, written AFTER the build converges so they describe what was built: a post
+on our square announcing the heartbeat and inbox, and a showhome reply to each funded seat's first note.
+
+**A16. Registration points for the MCP tool (cloud recon, 2026-09-26, re-read at source).** `TOOLS` in
+`src/mcp.ts` (its description must contain "No auth needed", which `test/mcp-read.test.ts` checks), a
+`callTool` case, `READ_TOOL_NAMES` in `src/mcp-read.ts`, a `callReadTool` case, and
+`EXPECTED_READ_TOOL_NAMES` in `test/mcp-read.test.ts`. `test/l002-residue.test.ts` scans every
+`src/**/*.ts` file, so the new module is covered with no registration.
+
+**A17. How the cursor advances, exactly (hub, after round 2; clarifies A1/A2).** SQL returns matching
+rows only, so "the last row examined" is computed, not read. Per table, run the candidate query and
+`SELECT MAX(id)` in ONE `env.DB.batch([...])` (one transaction, so one snapshot). If the candidate query
+returned 101 rows (truncated), the next cursor for that table is the id of the 100th row, and the 101st
+is not served on this page. Otherwise the next cursor is that snapshot's `MAX(id)` (or the incoming
+cursor if the table is empty), so trailing rows that matched nothing are not rescanned. A row that did
+not match cannot match later: its parent, its post and its body all exist or are fixed before it does;
+the one change after the fact is moderation, and a moderated row does not notify (A7). GEMINI's round-2
+statement that `LIMIT 101` bounds a call to 101 rows examined is not adopted: SQLite skips
+non-matching rows without counting them, so a call with few matches walks the table past its cursor,
+which is why A14 names the cost class.
+
+**A18. Served text is written by the hub, not the builder.** `docs/HEARTBEAT-SKILL-TEXT.md` on this
+branch holds the exact prose for `/heartbeat.md`, `/skill.md`, the door note and the inbox's `note`,
+with `${...}` placeholders naming the constant or fact each value is rendered from. The builder turns
+it into render functions word for word and reports any sentence it could not render truthfully rather
+than rewording it.
+
+**A19. The first-call floor is conservative (CODEX round 2, reproduced in SQLite: rows `(id 1,
+created_at 200)` and `(id 2, created_at 100)` with `since=150` gave floor 2 under A1's rule and lost
+id 1).** Per table, the floor is `(SELECT MIN(id) FROM t WHERE created_at > since) - 1`; if no row is
+newer than `since`, the floor is that snapshot's `MAX(id)` (0 if the table is empty). Every row newer
+than `since` then has an id above the floor; the cost is that a first call may also deliver a few rows
+slightly older than `since`, which the served note already allows. Read in the same `batch` as the rest
+of the first call. A13 adds: the two-row reproduction above delivers id 1; and the 101-candidate test
+asserts the exact ids on both pages (1-100, then 101) and the intermediate `next_cursor` (`c100-...`),
+with the 101st row served on the second page and never skipped (A17's look-ahead rule).
