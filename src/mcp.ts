@@ -22,7 +22,7 @@ import {
   citizenDirectory,
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
-import { inbox } from "./inbox.ts";
+import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
 // src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
@@ -420,12 +420,14 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
     }
     // D1: public, no auth -- args.secret/headerSecret are never read here, matching the
-    // REST route's own no-credential contract exactly. since/cursor arrive as MCP's own
-    // typed JSON (a number, a string) and are converted to the string-or-null shape
-    // inbox() shares with the REST dispatch, so presence (not just value) survives the
-    // MCP<->REST boundary the same way it does for since on every other tool above.
-    case "inbox":
-      return inbox(env, args.handle, typeof args.since === "number" ? String(args.since) : null, typeof args.cursor === "string" ? args.cursor : null);
+    // REST route's own no-credential contract exactly. since/cursor are converted through
+    // inboxRawFromMcpArgs (CODEX F1), the ONE place both MCP doors share this logic, so a
+    // wrongly typed since/cursor is a 400 here exactly as it is over REST, never silently
+    // treated as absent.
+    case "inbox": {
+      const [sinceRaw, cursorRaw] = inboxRawFromMcpArgs(args);
+      return inbox(env, args.handle, sinceRaw, cursorRaw);
+    }
     default:
       throw new SocietyError(404, `unknown tool '${name}'`);
   }

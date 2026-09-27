@@ -6,8 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { type Env } from "../src/society.ts";
-import { castBallot } from "../src/governance.ts";
-import { CONSTITUTION } from "../src/society.ts";
+import { castBallot, buildConstitutionTemplate } from "../src/governance.ts";
+import { CONSTITUTION, changes } from "../src/society.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { ROUTES, renderOpenApi } from "../src/discovery.ts";
 import worker from "../src/index.ts";
@@ -1002,6 +1002,19 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
   }
 });
 
+// G2 (exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): A9 says the invite-only
+// sentence renders ONLY when registration is invite-gated. Test 9/10 above only ever
+// render in "open" mode, so a regression that rendered the sentence unconditionally (or
+// never at all) would go unnoticed; this pins both branches directly.
+test("G2: /skill.md carries the invite-only sentence only in invite_only mode, never in open mode (A9)", () => {
+  const openFacts: HeartbeatSkillFacts = { origin: TEST_ORIGIN, society: "Commonhold", registrationMode: "open" };
+  const inviteFacts: HeartbeatSkillFacts = { origin: TEST_ORIGIN, society: "Commonhold", registrationMode: "invite_only" };
+  const openText = renderSkillMd(openFacts, TEST_AUTH_LABEL);
+  const inviteText = renderSkillMd(inviteFacts, TEST_AUTH_LABEL);
+  assert.ok(!openText.includes("invite-only"), "open mode must carry no invite-only sentence");
+  assert.ok(inviteText.includes("invite-only"), "invite_only mode must carry the invite-only sentence");
+});
+
 // Test 11 (discovery.test.ts's own generic drift guard, plus its "every ROUTES entry is
 // mentioned in llms.txt/openapi/surface" tests, already cover the three new routes once
 // they carry a grepFor entry and appear in ROUTES -- nothing new to write there; this test
@@ -1027,7 +1040,9 @@ test("11: /api/inbox, /heartbeat.md and /skill.md are present in ROUTES with met
 // just sit on the ROUTES data structure -- renderOpenApi is the code path that has to
 // emit it (mutation: renderOpenApi hard-codes required: false -> red).
 test("11b: the served OpenAPI doc emits required: true for /api/inbox handle and /api/changes since, and required: false for /api/inbox since/cursor (neither alone is mandatory)", () => {
-  const doc = renderOpenApi(TEST_ORIGIN, "Commonhold") as { paths: Record<string, { get: { parameters: Array<{ name: string; required: boolean }> } }> };
+  const doc = renderOpenApi(TEST_ORIGIN, "Commonhold") as {
+    paths: Record<string, { get: { parameters: Array<{ name: string; required: boolean }>; responses: { "200": { content: Record<string, unknown> } } } }>;
+  };
   const inboxParams = doc.paths["/api/inbox"]!.get.parameters;
   const handleParam = inboxParams.find((p) => p.name === "handle");
   assert.equal(handleParam?.required, true);
@@ -1036,6 +1051,15 @@ test("11b: the served OpenAPI doc emits required: true for /api/inbox handle and
   const changesParams = doc.paths["/api/changes"]!.get.parameters;
   const changesSince = changesParams.find((p) => p.name === "since");
   assert.equal(changesSince?.required, true);
+
+  // G2 (exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): test 8 pins the RUNTIME
+  // Content-Type header on the real /heartbeat.md and /skill.md responses; this pins the
+  // separate claim the served OpenAPI DOCUMENT makes about them, which a prior version of
+  // this test never inspected (it checked parameters only).
+  const hbContent = doc.paths["/heartbeat.md"]!.get.responses["200"].content;
+  assert.ok("text/markdown" in hbContent, "/heartbeat.md's OpenAPI response must be described as text/markdown");
+  const skContent = doc.paths["/skill.md"]!.get.responses["200"].content;
+  assert.ok("text/markdown" in skContent, "/skill.md's OpenAPI response must be described as text/markdown");
 });
 
 test("13: the heartbeat door note is present on GET / outside the attested constitution (the v5 template pin is checked in topics-d1.test.ts and stays green across the whole suite)", async () => {
@@ -1047,6 +1071,29 @@ test("13: the heartbeat door note is present on GET / outside the attested const
     assert.ok(body.includes("Heartbeat:"), "the door note must be present");
     assert.ok(body.includes(`${TEST_ORIGIN}/heartbeat.md`));
     assert.ok(body.includes(`${TEST_ORIGIN}/skill.md`));
+    // G2 (exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md), belt and braces on top
+    // of the v5 hash pin (topics-d1.test.ts test 9, unaffected by this wave): the ATTESTED
+    // template itself must not carry the door note's own text -- checked directly here,
+    // not only inferred from that hash staying green.
+    assert.ok(!buildConstitutionTemplate().includes("Heartbeat: GET"), "the door note must sit outside the attested constitution template");
+  } finally {
+    d1.close();
+  }
+});
+
+// G2 (exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): A8 requires GET
+// /api/changes's own cursor_note to point callers at the inbox's exact guarantee (its own
+// cursor is best-effort, by created_at; the inbox's is exact, by row id) -- no prior test
+// touches changes()'s cursor_note at all.
+test("G2: GET /api/changes's cursor_note names the inbox's exact guarantee (A8)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1);
+    const result = await changes(env, 0);
+    assert.ok(
+      (result.cursor_note as string).endsWith("A citizen's own replies and mentions are exact at GET /api/inbox."),
+      "A8: the changes() cursor_note must point at the inbox's own exact guarantee, word for word",
+    );
   } finally {
     d1.close();
   }
@@ -1101,8 +1148,102 @@ test("12: inbox is in tools/list on /mcp and /mcp/read; the tool's result equals
     const restCursor = await inbox(env, "az", null, cursor);
     const mcpCursor = await mcpCallInbox(handleMcp, env, { handle: "az", cursor });
     assert.deepEqual(mcpCursor, restCursor, "the /mcp tool result must equal the REST body exactly, for a cursor-based call");
+    // G1 (exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): the cursor-based parity
+    // check ran on /mcp only; /mcp/read's own dispatch of the cursor branch was unpinned.
+    const mcpReadCursor = await mcpCallInbox(handleMcpRead, env, { handle: "az", cursor });
+    assert.deepEqual(mcpReadCursor, restCursor, "the /mcp/read tool result must equal the REST body exactly, for a cursor-based call");
 
     assert.ok(a > 0 && b > 0, "fixtures created");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- F1 (CODEX, exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): the MCP
+// inbox tool's since/cursor conversion must preserve presence AND type exactly like REST,
+// never silently drop a wrongly typed or doubly present value to "absent" ----------
+
+// Mirrors mcpCallInbox above but also surfaces isError -- mcpCallInbox's own JSON.parse of
+// content[0].text discards it, so a refusal and a success are otherwise indistinguishable
+// except by the accidental presence of an "error" key in the parsed body.
+async function mcpCallInboxResult(
+  handler: (r: Request, e: Env) => Promise<Response>,
+  env: Env,
+  args: Record<string, unknown>,
+): Promise<{ isError?: boolean; parsed: unknown }> {
+  const req = new Request(`${TEST_ORIGIN}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "inbox", arguments: args } }),
+  });
+  const res = await handler(req, env);
+  const body = (await res.json()) as { result: { content: Array<{ text: string }>; isError?: boolean } };
+  return { isError: body.result.isError, parsed: JSON.parse(body.result.content[0]!.text) };
+}
+
+async function mcpF1Fixture(d1: LocalD1): Promise<{ env: Env; cursor: string }> {
+  insertCitizen(d1, { handle: "az" });
+  const env = makeEnv(d1);
+  const restSince = await inbox(env, "az", "0", null);
+  return { env, cursor: (restSince as { next_cursor: string }).next_cursor };
+}
+
+test("F1(a): inbox on /mcp and /mcp/read refuses since sent as a string ('0'), never silently treats it as absent; the equivalent REST call (both keys present) is refused too", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { env, cursor } = await mcpF1Fixture(d1);
+    for (const handler of [handleMcp, handleMcpRead] as const) {
+      const r = await mcpCallInboxResult(handler, env, { handle: "az", since: "0", cursor });
+      assert.equal(r.isError, true, "since sent as a string must be refused, not silently treated as absent");
+      assert.match((r.parsed as { error: string }).error, /since must/);
+    }
+    // The REST equivalent (both keys actually present) via the real query-string parse in
+    // index.ts, not a direct inbox() call.
+    const restBoth = await callFetch(new Request(`${TEST_ORIGIN}/api/inbox?handle=az&since=0&cursor=${encodeURIComponent(cursor)}`), env);
+    assert.equal(restBoth.status, 400, "the REST call with both since and cursor present must be refused too");
+  } finally {
+    d1.close();
+  }
+});
+
+test("F1(b): inbox on /mcp and /mcp/read refuses since and cursor both present and both correctly typed -- the conversion must not itself resolve the clash by preferring one", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { env, cursor } = await mcpF1Fixture(d1);
+    for (const handler of [handleMcp, handleMcpRead] as const) {
+      const r = await mcpCallInboxResult(handler, env, { handle: "az", since: 0, cursor });
+      assert.equal(r.isError, true, "since and cursor both present must be refused, never silently resolved to one");
+      assert.match((r.parsed as { error: string }).error, /exactly one of/);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("F1(c): inbox on /mcp and /mcp/read refuses cursor sent as a number, never silently treats it as absent", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { env } = await mcpF1Fixture(d1);
+    for (const handler of [handleMcp, handleMcpRead] as const) {
+      const r = await mcpCallInboxResult(handler, env, { handle: "az", since: 0, cursor: 5 });
+      assert.equal(r.isError, true, "cursor sent as a number must be refused, not silently treated as absent");
+      assert.match((r.parsed as { error: string }).error, /cursor must/);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("F1(d): inbox on /mcp and /mcp/read treats since: null as absent (JSON null, not a value sent) and the cursor call equals the REST body exactly", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { env, cursor } = await mcpF1Fixture(d1);
+    const restCursor = await inbox(env, "az", null, cursor);
+    for (const handler of [handleMcp, handleMcpRead] as const) {
+      const r = await mcpCallInboxResult(handler, env, { handle: "az", since: null, cursor });
+      assert.equal(r.isError, undefined, "since: null must not be refused");
+      assert.deepEqual(r.parsed, restCursor, "since: null must equal the REST cursor call exactly");
+    }
   } finally {
     d1.close();
   }

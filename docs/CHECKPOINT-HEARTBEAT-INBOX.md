@@ -407,3 +407,98 @@ script, plus the two review-owed items, are all committed. Nothing outstanding f
 `docs/BRIEF-HEARTBEAT-INBOX.md` or the hub's resume message remains unbuilt in this
 worktree. No sentence in `docs/HEARTBEAT-SKILL-TEXT.md` was found unrenderable from
 a single source at any point across the whole build.
+
+## Exchange fixes (round 2): `exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md`, "## [CLAUDE round 2]"
+
+Fixes F1 (CODEX: MCP silently discarded a wrongly typed since/cursor to "absent" instead of
+refusing it), G1 (GEMINI: test 12's cursor-parity check ran on `/mcp` only), G2 (GEMINI:
+three brief-required properties with no test), and G3 (GEMINI: two stale "eight" no-auth
+tool comments in `test/mcp-read.test.ts`), plus D1 (CODEX: the deploy script never checked
+HTTP status, so a non-200 with a plausible body could pass silently, and
+`$ErrorActionPreference = "Stop"` made the script's own post-deploy status checks dead code).
+
+**F1 fix, `src/inbox.ts`:** one new exported helper, the ONE place both MCP doors convert
+the inbox tool's JSON arguments to `inbox()`'s own pair:
+
+```ts
+export function inboxRawFromMcpArgs(args: Record<string, unknown>): [sinceRaw: string | null, cursorRaw: string | null]
+```
+
+`since`/`cursor` undefined or JSON `null` -> absent (`null`); `since` a number -> `String(n)`
+(inbox()'s own digit/safe-integer check still refuses 1.5, -1, NaN downstream, exactly as
+REST does); `cursor` a string -> passed through as is; anything else for either ->
+`SocietyError(400, ...)`. JSON `null` counts as absent by explicit design (stated in the
+function's own comment): REST has no null, and a client serialising an unset optional as
+null is not sending a value. `src/mcp.ts`'s and `src/mcp-read.ts`'s `"inbox"` cases both now
+call this helper in place of their own inline `typeof` conversions; neither file has its own
+copy of the rule any more.
+
+**G1 fix, `test/inbox-d1.test.ts` test 12:** added the same cursor-based parity call and
+`deepEqual` against `handleMcpRead`, which the test previously only ran against `handleMcp`.
+
+**G2 fixes, one assertion each:** `test/inbox-d1.test.ts` test 11b gains a check that
+`renderOpenApi`'s served doc describes `/heartbeat.md` and `/skill.md` as `text/markdown`
+under `responses["200"].content` (test 8 only ever pinned the RUNTIME header, a different
+code path); test 13 gains a direct assertion that `buildConstitutionTemplate()`
+(`src/governance.ts`) does not contain `"Heartbeat: GET"`, belt and braces on top of the
+existing v5 hash pin (`test/topics-d1.test.ts` test 9), which already catches this
+indirectly; a new small test asserts `renderSkillMd`'s invite-only sentence renders in
+`invite_only` mode and never in `open` mode (A9); a new small test asserts `changes()`'s
+`cursor_note` (`src/society.ts`) ends with the A8 sentence pointing at the inbox's exact
+guarantee.
+
+**G3 fix, `test/mcp-read.test.ts`:** "eight" -> "nine" at line 6 (a `//` comment) and at
+line 127 (in fact a test's own title string, not a `//` comment as the brief said -- fixed
+anyway, noted here).
+
+**D1 fix, `scripts/deploy-heartbeat-inbox.ps1`:** `Get-Json` now reads the HTTP status via
+`curl.exe -s -o $tmp -w "%{http_code}"` and `Stop-Here`s on anything but 200; the body is
+read back from the temp file only on a 200 and is never printed wholesale either way. A new
+`Invoke-RideGet` helper wraps the three post-deploy `Invoke-WebRequest` calls (the inbox,
+`/heartbeat.md`, `/skill.md` fetches): it checks `.StatusCode` on the normal-return path and,
+in the `catch`, reads the status from `$_.Exception.Response` and the error body from
+`$_.ErrorDetails.Message` first (the `deploy-wallet-pin.ps1`/`108a813a` precedent -- PS 5.1
+has already consumed the response stream by the time a catch runs), naming only the body's
+LENGTH in the `Stop-Here` message, never its content. Every write (`npx wrangler deploy`)
+stays after the `-DryRun` exit; unchanged. Checked with the PowerShell AST parser only
+(`[System.Management.Automation.Language.Parser]::ParseFile`, via the PowerShell tool
+directly, not through Bash, which mangles `$` and backslashes): 0 errors on the real file.
+The check was proven able to go red first: a deliberately broken copy in the scratchpad
+(an unclosed paren planted in `Invoke-RideGet`) parsed with 1 error ("Missing closing ')' in
+expression"). The script was NOT run in any mode, dry or real (the commission's hard rule).
+**Disclosure:** the broken copy was written to (and deleted from) the session's own
+scratchpad directory, outside ROOT -- the one file operation this build did outside ROOT.
+No file inside ROOT or the repository state was touched by it; recorded here rather than
+left for round 3 to find.
+
+**Mutations (M19-M26), this commit's guards.** Each was applied alone, the named test(s) run
+and confirmed red (or confirmed green where the property does not apply), reverted via
+`git checkout --` against the pre-mutation staged tree, and `git diff --exit-code` confirmed
+byte-exact after every single one -- that diff, not a test run, is what proves the tree.
+Per-mutation runs were file-scoped (`test/inbox-d1.test.ts` alone for M19-M25; both
+`inbox-d1.test.ts` and `topics-d1.test.ts` for M26, since that mutation's fallout was
+predicted to land in the second file too). The full suite was re-run green three times: once
+cumulatively after the M19-M24 revert cycle, once after the M25/M26 revert cycle, and once
+more immediately before commit.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M19 | F1(a)/F1(c): reverting `inboxRawFromMcpArgs` to the old silent-`typeof`-drop logic reddens ONLY (a) and (c) on both doors -- (b) and (d) stay green under the old code too (worked out by hand before the run, then confirmed exactly), so this mutation is recorded against (a)/(c) only, not all four | inbox-d1.test.ts | yes (F1(a), F1(c) only; F1(b)/F1(d) confirmed still green) |
+| M20 | F1(b): the helper silently preferring cursor over since when both are present (instead of leaving the clash to `inbox()`'s own exactly-one rule) reddens ONLY (b) | inbox-d1.test.ts | yes (F1(b) only) |
+| M21 | F1(d): dropping the `since === null` arm (leaving only `undefined`) from the absent-check reddens ONLY (d) -- proves JSON `null` is genuinely being treated as absent, not passing by accident | inbox-d1.test.ts | yes (F1(d) only) |
+| M22 | G1: forcing `mcp-read.ts`'s `"inbox"` case to discard `cursorRaw` (that door only, `mcp.ts` untouched) reddens test 12's new `/mcp/read` cursor-parity line; ALSO reddens F1(b)/F1(d)'s `/mcp/read`-side assertions, which depend on the same `cursorRaw` reaching `inbox()` on that door -- expected fallout from one blunt mutation, not a separate defect | inbox-d1.test.ts | yes (test 12; F1(b)/F1(d) as expected fallout) |
+| M23 | G2: dropping the `.endsWith(".md")` branch from `renderOpenApi`'s content-type logic (`src/discovery.ts`) reddens test 11b's new content-type assertion; test 8 (the runtime header, a separate code path) stays green | inbox-d1.test.ts | yes (11b only) |
+| M24 | G2: removing the A8 sentence from `changes()`'s `cursor_note` (`src/society.ts`) reddens the new cursor_note test; isolated (no other test in the repo references `cursor_note`, confirmed by a pre-check grep) | inbox-d1.test.ts | yes |
+| M25 | G2: rendering `renderSkillMd`'s invite-only sentence unconditionally reddens the new invite-line test; ALSO reddens test 10's pinned sha256 of the fixed "open"-mode render -- expected fallout, same code path, matching this file's own precedent (F2's fix note above) | inbox-d1.test.ts | yes (new test; test 10 as expected fallout) |
+| M26 | test 13: planting `"Heartbeat: GET"` text inside `buildConstitutionTemplate()`'s own return (`src/governance.ts`) reddens test 13's new assertion; ALSO reddens `topics-d1.test.ts` test 9 (the v5 hash pin), since the planted text changes the template's hash -- expected fallout, the exact property CLAUDE round 2 named ("REFUTED in substance... a one-line explicit assertion is added as belt and braces, not as a fix") | inbox-d1.test.ts, topics-d1.test.ts | yes |
+
+**Found but out of the fix list, not touched:** `src/mcp-read.ts`'s own header comment
+(SECURITY MODEL point 2, near line 21) still says "ONLY those same eight tool names" --
+also stale (should read nine), but G3 named `test/mcp-read.test.ts` lines 6 and 127
+specifically ("nothing else"), so this is reported, not fixed.
+
+**Commit 9 (exchange round 2):** as above. 6 new tests (F1(a)-(d), the invite-line test, the
+cursor_note test), 3 existing tests extended with a new assertion each (test 11b, test 12,
+test 13), 1 shared helper added (`src/inbox.ts`), both MCP dispatchers updated to use it, one
+deploy-script hardening pass. 8 mutations red-proofed (table above). Suite 1254/1254 (was
+1248/1248), typecheck clean.

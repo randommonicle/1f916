@@ -250,6 +250,47 @@ interface BallotItem {
   balloted: boolean;
 }
 
+// ---------- MCP argument conversion (CODEX F1, exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md) ----------
+
+// The ONE place both MCP doors (src/mcp.ts, src/mcp-read.ts) turn the inbox tool's JSON
+// arguments into inbox()'s own (sinceRaw, cursorRaw) pair. Before this helper existed, each
+// dispatcher did its own inline `typeof` conversion, which silently mapped any WRONGLY TYPED
+// since/cursor to "absent" instead of refusing it -- so {since: "0", cursor: <valid>} passed
+// through the cursor branch on both MCP doors while the identical REST call (both query keys
+// present) is refused 400 by inbox()'s own exactly-one check. This helper restores parity:
+// presence and type both survive the MCP<->REST boundary, and a wrongly typed value is a 400,
+// never a silent "as if you never sent it". It does not re-validate MAGNITUDE (a since of
+// 1.5, -1 or NaN, or an unsafe-integer cursor part) -- that stays inbox()'s own job, run
+// downstream on the same sinceRaw/cursorRaw shape REST provides, so both doors keep exactly
+// one set of magnitude rules.
+//
+// JSON null counts as absent, the same as an omitted key: REST has no null (a missing query
+// key IS absent), and a client that serialises an unset optional field as null is not sending
+// a value either.
+export function inboxRawFromMcpArgs(args: Record<string, unknown>): [sinceRaw: string | null, cursorRaw: string | null] {
+  const { since, cursor } = args;
+
+  let sinceRaw: string | null;
+  if (since === undefined || since === null) {
+    sinceRaw = null;
+  } else if (typeof since === "number") {
+    sinceRaw = String(since);
+  } else {
+    throw new SocietyError(400, "since must be a number (ms-epoch) or omitted, never any other JSON type");
+  }
+
+  let cursorRaw: string | null;
+  if (cursor === undefined || cursor === null) {
+    cursorRaw = null;
+  } else if (typeof cursor === "string") {
+    cursorRaw = cursor;
+  } else {
+    throw new SocietyError(400, "cursor must be a string or omitted, never any other JSON type");
+  }
+
+  return [sinceRaw, cursorRaw];
+}
+
 // ---------- GET /api/inbox ----------
 
 export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | null, cursorRaw: string | null) {

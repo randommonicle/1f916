@@ -16,10 +16,44 @@ $BASE = "https://commonhold.randommonicle.workers.dev"
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
-function Get-Json($url) { curl.exe -s $url | ConvertFrom-Json }
+# D1 (CODEX F2, exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): the old Get-Json
+# discarded curl's HTTP status entirely, so a non-200 answer carrying JSON with the expected
+# fields (an intermediary's error page, say) would pass every check that only reads named
+# keys off the parsed body. The body goes to a temp file and is read back ONLY on a 200 --
+# never printed wholesale either way.
+function Get-Json($url) {
+  $tmp = [System.IO.Path]::GetTempFileName()
+  $code = (curl.exe -s -o $tmp -w "%{http_code}" $url)
+  if ($code -ne "200") { Stop-Here "GET $url -> $code, expected 200 (body not printed; left at $tmp for inspection)." }
+  $json = (Get-Content $tmp -Raw | ConvertFrom-Json)
+  Remove-Item $tmp -ErrorAction SilentlyContinue
+  return $json
+}
 # One string with whitespace collapsed, never an array of lines (L-076/L-080: -match on an
 # array filters instead of testing the whole body).
 function Get-Flat($url) { ((curl.exe -s $url | Out-String) -replace '\s+', ' ') }
+# D1 (CODEX F2): every post-deploy Invoke-WebRequest goes through this one helper.
+# $ErrorActionPreference = "Stop" makes a non-2xx THROW before a caller's own
+# "if ($resp.StatusCode -ne 200)" check can ever run (CODEX proved that pattern dead code at
+# the old lines 78/91-92) -- so the real status check has to live on both paths out of this
+# function, the normal return AND the catch. The error body is read from
+# $_.ErrorDetails.Message first: PowerShell 5.1 has already consumed the response stream by
+# the time a catch runs, the same trap deploy-wallet-pin.ps1 (commit 108a813a) hit and fixed.
+# Only the body's LENGTH is ever named in the Stop-Here message -- never printed wholesale.
+function Invoke-RideGet($url) {
+  try {
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri $url
+    if ($resp.StatusCode -ne 200) { Stop-Here "GET $url -> $($resp.StatusCode), expected 200." }
+    return $resp
+  } catch {
+    $status = "no HTTP response"
+    if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+    $errBody = $null
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $errBody = $_.ErrorDetails.Message }
+    $note = if ($errBody) { "error body captured, $($errBody.Length) chars, not printed" } else { "no error body captured" }
+    Stop-Here "GET $url -> $status, expected 200 ($note)."
+  }
+}
 function Get-Sha256Hex($text) {
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
   $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
@@ -74,8 +108,7 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "wrangler deploy failed; the old worker is 
 
 # 4. the ride, exactly the brief's own Deploy section
 # 4a. GET /api/inbox?handle=commonhold-agent&since=0 -> 200, every section present
-$inboxResp = Invoke-WebRequest -UseBasicParsing -Uri "$BASE/api/inbox?handle=commonhold-agent&since=0"
-if ($inboxResp.StatusCode -ne 200) { Stop-Here "GET /api/inbox?handle=commonhold-agent&since=0 -> $($inboxResp.StatusCode), expected 200." }
+$inboxResp = Invoke-RideGet "$BASE/api/inbox?handle=commonhold-agent&since=0"
 $inboxBody = $inboxResp.Content | ConvertFrom-Json
 foreach ($key in "handle", "replies", "comments_on_your_posts", "mentions", "topics_opened", "ballots", "ballots_owed", "next_cursor", "has_more", "note", "cursor_note") {
   if (-not ($inboxBody.PSObject.Properties.Name -contains $key)) { Stop-Here "GET /api/inbox response is missing the '$key' section." }
@@ -86,10 +119,10 @@ $unknownCode = (curl.exe -s -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=no-
 if ($unknownCode -ne "404") { Stop-Here "GET /api/inbox for an unknown handle -> $unknownCode, expected 404." }
 Write-Host "[ride] GET /api/inbox for an unknown handle -> 404"
 # 4c. /heartbeat.md and /skill.md -> 200 text/markdown
-$hbResp = Invoke-WebRequest -UseBasicParsing -Uri "$BASE/heartbeat.md"
-$skResp = Invoke-WebRequest -UseBasicParsing -Uri "$BASE/skill.md"
-if ($hbResp.StatusCode -ne 200 -or $hbResp.Headers["Content-Type"] -notmatch "text/markdown") { Stop-Here "GET /heartbeat.md -> $($hbResp.StatusCode) $($hbResp.Headers['Content-Type']), expected 200 text/markdown." }
-if ($skResp.StatusCode -ne 200 -or $skResp.Headers["Content-Type"] -notmatch "text/markdown") { Stop-Here "GET /skill.md -> $($skResp.StatusCode) $($skResp.Headers['Content-Type']), expected 200 text/markdown." }
+$hbResp = Invoke-RideGet "$BASE/heartbeat.md"
+$skResp = Invoke-RideGet "$BASE/skill.md"
+if ($hbResp.Headers["Content-Type"] -notmatch "text/markdown") { Stop-Here "GET /heartbeat.md -> 200 but Content-Type $($hbResp.Headers['Content-Type']), expected text/markdown." }
+if ($skResp.Headers["Content-Type"] -notmatch "text/markdown") { Stop-Here "GET /skill.md -> 200 but Content-Type $($skResp.Headers['Content-Type']), expected text/markdown." }
 Write-Host "[ride] /heartbeat.md and /skill.md -> 200 text/markdown"
 # 4d. /api/surface's two sha256 values equal the served bodies' own sha256
 $surface = Get-Json "$BASE/api/surface"

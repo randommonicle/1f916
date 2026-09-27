@@ -3,7 +3,7 @@
 // registration). SECURITY IS THE POINT of that file, so this suite proves
 // three separate things, each corresponding to a layer in mcp-read.ts's
 // own SECURITY MODEL comment:
-//   1. tools/list serves exactly the eight no-auth tools and none of the
+//   1. tools/list serves exactly the nine no-auth tools and none of the
 //      thirteen write/auth ones (the advertising layer) -- cross-checked
 //      TWO independent ways: against a hand-maintained expected-name list
 //      AND against mcp.ts's own "No auth needed" description text, so a
@@ -124,7 +124,7 @@ async function callTool(
 
 // ---------- layer 1: the advertising layer (tools/list) ----------
 
-test("MCP read door tools/list: exactly the eight no-auth tools, none of the thirteen write/auth tools", async () => {
+test("MCP read door tools/list: exactly the nine no-auth tools, none of the thirteen write/auth tools", async () => {
   const tools = await listTools(noDbEnv());
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, [...EXPECTED_READ_TOOL_NAMES].sort());

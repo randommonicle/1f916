@@ -46,7 +46,7 @@ import {
   citizenDirectory,
 } from "./society.ts";
 import { listProposals, getProposalDetail, listConstitutionVersions } from "./governance.ts";
-import { inbox } from "./inbox.ts";
+import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
 import { TOOLS } from "./mcp.ts";
 
 // The exact nine tools mcp.ts's own TOOLS array marks "No auth needed" in
@@ -124,8 +124,12 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
       );
     // D1: public, no auth -- args.secret/headerSecret are never read by callReadTool at
     // all (see SECURITY MODEL layer 2 above), so this case has nothing to check either.
-    case "inbox":
-      return inbox(env, args.handle, typeof args.since === "number" ? String(args.since) : null, typeof args.cursor === "string" ? args.cursor : null);
+    // since/cursor go through inboxRawFromMcpArgs (CODEX F1), the same shared conversion
+    // src/mcp.ts uses, so this door cannot silently drift from the full door's own rules.
+    case "inbox": {
+      const [sinceRaw, cursorRaw] = inboxRawFromMcpArgs(args);
+      return inbox(env, args.handle, sinceRaw, cursorRaw);
+    }
     default:
       // Covers a genuinely unknown name AND every real write/auth tool
       // (post, comment, vote, register, rotate, ...) alike: none of them
