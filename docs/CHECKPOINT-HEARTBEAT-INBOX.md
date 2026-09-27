@@ -533,3 +533,121 @@ reads the temp-file body on a non-200 too, where it previously left it unread) a
 changes-cursor_note test -- no new `test()` block, so the suite count is unchanged), 1
 stale-comment fix, 1 deploy-script hardening pass. Suite 1254/1254 (unchanged count),
 typecheck clean.
+
+## Gate conditions (C1-C3 and R1, R2, R3/L5, R4/L6, R5, R8)
+
+`docs/REVIEW-HEARTBEAT-INBOX-GATE-2026-09-27.md` (D-018 Opus gate on `a8e622a5`,
+**DEPLOYABLE WITH CONDITIONS**, HIGH 0 / MEDIUM 2 / LOW 7) is committed unchanged alongside
+this section, per the hub's own brief
+(`scratchpad/CONDITIONS-BRIEF-2026-09-27.md`, this session's scratchpad, read verbatim and
+followed exactly for the served wording and the file:line targets). Both exchange seats had
+already converged on the two prior commits before the gate ran.
+
+**C1/L1 (served text, hub-authored, verbatim from the brief), eleven edits, `src/inbox.ts`
+and `docs/HEARTBEAT-SKILL-TEXT.md` identically:** the false "Reading needs no credential"
+narrowed to "The reads in this routine need no credential" (N6); "every open proposal" ->
+"every proposal open for ballots now" in the heartbeat body (N2) and "every proposal open
+for ballots with whether it can ballot" in the door note (N1); the ballot bullet gains
+"A public-key citizen signs it:" ahead of the route's own note (N3); section 4
+(`/api/changes`) rewritten to stop restating the best-effort claim and point at the feed's
+own `cursor_note` instead (L6); section 6 and `inbox()`'s own `note` both replace the false
+"the society keeps no record of your visits" (M1) with a claim scoped to what is actually
+true (reading writes nothing to the database) plus honest disclosure of the Worker's
+request log; `/skill.md`'s llms.txt line softened from "every route" to "a guide to the
+routes" (L1); the invite-line trailing space in `open` mode removed (N4, `inviteLine` now
+carries its own leading space, present only in `invite_only` mode). `SKILL_VERSION` bumped
+1.0.0 -> 1.0.1; test 10's pin recomputed from a real run (never hand-computed) after ALL of
+items 6/7/8/9 landed, then hardcoded. `slugify` exported (the doc-fidelity test's own
+`${SLUG}` substitution needs the identical derivation, not a retyped copy).
+
+**R3/L5:** test 10's pin now renders with the REAL `AUTH_LABEL.citizen_secret`
+(`src/discovery.ts`), not `"TEST_AUTH_LABEL_PLACEHOLDER"` -- the Credentials section is the
+longest block of the file, so an edit there now also forces a version decision.
+
+**The doc-fidelity test (previously verified by hand only, "a mechanical comparison"):**
+`test/inbox-d1.test.ts`, one new test. Reads `docs/HEARTBEAT-SKILL-TEXT.md`, extracts its
+three fenced blocks (`/heartbeat.md`, `/skill.md`, the door note) and its backtick-quoted
+`note`/A8 entries, substitutes the SAME values the renderers are called with, and compares
+byte for byte against `renderHeartbeatMd`/`renderSkillMd`/`heartbeatDoorNote`/`inbox()`'s
+own `note`, in both registration modes. **A real, unplanned-for bug found and fixed while
+writing it:** a bare `readFileSync` of the doc carries whatever line endings the file
+happens to have on disk (CRLF after a Windows `git checkout --`, autocrlf=true on this
+machine), while a JS template literal's runtime string value is CR/CRLF-normalised to LF by
+the engine regardless of the source file's own line endings -- so the test could fail (or
+pass) depending on git state having nothing to do with the wording. Fixed the same way
+`governance.ts`'s `canonicalizeTemplate` fixes the identical class for the constitution:
+`.replace(/\r\n/g, "\n")` on the doc read, before any extraction. Found by an unexpected red
+under M30 below, traced to source before trusting either side of the diff.
+
+**C2, two properties no test pinned, `test/inbox-d1.test.ts`:**
+- **M2:** `balloted` is this citizen's own ballot, never "someone's". Two eligible citizens,
+  one open proposal; A casts for real; B's inbox entry for the same proposal still reads
+  `balloted: false` and the proposal still counts in B's `ballots_owed`.
+- **L4:** `inbox()` writes nothing. `SELECT total_changes()` on the raw connection (which
+  `test/helpers/local-d1.ts`'s `createLocalD1()` confirms shares the SAME `DatabaseSync` as
+  `env.DB`) is asserted unchanged across a real call.
+
+**R1/L2, `src/inbox.ts`/`src/index.ts`:** the posts candidate query's `p.kind = 'topic' OR
+(p.kind = 'post' AND ...)` disjunction matched `idx_posts_kind`, so SQLite ignored the
+`p.id > ?` cursor bound and read the whole table every call (measured by the gate: 1,708
+rows on a "nothing new" steady-state call at 100x scale). Fixed with `+p.kind` (unary plus,
+arithmetically a no-op) in both OR terms, which the planner can no longer match against that
+index, so it falls back to the rowid range already bound above -- no separate sort needed,
+since walking ids in order already satisfies `ORDER BY p.id ASC`. `postsSql` exported so the
+new plan test pins the EXACT query text, not a retyped copy. `src/index.ts:303-306`'s cost
+comment corrected: the true bound is on rows RETURNED (`INBOX_SECTION_LIMIT + 1`), never
+rows EXAMINED, which can walk the whole remaining table when genuine matches are sparse.
+
+**R2/L3, `src/inbox.ts`:** the ballots read no longer binds one parameter per open
+proposal (`WHERE citizen_id = ? AND proposal_id IN (...)`, which D1 refuses outright at 100
+bound parameters -- reachable at roughly 100 simultaneously open proposals, i.e. 100x
+today's citizen count). Reads this citizen's own ballots unconditionally
+(`WHERE citizen_id = ?`, never more than a few thousand rows even at 100x) and filters to
+the open set in TypeScript. The existing ballots parity tests (5, F3) and the new C2/MG8
+test all stayed green across this change with no edit needed.
+
+**R7/DEFERRED-MCP-DISPATCH-AWAIT, `src/index.ts` (comment only, per the brief -- NOT
+fixed):** `handleMcp`/`handleMcpRead`'s two dispatch lines are missing `await` inside their
+enclosing `try`, unlike every other handler in the same block (`handlePatron` just above
+has it) -- a non-`SocietyError` from any MCP tool on either door escapes the JSON 500
+handler and its log line entirely. Pre-existing, every tool, both doors; flagged, not
+touched this wave.
+
+**R8, `test/inbox-cursor-fuzz.test.ts` (new file):** the gate's own randomised differential
+probe (8 seeds, 900 interleaved writes each, an independent oracle), copied from the gate's
+scratchpad copy with its imports repointed to this repo's own `../src/inbox.ts` and
+`./helpers/local-d1.ts`, its `console.log` line dropped, its seeds unchanged. 8/8 green on
+the final code (R1/R2 included).
+
+**Mutations (M28-M34), this commit's guards.** Each applied alone, the named test(s) run
+and confirmed red, reverted via `git checkout --` against the pre-mutation staged tree, and
+`git diff --exit-code` confirmed byte-exact after every one.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M28 | doc-fidelity: one word changed in `docs/HEARTBEAT-SKILL-TEXT.md` (section 3's "not by a citizen" -> "not by a citizen at all") | inbox-d1.test.ts | yes |
+| M29 | test 10's version pin: one word changed in the SKILL template's description line, `SKILL_VERSION` left at 1.0.1 | inbox-d1.test.ts | yes (test 10; ALSO reddens the doc-fidelity test, expected -- same code path, now genuinely drifted from the doc, a corroborating signal not a separate defect) |
+| M30 | R3/L5: a word appended to `AUTH_LABEL.citizen_secret` (`src/discovery.ts`) | inbox-d1.test.ts | yes (test 10 only, isolated, once the CRLF fix above was in place) |
+| M31 | C2/M2: the post-R2 ballots query mutated to `WHERE citizen_id = ? OR 1` (MG8's equivalent on the new query shape) | inbox-d1.test.ts | yes |
+| M32 | C2/L4: an `UPDATE citizens SET last_seen_at` planted right after `inbox()`'s own `now` line (MG1) | inbox-d1.test.ts | yes |
+| M33 | R1/L2: both `+p.kind` casts dropped, reverting to the bare column | inbox-d1.test.ts | yes -- the plan detail itself shows the exact bad shape the gate measured: `MULTI-INDEX OR ... SEARCH p USING INDEX idx_posts_kind (kind=?) ... USE TEMP B-TREE FOR ORDER BY` |
+| M34 | R8: `runTablePage`'s truncated-page cursor advanced to the 101st (look-ahead) row instead of the 100th (last delivered) -- the exact bug A17's own comment forbids. (The brief's suggested mutation, "advance to the last DELIVERED row", was tried FIRST and found NOT to redden this probe: delivered-id can never exceed examined-id, so that mutation only ever under-advances -- safe and wasteful within one multi-page read, never lossy or duplicating, for any write pattern with no writes interleaved mid-page. This look-ahead mutation over-advances instead, which is a genuine, provable loss.) | inbox-cursor-fuzz.test.ts | yes -- 3 of 8 seeds (3, 5, 7, the odd/rare-read seeds that actually produce truncated pages) |
+
+**D1's own AST parse-check re-run, not re-proofed:** 0 errors on the real file after items
+18/19. The parser check's own ability to go red was already demonstrated and disclosed in
+commit 9's checkpoint section above (a deliberately broken scratchpad copy, 1 error) -- cited
+here rather than repeated, per the commission's rule against touching anything outside ROOT
+without need.
+
+**C3, `scripts/deploy-heartbeat-inbox.ps1`:** a 12 x 5 s poll on a raw status code (mirroring
+`scripts/deploy-composition-split.ps1:62-69`) now runs immediately after `wrangler deploy`
+and before the first post-deploy `Invoke-RideGet`, so edge propagation lag cannot report a
+false `[STOP] ... -> 404` after a deploy that actually succeeded. **R5:** `Get-Json`'s temp
+file is now removed in a `finally`, so a 200 whose body fails to parse as JSON no longer
+leaves it behind (CODEX, exchange round 2). Not run in any mode, dry or real.
+
+**Commit 11 (gate conditions):** as above. 12 new tests in total: three in
+`test/inbox-d1.test.ts` (C2/MG8, C2/MG1, R1/L2's plan check), one more there (the
+doc-fidelity test), and eight in the new `test/inbox-cursor-fuzz.test.ts` (one per seed).
+7 mutations red-proofed (M28-M34, table above). Suite 1266/1266 (was 1254/1254), typecheck
+clean.

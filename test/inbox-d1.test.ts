@@ -4,16 +4,19 @@
 // (docs/CHECKPOINT-HEARTBEAT-INBOX.md carries the ledger).
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createLocalD1, insertCitizen, insertIdentityEvent, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { type Env } from "../src/society.ts";
 import { castBallot, buildConstitutionTemplate } from "../src/governance.ts";
-import { CONSTITUTION, changes } from "../src/society.ts";
+import { CONSTITUTION, TOPICS, changes } from "../src/society.ts";
 import { sha256Hex } from "../src/chain.ts";
-import { ROUTES, renderOpenApi } from "../src/discovery.ts";
+import { ROUTES, renderOpenApi, AUTH_LABEL } from "../src/discovery.ts";
 import worker from "../src/index.ts";
 import { handleMcp } from "../src/mcp.ts";
 import { handleMcpRead } from "../src/mcp-read.ts";
-import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "../src/inbox.ts";
+import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, heartbeatDoorNote, SKILL_VERSION, slugify, postsSql, type HeartbeatSkillFacts } from "../src/inbox.ts";
+import { REGISTRATION_PRICE_CENTS } from "../src/register-gate.ts";
 
 const DAY = 86_400_000;
 const TEST_ORIGIN = "https://commonhold.example.invalid";
@@ -654,6 +657,73 @@ test("F3: a full ballots parity matrix -- all four vote classes, tenure boundari
   }
 });
 
+// ---------- D-018 gate conditions C2 (M2/L4): two properties no test pinned ----------
+
+// M2 (D-018 gate): no test distinguished "this citizen balloted" from "someone balloted",
+// the field a seat reads to know whether it owes a vote. Code is correct today
+// (WHERE citizen_id = ?, this citizen's own row); mutant MG8 (WHERE citizen_id = ? OR 1,
+// i.e. balloted true once ANY citizen has cast) left the full suite green -- this pins the
+// per-citizen property directly, on the current (post-R2) query shape.
+test("C2/MG8 (D-018 gate): balloted is per citizen -- after A's real cast on P, an eligible B still reads balloted: false and P still counts in B's ballots_owed", async () => {
+  const d1 = createLocalD1();
+  try {
+    const NOW = Date.now();
+    const a = insertCitizen(d1, { handle: "gate-a", created_at: NOW - 30 * DAY });
+    insertCitizen(d1, { handle: "gate-b", created_at: NOW - 30 * DAY });
+    const p = insertProposal(d1, { kind: "resolution", registration_mode: "open", founding_ratified: false, opened_at: NOW - 10 * DAY, closes_at: NOW + 5 * DAY, status: "open" });
+    const env = makeEnv(d1, { registrationMode: "open" });
+
+    await castBallot(env, { id: a, created_at: NOW - 30 * DAY }, p, "yes", null);
+
+    const resB = await inbox(env, "gate-b", "0", null);
+    const ballotP = (resB.ballots as Array<{ proposal_id: number; balloted: boolean; eligible: boolean }>).find((x) => x.proposal_id === p)!;
+    assert.equal(ballotP.balloted, false, "B never cast a ballot on P -- balloted must be false, never A's");
+    assert.equal(ballotP.eligible, true, "sanity: B must actually be eligible for the assertion above to mean anything");
+    assert.equal(resB.ballots_owed, 1, "P must still count toward B's ballots_owed");
+  } finally {
+    d1.close();
+  }
+});
+
+// L4 (D-018 gate): the note claims inbox() "writes nothing to the society's database",
+// checked so far only by reading every statement inbox() calls and confirming each is a
+// SELECT -- true, but unpinned. Mutant MG1 (an UPDATE inside inbox()) left the full suite
+// green: nothing pinned the claim. This asserts it directly against the raw connection's
+// own total_changes() counter (d1.raw and d1.DB share the same underlying DatabaseSync
+// connection, test/helpers/local-d1.ts's own createLocalD1, so a write through env.DB is
+// visible here).
+test("C2/MG1 (D-018 gate): inbox() changes nothing in the database -- total_changes() on the raw connection is unchanged across a call", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "gate-c" });
+    const env = makeEnv(d1);
+    const before = (d1.raw.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    await inbox(env, "gate-c", "0", null);
+    const after = (d1.raw.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    assert.equal(after, before, "inbox() must write nothing -- total_changes() must be unchanged across the call");
+  } finally {
+    d1.close();
+  }
+});
+
+// R1/L2 (D-018 gate): the posts candidate query must plan as a rowid-range scan bounded by
+// its own cursor, with no separate sort step -- otherwise a heartbeat call reads the whole
+// posts table every time regardless of cursor position (measured by the gate: 1,708 rows
+// read in "nothing new" steady state at 100x scale, dropping to 7 with this plan). Pins the
+// REAL query text (postsSql, exported for exactly this), not a retyped copy.
+test("R1/L2 (D-018 gate): the posts candidate query plans as INTEGER PRIMARY KEY (rowid range), no TEMP B-TREE FOR ORDER BY (mutation: drop either +p.kind cast -> red)", () => {
+  const d1 = createLocalD1();
+  try {
+    const sql = postsSql("?");
+    const plan = d1.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(1, 0, 0, "%x%", "%x%", 101) as Array<{ detail: string }>;
+    const detail = plan.map((r) => r.detail).join(" | ");
+    assert.match(detail, /INTEGER PRIMARY KEY/, `the posts query must use the rowid range, not an index that ignores the cursor -- got: ${detail}`);
+    assert.doesNotMatch(detail, /TEMP B-TREE FOR ORDER BY/, `walking the rowid in id order must satisfy ORDER BY p.id ASC with no separate sort -- got: ${detail}`);
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- 6. topics_opened (D3) ----------
 
 test("6: an in-window topic is listed with author: null and opened_by; an out-of-window topic is not", async () => {
@@ -990,13 +1060,15 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     const otherBody = await (await callFetch(new Request(`${otherOrigin}/heartbeat.md`), env)).text();
     assert.notEqual(await sha256Hex(otherBody), surface.heartbeat.sha256, "a different origin render must not equal this origin served sha256");
 
-    // The version/sha pin (a fixed test origin/facts/ballotNote/authLabel, computed once
-    // and hardcoded here): an edit to the rendered skill text that does not bump
-    // SKILL_VERSION fails this exact assertion.
+    // The version/sha pin (a fixed test origin/facts/ballotNote, computed once and
+    // hardcoded here): an edit to the rendered skill text that does not bump
+    // SKILL_VERSION fails this exact assertion. L5 (D-018 gate): pinned with the REAL
+    // AUTH_LABEL.citizen_secret, not a placeholder -- the Credentials section is the
+    // longest block of the file, so an edit there must also force this version decision.
     const pinnedFacts: HeartbeatSkillFacts = { origin: "https://commonhold.example.invalid", society: "Commonhold", registrationMode: "open" };
-    const pinnedText = renderSkillMd(pinnedFacts, "TEST_AUTH_LABEL_PLACEHOLDER");
-    assert.equal(await sha256Hex(pinnedText), "e37cf8ed08acfbd136b2ddfe1bb68f85aff298f8542ca1456e40c20978e89441", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.0.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    const pinnedText = renderSkillMd(pinnedFacts, AUTH_LABEL.citizen_secret);
+    assert.equal(await sha256Hex(pinnedText), "9acfbbadd32da78cdd44ee5e7fb100e26ba1720b16a8f97472883a732d349ab5", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.0.1", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }
@@ -1105,6 +1177,120 @@ test("G2: GET /api/changes's cursor_note names the inbox's exact guarantee (A8)"
     );
   } finally {
     d1.close();
+  }
+});
+
+// ---------- D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md against the renderers ----------
+
+// Previously verified by hand only ("a mechanical comparison", exchange/
+// REVIEW_heartbeat-steps-bcd-build-2026-09-27.md's own CLAUDE round 1 note); the gate asked
+// for it as a real test. Extracts the doc's own fenced blocks and backtick-quoted entries,
+// substitutes the same values the renderers are called with, and compares byte for byte --
+// so a hand-edit to either side that drifts from the other fails this test, not a human
+// re-reading both files side by side.
+
+// Normalised the same way governance.ts's canonicalizeTemplate is (\r\n -> \n), for the
+// identical reason its own comment gives: a Windows checkout with core.autocrlf can carry
+// CRLF in this file's raw on-disk bytes, but a JS template literal's runtime string value
+// is CR/CRLF-normalised to LF by the engine regardless of the source file's own line
+// endings -- so a bare readFileSync of the doc must be normalised to compare like with
+// like, or this test's outcome would depend on git config, never on the wording itself.
+function readHeartbeatSkillTextDoc(): string {
+  return readFileSync(join(import.meta.dirname, "..", "docs", "HEARTBEAT-SKILL-TEXT.md"), "utf8").replace(/\r\n/g, "\n");
+}
+
+function extractFencedBlock(doc: string, heading: string): string {
+  const marker = `## ${heading}`;
+  const headingIdx = doc.indexOf(marker);
+  assert.ok(headingIdx !== -1, `doc heading not found: ${heading}`);
+  const rest = doc.slice(headingIdx + marker.length);
+  const openIdx = rest.indexOf("```");
+  assert.ok(openIdx !== -1, `no fenced block after heading: ${heading}`);
+  const afterOpen = rest.slice(openIdx + 3);
+  const newlineIdx = afterOpen.indexOf("\n");
+  assert.ok(newlineIdx !== -1, `fenced block opener has no newline: ${heading}`);
+  const bodyStart = newlineIdx + 1;
+  const closeIdx = afterOpen.indexOf("```", bodyStart);
+  assert.ok(closeIdx !== -1, `unterminated fenced block: ${heading}`);
+  return afterOpen.slice(bodyStart, closeIdx);
+}
+
+// The first backtick-quoted value after `marker` in the doc's own prose -- used for the
+// single-line `- \`note\`: \`...\`` / invite-line / A8 entries, which are not fenced blocks.
+function extractBacktickAfter(doc: string, marker: string): string {
+  const markerIdx = doc.indexOf(marker);
+  assert.ok(markerIdx !== -1, `doc marker not found: ${marker}`);
+  const rest = doc.slice(markerIdx + marker.length);
+  const openTick = rest.indexOf("`");
+  assert.ok(openTick !== -1, `no backtick value after marker: ${marker}`);
+  const afterOpen = rest.slice(openTick + 1);
+  const closeTick = afterOpen.indexOf("`");
+  assert.ok(closeTick !== -1, `unterminated backtick value after marker: ${marker}`);
+  return afterOpen.slice(0, closeTick);
+}
+
+function substitutePlaceholders(template: string, values: Record<string, string>): string {
+  let out = template;
+  for (const [key, val] of Object.entries(values)) out = out.split(`\${${key}}`).join(val);
+  return out;
+}
+
+test("D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md's three fenced blocks, the inbox note, and the A8 sentence equal the renderers' own output after placeholder substitution, in both registration modes (mutation: change one doc word -> red)", async () => {
+  const doc = readHeartbeatSkillTextDoc();
+  const hbBlock = extractFencedBlock(doc, "/heartbeat.md");
+  const skBlock = extractFencedBlock(doc, "/skill.md");
+  const doorBlock = extractFencedBlock(doc, "Door note on GET / (appended after `topicsDoorNote`, outside `FRONT_DOOR_TEMPLATE`)");
+  const inviteLineInvite = extractBacktickAfter(doc, "carrying its own leading space");
+  const noteDoc = extractBacktickAfter(doc, "- `note`: ");
+  const a8Doc = extractBacktickAfter(doc, "(A8)");
+
+  const O = TEST_ORIGIN;
+  const S = "Commonhold";
+  const SLUG = slugify(S);
+  const P = String(CONSTITUTION.posts_per_day);
+  const C = String(CONSTITUTION.comments_per_day);
+  const V = String(CONSTITUTION.votes_per_day);
+  const OPENED_BY = TOPICS.opened_by;
+  const PRICE = `$${(REGISTRATION_PRICE_CENTS / 100).toFixed(2)} USDC`;
+
+  for (const mode of ["open", "invite_only"] as const) {
+    const facts: HeartbeatSkillFacts = { origin: O, society: S, registrationMode: mode };
+
+    const expectedHb = substitutePlaceholders(hbBlock, { O, S, SLUG, P, C, V, OPENED_BY, BALLOT_NOTE: TEST_BALLOT_NOTE });
+    assert.equal(renderHeartbeatMd(facts, TEST_BALLOT_NOTE), expectedHb, `renderHeartbeatMd must equal the doc's /heartbeat.md block (${mode})`);
+
+    const expectedSk = substitutePlaceholders(skBlock, {
+      O,
+      S,
+      SLUG,
+      PRICE,
+      INVITE_LINE: mode === "invite_only" ? inviteLineInvite : "",
+      AUTH: TEST_AUTH_LABEL,
+      SKILL_VERSION,
+    });
+    assert.equal(renderSkillMd(facts, TEST_AUTH_LABEL), expectedSk, `renderSkillMd must equal the doc's /skill.md block (${mode})`);
+  }
+
+  const expectedDoor = substitutePlaceholders(doorBlock, { O: TEST_ORIGIN });
+  assert.equal(heartbeatDoorNote(TEST_ORIGIN), expectedDoor, "heartbeatDoorNote must equal the doc's door-note block");
+
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "az" });
+    const env = makeEnv(d1);
+    const res = await inbox(env, "az", "0", null);
+    assert.equal(res.note, noteDoc, "inbox()'s note must equal the doc's note entry, word for word");
+  } finally {
+    d1.close();
+  }
+
+  const d1b = createLocalD1();
+  try {
+    const env = makeEnv(d1b);
+    const changesRes = await changes(env, 0);
+    assert.ok((changesRes.cursor_note as string).endsWith(a8Doc), "changes()'s cursor_note must end with the doc's A8 sentence, word for word");
+  } finally {
+    d1b.close();
   }
 });
 

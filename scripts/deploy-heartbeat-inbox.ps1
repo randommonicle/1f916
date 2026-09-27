@@ -39,17 +39,21 @@ function Format-ErrBody($bodyText) {
 # fields (an intermediary's error page, say) would pass every check that only reads named
 # keys off the parsed body. The body goes to a temp file and is read back on a 200 as
 # before; on anything else it is read once more, through Format-ErrBody, then discarded.
+# R5 (D-018 gate, CODEX exchange round 2): the temp file is removed in a `finally`, so a 200
+# whose body is not valid JSON (ConvertFrom-Json throws, $ErrorActionPreference = "Stop")
+# still cleans it up -- the old form left it behind on exactly that path.
 function Get-Json($url) {
   $tmp = [System.IO.Path]::GetTempFileName()
-  $code = (curl.exe -s -o $tmp -w "%{http_code}" $url)
-  if ($code -ne "200") {
-    $bodyText = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
+  try {
+    $code = (curl.exe -s -o $tmp -w "%{http_code}" $url)
+    if ($code -ne "200") {
+      $bodyText = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
+      Stop-Here "GET $url -> $code, expected 200 ($(Format-ErrBody $bodyText))."
+    }
+    return (Get-Content $tmp -Raw | ConvertFrom-Json)
+  } finally {
     Remove-Item $tmp -ErrorAction SilentlyContinue
-    Stop-Here "GET $url -> $code, expected 200 ($(Format-ErrBody $bodyText))."
   }
-  $json = (Get-Content $tmp -Raw | ConvertFrom-Json)
-  Remove-Item $tmp -ErrorAction SilentlyContinue
-  return $json
 }
 # One string with whitespace collapsed, never an array of lines (L-076/L-080: -match on an
 # array filters instead of testing the whole body).
@@ -126,6 +130,21 @@ if ($DryRun) { Write-Host "[dry-run] would run: npx wrangler deploy, then the po
 Write-Host "[deploy] npx wrangler deploy"
 npx wrangler deploy
 if ($LASTEXITCODE -ne 0) { Stop-Here "wrangler deploy failed; the old worker is still live." }
+
+# 3.5. C3 (D-018 gate): wait for the new worker's route to appear before the first
+# post-deploy read. wrangler deploy returns once propagation STARTS, not once it is
+# complete everywhere -- the edge can still answer with the OLD worker (404 on this new
+# route) for a few seconds after. Same 12 x 5 s pattern as
+# scripts/deploy-composition-split.ps1:62-69, but polling a raw status code (curl.exe, not
+# Get-Json, which Stop-Heres on the first non-200 and so cannot poll through one).
+$inboxCode = "404"
+for ($i = 0; $i -lt 12; $i++) {
+  $inboxCode = (curl.exe -s -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=commonhold-agent&since=0")
+  if ($inboxCode -ne "404") { break }
+  Start-Sleep -Seconds 5
+}
+if ($inboxCode -eq "404") { Stop-Here "deployed, but the new route has not appeared after 60 s; check by hand." }
+Write-Host "[deploy] GET /api/inbox -> $inboxCode after waiting for propagation"
 
 # 4. the ride, exactly the brief's own Deploy section
 # 4a. GET /api/inbox?handle=commonhold-agent&since=0 -> 200, every section present

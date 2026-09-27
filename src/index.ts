@@ -239,6 +239,14 @@ export default {
           ),
         );
       if (path === "/api/patron" && method === "POST") return await handlePatron(request, env);
+      // DEFERRED-MCP-DISPATCH-AWAIT (D-018 gate R7/L3 aside, pre-existing, every tool on
+      // both doors, NOT fixed this wave): these two returns are missing `await` inside this
+      // try -- every other dispatch line in this block awaits its handler (handlePatron
+      // just above does), so a non-SocietyError thrown by ANY MCP tool call (this wave's
+      // inbox tool included) rejects fetch()'s own returned promise AFTER this function has
+      // already returned, escaping the catch block below and its JSON 500 (with its log
+      // line) entirely. The fix is `return await handleMcp(request, env)` /
+      // `return await handleMcpRead(request, env)`.
       if (path === "/mcp") return handleMcp(request, env);
       if (path === "/mcp/read") return handleMcpRead(request, env);
 
@@ -301,9 +309,12 @@ export default {
       // D1/A14: public, stateless, read-only -- no credential, no write. Every item it
       // lists is already public elsewhere; this route only gathers it for one handle.
       // DEFERRED-PUBLIC-READ-RATE-CAP: no per-IP cap on this or any other public read in
-      // this Worker; a call examines at most 101 rows per table past its cursor, but
-      // cursor=c0-p0 scans whole tables, as /api/changes?since=0 and /api/search can
-      // today (A14 point 2) -- a class, not fixed in this wave.
+      // this Worker. Cost correction (D-018 gate L2, R1 applied): the candidate query's own
+      // LIMIT bounds ROWS RETURNED to INBOX_SECTION_LIMIT + 1 per table, never rows
+      // EXAMINED -- a call can walk every row past its cursor in a table when genuine
+      // matches are sparse (A17), which the posts side did unconditionally, cursor or not,
+      // before R1's `+p.kind` plan fix; /api/changes?since=0 and /api/search remain
+      // unbounded the same way today (A14 point 2) -- a class, not fixed in this wave.
       if (path === "/api/inbox" && method === "GET")
         return json(await inbox(env, url.searchParams.get("handle"), url.searchParams.get("since"), url.searchParams.get("cursor")));
       if (path === "/api/new" && method === "GET")
