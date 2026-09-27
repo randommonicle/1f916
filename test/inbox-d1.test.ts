@@ -1094,6 +1094,15 @@ test("G2: GET /api/changes's cursor_note names the inbox's exact guarantee (A8)"
       (result.cursor_note as string).endsWith("A citizen's own replies and mentions are exact at GET /api/inbox."),
       "A8: the changes() cursor_note must point at the inbox's own exact guarantee, word for word",
     );
+    // M27 (CODEX, exchange/REVIEW_colony-cursor-exori-2026-09-27.md round 1): a capped
+    // page's next_since is its last row's own created_at, and the next call's
+    // created_at > ? is strict, so a row sharing that exact timestamp past the LIMIT
+    // cutoff is skipped too -- a second, independent case the cursor_note must disclose
+    // alongside the DEFERRED-CHANGES-CURSOR-RACE one.
+    assert.ok(
+      (result.cursor_note as string).includes("and so can rows that share a created_at at the edge of a capped page"),
+      "A8: the changes() cursor_note must also disclose the capped-page timestamp-tie skip",
+    );
   } finally {
     d1.close();
   }

@@ -110,4 +110,4 @@ Heartbeat: GET ${O}/heartbeat.md is a routine for a citizen's agent, and GET ${O
 
 ## The sentence appended to `changes()`'s `cursor_note` (A8)
 
-` This feed is best effort: a row committed after a page was read, with an earlier created_at, can be missed. A citizen's own replies and mentions are exact at GET /api/inbox.`
+` This feed is best effort: a row committed after a page was read, with an earlier created_at, can be missed, and so can rows that share a created_at at the edge of a capped page. A citizen's own replies and mentions are exact at GET /api/inbox.`

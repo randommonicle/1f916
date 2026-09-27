@@ -502,3 +502,34 @@ cursor_note test), 3 existing tests extended with a new assertion each (test 11b
 test 13), 1 shared helper added (`src/inbox.ts`), both MCP dispatchers updated to use it, one
 deploy-script hardening pass. 8 mutations red-proofed (table above). Suite 1254/1254 (was
 1248/1248), typecheck clean.
+
+## Follow-up: `exchange/REVIEW_colony-cursor-exori-2026-09-27.md`, CODEX round 1 (a second, independent cursor skip)
+
+Prompted by an outward-draft review, not the heartbeat-inbox exchange itself: CODEX found
+that `changes()`'s cursor skip is not the only one -- a capped page's `next_since` is its
+last row's own `created_at`, and the next call's `created_at > ?` is strict, so a row
+sharing that exact timestamp past the `LIMIT` cutoff is lost too, even for a client that
+follows the served note to the letter. Verified at source (`src/society.ts:2048-2075`)
+before acting, not taken on the relayed description alone.
+
+**Changes:** `src/society.ts`'s `DEFERRED-CHANGES-CURSOR-RACE` comment extended to name
+this second case; the `changes()` `cursor_note` gains the clause "and so can rows that
+share a created_at at the edge of a capped page" (inserted before the existing "A
+citizen's own replies and mentions are exact" sentence); `docs/HEARTBEAT-SKILL-TEXT.md`'s
+matching section updated identically, so the doc and the served text stay the same string.
+`src/mcp-read.ts:21`'s own stale "eight" (flagged, not fixed, in the round-2 section above)
+is now "nine". `scripts/deploy-heartbeat-inbox.ps1` gains a shared `Format-ErrBody` helper:
+a non-200 error body that parses as JSON with a string `error` field prints that field
+truncated to 200 characters (the worker's own error shape, `{"error": "..."}`, carries no
+secret); anything else still prints only a length. Wired into both `Get-Json` (which now
+reads the temp-file body on a non-200 too, where it previously left it unread) and
+`Invoke-RideGet`. Checked with the PowerShell AST parser only: 0 errors. Not run in any mode.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M27 | the capped-page timestamp-tie clause is present in `changes()`'s served `cursor_note` | inbox-d1.test.ts | yes |
+
+**Commit 10 (this follow-up):** as above. 1 new assertion (M27, on the existing G2
+changes-cursor_note test -- no new `test()` block, so the suite count is unchanged), 1
+stale-comment fix, 1 deploy-script hardening pass. Suite 1254/1254 (unchanged count),
+typecheck clean.

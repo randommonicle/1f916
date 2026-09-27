@@ -16,15 +16,37 @@ $BASE = "https://commonhold.randommonicle.workers.dev"
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
+# Follow-up (coordinator, 2026-09-27): our worker's own error bodies are {"error": "..."}
+# and carry no secret, so a parsed string `error` field is safe to surface, truncated to
+# 200 characters. Anything else -- a non-JSON body, a differently shaped JSON body, an
+# `error` field that is not a string, or no body at all -- still names only a LENGTH,
+# never raw content: this is the one shared place that decision is made, for both Get-Json
+# and Invoke-RideGet below.
+function Format-ErrBody($bodyText) {
+  if (-not $bodyText) { return "no error body captured" }
+  try {
+    $j = $bodyText | ConvertFrom-Json
+    if ($j -and ($j.PSObject.Properties.Name -contains "error") -and ($j.error -is [string])) {
+      $msg = $j.error
+      if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) + "..." }
+      return "error: `"$msg`""
+    }
+  } catch {}
+  return "error body captured, $($bodyText.Length) chars, not printed"
+}
 # D1 (CODEX F2, exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md): the old Get-Json
 # discarded curl's HTTP status entirely, so a non-200 answer carrying JSON with the expected
 # fields (an intermediary's error page, say) would pass every check that only reads named
-# keys off the parsed body. The body goes to a temp file and is read back ONLY on a 200 --
-# never printed wholesale either way.
+# keys off the parsed body. The body goes to a temp file and is read back on a 200 as
+# before; on anything else it is read once more, through Format-ErrBody, then discarded.
 function Get-Json($url) {
   $tmp = [System.IO.Path]::GetTempFileName()
   $code = (curl.exe -s -o $tmp -w "%{http_code}" $url)
-  if ($code -ne "200") { Stop-Here "GET $url -> $code, expected 200 (body not printed; left at $tmp for inspection)." }
+  if ($code -ne "200") {
+    $bodyText = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Stop-Here "GET $url -> $code, expected 200 ($(Format-ErrBody $bodyText))."
+  }
   $json = (Get-Content $tmp -Raw | ConvertFrom-Json)
   Remove-Item $tmp -ErrorAction SilentlyContinue
   return $json
@@ -39,7 +61,7 @@ function Get-Flat($url) { ((curl.exe -s $url | Out-String) -replace '\s+', ' ') 
 # function, the normal return AND the catch. The error body is read from
 # $_.ErrorDetails.Message first: PowerShell 5.1 has already consumed the response stream by
 # the time a catch runs, the same trap deploy-wallet-pin.ps1 (commit 108a813a) hit and fixed.
-# Only the body's LENGTH is ever named in the Stop-Here message -- never printed wholesale.
+# What the Stop-Here message shows beyond that is Format-ErrBody's call to make, above.
 function Invoke-RideGet($url) {
   try {
     $resp = Invoke-WebRequest -UseBasicParsing -Uri $url
@@ -50,8 +72,7 @@ function Invoke-RideGet($url) {
     if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
     $errBody = $null
     if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $errBody = $_.ErrorDetails.Message }
-    $note = if ($errBody) { "error body captured, $($errBody.Length) chars, not printed" } else { "no error body captured" }
-    Stop-Here "GET $url -> $status, expected 200 ($note)."
+    Stop-Here "GET $url -> $status, expected 200 ($(Format-ErrBody $errBody))."
   }
 }
 function Get-Sha256Hex($text) {

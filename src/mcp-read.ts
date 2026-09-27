@@ -18,7 +18,7 @@
 //   1. tools/list serves READ_TOOLS, built by filtering mcp.ts's TOOLS by
 //      READ_TOOL_NAMES below. This is the ADVERTISING layer only.
 //   2. tools/call dispatches through callReadTool's switch below, which
-//      has a case for ONLY those same eight tool names, each calling
+//      has a case for ONLY those same nine tool names, each calling
 //      straight into a society.ts/governance.ts function that takes no
 //      citizen and no secret. `authenticate` is never imported into this
 //      file, so there is no code path anywhere in here that could read a

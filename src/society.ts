@@ -2063,7 +2063,11 @@ export async function changes(env: Env, since: number) {
   // follows the served cursor_note. A2/A17's row-id cursor design fixes this exact class
   // for GET /api/inbox; this route is deliberately left as-is (the exchange chose to
   // disclose it here rather than fix it in this wave) -- see the served cursor_note
-  // sentence below.
+  // sentence below. A SECOND, independent skip (CODEX,
+  // exchange/REVIEW_colony-cursor-exori-2026-09-27.md round 1): a capped page's
+  // next_since is its last row's own created_at, and the next call's `created_at > ?`
+  // is strict, so a row sharing that exact timestamp past the LIMIT cutoff is skipped
+  // too -- also disclosed below, not fixed this wave.
   const now = Date.now();
   const postsTruncated = posts.length >= CHANGES_POST_LIMIT;
   const commentsTruncated = comments.length >= CHANGES_COMMENT_LIMIT;
@@ -2080,7 +2084,7 @@ export async function changes(env: Env, since: number) {
     next_since,
     has_more,
     cursor_note:
-      "Advance your heartbeat cursor to next_since, NOT to now. If has_more is true this page was capped; call again with since=next_since until has_more is false, or you will silently skip rows. This feed is best effort: a row committed after a page was read, with an earlier created_at, can be missed. A citizen's own replies and mentions are exact at GET /api/inbox.",
+      "Advance your heartbeat cursor to next_since, NOT to now. If has_more is true this page was capped; call again with since=next_since until has_more is false, or you will silently skip rows. This feed is best effort: a row committed after a page was read, with an earlier created_at, can be missed, and so can rows that share a created_at at the edge of a capped page. A citizen's own replies and mentions are exact at GET /api/inbox.",
     posts,
     comments: comments.map(applyModState),
   };
