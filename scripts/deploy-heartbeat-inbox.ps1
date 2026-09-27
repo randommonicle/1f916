@@ -45,7 +45,7 @@ function Format-ErrBody($bodyText) {
 function Get-Json($url) {
   $tmp = [System.IO.Path]::GetTempFileName()
   try {
-    $code = (curl.exe -s -o $tmp -w "%{http_code}" $url)
+    $code = (curl.exe -s --max-time 20 -o $tmp -w "%{http_code}" $url)
     if ($code -ne "200") {
       $bodyText = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
       Stop-Here "GET $url -> $code, expected 200 ($(Format-ErrBody $bodyText))."
@@ -57,7 +57,7 @@ function Get-Json($url) {
 }
 # One string with whitespace collapsed, never an array of lines (L-076/L-080: -match on an
 # array filters instead of testing the whole body).
-function Get-Flat($url) { ((curl.exe -s $url | Out-String) -replace '\s+', ' ') }
+function Get-Flat($url) { ((curl.exe -s --max-time 20 $url | Out-String) -replace '\s+', ' ') }
 # D1 (CODEX F2): every post-deploy Invoke-WebRequest goes through this one helper.
 # $ErrorActionPreference = "Stop" makes a non-2xx THROW before a caller's own
 # "if ($resp.StatusCode -ne 200)" check can ever run (CODEX proved that pattern dead code at
@@ -120,7 +120,7 @@ foreach ($ch in "identity_log", "treasury", "payouts", "ballots") {
   if ($attBefore.$ch.status -ne "verified") { Stop-Here "chain $ch is $($attBefore.$ch.status) before the deploy." }
 }
 Write-Host ("[live] before: v5 " + $V5_HASH.Substring(0, 8) + "; chains verified; identity head " + $attBefore.identity_log.head.Substring(0, 12) + " at " + $attBefore.identity_log.total_rows + " rows")
-$inboxBeforeCode = (curl.exe -s -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=commonhold-agent&since=0")
+$inboxBeforeCode = (curl.exe -s --max-time 20 -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=commonhold-agent&since=0")
 if ($inboxBeforeCode -ne "404") { Stop-Here "GET /api/inbox already answers $inboxBeforeCode before this deploy (expected 404) -- investigate before shipping anything." }
 Write-Host "[live] before: GET /api/inbox -> 404, as expected pre-deploy"
 
@@ -136,10 +136,12 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "wrangler deploy failed; the old worker is 
 # complete everywhere -- the edge can still answer with the OLD worker (404 on this new
 # route) for a few seconds after. Same 12 x 5 s pattern as
 # scripts/deploy-composition-split.ps1:62-69, but polling a raw status code (curl.exe, not
-# Get-Json, which Stop-Heres on the first non-200 and so cannot poll through one).
+# Get-Json, which Stop-Heres on the first non-200 and so cannot poll through one). CODEX
+# (exchange/REVIEW_heartbeat-gate-conditions-2026-09-27.md round 1): a shorter --max-time
+# here than elsewhere -- a stalled poll iteration must not itself burn the whole 60 s budget.
 $inboxCode = "404"
 for ($i = 0; $i -lt 12; $i++) {
-  $inboxCode = (curl.exe -s -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=commonhold-agent&since=0")
+  $inboxCode = (curl.exe -s --max-time 10 -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=commonhold-agent&since=0")
   if ($inboxCode -ne "404") { break }
   Start-Sleep -Seconds 5
 }
@@ -155,7 +157,7 @@ foreach ($key in "handle", "replies", "comments_on_your_posts", "mentions", "top
 }
 Write-Host ("[ride] GET /api/inbox?handle=commonhold-agent&since=0 -> 200, every section present; next_cursor " + $inboxBody.next_cursor)
 # 4b. an unknown handle -> 404
-$unknownCode = (curl.exe -s -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=no-such-citizen-at-all&since=0")
+$unknownCode = (curl.exe -s --max-time 20 -o NUL -w "%{http_code}" "$BASE/api/inbox?handle=no-such-citizen-at-all&since=0")
 if ($unknownCode -ne "404") { Stop-Here "GET /api/inbox for an unknown handle -> $unknownCode, expected 404." }
 Write-Host "[ride] GET /api/inbox for an unknown handle -> 404"
 # 4c. /heartbeat.md and /skill.md -> 200 text/markdown
@@ -184,7 +186,7 @@ $door = Get-Flat "$BASE/"
 if ($door -notmatch "Heartbeat: GET") { Stop-Here "the heartbeat door note is not on GET /." }
 $bad = @()
 foreach ($p in "/", "/api/official", "/llms.txt", "/openapi.json", "/api/topics", "/api/front", "/treasury", "/api/showhome") {
-  $code = (curl.exe -s -o NUL -w "%{http_code}" "$BASE$p")
+  $code = (curl.exe -s --max-time 20 -o NUL -w "%{http_code}" "$BASE$p")
   if ($code -ne "200") { $bad += "$p=$code" }
 }
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after deploy: " + ($bad -join ", ")) }

@@ -15,7 +15,7 @@ import { ROUTES, renderOpenApi, AUTH_LABEL } from "../src/discovery.ts";
 import worker from "../src/index.ts";
 import { handleMcp } from "../src/mcp.ts";
 import { handleMcpRead } from "../src/mcp-read.ts";
-import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, heartbeatDoorNote, SKILL_VERSION, slugify, postsSql, type HeartbeatSkillFacts } from "../src/inbox.ts";
+import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, heartbeatDoorNote, SKILL_VERSION, slugify, postsSql, ballotsSql, type HeartbeatSkillFacts } from "../src/inbox.ts";
 import { REGISTRATION_PRICE_CENTS } from "../src/register-gate.ts";
 
 const DAY = 86_400_000;
@@ -711,7 +711,7 @@ test("C2/MG1 (D-018 gate): inbox() changes nothing in the database -- total_chan
 // posts table every time regardless of cursor position (measured by the gate: 1,708 rows
 // read in "nothing new" steady state at 100x scale, dropping to 7 with this plan). Pins the
 // REAL query text (postsSql, exported for exactly this), not a retyped copy.
-test("R1/L2 (D-018 gate): the posts candidate query plans as INTEGER PRIMARY KEY (rowid range), no TEMP B-TREE FOR ORDER BY (mutation: drop either +p.kind cast -> red)", () => {
+test("R1/L2 (D-018 gate): the posts candidate query plans as INTEGER PRIMARY KEY (rowid range), no TEMP B-TREE FOR ORDER BY (mutation: drop both +p.kind casts -> red; dropping only one is not enough, re-gate Note 2)", () => {
   const d1 = createLocalD1();
   try {
     const sql = postsSql("?");
@@ -719,6 +719,22 @@ test("R1/L2 (D-018 gate): the posts candidate query plans as INTEGER PRIMARY KEY
     const detail = plan.map((r) => r.detail).join(" | ");
     assert.match(detail, /INTEGER PRIMARY KEY/, `the posts query must use the rowid range, not an index that ignores the cursor -- got: ${detail}`);
     assert.doesNotMatch(detail, /TEMP B-TREE FOR ORDER BY/, `walking the rowid in id order must satisfy ORDER BY p.id ASC with no separate sort -- got: ${detail}`);
+  } finally {
+    d1.close();
+  }
+});
+
+// Re-gate Note 1: the FIRST fix for R2/L3 (WHERE citizen_id = ? alone) avoided D1's
+// bound-parameter limit but has no usable index (idx_ballots_proposal_citizen leads with
+// proposal_id, not citizen_id), so it planned as a full SCAN of every ballot ever cast, on
+// every inbox call. The subquery form pins a SEARCH via that same index instead.
+test("re-gate Note 1: the ballots read plans as an indexed SEARCH on idx_ballots_proposal_citizen, never a SCAN of ballots (mutation: revert to WHERE citizen_id = ? alone -> red)", () => {
+  const d1 = createLocalD1();
+  try {
+    const plan = d1.raw.prepare(`EXPLAIN QUERY PLAN ${ballotsSql()}`).all(1, 0) as Array<{ detail: string }>;
+    const detail = plan.map((r) => r.detail).join(" | ");
+    assert.doesNotMatch(detail, /SCAN ballots/, `the ballots read must never be a full scan -- got: ${detail}`);
+    assert.match(detail, /SEARCH ballots USING (COVERING )?INDEX idx_ballots_proposal_citizen/, `the ballots read must use the (proposal_id, citizen_id) index -- got: ${detail}`);
   } finally {
     d1.close();
   }

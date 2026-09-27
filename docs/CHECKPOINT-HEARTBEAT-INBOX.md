@@ -636,7 +636,7 @@ and confirmed red, reverted via `git checkout --` against the pre-mutation stage
 | M31 | C2/M2: the post-R2 ballots query mutated to `WHERE citizen_id = ? OR 1` (MG8's equivalent on the new query shape) | inbox-d1.test.ts | yes |
 | M32 | C2/L4: an `UPDATE citizens SET last_seen_at` planted right after `inbox()`'s own `now` line (MG1) | inbox-d1.test.ts | yes |
 | M33 | R1/L2: both `+p.kind` casts dropped, reverting to the bare column | inbox-d1.test.ts | yes -- the plan detail itself shows the exact bad shape the gate measured: `MULTI-INDEX OR ... SEARCH p USING INDEX idx_posts_kind (kind=?) ... USE TEMP B-TREE FOR ORDER BY` |
-| M34 | R8: `runTablePage`'s truncated-page cursor advanced to the 101st (look-ahead) row instead of the 100th (last delivered) -- the exact bug A17's own comment forbids. (The brief's suggested mutation, "advance to the last DELIVERED row", was tried FIRST and found NOT to redden this probe: delivered-id can never exceed examined-id, so that mutation only ever under-advances -- safe and wasteful within one multi-page read, never lossy or duplicating, for any write pattern with no writes interleaved mid-page. This look-ahead mutation over-advances instead, which is a genuine, provable loss.) | inbox-cursor-fuzz.test.ts | yes -- 3 of 8 seeds (3, 5, 7, the odd/rare-read seeds that actually produce truncated pages) |
+| M34 | R8: `runTablePage`'s truncated-page cursor advanced to the 101st (look-ahead) row instead of the 100th (last delivered) -- the exact bug A17's own comment forbids. (The brief's suggested mutation, "advance to the last DELIVERED row", was tried FIRST and found NOT to redden this probe: delivered-id can never exceed examined-id, so that mutation only ever under-advances -- safe and wasteful within one multi-page read, never lossy or duplicating, for any write pattern with no writes interleaved mid-page. This look-ahead mutation over-advances instead, which is a genuine, provable loss.) | inbox-cursor-fuzz.test.ts | yes -- red on 3 of 8 seeds (3, 5, 7). Re-gate nit, re-verified directly: ALL FOUR odd seeds (1, 3, 5, 7) produce truncated pages (the file's own `if (seed % 2) assert.ok(truncatedPages > 0)` sanity check requires it of each); this row's original wording wrongly implied only 3, 5 and 7 do. Seed 1 stays green under this specific mutation regardless -- its own page edges happen not to expose the off-by-one, not because it never truncates. |
 
 **A coverage limit of R8, found by the attempt above, not a defect in either the probe or
 A20:** the fuzz probe's own oracle recomputes expected results from FINAL database state
@@ -666,3 +666,52 @@ leaves it behind (CODEX, exchange round 2). Not run in any mode, dry or real.
 doc-fidelity test), and eight in the new `test/inbox-cursor-fuzz.test.ts` (one per seed).
 7 mutations red-proofed (M28-M34, table above). Suite 1266/1266 (was 1254/1254), typecheck
 clean.
+
+## Re-gate notes: `docs/REVIEW-HEARTBEAT-INBOX-REGATE-2026-09-27.md` (CLEAR WITH NOTES)
+
+Committed unchanged alongside this section. C1-C3 re-confirmed met; two real findings (Note
+1, Note 2) and two nits (the M33 wording, the M34 seed count -- both corrected in place
+above, not repeated here) came out of the re-gate plus a parallel exchange
+(`exchange/REVIEW_heartbeat-gate-conditions-2026-09-27.md`, CODEX round 1).
+
+**Note 1 (LOW): the ballots read (R2's own fix) had no usable index.**
+`idx_ballots_proposal_citizen` (`schema.sql`) leads with `proposal_id`, not `citizen_id`, so
+`WHERE citizen_id = ?` alone planned as `SCAN ballots USING COVERING INDEX
+idx_ballots_proposal_citizen` -- every ballot ever cast, on every inbox call, cancelling most
+of R1's own gain (measured by the re-gate: 1,400 of 1,407 total rows read at 100x). Fixed
+exactly as the re-gate proposed and verified: `WHERE citizen_id = ? AND proposal_id IN
+(SELECT id FROM proposals WHERE status = 'open' AND closes_at > ? AND post_id IS NOT NULL)`,
+bound `(citizen.id, now)` -- no per-proposal parameter list (the 100-parameter limit stays
+avoided), and the driven-from-the-subquery plan seeks the SAME index instead of scanning it.
+The existing TypeScript filter to `openIds` (from the outer `openProposals` query, same
+`now`) is kept, so this citizen's `balloted`/`ballots_owed` stay scoped to one snapshot, not
+two independently-timed reads of "open". `ballotsSql()` exported (mirrors `postsSql()`) so
+the new plan test pins the exact text. Empirically confirmed
+(`EXPLAIN QUERY PLAN`): `SEARCH ballots USING COVERING INDEX idx_ballots_proposal_citizen
+(proposal_id=? AND citizen_id=?)`, driven by a `LIST SUBQUERY` on
+`idx_proposals_status_closes` -- not a scan.
+
+**Note 2 (LOW): a false red-proof claim, not a defect.** `test/inbox-d1.test.ts:714`'s title
+and `src/inbox.ts:234-235`'s comment both said dropping EITHER `+p.kind` cast reddens the
+plan test. Re-gate mutants M33b/M33c (drop one cast, each side) stayed green: one
+non-indexable OR term is already enough to defeat `MULTI-INDEX OR`, so the property holds
+with either `+` present. Both wordings corrected to "drop both" -- no behaviour change, the
+guard itself was always sound.
+
+**Nits, corrected in place (not repeated here):** the M33 row already said "both" (was
+already correct); the M34 row's "3, 5, 7" undercounted which seeds produce truncated pages
+(all four odd seeds do; only three of them happen to redden this specific mutation) -- fixed
+above with the distinction stated explicitly.
+
+**CODEX (exchange, round 1): every `curl.exe` call in the deploy script needed a bounded
+`--max-time`,** or a stalled request could hang the script indefinitely regardless of the
+12-iteration poll count. 10 s on the propagation poll (a stalled iteration must not itself
+burn the 60 s budget), 20 s everywhere else. AST parse-check only, 0 errors; not run in any
+mode.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M35 | re-gate Note 1: the ballots read plans as an indexed SEARCH, not a SCAN of ballots -- `ballotsSql()` reverted to the pre-fix one-placeholder form, its call site's `.bind(...)` mutated to match in the same change (self-consistent, not a bind-count mismatch against the REAL call site -- only the test's own hardcoded two-argument `EXPLAIN QUERY PLAN` call then mismatches the mutated one-placeholder text) | inbox-d1.test.ts | yes -- isolated: only this test fails (a `column index out of range` error, not a clean assertion, but unambiguously not a silent pass); every ballots-parity test (5, F3, C2/MG8) stays green under the same mutation |
+
+**Commit 12 (re-gate notes):** as above. 1 new test (M35), 1 mutation red-proofed. Suite
+1267/1267 (was 1266/1266), typecheck clean.

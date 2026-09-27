@@ -232,7 +232,9 @@ interface PostCandidateRow {
 // KEY (rowid>?), no separate sort (id order already satisfies ORDER BY p.id ASC). Without
 // it, the measured plan reads the WHOLE posts table on every call regardless of cursor
 // position (test/inbox-d1.test.ts's own EXPLAIN QUERY PLAN test pins this; mutation: drop
-// either `+` -> red). Bind order and meaning are unchanged -- this is a plan hint only.
+// BOTH `+` -> red -- dropping only one leaves the other non-indexable OR term enough to
+// defeat MULTI-INDEX OR on its own, re-gate Note 2). Bind order and meaning are unchanged
+// -- this is a plan hint only.
 // Exported (D-018 gate R1/L2's own EXPLAIN QUERY PLAN test): the plan check needs the
 // EXACT text inbox() runs, not a retyped copy that could drift from it.
 export function postsSql(startExpr: string): string {
@@ -260,6 +262,13 @@ interface BallotItem {
   eligible: boolean;
   reason: string | null;
   balloted: boolean;
+}
+
+// Exported (D-018 re-gate Note 1's own EXPLAIN QUERY PLAN test): the plan check needs the
+// EXACT text inbox() runs, not a retyped copy that could drift from it. Binds
+// (citizen.id, now) -- see the call site's own comment for why this shape, not an IN-list.
+export function ballotsSql(): string {
+  return `SELECT proposal_id FROM ballots WHERE citizen_id = ? AND proposal_id IN (SELECT id FROM proposals WHERE status = 'open' AND closes_at > ? AND post_id IS NOT NULL)`;
 }
 
 // ---------- MCP argument conversion (CODEX F1, exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md) ----------
@@ -454,16 +463,25 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
       founding_ratified: number;
     }>();
 
-  // R2 (D-018 gate L3): no IN-list bound one parameter per open proposal -- D1's own limit
-  // is 100 bound parameters per query, and 100 simultaneously open proposals is plausible at
-  // 100x today's citizen count (each proposer may hold at most one open proposal at a time,
-  // governance.ts's own gate), where the old form threw D1_ERROR: too many SQL variables on
-  // every inbox call for every handle. This citizen's own ballots (never more than a few
-  // thousand even at 100x) are read once, unconditionally, and filtered to the open set in
-  // TypeScript -- the SAME per-citizen scoping (WHERE citizen_id = ?, this citizen's row
-  // only), just without the second, proposal-count-shaped bound-parameter list.
+  // R2 (D-018 gate L3), corrected by the re-gate's own Note 1: no IN-list bound one
+  // parameter per open proposal -- D1's own limit is 100 bound parameters per query, and
+  // 100 simultaneously open proposals is plausible at 100x today's citizen count (each
+  // proposer may hold at most one open proposal at a time, governance.ts's own gate),
+  // where the old form threw D1_ERROR: too many SQL variables on every inbox call for
+  // every handle. R2's FIRST fix (`WHERE citizen_id = ?` alone) avoided that limit but has
+  // no usable index: idx_ballots_proposal_citizen (schema.sql) leads with proposal_id, not
+  // citizen_id, so that form plans as a full SCAN of every ballot ever cast, on every call
+  // (measured by the re-gate: 1,400 rows at 100x, cancelling most of R1's own gain). This
+  // subquery form binds only (citizen.id, now) -- still no per-proposal parameter list, so
+  // the 100-parameter limit stays avoided -- and lets SQLite drive from the (typically
+  // small) open-proposals subquery, seeking idx_ballots_proposal_citizen(proposal_id,
+  // citizen_id) per row (measured: 3 rows at every scale; the EXPLAIN QUERY PLAN test below
+  // pins it). The TypeScript filter to openIds is kept regardless: this subquery's own read
+  // of "open" happens moments after `now` was read for the query above, so the filter keeps
+  // this citizen's balloted/ballots_owed answers scoped to the EXACT same open-proposal
+  // snapshot the rest of this function uses, not a second, independently-timed one.
   const openIds = new Set(openProposals.map((p) => p.id));
-  const { results: citizenBallotRows } = await env.DB.prepare(`SELECT proposal_id FROM ballots WHERE citizen_id = ?`).bind(citizen.id).all<{ proposal_id: number }>();
+  const { results: citizenBallotRows } = await env.DB.prepare(ballotsSql()).bind(citizen.id, now).all<{ proposal_id: number }>();
   const balloted = new Set(citizenBallotRows.filter((r) => openIds.has(r.proposal_id)).map((r) => r.proposal_id));
 
   // One founder read for the whole page, not one per proposal -- a citizen's founder
