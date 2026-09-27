@@ -597,6 +597,11 @@ since walking ids in order already satisfies `ORDER BY p.id ASC`. `postsSql` exp
 new plan test pins the EXACT query text, not a retyped copy. `src/index.ts:303-306`'s cost
 comment corrected: the true bound is on rows RETURNED (`INBOX_SECTION_LIMIT + 1`), never
 rows EXAMINED, which can walk the whole remaining table when genuine matches are sparse.
+`+p.kind` is a planner HINT, not a semantic guarantee -- it depends on SQLite's current
+cost heuristics never matching an arithmetic expression against an index the way a bare
+column does. The new plan test is what actually guards the property: a future SQLite
+version (or a future index) that plans this differently fails the test loudly rather than
+silently regressing the cost back to a full table scan.
 
 **R2/L3, `src/inbox.ts`:** the ballots read no longer binds one parameter per open
 proposal (`WHERE citizen_id = ? AND proposal_id IN (...)`, which D1 refuses outright at 100
@@ -626,12 +631,22 @@ and confirmed red, reverted via `git checkout --` against the pre-mutation stage
 | id | guard | test file | red seen |
 |----|-------|-----------|----------|
 | M28 | doc-fidelity: one word changed in `docs/HEARTBEAT-SKILL-TEXT.md` (section 3's "not by a citizen" -> "not by a citizen at all") | inbox-d1.test.ts | yes |
-| M29 | test 10's version pin: one word changed in the SKILL template's description line, `SKILL_VERSION` left at 1.0.1 | inbox-d1.test.ts | yes (test 10; ALSO reddens the doc-fidelity test, expected -- same code path, now genuinely drifted from the doc, a corroborating signal not a separate defect) |
+| M29 | test 10's version pin: one word changed in the SKILL template's description line, `SKILL_VERSION` left at 1.0.1 | inbox-d1.test.ts | yes (test 10; ALSO reddens the doc-fidelity test, RE-RUN after the CRLF fix below to confirm the second red stands on its own, not the CRLF artefact -- same code path, now genuinely drifted from the doc, a corroborating signal not a separate defect) |
 | M30 | R3/L5: a word appended to `AUTH_LABEL.citizen_secret` (`src/discovery.ts`) | inbox-d1.test.ts | yes (test 10 only, isolated, once the CRLF fix above was in place) |
 | M31 | C2/M2: the post-R2 ballots query mutated to `WHERE citizen_id = ? OR 1` (MG8's equivalent on the new query shape) | inbox-d1.test.ts | yes |
 | M32 | C2/L4: an `UPDATE citizens SET last_seen_at` planted right after `inbox()`'s own `now` line (MG1) | inbox-d1.test.ts | yes |
 | M33 | R1/L2: both `+p.kind` casts dropped, reverting to the bare column | inbox-d1.test.ts | yes -- the plan detail itself shows the exact bad shape the gate measured: `MULTI-INDEX OR ... SEARCH p USING INDEX idx_posts_kind (kind=?) ... USE TEMP B-TREE FOR ORDER BY` |
 | M34 | R8: `runTablePage`'s truncated-page cursor advanced to the 101st (look-ahead) row instead of the 100th (last delivered) -- the exact bug A17's own comment forbids. (The brief's suggested mutation, "advance to the last DELIVERED row", was tried FIRST and found NOT to redden this probe: delivered-id can never exceed examined-id, so that mutation only ever under-advances -- safe and wasteful within one multi-page read, never lossy or duplicating, for any write pattern with no writes interleaved mid-page. This look-ahead mutation over-advances instead, which is a genuine, provable loss.) | inbox-cursor-fuzz.test.ts | yes -- 3 of 8 seeds (3, 5, 7, the odd/rare-read seeds that actually produce truncated pages) |
+
+**A coverage limit of R8, found by the attempt above, not a defect in either the probe or
+A20:** the fuzz probe's own oracle recomputes expected results from FINAL database state
+only, so a mutation that merely delays delivery (never loses or duplicates it) cannot redden
+it -- specifically, it cannot see the A20 class (a mention hidden by moderation when the
+cursor passed it, delivered anyway if later restored), because a delayed-but-eventual
+delivery still satisfies "delivered exactly once, matching current state". Test A20 covers
+that class directly and still does; R8 covers a DIFFERENT class (loss/duplication across
+interleaved writes and truncated pages) that no prior test exercised. Both are needed;
+neither substitutes for the other.
 
 **D1's own AST parse-check re-run, not re-proofed:** 0 errors on the real file after items
 18/19. The parser check's own ability to go red was already demonstrated and disclosed in
