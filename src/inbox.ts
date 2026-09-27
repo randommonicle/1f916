@@ -268,7 +268,16 @@ interface BallotItem {
 // EXACT text inbox() runs, not a retyped copy that could drift from it. Binds
 // (citizen.id, now) -- see the call site's own comment for why this shape, not an IN-list.
 export function ballotsSql(): string {
-  return `SELECT proposal_id FROM ballots WHERE citizen_id = ? AND proposal_id IN (SELECT id FROM proposals WHERE status = 'open' AND closes_at > ? AND post_id IS NOT NULL)`;
+  // CODEX round 2 (exchange/REVIEW_heartbeat-gate-conditions-2026-09-27.md): the subquery
+  // narrows by closes_at/post_id only, NEVER status -- those two columns do not change once
+  // a proposal is open, but status does (a sweep can move it to 'tallying' between the
+  // outer openProposals read above and this one). Re-checking status = 'open' here was a
+  // SECOND, independently timed read of the same fact; a proposal that closed in the gap
+  // would vanish from this query while staying in openProposals, so its real ballot
+  // silently dropped out and balloted/ballots_owed read the wrong answer for that citizen.
+  // The TypeScript filter to openIds (the call site's own comment) now does ALL the "open"
+  // narrowing, from the ONE snapshot openProposals already took.
+  return `SELECT proposal_id FROM ballots WHERE citizen_id = ? AND proposal_id IN (SELECT id FROM proposals WHERE closes_at > ? AND post_id IS NOT NULL)`;
 }
 
 // ---------- MCP argument conversion (CODEX F1, exchange/REVIEW_heartbeat-steps-bcd-build-2026-09-27.md) ----------
@@ -474,12 +483,14 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
   // (measured by the re-gate: 1,400 rows at 100x, cancelling most of R1's own gain). This
   // subquery form binds only (citizen.id, now) -- still no per-proposal parameter list, so
   // the 100-parameter limit stays avoided -- and lets SQLite drive from the (typically
-  // small) open-proposals subquery, seeking idx_ballots_proposal_citizen(proposal_id,
-  // citizen_id) per row (measured: 3 rows at every scale; the EXPLAIN QUERY PLAN test below
-  // pins it). The TypeScript filter to openIds is kept regardless: this subquery's own read
-  // of "open" happens moments after `now` was read for the query above, so the filter keeps
-  // this citizen's balloted/ballots_owed answers scoped to the EXACT same open-proposal
-  // snapshot the rest of this function uses, not a second, independently-timed one.
+  // small) subquery, seeking idx_ballots_proposal_citizen(proposal_id, citizen_id) per row
+  // (measured: 3 rows at every scale; the EXPLAIN QUERY PLAN test below pins it). CODEX
+  // round 2: the subquery itself checks only closes_at/post_id, NEVER status -- there is no
+  // second, independently timed read of "open" for a sweep to race against. The TypeScript
+  // filter to openIds is what does ALL of the "open" narrowing now, from the ONE
+  // openProposals snapshot this function already took; a proposal a sweep tallies between
+  // that read and this one still keeps its real ballot row here, and openIds (not this
+  // query) is the sole place that decides whether it is still listed at all.
   const openIds = new Set(openProposals.map((p) => p.id));
   const { results: citizenBallotRows } = await env.DB.prepare(ballotsSql()).bind(citizen.id, now).all<{ proposal_id: number }>();
   const balloted = new Set(citizenBallotRows.filter((r) => openIds.has(r.proposal_id)).map((r) => r.proposal_id));

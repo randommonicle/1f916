@@ -740,6 +740,32 @@ test("re-gate Note 1: the ballots read plans as an indexed SEARCH on idx_ballots
   }
 });
 
+// CODEX round 2 (exchange/REVIEW_heartbeat-gate-conditions-2026-09-27.md): openProposals is
+// read first, then this subquery re-checked status = 'open' in a SEPARATE, later query. A
+// sweep can move a proposal to 'tallying' in the gap between the two reads (closes_at and
+// post_id do not change once a proposal is open; status does), which silently dropped this
+// citizen's real ballot out of the second read while the proposal stayed listed from the
+// first -- balloted read false and ballots_owed rose for that entry. Seeds a proposal
+// already moved to 'tallying' (closes_at/post_id exactly as a real sweep leaves them) and a
+// ballot on it, then reads it back through the exact subquery inbox() runs.
+test("CODEX round 2: the ballots read returns a ballot on a proposal already moved to 'tallying' -- no second, independently timed status check (mutation: put status = 'open' back into the subquery -> red)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const NOW = Date.now();
+    const citizen = insertCitizen(d1, { handle: "az" });
+    const proposalId = insertProposal(d1, { kind: "resolution", status: "tallying", closes_at: NOW + 5 * DAY });
+    d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'yes', ?)").run(proposalId, citizen, NOW - 1000);
+
+    const { results } = await d1.DB.prepare(ballotsSql()).bind(citizen, NOW).all<{ proposal_id: number }>();
+    assert.ok(
+      results.some((r) => r.proposal_id === proposalId),
+      "the ballots read must return this citizen's real ballot even though the proposal's status has since moved on",
+    );
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- 6. topics_opened (D3) ----------
 
 test("6: an in-window topic is listed with author: null and opened_by; an out-of-window topic is not", async () => {

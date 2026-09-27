@@ -711,7 +711,32 @@ mode.
 
 | id | guard | test file | red seen |
 |----|-------|-----------|----------|
-| M35 | re-gate Note 1: the ballots read plans as an indexed SEARCH, not a SCAN of ballots -- `ballotsSql()` reverted to the pre-fix one-placeholder form, its call site's `.bind(...)` mutated to match in the same change (self-consistent, not a bind-count mismatch against the REAL call site -- only the test's own hardcoded two-argument `EXPLAIN QUERY PLAN` call then mismatches the mutated one-placeholder text) | inbox-d1.test.ts | yes -- isolated: only this test fails (a `column index out of range` error, not a clean assertion, but unambiguously not a silent pass); every ballots-parity test (5, F3, C2/MG8) stays green under the same mutation |
+| M35 | re-gate Note 1: the ballots read plans as an indexed SEARCH, not a SCAN of ballots -- `ballotsSql()` reverted to the pre-fix one-placeholder form, its call site's `.bind(...)` mutated to match in the same change (self-consistent, not a bind-count mismatch against the REAL call site -- only the test's own hardcoded two-argument `EXPLAIN QUERY PLAN` call then mismatches the mutated one-placeholder text) | inbox-d1.test.ts | **CORRECTED** -- my own run failed for the WRONG reason: the bind-count mismatch threw `column index out of range` before either assertion ran, so the "red" I recorded was an error, not the assertions actually catching the defect. The hub re-proved it with a right-reason mutation (two binds kept, `WHERE citizen_id = ? AND ? > 0` -- a forced scan that does not change the bind count) and it failed on its own `assert.doesNotMatch(detail, /SCAN ballots/)` line. The test stands; my red-proof of it does not, and is recorded here as struck rather than deleted. |
 
 **Commit 12 (re-gate notes):** as above. 1 new test (M35), 1 mutation red-proofed. Suite
 1267/1267 (was 1266/1266), typecheck clean.
+
+## CODEX round 2: a race in the ballots subquery's own status re-check
+
+`exchange/REVIEW_heartbeat-gate-conditions-2026-09-27.md`, CODEX round 2, confirmed by the
+hub. `openProposals` (the outer query) is read first; `ballotsSql()`'s subquery then
+re-checked `status = 'open'` in a SEPARATE, LATER query. `closes_at` and `post_id` cannot
+change once a proposal is open, but `status` can (a sweep tallies it): a proposal tallied in
+the gap between the two reads vanished from the ballots subquery while staying listed from
+the first read, so that citizen's real, already-cast ballot silently dropped out --
+`balloted` read false and `ballots_owed` rose for that entry, for a citizen who HAD voted.
+
+**Fix:** `ballotsSql()`'s subquery now checks only `closes_at > ? AND post_id IS NOT NULL`
+(same binds, `citizen.id, now`) -- never `status`. The existing TypeScript filter to
+`openIds` (from `openProposals`'s own single snapshot) is now the ONLY place "open" is
+decided; the subquery's job is purely to scope ballot rows to proposals that were ever a
+candidate, cheaply and by an indexed column, with no second, independently timed read of a
+fact that can move. The comments at `ballotsSql()` and its call site both say this now.
+
+| id | guard | test file | red seen |
+|----|-------|-----------|----------|
+| M36 | CODEX round 2: a proposal seeded directly as `status = 'tallying'` (closes_at/post_id exactly as a real sweep leaves them) carrying this citizen's real ballot; the ballots read (called directly, the same way the plan test does) must still return that ballot row | inbox-d1.test.ts | yes -- `status = 'open'` put back into the subquery fails the test's own `assert.ok(...)` cleanly (`AssertionError`, actual `false` vs expected `true`), isolated: only this test fails, the plan test and every ballots-parity/per-citizen test stay green |
+
+**Commit 13 (CODEX round 2, the status race):** as above. 1 new test (M36), 1 mutation
+red-proofed, 1 correction to the M35 ledger row. Suite 1268/1268 (was 1267/1267), typecheck
+clean.
