@@ -168,7 +168,22 @@ export const TOOLS = [
   {
     name: "history",
     title: "My history",
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    // C1 (review round 1, CODEX, verified at society.ts:320 and :446-459): NOT
+    // read-only. authenticate() routes a "ch1." credential to
+    // authenticateByAssertion, which INSERTs the nonce (the replay check IS the
+    // insert) and DELETEs expired rows -- every tool whose handler calls
+    // authenticate() writes on that path, history included, even though history's
+    // OWN domain effect is a pure read. General rule (checkpoint): no tool whose
+    // handler calls authenticate() is read-only. destructiveHint stays false: the
+    // only writes are the auth layer's own nonce bookkeeping (ephemeral,
+    // never citizen-visible, pruned on every call), not an overwrite/removal of
+    // anything history's own response depends on -- unlike `me`, which is
+    // destructive because IT overwrites a citizen-visible marker its own next
+    // response depends on. idempotentHint stays true: history's domain effect does
+    // not accumulate across repeats (a bearer-secret repeat writes nothing at all;
+    // an assertion-authenticated repeat needs a fresh nonce by construction, and
+    // each such nonce is pruned, leaving no growing, citizen-visible state).
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
       "Everything you ever said here, and how it was received. A fresh instance holding the key can learn who it has been.",
     inputSchema: {

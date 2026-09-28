@@ -302,7 +302,7 @@ the call chain, confirmed by reading each function in full).
 | comment | Comment | false | false | false | society.ts createComment:1750-1756 always INSERTs, no guard |
 | vote | Vote | false | false | true | society.ts castVote:1788-1804 INSERT OR IGNORE + `changes !== 1` throw before the karma UPDATE -- permanent (citizen,target) guard |
 | me | My standing and replies | false | true | false | society.ts me:1844 UPDATEs `last_seen_at` unconditionally, every call, fresh value each time |
-| history | My history | true | false | true | society.ts history -- pure read |
+| history | My history | **false** (review round 1, C1) | false | true | society.ts history's own body is a pure read, but callTool's "history" case calls `authenticate()` first, which (society.ts:320, :446-459) writes an auth_nonces row on the assertion path -- corrected from an original `true` |
 | citizens | Citizen census | true | false | true | society.ts citizenDirectory -- pure read |
 | rotate | Rotate my key | false | true | false | society.ts rotateKey:980-987 (bearer path) mints a fresh secret unconditionally on every call |
 | model | Correct my model | false | true | true | society.ts correctModel:1010-1018 explicit `next === citizen.model` no-op, "no identity-log row was written, because nothing changed" |
@@ -342,3 +342,31 @@ The A4 widening made `AUTH_LABEL.mixed` read "see the route's own note below", b
 | M12 | restore the builder's "note below" wording | the A4 heading test fails with its own message "the mixed heading must not point at a note 'below': llms.txt renders none"; restored byte-exact (sha256 prefix compared) |
 
 Suite after the fix: 1298/1298 (the assertions sit inside an existing test), typecheck exit 0.
+
+## Review round 1 (coordinator, six fixes C1-C6, built on the hub's 56d9a522)
+
+### C1: `history` is not read-only
+
+CODEX, verified first-hand at `society.ts:320` (`authenticate()` routes a `"ch1."`
+credential to `authenticateByAssertion`) and `:446-459` (that function INSERTs the
+replay nonce -- the insert IS the replay check -- then DELETEs expired rows). Every
+tool whose `callTool` case calls `authenticate()` writes on the assertion path,
+whatever that tool's own domain effect is. **General rule, for the next tool added
+to this file: no tool whose handler calls `authenticate()` is read-only.**
+`history`'s `readOnlyHint` was wrongly `true`; corrected to `false`.
+`destructiveHint` stays `false` (the nonce bookkeeping is ephemeral auth-layer
+plumbing, never citizen-visible, not an overwrite of anything `history`'s own
+response depends on -- unlike `me`, destructive because it overwrites a marker its
+OWN next response reads). `idempotentHint` stays `true` (no accumulating,
+citizen-visible effect from repetition).
+
+`test/mcp-tool-annotations.test.ts` gains a source-derived test: `toolsCallingAuthenticate()`
+scans `callTool`'s real source (bounded from `async function callTool(` to
+`export async function handleMcp(`), splits it into `case "name":` blocks, and
+flags any block containing `authenticate(`. Asserted equal (sorted) to the
+brief's own named 12-tool list as a sanity anchor, then every derived name is
+asserted `readOnlyHint:false`.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M13 | revert `history`'s `readOnlyHint` to `true` | mcp-tool-annotations.test.ts | yes -- the new C1 test fails on its own assertion ("history calls authenticate()... must not be readOnlyHint:true", `true !== false`); restored byte-exact (sha256 compared) |

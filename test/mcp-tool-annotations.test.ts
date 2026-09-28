@@ -7,6 +7,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
 import { handleMcp, TOOLS } from "../src/mcp.ts";
 import { handleMcpRead } from "../src/mcp-read.ts";
@@ -25,6 +27,40 @@ interface ToolOut {
   name: string;
   title?: string;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
+}
+
+// C1 (review round 1, CODEX): "no tool whose handler calls authenticate() is
+// read-only" is a structural claim about callTool's OWN source, so it is checked
+// against that source directly -- deriving the list, not a hand-typed array that
+// could silently drift the next time a tool's handler gains or loses an
+// authenticate() call. Text-scan, matching this repo's own established
+// convention for structural source checks (discovery.test.ts's grepFor drift
+// guards, secret-literal-guard.test.ts's lexer) rather than a full AST parser.
+function callToolSource(): string {
+  const src = readFileSync(join(import.meta.dirname, "..", "src", "mcp.ts"), "utf8");
+  const start = src.indexOf("async function callTool(");
+  assert.ok(start !== -1, "sanity: callTool not found in src/mcp.ts -- this scan's anchor moved");
+  const end = src.indexOf("export async function handleMcp(", start);
+  assert.ok(end !== -1 && end > start, "sanity: handleMcp not found after callTool -- this scan's other anchor moved");
+  return src.slice(start, end);
+}
+
+// Every `case "name":` block inside callTool, up to the next `case` (or the end
+// of the source, for the last one), scanned for a direct authenticate( call.
+function toolsCallingAuthenticate(): string[] {
+  const body = callToolSource();
+  const caseRe = /case\s+"([a-z_]+)":/g;
+  const cases: Array<{ name: string; index: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = caseRe.exec(body)) !== null) cases.push({ name: m[1]!, index: m.index });
+  assert.ok(cases.length >= 20, `sanity: found only ${cases.length} case blocks -- the scan likely mis-anchored`);
+  const names: string[] = [];
+  for (let i = 0; i < cases.length; i++) {
+    const blockEnd = i + 1 < cases.length ? cases[i + 1]!.index : body.length;
+    const block = body.slice(cases[i]!.index, blockEnd);
+    if (/\bauthenticate\(/.test(block)) names.push(cases[i]!.name);
+  }
+  return names;
 }
 
 async function listTools(handler: typeof handleMcp, env: Env): Promise<ToolOut[]> {
@@ -67,6 +103,24 @@ test("A3: me is NOT read-only (it writes last_seen_at on every call)", () => {
 test("A3: register is read-only on the MCP door specifically (it throws before doing anything)", () => {
   const register = (TOOLS as unknown as ToolOut[]).find((t) => t.name === "register")!;
   assert.equal(register.annotations!.readOnlyHint, true);
+});
+
+// C1 (review round 1, CODEX, verified at society.ts:320 and :446-459): authenticate()
+// routes a "ch1." credential to authenticateByAssertion, which INSERTs the replay
+// nonce and DELETEs expired rows -- so every tool whose handler calls authenticate()
+// writes on that path, history included, whatever that tool's OWN domain effect is.
+test("C1: no tool whose handler calls authenticate() is readOnlyHint:true (derived from callTool's own source, not a hand-typed list)", () => {
+  const derived = toolsCallingAuthenticate();
+  // Sanity anchor: the brief's own named set (post, pin, comment, vote, me, history,
+  // rotate, model, flag, moderate, propose, ballot) -- if the derivation and this
+  // fixed list ever disagree, that is itself worth seeing rather than silently
+  // trusting either one.
+  const expected = ["post", "pin", "comment", "vote", "me", "history", "rotate", "model", "flag", "moderate", "propose", "ballot"];
+  assert.deepEqual([...derived].sort(), [...expected].sort(), "the derived authenticate()-calling set must equal the brief's own named list");
+  const byName = new Map((TOOLS as unknown as ToolOut[]).map((t) => [t.name, t]));
+  for (const name of derived) {
+    assert.equal(byName.get(name)!.annotations!.readOnlyHint, false, `${name} calls authenticate() (writes a nonce on the assertion path), so it must not be readOnlyHint:true`);
+  }
 });
 
 // destructiveHint spot-checks named in the brief's own worked examples plus the two
