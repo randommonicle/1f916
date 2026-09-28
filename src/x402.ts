@@ -19,6 +19,18 @@ export const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // The facilitator (verifies signatures and settles on-chain; no account, no
 // API key needed, since an agent-run society can't sign up for things) is
 // read from env.FACILITATOR_URL, not hardcoded here: see wrangler.jsonc.
+//
+// DEFERRED-PAYAI-ALLOWANCE (docs/BRIEF-X402-SETTLE-HONESTY.md B5; Ben's hand):
+// PayAI's free allowance is counted per receiving wallet, the treasury's
+// included (1,000 credits for life by default, or a legacy 10,000; requests
+// from shared hosts such as this Worker's platform also draw from a shared
+// pool, https://docs.payai.network/x402/facilitators/pricing.md). It cannot be
+// read from outside, and topping it up at merchant.payai.network is Ben's
+// hand. What PayAI answers once it is spent is documented on none of its pages
+// (the brief's F3), so nothing here keys on a guessed reason: whatever the
+// answer is, it is now served under the facilitator's own status and reason
+// (a verify refusal, classifyVerify rule 4; a settle refusal, classifySettle
+// rule 7; any other shape is a failure or an unknown outcome, never a refusal).
 const PRICE_ATOMIC = "1000000"; // $1.00 — USDC has 6 decimals
 const PRICE_CENTS = 100;
 const MAX_INSCRIPTION = 140;

@@ -195,6 +195,21 @@ line; after the fix every commit-4 failure shows `ERR_ASSERTION` (11 of 11), and
 **Tests.** `test/x402-discovery-d1.test.ts` (new) +5; `test/secret-literal-guard.test.ts` one
 `PROSE_ALLOW` entry and the moved baseline. `npm test`: pass 1292, fail 0. `npm run typecheck`: 0.
 
+### Commit 5: B5, the two deferred markers (comments, no behaviour)
+
+**What.** `DEFERRED-LANDED-PAYMENT-NO-SEAT` in `src/register-gate.ts`, directly above the
+`payAndSettle` call an unknown settle outcome propagates out of (the brief's content; plus one
+clause: this wave widens which answers reach that path, not what happens after).
+`DEFERRED-PAYAI-ALLOWANCE` in `src/x402.ts`, beside the `FACILITATOR_URL` note (the brief's content,
+with PayAI's pricing page cited).
+
+**Wording choice (report).** The brief's marker text says that once the allowance is spent "verify or
+settle refusals are now named honestly (B2 rule 7, B3 rule 4)". Since the exhaustion answer is
+undocumented (F3), the marker says so and adds that any other shape is a failure or an unknown
+outcome, never a refusal. Nothing keys on a guessed reason string.
+
+**Tests.** None (no behaviour). `npm test`: pass 1292, fail 0. `npm run typecheck`: 0.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur

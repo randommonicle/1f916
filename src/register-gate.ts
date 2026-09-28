@@ -191,6 +191,16 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // the risk note in docs/PHASE0-PLAN.md section 4 and the honest failure
   // handling below, which is what covers the residual case: a race lost in
   // the gap between this check and settle actually landing).
+  //
+  // DEFERRED-LANDED-PAYMENT-NO-SEAT (docs/BRIEF-X402-SETTLE-HONESTY.md B5; Ben's
+  // decision): an unknown settle outcome (x402.ts settleOrThrow: pending, 409,
+  // 5xx, an unreadable body and the rest) propagates out of this call as a 502,
+  // before the ledger line and before register(). When such a registration's
+  // money later lands, the payer has paid with no seat, and no route completes
+  // the registration from the landed payment. The operator sees
+  // x402_settle_outcome_unknown in the log and a gap between the treasury's
+  // booked and on-chain totals. Pre-existing on the unreadable-body path; this
+  // wave widens only which answers reach it, never what happens after.
   const result = await payAndSettle(env, request, reqs, () => assertHandleAvailable(env, b.handle));
   if (!result.ok) return result.response;
 
