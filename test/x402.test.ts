@@ -328,6 +328,38 @@ test("B2 classifySettle: every row is decided by the rule the brief names, first
   }
 });
 
+// F5 + F6 (build review round 1): every builder-worded unknown message (rules
+// 1, 2, 4, 6 and 8), asserted exactly. Each states the status and quotes the
+// errorReason as given, says why the outcome is unknown, and claims nothing the
+// answer did not say (a 409 with no reason is not called duplicate_settlement;
+// an intermediary's `error` field is not the facilitator's errorReason).
+test("F6 classifySettle: the unknown-rule messages, exactly, for every way an errorReason can be given", () => {
+  const TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked.";
+  const rows: { status: number; body: Record<string, unknown>; rule: number; message: string }[] = [
+    { status: 500, body: { success: false, errorReason: "x" }, rule: 1, message: `The facilitator answered /settle with HTTP 500 (errorReason: x). A 5xx answer is not a settlement verdict. ${TAIL}` },
+    { status: 502, body: {}, rule: 1, message: `The facilitator answered /settle with HTTP 502 (no errorReason). A 5xx answer is not a settlement verdict. ${TAIL}` },
+    { status: 503, body: { error: "upstream timeout" }, rule: 1, message: `The facilitator answered /settle with HTTP 503 (no errorReason). A 5xx answer is not a settlement verdict. ${TAIL}` },
+    { status: 409, body: { success: false, errorReason: "duplicate_settlement" }, rule: 2, message: `The facilitator answered /settle with HTTP 409 (errorReason: duplicate_settlement). A 409 answer is not a settlement verdict. ${TAIL}` },
+    { status: 409, body: { success: true }, rule: 2, message: `The facilitator answered /settle with HTTP 409 (no errorReason). A 409 answer is not a settlement verdict. ${TAIL}` },
+    { status: 409, body: { success: false, errorReason: "another_reason" }, rule: 2, message: `The facilitator answered /settle with HTTP 409 (errorReason: another_reason). A 409 answer is not a settlement verdict. ${TAIL}` },
+    { status: 403, body: { success: true }, rule: 4, message: `The facilitator answered /settle with HTTP 403 and success: true (no errorReason). A success on a status other than 2xx is not a settlement verdict. ${TAIL}` },
+    { status: 200, body: { success: false }, rule: 6, message: `The facilitator answered /settle with HTTP 200 and success: false (no errorReason). A failure without a usable reason cannot be classified. ${TAIL}` },
+    { status: 200, body: { success: false, errorReason: " " }, rule: 6, message: `The facilitator answered /settle with HTTP 200 and success: false (a blank errorReason). A failure without a usable reason cannot be classified. ${TAIL}` },
+    { status: 400, body: { success: false, errorReason: 42 }, rule: 6, message: `The facilitator answered /settle with HTTP 400 and success: false (an errorReason that is not a string: 42). A failure without a usable reason cannot be classified. ${TAIL}` },
+    { status: 403, body: { success: false, errorReason: null }, rule: 6, message: `The facilitator answered /settle with HTTP 403 and success: false (an errorReason that is not a string: null). A failure without a usable reason cannot be classified. ${TAIL}` },
+    { status: 408, body: { success: false, errorReason: "upstream_timeout" }, rule: 8, message: `The facilitator answered /settle with HTTP 408 and success: false (errorReason: upstream_timeout). PayAI does not document that combination as a definitive refusal. ${TAIL}` },
+    { status: 202, body: { success: false, errorReason: "x" }, rule: 8, message: `The facilitator answered /settle with HTTP 202 and success: false (errorReason: x). PayAI does not document that combination as a definitive refusal. ${TAIL}` },
+    { status: 429, body: { success: false, errorReason: "r".repeat(250) }, rule: 8, message: `The facilitator answered /settle with HTTP 429 and success: false (errorReason: ${"r".repeat(200)}). PayAI does not document that combination as a definitive refusal. ${TAIL}` },
+  ];
+  for (const r of rows) {
+    const v = classifySettle(r.status, r.body);
+    const label = `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 80)}`;
+    assert.equal(v.kind, "unknown", `${label}: unknown`);
+    assert.equal(v.rule, r.rule, `${label}: rule ${r.rule}`);
+    if (v.kind === "unknown") assert.equal(v.message, r.message, `${label}: the message, exactly`);
+  }
+});
+
 test("B2 rule 5: the hub's wording, verbatim, with and without a broadcast transaction; only a non-empty string transaction is named", () => {
   const withTx = classifySettle(200, { success: false, errorReason: "settlement_pending", transaction: PENDING_TX });
   assert.equal(withTx.kind, "unknown");

@@ -222,6 +222,16 @@ export const SETTLEMENT_PENDING = "settlement_pending";
 const FACILITATOR_REASON_MAX = 200;
 const clipReason = (v: unknown) => (typeof v === "string" ? v : String(v)).slice(0, FACILITATOR_REASON_MAX);
 const SETTLE_UNKNOWN_TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked.";
+// How an unknown-outcome message quotes the answer's errorReason: exactly as
+// given, never interpreted (build review round 1, F5). A message states the
+// status and this, then why the outcome is unknown, and nothing the answer did
+// not say.
+function givenReason(v: unknown): string {
+  if (v === undefined) return "no errorReason";
+  if (typeof v !== "string") return `an errorReason that is not a string: ${shown(v)}`;
+  if (v.trim().length === 0) return "a blank errorReason";
+  return `errorReason: ${clipReason(v)}`;
+}
 
 export type SettleVerdict =
   | { kind: "settled"; rule: 4; payer: string; tx: string }
@@ -229,13 +239,15 @@ export type SettleVerdict =
   | { kind: "unknown"; rule: 1 | 2 | 3 | 4 | 5 | 6 | 8; message: string; broadcastTx?: string };
 
 export function classifySettle(status: number, body: Record<string, unknown>): SettleVerdict {
-  // 1. A server error, whatever the body says.
+  // 1. A 5xx, whatever the body says.
   if (status >= 500 && status <= 599) {
-    return { kind: "unknown", rule: 1, message: `The facilitator answered /settle with HTTP ${status}, a server error, which is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
+    return { kind: "unknown", rule: 1, message: `The facilitator answered /settle with HTTP ${status} (${givenReason(body.errorReason)}). A 5xx answer is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
   }
-  // 2. 409 duplicate_settlement: "the same operation is already in flight or has a replay marker".
+  // 2. A 409, whatever the body says. PayAI documents 409 duplicate_settlement
+  //    as "the same operation is already in flight or has a replay marker", but
+  //    the message quotes only the reason this answer gave (F5).
   if (status === 409) {
-    return { kind: "unknown", rule: 2, message: `The facilitator answered /settle with HTTP 409 (duplicate_settlement: the same settlement is already in flight or has a replay marker), which is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
+    return { kind: "unknown", rule: 2, message: `The facilitator answered /settle with HTTP 409 (${givenReason(body.errorReason)}). A 409 answer is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
   }
   // 3. No boolean `success` (L-089; wording unchanged).
   if (typeof body.success !== "boolean") {
@@ -246,7 +258,7 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
     if (status >= 200 && status <= 299) {
       return { kind: "settled", rule: 4, payer: typeof body.payer === "string" ? body.payer : "unknown", tx: typeof body.transaction === "string" ? body.transaction : "" };
     }
-    return { kind: "unknown", rule: 4, message: `The facilitator answered /settle with success: true on HTTP ${status}; a success on a non-2xx status contradicts itself, so it is not read as a verdict. ${SETTLE_UNKNOWN_TAIL}` };
+    return { kind: "unknown", rule: 4, message: `The facilitator answered /settle with HTTP ${status} and success: true (${givenReason(body.errorReason)}). A success on a status other than 2xx is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
   }
   const reason = body.errorReason;
   // 5. settlement_pending: "It is not a verdict." On EVM `transaction` carries
@@ -264,7 +276,7 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
   //    not a string, or blank after trimming (build review round 1, F3: " "
   //    establishes no recorded failure, so it must never release a reservation).
   if (typeof reason !== "string" || reason.trim().length === 0) {
-    return { kind: "unknown", rule: 6, message: `The facilitator answered /settle with HTTP ${status} and success: false but no reason (errorReason absent, not a string, or blank), so the answer cannot be classified. ${SETTLE_UNKNOWN_TAIL}` };
+    return { kind: "unknown", rule: 6, message: `The facilitator answered /settle with HTTP ${status} and success: false (${givenReason(reason)}). A failure without a usable reason cannot be classified. ${SETTLE_UNKNOWN_TAIL}` };
   }
   // 7. The only refusals: "a recorded failure" (200) and "invalid input,
   //    missing/invalid credentials, or a policy refusal" (400, 401, 403), each
@@ -279,7 +291,7 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
     return { kind: "refused", rule: 7, status, reason: shownReason, error: `The facilitator reports that this settlement failed (HTTP ${status}, reason: ${shownReason}). By its account no money moved.` };
   }
   // 8. Anything else: every other 4xx, every 2xx other than 200, any 1xx or 3xx.
-  return { kind: "unknown", rule: 8, message: `The facilitator answered /settle with HTTP ${status}, success: false and reason ${clipReason(reason)}: a combination PayAI does not document as a definitive refusal. ${SETTLE_UNKNOWN_TAIL}` };
+  return { kind: "unknown", rule: 8, message: `The facilitator answered /settle with HTTP ${status} and success: false (${givenReason(reason)}). PayAI does not document that combination as a definitive refusal. ${SETTLE_UNKNOWN_TAIL}` };
 }
 
 // ---------- B3: classifying the /verify answer (docs/BRIEF-X402-SETTLE-HONESTY.md) ----------

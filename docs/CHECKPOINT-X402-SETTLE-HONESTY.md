@@ -354,6 +354,39 @@ before a real `errorReason`, blank before `error`, blank before `message`, blank
 `test/x402-settle-route-d1.test.ts`: `" "` at 200 and at 403 keeps the reservation. `npm test`: pass
 1302, fail 0. Typecheck 0.
 
+### Commit R4: F5 and F6, the unknown-rule messages state only what the answer said
+
+**What.** A `givenReason(errorReason)` quotes the answer's reason exactly as given: `errorReason: X`
+(clipped to 200), `no errorReason`, `a blank errorReason`, or `an errorReason that is not a string:
+<value>`. Every builder-worded unknown message now states the status and that quote, then why the
+outcome is unknown, and nothing else:
+- rule 1: "The facilitator answered /settle with HTTP 503 (errorReason: x). A 5xx answer is not a
+  settlement verdict." (was "a server error");
+- rule 2: "... HTTP 409 (errorReason: X)." or "(no errorReason)". It no longer calls every 409
+  `duplicate_settlement` (CODEX; point (a)). PayAI's documented meaning stays in a code comment;
+- rule 4: "... HTTP 403 and success: true (no errorReason). A success on a status other than 2xx is not
+  a settlement verdict." (was "contradicts itself");
+- rule 6: "... HTTP 200 and success: false (a blank errorReason). A failure without a usable reason
+  cannot be classified.";
+- rule 8: "... HTTP 408 and success: false (errorReason: upstream_timeout). PayAI does not document that
+  combination as a definitive refusal."
+Each still ends with the tail "The settle request was sent; whether the money moved is unknown until
+the chain is checked." Rule 3 (L-089) and rule 5 (the hub's) are unchanged. An intermediary's `error`
+field is not quoted as the facilitator's `errorReason` (a 503 `{error: ...}` reads "(no errorReason)").
+
+**Tests.** `test/x402.test.ts` +1 (F6, GEMINI): 14 rows across rules 1, 2, 4, 6 and 8, each message
+asserted exactly, covering all four reason forms, the clip, a 409 with no reason and one with another
+reason, and a 503 carrying only `error`. `npm test`: pass 1303, fail 0. Typecheck 0.
+
+### Review round 1: closing walk
+
+- F1 server (R1 `16c71a46`), F1 scripts and F2 (R2 `87ca8765`), F3 and F4 (R3 `e2ce87ef`), F5 and F6
+  (R4, this commit). Red-proofs M48-M75: every new assertion failed on its own message
+  (`ERR_ASSERTION`) and every file was restored byte-exact; M64 is an evidence run, not a red-proof.
+- `src/doc.ts` still has 0 diff lines against `origin/main` (non-minting).
+- No push, no deploy, no remote `wrangler`, no live-service call; no `*.local.*` or `.env` opened; git
+  run only against this worktree in this round.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -430,3 +463,12 @@ named.
 | M64 | EVIDENCE, not a red-proof | rule 7's non-blank condition alone reverted, rule 6 intact | x402.test + route: 37 / 0 | none, as expected: rule 7's own check is defence in depth | byte-exact |
 | M65 | verifyReason skips an empty string (F4) | its non-blank check removed (the first string again) | x402.test: 24 / 1 | F4 test: `an empty invalidReason does not mask errorReason` | byte-exact |
 | M66 | verifyReason skips a blank string (F4) | `v.trim().length > 0` -> `v.length > 0` | x402.test: 24 / 1 | F4 test: `a blank invalidReason does not mask error` | byte-exact |
+| M67 | rule 2 claims no reason the answer did not give (F5) | rule 2's message -> the pre-review "duplicate_settlement: ... in flight or has a replay marker" | x402.test: 25 / 1 | F6: `HTTP 409 {"success":false,"errorReason":"duplicate_settlement"}: the message, exactly` | byte-exact |
+| M68 | an absent reason is quoted as absent (F5) | `givenReason(undefined)` -> "errorReason: duplicate_settlement" | x402.test: 25 / 1 | F6: `HTTP 502 {}: the message, exactly` | byte-exact |
+| M69 | rule 1 claims nothing more (F5) | "A 5xx answer is not a settlement verdict." -> "The facilitator is down." | x402.test: 25 / 1 | F6: `HTTP 500 {... "x"}: the message, exactly` | byte-exact |
+| M70 | rule 4 claims nothing more (F5) | its reason sentence -> "A success on a non-2xx status contradicts itself." | x402.test: 25 / 1 | F6: `HTTP 403 {"success":true}: the message, exactly` | byte-exact |
+| M71 | rule 6 quotes the reason as given (F5) | the `(${givenReason(reason)})` clause dropped | x402.test: 25 / 1 | F6: `HTTP 200 {"success":false}: the message, exactly` | byte-exact |
+| M72 | rule 8 quotes the reason as given (F5) | the `(${givenReason(reason)})` clause dropped | x402.test: 25 / 1 | F6: `HTTP 408 {... "upstream_timeout"}: the message, exactly` | byte-exact |
+| M73 | a blank reason is quoted as blank (F5) | blank -> "no errorReason" | x402.test: 25 / 1 | F6: `HTTP 200 {... " "}: the message, exactly` | byte-exact |
+| M74 | a non-string reason is quoted as one (F5) | not-a-string -> "no errorReason" | x402.test: 25 / 1 | F6: `HTTP 400 {... 42}: the message, exactly` | byte-exact |
+| M75 | the quoted reason is clipped to 200 (F5) | `clipReason(v)` -> `v` | x402.test: 25 / 1 | F6: `HTTP 429 {... "rrrr..."}: the message, exactly` | byte-exact |
