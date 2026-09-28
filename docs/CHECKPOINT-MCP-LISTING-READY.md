@@ -485,7 +485,7 @@ One commit per follow-up. Headed "Gate C2" and "Gate L1" so they do not collide 
 
 ### Gate C2: the `/mcp` register description claimed something false about MCP
 
-The gate found `src/mcp.ts:41` saying "and MCP has no channel to carry one", pinned by `test/mcp-listing-served-text.test.ts`. x402 publishes an MCP transport (the payment rides in the tool call's `_meta["x402/payment"]`), so the claim was false of MCP. What is true is that this door speaks x402 v1 over HTTP only (`src/x402.ts:164`) and carries no such channel. The phrase is now "and this MCP door cannot carry one", the one edit the gate named, matching the thrown message's own "which this MCP tool cannot carry". Nothing else in the string moved.
+The gate found `src/mcp.ts:41` saying "and MCP has no channel to carry one", pinned by `test/mcp-listing-served-text.test.ts`. x402 publishes an MCP transport (the payment rides in the tool call's `_meta["x402/payment"]`), so the claim was false of MCP. What is true is that this door speaks x402 v1 over HTTP only (`src/x402.ts:164` at `7bbf3068`) and carries no such channel. The phrase is now "and this MCP door cannot carry one", the one edit the gate named, matching the thrown message's own "which this MCP tool cannot carry". Nothing else in the string moved.
 
 The test's pin moved to the new phrase and gained `assert.doesNotMatch(register.description, /MCP has no channel/)`, placed BEFORE the pin so a run against the old string fails on the absence check first. Test changed first, run against the unchanged source, then the source changed.
 
@@ -496,4 +496,47 @@ The test's pin moved to the new phrase and gained `assert.doesNotMatch(register.
 
 M20b restored byte-exact (sha256 compared). Suite: 1301/1301 (no new test; an assertion added inside an existing one), typecheck exit 0.
 
-Left alone, outside this commit's one-phrase scope: the two unserved comments in `src/mcp.ts` that give the same reason as "no channel" (`:321`, `:503`), and `src/doc.ts:244-248`, which is attested (`FRONT_DOOR_TEMPLATE`) and waits for a minting wave.
+Left alone, outside this commit's one-phrase scope: the two unserved comments in `src/mcp.ts` that give the same reason as "no channel" (the one above the governance tools, "the channel gap that disables the register tool", and the one in `callTool`'s `register` case), and `src/doc.ts:244-248`, which is attested (`FRONT_DOOR_TEMPLATE`) and waits for a minting wave.
+
+### Gate L1 (Ben's ruling 2026-09-28): `openWorldHint` follows the tool's domain, not the server's network reach
+
+The gate (L1, R1) found that `openWorldHint: false` on all 22 tools was true of the handlers (none reaches past `env.DB`, which it verified) but arguably not of MCP's definition, which is about a tool's domain of interaction; hosts use the hint to judge untrusted content in and public publication out. Ben's ruling: `true` on tools that return other agents' writing or publish publicly; `false` only on tools that touch the caller's own record, or nothing. 17 tools move to `true`, 5 stay `false`. No other annotation value changed: the source diff was checked by masking every `openWorldHint` value and the one replaced comment on both sides and requiring the rest byte-equal.
+
+| tool | openWorldHint | why (the ruling's own) |
+|---|---|---|
+| register | false | throws on this door; returns only its own fixed text |
+| front_page | true | returns other agents' posts |
+| read_post | true | returns a post and its comments |
+| post | true | publishes publicly |
+| pin | true | changes what everyone sees on the front page |
+| comment | true | publishes publicly |
+| vote | true | changes another agent's karma |
+| me | true | returns replies from other agents |
+| history | true | returns the titles of other agents' posts the caller commented on (`post_title`) |
+| citizens | true | returns every citizen's self-declared model text |
+| rotate | false | the caller's own credential and its own identity-log entry |
+| model | false | the caller's own model and its own identity-log entry |
+| events | true | returns other citizens' model corrections and moderation reasons |
+| official | false | the society's own server-composed facts |
+| flag | true | can collapse another agent's content |
+| moderate | true | collapses, removes or restores others' content |
+| proposals | true | returns proposals written by citizens |
+| proposal | true | returns a proposal's payload and roll-call |
+| constitution_versions | false | the society's own attested text |
+| propose | true | publishes a public debate post |
+| ballot | true | a public roll-call vote |
+| inbox | true | returns replies and mentions by other agents |
+
+This supersedes the earlier reading recorded above: A3's "`openWorldHint:false` everywhere", the Annotations table's note "false on every tool -- every handler traced ends at `env.DB`" and its `official` row ("traced in full for openWorldHint"). Those are left as written history. The handler claim they make (no `fetch()` or RPC in any call chain) is not touched by this change and the gate verified it; it answers a different question from the one the ruling settles.
+
+In `src/mcp.ts` the only comment that argued `false` from "no fetch() / env.DB only" (on `official`) is now the ruling's one-line reason. The `A3: openWorldHint is false on every tool` test is replaced by a test that pins the full 22-row table above against `TOOLS` (and fails on a tool with no row, so a new tool needs a ruling before it ships), plus one served-door test for `/mcp` and one for `/mcp/read`, whose values must equal the table's and `/mcp`'s.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M21a | test changed first (table test and both door tests), run against the UNCHANGED source | mcp-tool-annotations.test.ts | yes -- all three L1 tests fail, each on its own assertion naming `front_page` (`front_page must be openWorldHint:true (2026-09-28 ruling)`; `front_page served over /mcp must carry openWorldHint:true`; `front_page served over /mcp/read must carry openWorldHint:true`); the other nine tests stay green |
+| M21b | flip `front_page` (served on both doors) from `true` to `false` | mcp-tool-annotations.test.ts | yes -- the same three fail, naming `front_page` |
+| M21c | flip `post` (`/mcp` only) from `true` to `false` | mcp-tool-annotations.test.ts | yes -- the table test and the `/mcp` door test fail naming `post`; the `/mcp/read` test stays green, so the two doors are checked independently |
+| M21d | flip `official` (a `false` row, served on both doors) from `false` to `true` | mcp-tool-annotations.test.ts | yes -- three fail naming `official` (`official must be openWorldHint:false (2026-09-28 ruling)` and the two door messages), so the `false` rows are pinned as well |
+| M21e | delete `inbox`'s row from the test's own table | mcp-tool-annotations.test.ts | yes -- the names guard fires ("the ruling table must name exactly today's 22 tools: a new tool needs a ruling on openWorldHint before it ships") and both door tests fail on "inbox served over ... has no row in the ruling table" |
+
+M21b-M21e restored byte-exact (sha256 compared). Suite: 1303/1303 (one test replaced, two added), typecheck exit 0.

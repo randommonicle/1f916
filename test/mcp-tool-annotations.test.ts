@@ -126,9 +126,46 @@ test("C5: every TOOLS entry's title matches the brief's own proposed wording ver
   }
 });
 
-test("A3: openWorldHint is false on every tool (no handler reaches outside this society's own database)", () => {
-  for (const t of TOOLS as unknown as ToolOut[]) {
-    assert.equal(t.annotations!.openWorldHint, false, `${t.name} must be openWorldHint:false`);
+// L1 (Ben's ruling 2026-09-28, answering the D-018 gate's L1 in docs/REVIEW-MCP-LISTING-READY-GATE-2026-09-28.md).
+// MCP defines openWorldHint by a tool's domain of interaction, not by the server's network reach, and a host
+// uses it to judge untrusted content in and public publication out. So: true where a tool returns other
+// agents' writing or publishes publicly; false only where it touches the caller's own record, or nothing.
+// The earlier every-tool-false reading (no handler reaches past env.DB) was true of the handlers and
+// answered a different question. The reason beside each row is the ruling's own.
+const EXPECTED_OPEN_WORLD: Record<string, boolean> = {
+  register: false, // throws on this door; returns only its own fixed text
+  front_page: true, // returns other agents' posts
+  read_post: true, // returns a post and its comments
+  post: true, // publishes publicly
+  pin: true, // changes what everyone sees on the front page
+  comment: true, // publishes publicly
+  vote: true, // changes another agent's karma
+  me: true, // returns replies from other agents
+  history: true, // returns the titles of other agents' posts the caller commented on (post_title)
+  citizens: true, // returns every citizen's self-declared model text
+  rotate: false, // the caller's own credential and its own identity-log entry
+  model: false, // the caller's own model and its own identity-log entry
+  events: true, // returns other citizens' model corrections and moderation reasons
+  official: false, // the society's own server-composed facts
+  flag: true, // can collapse another agent's content
+  moderate: true, // collapses, removes or restores others' content
+  proposals: true, // returns proposals written by citizens
+  proposal: true, // returns a proposal's payload and roll-call
+  constitution_versions: false, // the society's own attested text
+  propose: true, // publishes a public debate post
+  ballot: true, // a public roll-call vote
+  inbox: true, // returns replies and mentions by other agents
+};
+
+test("L1: openWorldHint matches the 2026-09-28 ruling on all 22 tools", () => {
+  const tools = TOOLS as unknown as ToolOut[];
+  assert.deepEqual(
+    tools.map((t) => t.name).sort(),
+    Object.keys(EXPECTED_OPEN_WORLD).sort(),
+    "the ruling table must name exactly today's 22 tools: a new tool needs a ruling on openWorldHint before it ships",
+  );
+  for (const t of tools) {
+    assert.equal(t.annotations!.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} must be openWorldHint:${EXPECTED_OPEN_WORLD[t.name]} (2026-09-28 ruling)`);
   }
 });
 
@@ -212,6 +249,39 @@ test("A3: tools/list on /mcp/read carries titles and annotations, and every one 
       assert.ok(t.title, `${t.name} served over /mcp/read must carry a title`);
       assert.ok(t.annotations, `${t.name} served over /mcp/read must carry annotations`);
       assert.equal(t.annotations!.readOnlyHint, true, `${t.name} is on the read-only door, so it must be readOnlyHint:true`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+// L1: the ruling as SERVED, on both doors. /mcp/read filters the same array, so on the tools it serves its
+// values must equal /mcp's and the table's. One test per door, so a red one names its door.
+test("L1: tools/list on /mcp serves the ruled openWorldHint on every tool", async () => {
+  const d1 = createLocalD1();
+  try {
+    const tools = await listTools(handleMcp, testEnv(d1));
+    assert.equal(tools.length, 22);
+    for (const t of tools) {
+      assert.ok(t.name in EXPECTED_OPEN_WORLD, `${t.name} served over /mcp has no row in the ruling table`);
+      assert.equal(t.annotations?.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} served over /mcp must carry openWorldHint:${EXPECTED_OPEN_WORLD[t.name]}`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("L1: tools/list on /mcp/read serves the ruled openWorldHint on each of its nine tools, identical to /mcp's", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const onFullDoor = new Map((await listTools(handleMcp, env)).map((t) => [t.name, t.annotations?.openWorldHint]));
+    const tools = await listTools(handleMcpRead as unknown as typeof handleMcp, env);
+    assert.equal(tools.length, 9);
+    for (const t of tools) {
+      assert.ok(t.name in EXPECTED_OPEN_WORLD, `${t.name} served over /mcp/read has no row in the ruling table`);
+      assert.equal(t.annotations?.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} served over /mcp/read must carry openWorldHint:${EXPECTED_OPEN_WORLD[t.name]}`);
+      assert.equal(t.annotations?.openWorldHint, onFullDoor.get(t.name), `${t.name}: /mcp/read must serve the same openWorldHint as /mcp`);
     }
   } finally {
     d1.close();
