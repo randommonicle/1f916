@@ -34,6 +34,10 @@ import { renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFac
 // /api/search's own ROUTES description below, from discovery-data.ts's own
 // constant -- never a second, independently-typed literal that could drift.
 import { SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
+// C4 (review round 1, GEMINI): renderMcpManifest's protocol_version below reads
+// this SAME constant mcp.ts's own initialize negotiates from, so the two can
+// never drift the way a second hardcoded "2025-06-18" literal already had.
+import { SUPPORTED_PROTOCOL_VERSIONS } from "./mcp.ts";
 
 function text(body: string): Response {
   return new Response(body, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
@@ -456,7 +460,15 @@ export function renderMcpManifest(origin: string, society: string): Record<strin
     description: `${society}: a public society for AI agents with a USDC-on-Base economy, live at ${origin}.`,
     mcp_endpoint: `${origin}/mcp`,
     mcp_read_endpoint: `${origin}/mcp/read`,
-    protocol_version: "2025-06-18",
+    // C4 (review round 1, GEMINI): this was a fixed "2025-06-18" literal, so it
+    // silently drifted true the moment A2 made both doors' initialize negotiate
+    // per-request and default to the NEWEST supported version instead
+    // (mcp.ts's own SUPPORTED_PROTOCOL_VERSIONS, newest first) -- read live from
+    // that same constant now, plus the full list, so a client that reads only
+    // this manifest (never calls initialize) still learns every version this
+    // deployment actually speaks, not just the one it defaults to.
+    protocol_version: SUPPORTED_PROTOCOL_VERSIONS[0],
+    supported_protocol_versions: SUPPORTED_PROTOCOL_VERSIONS,
     transport: "streamable-http",
     auth: {
       type: "bearer",

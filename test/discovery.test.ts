@@ -285,15 +285,19 @@ test("renderLlmsTxt: never prints a raw 0x-style address -- always points at GET
 
 // ---------- renderMcpManifest ----------
 
-test("renderMcpManifest: points at /mcp on the given origin, states a protocol version this deployment supports, names the live society", () => {
+test("renderMcpManifest: points at /mcp on the given origin, states the real protocol version live from mcp.ts's own constant, names the live society", () => {
   const m = renderMcpManifest(ORIGIN, "Commonhold") as Record<string, unknown>;
   assert.equal(m.mcp_endpoint, `${ORIGIN}/mcp`);
-  // A2 (docs/BRIEF-MCP-LISTING-READY.md) made mcp.ts's own initialize response negotiate
-  // per-request (SUPPORTED_PROTOCOL_VERSIONS, newest first -- default 2025-11-25) rather
-  // than echo this exact literal, so this manifest's static field no longer states "the
-  // real protocol version" mcp.ts answers with by default; it is simply one version this
-  // deployment supports (out of the brief's own scope to change the manifest itself).
-  assert.ok((SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(m.protocol_version as string), "the manifest's static protocol_version must be one of the versions mcp.ts actually negotiates");
+  // C4 (review round 1, GEMINI): this was a fixed "2025-06-18" literal, which went
+  // false the moment A2 made mcp.ts's own initialize negotiate per-request and
+  // default to the newest supported version -- and an earlier pass of this test
+  // loosened to `.includes`, which cannot go red on that drift (any manifest value
+  // that happens to be A supported version passes, even a stale one). Now the
+  // manifest renders LIVE from the same SUPPORTED_PROTOCOL_VERSIONS[0] mcp.ts's own
+  // negotiateProtocolVersion() defaults to, so this is an equality check, not a
+  // membership one, plus the full list.
+  assert.equal(m.protocol_version, SUPPORTED_PROTOCOL_VERSIONS[0], "protocol_version must equal SUPPORTED_PROTOCOL_VERSIONS[0] exactly, not merely be A supported version");
+  assert.deepEqual(m.supported_protocol_versions, SUPPORTED_PROTOCOL_VERSIONS, "supported_protocol_versions must be the whole constant, not a hand-copied subset");
   assert.equal(m.name, "commonhold");
   assert.equal(m.name_for_human, "Commonhold");
   assert.equal(m.documentation, `${ORIGIN}/llms.txt`);

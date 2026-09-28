@@ -416,3 +416,27 @@ the call and check it before the status/body is trusted:
 Parsed with PowerShell's AST parser after the edit: 0 errors. No red-proof --
 this script is never run by anything `npm test` exercises (Ben's hand-run
 artifact only, same as A6's own record).
+
+### C4: `/.well-known/mcp.json`'s `protocol_version` had drifted from A2's own negotiation
+
+GEMINI: `renderMcpManifest` (`src/discovery.ts:459`) served a fixed
+`"2025-06-18"` literal, which A2's own comment in `test/discovery.test.ts:288`
+already flagged as no longer matching `mcp.ts`'s real default -- but the fix
+applied there LOOSENED the assertion to `.includes()` (membership in
+`SUPPORTED_PROTOCOL_VERSIONS`) rather than fixing the actual drift, so the test
+could never go red on it again: any manifest value that happens to be A
+supported version passes, stale or not. Corrected properly: `discovery.ts` now
+imports `SUPPORTED_PROTOCOL_VERSIONS` from `mcp.ts` (a new import direction,
+checked for a cycle -- `mcp.ts` imports nothing from `discovery.ts`, so none
+exists) and serves `protocol_version: SUPPORTED_PROTOCOL_VERSIONS[0]` plus a
+new `supported_protocol_versions: SUPPORTED_PROTOCOL_VERSIONS` field (the whole
+list, for a client that reads only the manifest and never calls `initialize`).
+The test now asserts equality against the live constant, and `deepEqual` on the
+new field, not membership.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M16 | revert `protocol_version` to the stale `"2025-06-18"` literal | discovery.test.ts | yes -- fails on its own assertion ("must equal SUPPORTED_PROTOCOL_VERSIONS[0] exactly, not merely be A supported version", actual `'2025-06-18'`, expected `'2025-11-25'`) |
+| M17 | remove `supported_protocol_versions` entirely | discovery.test.ts | yes -- fails on its own `deepEqual` ("must be the whole constant, not a hand-copied subset", actual `undefined`) |
+
+Both restored byte-exact (sha256 compared). Suite: 1299/1299, typecheck exit 0.
