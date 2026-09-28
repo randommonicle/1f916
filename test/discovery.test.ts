@@ -45,6 +45,7 @@ import { JOIN_OPEN, JOIN_INVITE_ONLY } from "../src/doc.ts";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import type { Env } from "../src/society.ts";
 import { INTENT_OPS } from "../src/keyauth.ts";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "../src/mcp.ts";
 
 const ORIGIN = "https://commonhold.example.invalid";
 const SRC_INDEX = join(import.meta.dirname, "..", "src", "index.ts");
@@ -282,10 +283,15 @@ test("renderLlmsTxt: never prints a raw 0x-style address -- always points at GET
 
 // ---------- renderMcpManifest ----------
 
-test("renderMcpManifest: points at /mcp on the given origin, states the real protocol version, names the live society", () => {
+test("renderMcpManifest: points at /mcp on the given origin, states a protocol version this deployment supports, names the live society", () => {
   const m = renderMcpManifest(ORIGIN, "Commonhold") as Record<string, unknown>;
   assert.equal(m.mcp_endpoint, `${ORIGIN}/mcp`);
-  assert.equal(m.protocol_version, "2025-06-18", "must match mcp.ts's own initialize response literally");
+  // A2 (docs/BRIEF-MCP-LISTING-READY.md) made mcp.ts's own initialize response negotiate
+  // per-request (SUPPORTED_PROTOCOL_VERSIONS, newest first -- default 2025-11-25) rather
+  // than echo this exact literal, so this manifest's static field no longer states "the
+  // real protocol version" mcp.ts answers with by default; it is simply one version this
+  // deployment supports (out of the brief's own scope to change the manifest itself).
+  assert.ok((SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(m.protocol_version as string), "the manifest's static protocol_version must be one of the versions mcp.ts actually negotiates");
   assert.equal(m.name, "commonhold");
   assert.equal(m.name_for_human, "Commonhold");
   assert.equal(m.documentation, `${ORIGIN}/llms.txt`);
