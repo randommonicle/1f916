@@ -173,8 +173,10 @@ None.
   - `payAndSettle` answers 402 whenever X-PAYMENT is absent (`src/x402.ts:158-171`).
   - "An hourly registration limit" covers both of the throttle's limits: 3 per IP (`src/society.ts:514`)
     and 300 society-wide (`:520`).
-  - The `reg_log` row is written only inside `register()`, after settlement (`src/society.ts:783`), so a
-    refused or 402'd request spends no allowance, and "cost nothing" holds.
+  - The registration throttle's `reg_log` row (hash namespace `reg:`) is written only inside
+    `register()`, after settlement (`src/society.ts:783`), so a refused or 402'd request spends no
+    allowance, and "cost nothing" holds. The table's other INSERTs (`:576`, `:619`, `:691`, `:694`,
+    `:736`) belong to other throttles, each under its own namespace, and never count toward this one.
   - `public_key` has no uniqueness constraint (`schema.sql:16`), so no key refusal can land after payment.
   - The only paid failure is the documented handle race (`src/register-gate.ts:161-168`).
   - "$1" is a constant (`src/register-gate.ts:28`).
@@ -233,14 +235,16 @@ None.
 - **The authenticated tools write, as marked.** Bearer authentication is a SELECT (`src/society.ts:322-335`).
   The assertion path inserts a nonce and prunes expired ones (`:446-459`), so the C1 fix to `history`
   is right.
-- **`destructiveHint: false` holds on the six tools that carry it:**
+- **`destructiveHint: false` holds on the six write tools that carry it** (the ten read-only tools also
+  carry it, where MCP treats it as meaningless):
   - `post` inserts; a bulletin adds a log row.
   - `comment` inserts.
   - `vote` inserts plus a karma increment.
   - `propose` inserts and deletes only its own just-inserted row on failure.
   - `ballot` is a gated append.
   - `history` writes nothing but the nonce.
-- **`idempotentHint: true` holds on the five tools that carry it:**
+- **`idempotentHint: true` holds on the five write tools that carry it** (the ten read-only tools also
+  carry it, likewise meaningless there):
   - `vote`: INSERT OR IGNORE (`src/society.ts:1788`), then a 409 (`:1804`) before the karma
     increment (`:1806`).
   - `flag`: UNIQUE, then a 409 (`:1345-1351`).
@@ -342,8 +346,9 @@ None.
 - **Live, by public GET:**
   - `/api/surface`: eight keys, `skill.version` 1.0.1, no auth vocabulary, no `/api/search`.
   - `/llms.txt`: the Showhome paragraph.
-- **x402's MCP transport:** Coinbase's documentation page, which names the x402 Foundation spec and
-  the `_meta["x402/payment"]` key.
+- **x402's MCP transport:** both pages fetched directly. Coinbase's documentation names the x402
+  Foundation spec. The spec itself (`specs/transports-v2/mcp.md`) states that `_meta["x402/payment"]`
+  carries the client's payment payload and `_meta["x402/payment-response"]` carries the settlement.
 - **Wave B's footprint and the merge:** `git diff --stat 04d51c17..x402-settle-honesty-2026-09-28`,
   and the `merge-tree` line in M1.
 - **The deploy script:**
