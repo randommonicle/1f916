@@ -210,6 +210,51 @@ outcome, never a refusal. Nothing keys on a guessed reason string.
 
 **Tests.** None (no behaviour). `npm test`: pass 1292, fail 0. `npm run typecheck`: 0.
 
+### Commit 6: B7, the deploy script (written and parsed, never run)
+
+**What.** `scripts/deploy-x402-settle-honesty.ps1`, modelled on `scripts/deploy-heartbeat-inbox.ps1`:
+`-DryRun`; a clean tree and `main` level with `origin/main`; a check that this checkout carries the
+wave (`classifySettle`, `REGISTER_OUTPUT_SCHEMA`); `npm test` and typecheck re-run; attest v5
+`fa11788d` and all four chains verified before and after; worker-only `npx wrangler deploy`; a
+12 x 5 s propagation poll with a shorter `--max-time`; every GET status read, never discarded. The
+ride: `POST /api/register` with `{"handle":"ride-probe-<UTC yyyyMMddHHmm>","model":"ride-probe"}`
+and no payment answers 402 with NO `outputSchema` before the deploy and with
+`accepts[0].outputSchema.input` = type http, method POST, discoverable true after; `POST /api/patron`
+with no payment answers 402 with no `outputSchema` before and after; a sweep of five untouched
+surfaces. The script prints, in the dry run and the real run, that the settle and verify
+classifications cannot be ridden without a real payment: the tests prove them, and the next real
+payment's log line is their first ride.
+
+**Decisions.** The unpaid POST bodies go through a temp file (`--data-binary @file`), because
+PowerShell 5.1 strips embedded double quotes from native-command arguments. A 429 on the register
+probe is named as the registration throttle (3 per IP per hour, 300 society-wide, counted from real
+registrations only), not a defect; a 403 as an invite-only door. The dry run still makes the live
+reads and the two unpaid POSTs (as the heartbeat script's dry run makes its live reads): a 402 writes
+nothing, and nothing can be paid without an X-PAYMENT header.
+
+**Checked, never run.** `[System.Management.Automation.Language.Parser]::ParseFile` reports 0
+errors; the file is 13,887 bytes, 0 of them non-ASCII (5.1 reads a BOM-less script as ANSI); no
+`"$var:"` drive-reference interpolation; 178 variable tokens, no name spelled two ways (the
+case-collision check's positive control, `cols` / `COLS`, is detected). A first version of that
+collision check used `Select-Object -CaseSensitive`, which PowerShell 5.1 does not have; it errored
+per group and printed 0, a check that could not go red, and was replaced before it was relied on.
+
+## Closing walk
+
+- B1 `facilitator()` keeps the status: commit 1. B2 rules 1-8, the `:196-212` comment, the
+  listings.ts comment and message, the pay-listing.mjs phrase and its test: commit 1. B3: commit 2.
+  B2b (all three scripts, one helper): commit 3. B4: commit 4. B5: commit 5. B7: commit 6.
+- Wiring: every `payAndSettle` caller inherits the classifiers; a pending settle is ridden through all
+  four doors (pay, register, patron, listing create), a verify refusal and failure through register
+  and pay.
+- Byte-identity: the patron, listing-create and listing-pay requirements keep their pre-wave keys and
+  order (unit golden string plus three route 402s).
+- Non-minting: `src/doc.ts` has 0 diff lines against `origin/main`; the existing v5 pin stays green.
+- Red-proofs M1-M44, each failing its own assertion (`ERR_ASSERTION`), each restored byte-exact.
+- Not done here, by the hard rules: no push, no deploy, no remote `wrangler`, no network call to a
+  live service. No `*.local.*` file and no `.env` was opened. The D-018 gate and the deploy are next,
+  and are not this builder's.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
