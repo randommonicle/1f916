@@ -234,6 +234,47 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
   return { kind: "unknown", rule: 8, message: `The facilitator answered /settle with HTTP ${status}, success: false and reason ${clipReason(reason)}: a combination PayAI does not document as a definitive refusal. ${SETTLE_UNKNOWN_TAIL}` };
 }
 
+// ---------- B3: classifying the /verify answer (docs/BRIEF-X402-SETTLE-HONESTY.md) ----------
+//
+// Pure, like classifySettle. When /verify answers, nothing that could settle
+// has been sent, so every refusal and failure here truthfully says no money
+// moved; what the status adds is whose answer it is. Before this wave any
+// answer without `isValid: true` was served as 402 "payment invalid", which
+// misnamed a facilitator that refused service (4xx) or failed (5xx) as a fault
+// in the payer's signature. `/settle` is never called after rules 1, 3, 4 or 5.
+export type VerifyVerdict =
+  | { kind: "valid"; rule: 2 }
+  | { kind: "invalid"; rule: 3; error: string }
+  | { kind: "refused"; rule: 4; error: string }
+  | { kind: "failed"; rule: 5; message: string };
+
+const VERIFY_REASON_KEYS = ["invalidReason", "errorReason", "error", "message"] as const;
+// The first STRING among those keys (an empty one counts: the brief says "the
+// first string"), clipped to 200 characters, else "none given".
+function verifyReason(body: Record<string, unknown>): string {
+  for (const key of VERIFY_REASON_KEYS) {
+    const v = body[key];
+    if (typeof v === "string") return v.slice(0, FACILITATOR_REASON_MAX);
+  }
+  return "none given";
+}
+
+export function classifyVerify(status: number, body: Record<string, unknown>): VerifyVerdict {
+  // Rule 1 (a body that is not a JSON object) is facilitator()'s own 502, "Your money was not taken".
+  if (status >= 200 && status <= 299) { // verify: rules 2 and 3 read a 2xx only
+    if (body.isValid === true) return { kind: "valid", rule: 2 };
+    return { kind: "invalid", rule: 3, error: String(body.invalidReason ?? "payment invalid") }; // unchanged
+  }
+  const reason = verifyReason(body);
+  if (status >= 400 && status <= 499) { // verify: rule 4, the facilitator refused
+    return { kind: "refused", rule: 4, error: `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.` };
+  }
+  // Rule 5: a 5xx. The brief names only 2xx, 4xx and 5xx; any other final
+  // status (1xx, 3xx) takes this same path, filled conservatively: it is no
+  // reason to settle, and nothing that could settle was sent.
+  return { kind: "failed", rule: 5, message: `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent. Try again later.` };
+}
+
 // The /settle leg. Returns a settled or refused verdict with the body it came
 // from; every other outcome (a rejected fetch, an unreadable body, an answer
 // classifySettle calls unknown) is logged ONCE as x402_settle_outcome_unknown
@@ -300,12 +341,18 @@ export async function payAndSettle(
 
   const rpcBody = { x402Version: 1, paymentPayload, paymentRequirements: reqs };
 
-  const verdict = (await facilitator(env, "/verify", rpcBody)).body;
-  if (verdict.isValid !== true) {
+  // B3: the /verify answer, status and body together (classifyVerify). A
+  // failure (5xx) is a 502 that says no money moved; a refusal (4xx) or an
+  // invalid payment (2xx without isValid: true) is a 402; only a 2xx with
+  // isValid: true goes on towards /settle.
+  const checked = await facilitator(env, "/verify", rpcBody);
+  const verdict = classifyVerify(checked.status, checked.body);
+  if (verdict.kind === "failed") throw new SocietyError(502, verdict.message);
+  if (verdict.kind !== "valid") {
     return {
       ok: false,
       response: Response.json(
-        { x402Version: 1, error: String(verdict.invalidReason ?? "payment invalid"), accepts: [reqs] },
+        { x402Version: 1, error: verdict.error, accepts: [reqs] },
         { status: 402 },
       ),
     };

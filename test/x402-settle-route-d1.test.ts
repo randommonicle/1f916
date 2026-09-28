@@ -278,3 +278,64 @@ test("B2 on the patron and listing-create doors: a settlement_pending /settle is
     }
   }
 });
+
+// ---------- B3: the /verify answer, through the routes ----------
+
+const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.`;
+const hubVerifyFailed = (status: number, reason: string) => `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent. Try again later.`;
+
+test("B3 on the register route: a 403 from /verify answers 402 naming 403 and the reason, a 503 answers 502, an invalid 200 keeps its old 402 -- and none of them reaches /settle or writes anything", async () => {
+  const cases: { label: string; verify: Answer; status: number; error: string }[] = [
+    { label: "verify 403", verify: { status: 403, body: { isValid: false, errorReason: "policy_refusal" } }, status: 402, error: hubVerifyRefused(403, "policy_refusal") },
+    { label: "verify 503", verify: { status: 503, body: { error: "unavailable" } }, status: 502, error: hubVerifyFailed(503, "unavailable") },
+    { label: "verify 200 invalid", verify: { status: 200, body: { isValid: false, invalidReason: "x" } }, status: 402, error: "x" },
+  ];
+  for (const c of cases) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ verify: c.verify });
+    try {
+      const before = { citizens: count(d1, "citizens"), ledger: count(d1, "ledger"), reg: count(d1, "reg_log") };
+      const res = await callWorker(registerReq("verify-case"), testEnv(d1));
+      assert.equal(res.status, c.status, `${c.label}: status`);
+      assert.equal(((await res.json()) as { error: string }).error, c.error, `${c.label}: error`);
+      assert.equal(stub.calls.verify, 1, `${c.label}: /verify was asked`);
+      assert.equal(stub.calls.settle, 0, `${c.label}: /settle is never called`);
+      assert.deepEqual({ citizens: count(d1, "citizens"), ledger: count(d1, "ledger"), reg: count(d1, "reg_log") }, before, `${c.label}: nothing is written`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+// The status and error text a route answers with, whether the handler RETURNED
+// a Response or THREW a SocietyError (the router serves both the same way), so a
+// change that swaps one for the other fails this test's own assertion instead of
+// escaping it as an exception.
+async function answerOf(p: Promise<Response>): Promise<{ status: number; error: string }> {
+  try {
+    const res = await p;
+    return { status: res.status, error: String(((await res.json()) as { error?: unknown }).error) };
+  } catch (e) {
+    if (e instanceof SocietyError) return { status: e.status, error: e.message };
+    throw e;
+  }
+}
+
+test("B3 on the pay route: a 403 or a 503 from /verify never reserves the listing and never reaches /settle (402 and 502 respectively)", async () => {
+  for (const c of [
+    { label: "verify 403", verify: { status: 403, body: { isValid: false, errorReason: "policy_refusal" } }, answer: { status: 402, error: hubVerifyRefused(403, "policy_refusal") } },
+    { label: "verify 503", verify: { status: 503, body: { error: "unavailable" } }, answer: { status: 502, error: hubVerifyFailed(503, "unavailable") } },
+  ]) {
+    const f = await payFixture();
+    const stub = stubFacilitator({ verify: c.verify });
+    try {
+      assert.deepEqual(await answerOf(handlePayListing(payReq(f), f.env, f.funder, f.listingId)), c.answer, `${c.label}: the route's answer`);
+      assert.equal(stub.calls.settle, 0, `${c.label}: /settle is never called`);
+      assert.deepEqual(listingRow(f), { status: "open", paying_since: null, paying_wallet_row_id: null, paying_wallet_row_hash: null }, `${c.label}: never reserved`);
+    } finally {
+      stub.restore();
+      f.d1.close();
+    }
+  }
+});

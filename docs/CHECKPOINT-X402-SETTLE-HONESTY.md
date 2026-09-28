@@ -92,6 +92,35 @@ rule 4's payer/tx, the log line through `payAndSettle`); `test/x402-settle-route
 `test/pay-listing.test.ts` one assertion added to the `leg2_unconfirmed` test. `npm test`: pass 1279,
 fail 0. `npm run typecheck`: exit 0.
 
+### Commit 2: B3, the /verify classification
+
+**What.** `classifyVerify(status, body)`, pure and exported: a 2xx with `isValid: true` proceeds (rule
+2); a 2xx without it keeps the old 402 with `String(invalidReason ?? "payment invalid")` (rule 3,
+byte-identical expression); a 4xx is a 402 whose `error` is the hub's "refused to verify" wording
+(rule 4); a 5xx is a `SocietyError(502)` with the hub's "failed to verify ... Try again later"
+wording (rule 5). `reason` is the first string among `invalidReason`, `errorReason`, `error`,
+`message`, clipped to 200, else "none given". Rule 1 (a body that is not a JSON object) stays
+`facilitator()`'s own 502. `/settle` is never called after rules 1, 3, 4 or 5.
+
+**Gap filled conservatively (report).** B3 names only 2xx, 4xx and 5xx. A 1xx or 3xx final status
+on /verify takes rule 5's path (502, `/settle` never called): it is no reason to settle, and nothing
+that could settle was sent. Pinned by the unit row `302 {"isValid":true}` -> failed.
+
+**Reading recorded.** "The first string" is taken literally: an empty string counts, so
+`{ invalidReason: "", errorReason: "x" }` names `reason: ` (empty). Wording only; nothing moves on it.
+
+**Test design fix during red-proofing.** The first B3 pay-route test called `handlePayListing` and
+read a Response, so M19 (4xx becomes a 502 throw) failed it with `ERR_TEST_FAILURE` (an escaped
+`SocietyError`), not its own assertion. It now reads the route's answer through `answerOf`, which
+takes the status and error from a returned Response OR a thrown `SocietyError` (the router serves
+both alike); every commit-2 mutation then fails it on `ERR_ASSERTION`. All 58 failures across the
+commit-1 and commit-2 red-proof logs are `AssertionError`; none is `ERR_TEST_FAILURE` or a TypeError.
+
+**Tests.** `test/x402.test.ts` +2 (the rule table incl. a 5xx and a 4xx that say `isValid: true`; the
+reason chain and clip); `test/x402-settle-route-d1.test.ts` +2 (register: 403 -> 402, 503 -> 502,
+invalid 200 -> unchanged 402, none reaching /settle or writing; pay: 403 and 503 never reserve and
+never settle). `npm test`: pass 1283, fail 0. `npm run typecheck`: exit 0.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -119,3 +148,13 @@ named.
 | M15 | rule 5's wording | "do not sign again." -> "retry later." | x402.test + route: 24 / 3 | register pending (strictEqual on the error); rule 5 wording test; log test | byte-exact |
 | M16 | rule 7's 200-character clip | `FACILITATOR_REASON_MAX = 200` -> `250` | x402.test: 20 / 1 | rule 7 test: reason `r`x250 !== `r`x200 | byte-exact |
 | M17 | rule 4's payer/tx unchanged | `payer: typeof body.payer === "string" ? ...` -> `payer: "unknown"` | x402.test: 20 / 1 | rule 4 test: deepEqual, payer `'unknown'` vs `'0xpayer'` | byte-exact |
+| M18 | verify: rules 2-3 read a 2xx only | the verify 2xx test -> `if (true)` (the pre-wave behaviour) | route + x402.test: 27 / 4 | register: `verify 403: error`, "payment invalid" vs the hub's refusal; pay route answer; both unit tests | byte-exact |
+| M19 | verify rule 4 | the verify 4xx test -> `if (false)` | route + x402.test: 27 / 4 | register: `verify 403: status`, 502 !== 402; pay route answer (after the `answerOf` fix, ERR_ASSERTION); unit table | byte-exact |
+| M20 | verify rule 5 is a 502 | rule 5's return -> a refusal | route: 6 / 2 | register: `verify 503: status`, 402 !== 502; pay route answer | byte-exact |
+| M21 | no /settle after a verify refusal | `if (verdict.kind !== "valid")` -> `if (verdict.kind === "invalid")` | route: 6 / 2 | register: `verify 403: status`, 201 !== 402 (it settled and registered); pay route answer | byte-exact |
+| M22 | a verify failure is thrown | the `failed` throw line removed | route: 6 / 2 | register: `verify 503: status`, 402 !== 502; pay route answer | byte-exact |
+| M23 | the reason chain's order | `invalidReason` and `errorReason` swapped | x402.test: 22 / 1 | reason test: strictEqual, "second" vs "first" | byte-exact |
+| M24 | "none given" | `return "none given"` -> `return ""` | x402.test: 21 / 2 | rule table: `HTTP 422 {"isValid":true}: error`; reason test | byte-exact |
+| M25 | verify's 200-character clip | the reason's `.slice(0, FACILITATOR_REASON_MAX)` removed | x402.test: 22 / 1 | reason test: strictEqual, `e`x250 vs `e`x200 | byte-exact |
+| M26 | verify rule 4's wording | "refused to verify this payment" -> "declined to ..." | x402.test + route: 27 / 4 | register: `verify 403: error`; pay route answer; both unit tests | byte-exact |
+| M27 | verify rule 5's wording | "failed to verify this payment" -> "could not verify ..." | x402.test + route: 28 / 3 | register: `verify 503: error`; pay route answer; rule table | byte-exact |

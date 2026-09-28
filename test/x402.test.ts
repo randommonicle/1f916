@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPaymentRequirements, payAndSettle, assertPayloadMatchesRequirements, classifySettle, USDC_BASE } from "../src/x402.ts";
+import { buildPaymentRequirements, payAndSettle, assertPayloadMatchesRequirements, classifySettle, classifyVerify, USDC_BASE } from "../src/x402.ts";
 import { SocietyError, errorBody } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 
@@ -393,4 +393,50 @@ test("B2 through payAndSettle: a pending /settle is thrown as a 502 carrying the
   assert.ok(noTx.thrown instanceof SocietyError && noTx.thrown.status === 502);
   assert.equal(noTx.events.length, 1);
   assert.equal("broadcast_tx" in noTx.events[0]!, false, "no broadcast transaction is claimed when none was reported");
+});
+
+// ---------- B3 (docs/BRIEF-X402-SETTLE-HONESTY.md): classifyVerify ----------
+
+const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.`;
+const hubVerifyFailed = (status: number, reason: string) => `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent. Try again later.`;
+
+test("B3 classifyVerify: only a 2xx with isValid:true proceeds; a 2xx without it is the unchanged 402; a 4xx is a refusal and a 5xx a failure, whatever isValid says", () => {
+  const rows: { status: number; body: Record<string, unknown>; kind: string; rule: number; text?: string }[] = [
+    { status: 200, body: { isValid: true }, kind: "valid", rule: 2 },
+    { status: 299, body: { isValid: true }, kind: "valid", rule: 2 },
+    { status: 200, body: { isValid: false, invalidReason: "x" }, kind: "invalid", rule: 3, text: "x" },
+    { status: 200, body: { isValid: false }, kind: "invalid", rule: 3, text: "payment invalid" },
+    { status: 200, body: { isValid: "true" }, kind: "invalid", rule: 3, text: "payment invalid" },
+    { status: 200, body: { isValid: false, invalidReason: 5 }, kind: "invalid", rule: 3, text: "5" },
+    { status: 403, body: { isValid: false, invalidReason: "x" }, kind: "refused", rule: 4, text: hubVerifyRefused(403, "x") },
+    { status: 422, body: { isValid: true }, kind: "refused", rule: 4, text: hubVerifyRefused(422, "none given") },
+    { status: 400, body: {}, kind: "refused", rule: 4, text: hubVerifyRefused(400, "none given") },
+    { status: 499, body: { error: "e" }, kind: "refused", rule: 4, text: hubVerifyRefused(499, "e") },
+    { status: 500, body: { isValid: true }, kind: "failed", rule: 5, text: hubVerifyFailed(500, "none given") },
+    { status: 503, body: { errorReason: "down" }, kind: "failed", rule: 5, text: hubVerifyFailed(503, "down") },
+    { status: 599, body: { message: "m" }, kind: "failed", rule: 5, text: hubVerifyFailed(599, "m") },
+    { status: 302, body: { isValid: true }, kind: "failed", rule: 5, text: hubVerifyFailed(302, "none given") },
+  ];
+  for (const r of rows) {
+    const v = classifyVerify(r.status, r.body);
+    const label = `HTTP ${r.status} ${JSON.stringify(r.body)}`;
+    assert.equal(v.kind, r.kind, `${label}: kind`);
+    assert.equal(v.rule, r.rule, `${label}: rule`);
+    if (v.kind === "invalid" || v.kind === "refused") assert.equal(v.error, r.text, `${label}: error`);
+    if (v.kind === "failed") assert.equal(v.message, r.text, `${label}: message`);
+  }
+});
+
+test("B3 classifyVerify: the reason is the first STRING among invalidReason, errorReason, error, message, clipped to 200 characters, else 'none given'", () => {
+  const reasonOf = (body: Record<string, unknown>) => {
+    const v = classifyVerify(403, body);
+    assert.equal(v.kind, "refused");
+    return v.kind === "refused" ? v.error : "";
+  };
+  assert.equal(reasonOf({ invalidReason: "first", errorReason: "second", error: "third", message: "fourth" }), hubVerifyRefused(403, "first"));
+  assert.equal(reasonOf({ invalidReason: 7, errorReason: "second", error: "third" }), hubVerifyRefused(403, "second"), "a non-string is skipped");
+  assert.equal(reasonOf({ error: "third", message: "fourth" }), hubVerifyRefused(403, "third"));
+  assert.equal(reasonOf({ message: "fourth" }), hubVerifyRefused(403, "fourth"));
+  assert.equal(reasonOf({ invalidReason: null, errorReason: { nested: 1 } }), hubVerifyRefused(403, "none given"));
+  assert.equal(reasonOf({ errorReason: "e".repeat(250) }), hubVerifyRefused(403, "e".repeat(200)));
 });
