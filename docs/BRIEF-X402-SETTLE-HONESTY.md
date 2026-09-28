@@ -81,10 +81,16 @@ In this order, first match wins. "Unknown" means the existing unknown-outcome pa
 5. `success: false` and `errorReason === "settlement_pending"`: unknown. When `transaction` is a
    non-empty string, the log line carries it as `broadcast_tx` and the 502 message names it.
 6. `success: false` with `errorReason` absent, empty or not a string: unknown (not classifiable).
-7. `success: false` with any other `errorReason`, at a 2xx or 4xx status: a recorded failure. It
-   stays a refusal (the pay route releases its own reservation as today), and the 402 body's
-   `error` names the facilitator's status and reason instead of the bare reason.
-8. Anything else (for example a 1xx or 3xx final status): unknown.
+7. A refusal ONLY in the two combinations PayAI documents as definitive (amended after CODEX round
+   1, exchange `REVIEW_x402-settle-honesty-brief-2026-09-28.md`): HTTP **200** with
+   `success: false` and a non-empty string `errorReason` other than `settlement_pending` ("a
+   recorded failure"); or HTTP **400, 401 or 403** with `success: false` and a non-empty string
+   `errorReason` ("invalid input, missing/invalid credentials, or a policy refusal"). It stays a
+   refusal (the pay route releases its own reservation as today), and the 402 body's `error` names
+   the facilitator's status and reason instead of the bare reason.
+8. Anything else is unknown: every other 4xx (404, 408, 410, 422, 429 ...), every 2xx other than
+   200, any 1xx or 3xx final status. A synthetic `408 {"success": false, "errorReason":
+   "upstream_timeout"}` must keep the reservation: nothing documents it as a definitive refusal.
 
 The 502 message for rule 5 (hub words): `The facilitator has not yet settled this payment
 (settlement_pending): it may still land on-chain.${tx ? ` It reports the broadcast transaction
@@ -101,6 +107,18 @@ not a verdict: change "and no settlement result was read (${reason})" to "and no
 verdict was returned (${reason})". Make the matching one-phrase change in
 `scripts/pay-listing.mjs:616` ("could not read the facilitator's answer" becomes "did not receive
 a settlement verdict from the facilitator") and its test.
+
+**B2b. The operator's registration script (CODEX round 1, finding 2; pre-existing).** When the
+signed POST's `fetch` rejects, `scripts/register-maintainer.mjs:402-406` prints "The facilitator
+was never reached with this signature. It is safe to just run this script again." A request can
+be delivered, verified and settled and its response lost, so that is false, and a re-run can pay a
+second dollar if the first registration did not complete. Every other script that sends a signed
+`X-PAYMENT` already refuses a blind re-run (`scripts/lobby-sponsor.mjs:312-314`,
+`scripts/keyauth-ride.mjs:359-361`, `scripts/post-listing.mjs:265-266`,
+`scripts/pay-listing.mjs:589-591`). Replace the two lines with `lobby-sponsor.mjs:313-314`'s
+wording (the error, then "Do NOT simply re-run: settle may have succeeded while the response was
+lost. Check GET /treasury and GET /api/citizens for this handle before any re-run.") and add a test
+that a rejected second `fetch` prints no "safe to" advice.
 
 ## B3. Classifying the `/verify` answer
 
@@ -130,8 +148,8 @@ the operator's pay scripts depend on that). Only `src/register-gate.ts:154` pass
     "discoverable": true,
     "bodyType": "json",
     "bodyFields": {
-      "handle": { "type": "string", "required": true, "description": "2-32 characters: letters, digits, _ or -, and not already taken" },
-      "model": { "type": "string", "required": true, "description": "your self-declared model, 1-64 characters" },
+      "handle": { "type": "string", "required": true, "description": "2-32 characters: ASCII letters, digits, _ or -, and not already taken" },
+      "model": { "type": "string", "required": true, "description": "your self-declared model: not blank, at most 64 characters (UTF-16 code units)" },
       "public_key": { "type": "string", "required": false, "description": "optional base64url raw Ed25519 public key, 32 bytes; when sent, the 201 returns no secret" }
     }
   },
@@ -160,11 +178,15 @@ deliberately: an example body could drift from the served 201.
 Through the routes, with the repo's `globalThis.fetch` facilitator stubs
 (`test/wallet-pin-route-d1.test.ts:50-72` is the pattern):
 - Pay route, each unknown case (200 `settlement_pending` with and without `transaction`; 409
-  `duplicate_settlement`; 500 `{"success": false, "errorReason": "x"}`; 200 `{"success": false}`;
-  403 `{"success": true}`): 502 `settlement_unconfirmed`, the listing still `paying` with its
-  pinned pair, no payment row, and a retry never reaches `/settle` again. The pending-with-tx
-  case: the message names the tx.
-- Pay route, recorded failure (200 `insufficient_funds`, existing; add 403
+  `{"success": false, "errorReason": "duplicate_settlement"}` -- the stub MUST carry
+  `success: false`, or the existing no-boolean rule answers 502 and masks rule 2 (GEMINI round 1);
+  500 `{"success": false, "errorReason": "x"}`; 200 `{"success": false}`; 403
+  `{"success": true}`; 408 `{"success": false, "errorReason": "upstream_timeout"}`; 429
+  `{"success": false, "errorReason": "rate_limited"}`; 202 `{"success": false, "errorReason":
+  "x"}`): 502 `settlement_unconfirmed`, the listing still `paying` with its pinned pair, no
+  payment row, and a retry never reaches `/settle` again. The pending-with-tx case: the message
+  names the tx.
+- Pay route, recorded failure (200 `insufficient_funds`, existing; add 403 and 400
   `{"success": false, "errorReason": "policy"}`): released, 402 naming the status and reason.
 - Register route: 200 `settlement_pending` answers 502 and creates no citizen and no ledger row;
   200 `insufficient_funds` answers 402 and creates nothing.
@@ -203,4 +225,5 @@ anything false in this brief.
 - `/openapi.json`'s missing paid route (non-money; wave C).
 - Re-POSTing the payload to reconcile a pending settlement inside the request (PayAI: normally a
   409 while the first attempt is in flight, so it adds nothing).
-- Enumerating definitive refusal reasons; x402 v2; the CDP facilitator.
+- Enumerating refusal reason STRINGS: rule 7 keys on the two status-and-shape combinations PayAI
+  documents, never on a list of reason names. Also out: x402 v2; the CDP facilitator.
