@@ -781,6 +781,11 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // machine-readable code the pay script recognises. Recovery is the
     // operator's act with the chain as arbiter: EIP-3009 authorizationState
     // for the signed nonce, after validBefore, at a two-RPC quorum.
+    // Since the settle-honesty wave (docs/BRIEF-X402-SETTLE-HONESTY.md B2)
+    // payAndSettle also throws for an answer it read and found not to be a
+    // verdict (settlement_pending, a 409, a 5xx, and the rest of
+    // classifySettle's unknown rules), so this same path keeps the
+    // reservation for those.
     if (!reservedByMe) throw e;
     const reason = e instanceof Error ? e.message : String(e);
     console.log(JSON.stringify({ level: "error", event: "listing_pay_settle_unconfirmed", listing_id: listingId, submission_id: submissionId, paying_since: reservedAt, wallet_row_id: pin.walletRowId, wallet_row_hash: pin.walletRowHash, reason }));
@@ -792,7 +797,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
         paying_since: reservedAt,
         wallet_row_id: pin.walletRowId,
         wallet_row_hash: pin.walletRowHash,
-        message: `The settle request was sent and no settlement result was read (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that, against the wallet row recorded here (${pin.walletRowId}), never whichever row is newest at reconciliation time. GET /api/listing/${listingId} serves the state.`,
+        message: `The settle request was sent and no settlement verdict was returned (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that, against the wallet row recorded here (${pin.walletRowId}), never whichever row is newest at reconciliation time. GET /api/listing/${listingId} serves the state.`,
       },
       { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
     );
@@ -803,8 +808,9 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // before afterVerify), reservedByMe is false and we must NOT touch the
     // row: another request may legitimately hold 'paying' and be mid-settle
     // right now. If we did reserve and settle then failed, release our OWN
-    // lock so the funder can retry. A refused settle is an ANSWER (the
-    // facilitator said no), unlike the unread one caught above.
+    // lock so the funder can retry. A recorded failure is an answer; a
+    // pending or unreadable one is not (x402.ts): only classifySettle's rule
+    // 7 reaches here, every other outcome was thrown and caught above.
     if (reservedByMe) {
       await env.DB.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying'").bind(listingId).run();
     }

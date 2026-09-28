@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPaymentRequirements, payAndSettle, assertPayloadMatchesRequirements, USDC_BASE } from "../src/x402.ts";
+import { buildPaymentRequirements, payAndSettle, assertPayloadMatchesRequirements, classifySettle, USDC_BASE } from "../src/x402.ts";
 import { SocietyError, errorBody } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
 
@@ -252,4 +252,145 @@ test("errorBody: an error with no code serialises exactly as before codes existe
   assert.deepEqual(errorBody(new SocietyError(409, "listing 3 is paid, not open")), { error: "listing 3 is paid, not open" });
   assert.deepEqual(Object.keys(errorBody(new SocietyError(409, "x"))), ["error"]);
   assert.deepEqual(errorBody(new SocietyError(400, "bad payload", "payment_payload_mismatch")), { error: "bad payload", code: "payment_payload_mismatch" });
+});
+
+// ---------- B2 (docs/BRIEF-X402-SETTLE-HONESTY.md): classifySettle, rules 1-8 ----------
+// Each row names the rule that must match. Rules 1, 2, 3 and 6 are observable
+// ONLY through `rule` and the wording: remove any one and rule 8 still calls
+// its answers unknown (rule 7 names four statuses and requires every condition
+// PayAI documents). The route tests (x402-settle-route-d1.test.ts) prove the
+// outcomes; this table proves which rule decided each one.
+
+const PENDING_TX = "0x" + "cd".repeat(32);
+const HUB_PENDING_WITH_TX = `The facilitator has not yet settled this payment (settlement_pending): it may still land on-chain. It reports the broadcast transaction ${PENDING_TX}. Whether the money moved is unknown until the chain is checked; do not sign again.`;
+const HUB_PENDING_NO_TX = "The facilitator has not yet settled this payment (settlement_pending): it may still land on-chain. Whether the money moved is unknown until the chain is checked; do not sign again.";
+const hubRefusal = (status: number, reason: string) => `The facilitator reports that this settlement failed (HTTP ${status}, reason: ${reason}). By its account no money moved.`;
+
+type SettleRow = { status: number; body: Record<string, unknown>; kind: "settled" | "refused" | "unknown"; rule: number };
+const SETTLE_ROWS: SettleRow[] = [
+  // rule 1: any 5xx, whatever the body says (500-599 inclusive)
+  { status: 500, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 1 },
+  { status: 502, body: {}, kind: "unknown", rule: 1 },
+  { status: 599, body: { success: true, transaction: "0xab" }, kind: "unknown", rule: 1 },
+  // rule 2: 409, whatever the body says
+  { status: 409, body: { success: false, errorReason: "duplicate_settlement" }, kind: "unknown", rule: 2 },
+  { status: 409, body: { success: true, transaction: "0xab" }, kind: "unknown", rule: 2 },
+  // rule 3: no boolean success (the second row would be a refusal without it)
+  { status: 200, body: {}, kind: "unknown", rule: 3 },
+  { status: 200, body: { success: "false", errorReason: "insufficient_funds" }, kind: "unknown", rule: 3 },
+  { status: 403, body: { success: null, errorReason: "policy" }, kind: "unknown", rule: 3 },
+  // rule 4: success:true settles on a 2xx only
+  { status: 200, body: { success: true, payer: "0xpayer", transaction: "0xtx" }, kind: "settled", rule: 4 },
+  { status: 201, body: { success: true }, kind: "settled", rule: 4 },
+  { status: 299, body: { success: true }, kind: "settled", rule: 4 },
+  { status: 300, body: { success: true }, kind: "unknown", rule: 4 },
+  { status: 403, body: { success: true }, kind: "unknown", rule: 4 },
+  // rule 5: settlement_pending on ANY status is unknown (the 400/403 rows would be refusals without it)
+  { status: 200, body: { success: false, errorReason: "settlement_pending", transaction: PENDING_TX }, kind: "unknown", rule: 5 },
+  { status: 200, body: { success: false, errorReason: "settlement_pending" }, kind: "unknown", rule: 5 },
+  { status: 400, body: { success: false, errorReason: "settlement_pending" }, kind: "unknown", rule: 5 },
+  { status: 403, body: { success: false, errorReason: "settlement_pending" }, kind: "unknown", rule: 5 },
+  // rule 6: success:false with errorReason absent, empty or not a string
+  { status: 200, body: { success: false }, kind: "unknown", rule: 6 },
+  { status: 200, body: { success: false, errorReason: "" }, kind: "unknown", rule: 6 },
+  { status: 400, body: { success: false, errorReason: 42 }, kind: "unknown", rule: 6 },
+  { status: 403, body: { success: false, errorReason: null }, kind: "unknown", rule: 6 },
+  // rule 7: the two documented refusals, and only those
+  { status: 200, body: { success: false, errorReason: "insufficient_funds" }, kind: "refused", rule: 7 },
+  { status: 400, body: { success: false, errorReason: "policy" }, kind: "refused", rule: 7 },
+  { status: 401, body: { success: false, errorReason: "policy" }, kind: "refused", rule: 7 },
+  { status: 403, body: { success: false, errorReason: "policy" }, kind: "refused", rule: 7 },
+  // rule 8: every other 4xx, every 2xx other than 200, any 1xx or 3xx, and the edges either side of 5xx
+  { status: 408, body: { success: false, errorReason: "upstream_timeout" }, kind: "unknown", rule: 8 },
+  { status: 429, body: { success: false, errorReason: "rate_limited" }, kind: "unknown", rule: 8 },
+  { status: 402, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 404, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 422, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 202, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 204, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 302, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 101, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 499, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+  { status: 600, body: { success: false, errorReason: "x" }, kind: "unknown", rule: 8 },
+];
+
+test("B2 classifySettle: every row is decided by the rule the brief names, first match wins", () => {
+  for (const row of SETTLE_ROWS) {
+    const v = classifySettle(row.status, row.body);
+    const label = `HTTP ${row.status} ${JSON.stringify(row.body)}`;
+    assert.equal(v.kind, row.kind, `${label}: kind`);
+    assert.equal(v.rule, row.rule, `${label}: decided by rule ${row.rule}`);
+    if (v.kind === "unknown") assert.match(v.message, /unknown until the chain is checked/, `${label}: an unknown outcome says so`);
+  }
+});
+
+test("B2 rule 5: the hub's wording, verbatim, with and without a broadcast transaction; only a non-empty string transaction is named", () => {
+  const withTx = classifySettle(200, { success: false, errorReason: "settlement_pending", transaction: PENDING_TX });
+  assert.equal(withTx.kind, "unknown");
+  if (withTx.kind !== "unknown") return;
+  assert.equal(withTx.message, HUB_PENDING_WITH_TX);
+  assert.equal(withTx.broadcastTx, PENDING_TX);
+  for (const body of [{ success: false, errorReason: "settlement_pending" }, { success: false, errorReason: "settlement_pending", transaction: "" }, { success: false, errorReason: "settlement_pending", transaction: 12 }]) {
+    const v = classifySettle(200, body);
+    assert.equal(v.kind, "unknown");
+    if (v.kind !== "unknown") return;
+    assert.equal(v.message, HUB_PENDING_NO_TX, JSON.stringify(body));
+    assert.equal("broadcastTx" in v, false, `${JSON.stringify(body)}: no broadcast transaction is claimed`);
+  }
+});
+
+test("B2 rule 7: the refusal's error is the hub's wording with the facilitator's own status and reason; the reason is clipped to 200 characters", () => {
+  for (const status of [200, 400, 401, 403]) {
+    const v = classifySettle(status, { success: false, errorReason: "policy" });
+    assert.equal(v.kind, "refused");
+    if (v.kind !== "refused") return;
+    assert.equal(v.error, hubRefusal(status, "policy"));
+    assert.equal(v.status, status);
+  }
+  const long = classifySettle(200, { success: false, errorReason: "r".repeat(250) });
+  assert.equal(long.kind, "refused");
+  if (long.kind !== "refused") return;
+  assert.equal(long.reason, "r".repeat(200));
+  assert.equal(long.error, hubRefusal(200, "r".repeat(200)));
+});
+
+test("B2 rule 4: a settled answer carries the payer and transaction exactly as before this wave (payer 'unknown' and tx '' when absent)", () => {
+  assert.deepEqual(classifySettle(200, { success: true, payer: "0xpayer", transaction: "0xtx" }), { kind: "settled", rule: 4, payer: "0xpayer", tx: "0xtx" });
+  assert.deepEqual(classifySettle(200, { success: true }), { kind: "settled", rule: 4, payer: "unknown", tx: "" });
+});
+
+test("B2 through payAndSettle: a pending /settle is thrown as a 502 carrying the hub's message, logged exactly once as x402_settle_outcome_unknown, and the line carries broadcast_tx only when the facilitator named one", async () => {
+  const reqs = testRequirements();
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const good = btoa(JSON.stringify(payloadFor(authFor(reqs))));
+  const run = async (settleBody: unknown) => {
+    const lines: string[] = [];
+    globalThis.fetch = (async (url: unknown) => {
+      if (String(url).endsWith("/verify")) return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(settleBody), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    let thrown: unknown;
+    try {
+      await payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs);
+    } catch (e) {
+      thrown = e;
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+    const events = lines.map((l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return null; } }).filter((e) => e?.event === "x402_settle_outcome_unknown");
+    return { thrown, events };
+  };
+  const withTx = await run({ success: false, errorReason: "settlement_pending", transaction: PENDING_TX });
+  assert.ok(withTx.thrown instanceof SocietyError && withTx.thrown.status === 502, "a 502, not a 402 that invites a second payment");
+  assert.equal((withTx.thrown as SocietyError).message, HUB_PENDING_WITH_TX);
+  assert.equal(withTx.events.length, 1, "exactly one unknown-outcome line");
+  assert.equal(withTx.events[0]!.broadcast_tx, PENDING_TX);
+  assert.equal(withTx.events[0]!.reason, HUB_PENDING_WITH_TX);
+  const noTx = await run({ success: false, errorReason: "settlement_pending" });
+  assert.ok(noTx.thrown instanceof SocietyError && noTx.thrown.status === 502);
+  assert.equal(noTx.events.length, 1);
+  assert.equal("broadcast_tx" in noTx.events[0]!, false, "no broadcast transaction is claimed when none was reported");
 });

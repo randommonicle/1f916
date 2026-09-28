@@ -67,7 +67,17 @@ export function buildPaymentRequirements(
   };
 }
 
-async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown): Promise<Record<string, unknown>> {
+// B1 (docs/BRIEF-X402-SETTLE-HONESTY.md): the facilitator's HTTP status is kept
+// beside its parsed body. PayAI's own table says to "read the status and
+// response body together" (a JSON 409 or 5xx can carry `success: false`
+// without being a verdict), so classifySettle and classifyVerify below never
+// read one without the other.
+interface FacilitatorAnswer {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown): Promise<FacilitatorAnswer> {
   const res = await fetch(`${env.FACILITATOR_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -89,7 +99,7 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   } catch {
     answer = undefined;
   }
-  if (answer !== null && typeof answer === "object" && !Array.isArray(answer)) return answer as Record<string, unknown>;
+  if (answer !== null && typeof answer === "object" && !Array.isArray(answer)) return { status: res.status, body: answer as Record<string, unknown> };
   if (path === "/settle") {
     throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). The settle request was sent; whether the money moved is unknown until the chain is checked.`);
   }
@@ -101,8 +111,10 @@ export type SettleResult =
   | { ok: true; payer: string; tx: string; settlement: Record<string, unknown> };
 
 // The shared verify+settle core. Returns either a 402 Response to send back
-// as-is (no payment attached, an invalid signature, or a failed
-// settlement), or a successful settlement for the caller to act on.
+// as-is (no payment attached, an invalid signature, or a settlement the
+// facilitator reports as failed, classifySettle rule 7), or a successful
+// settlement for the caller to act on. An outcome that is not a verdict is
+// thrown (settleOrThrow), never returned as a 402.
 //
 // afterVerify, if given, runs after the signature is confirmed valid but
 // BEFORE the irreversible settle call: the one point in this flow where a
@@ -149,6 +161,114 @@ export function assertPayloadMatchesRequirements(paymentPayload: unknown, reqs: 
   }
 }
 
+// ---------- B2: classifying the /settle answer (docs/BRIEF-X402-SETTLE-HONESTY.md) ----------
+//
+// Pure, so every rule is provable offline, and called only from settleOrThrow
+// below. The rules run in the brief's order and the first match wins; `rule`
+// names the one that matched. The label is also what makes rules 1, 2, 3 and 6
+// observable at all: rule 7 names four statuses and rule 8 catches everything
+// else as unknown, so any one of those four could go and its answers would
+// still be unknown, only worded differently.
+// Rule 7 carries every condition PayAI documents for a definitive refusal, not
+// only the ones rules 1-6 leave unchecked, so a refusal never depends on the
+// rules above it staying where they are: a refusal releases a listing's
+// reservation, and a wrong one invites a second payment.
+export const SETTLEMENT_PENDING = "settlement_pending";
+const FACILITATOR_REASON_MAX = 200;
+const clipReason = (v: unknown) => (typeof v === "string" ? v : String(v)).slice(0, FACILITATOR_REASON_MAX);
+const SETTLE_UNKNOWN_TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked.";
+
+export type SettleVerdict =
+  | { kind: "settled"; rule: 4; payer: string; tx: string }
+  | { kind: "refused"; rule: 7; status: number; reason: string; error: string }
+  | { kind: "unknown"; rule: 1 | 2 | 3 | 4 | 5 | 6 | 8; message: string; broadcastTx?: string };
+
+export function classifySettle(status: number, body: Record<string, unknown>): SettleVerdict {
+  // 1. A server error, whatever the body says.
+  if (status >= 500 && status <= 599) {
+    return { kind: "unknown", rule: 1, message: `The facilitator answered /settle with HTTP ${status}, a server error, which is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
+  }
+  // 2. 409 duplicate_settlement: "the same operation is already in flight or has a replay marker".
+  if (status === 409) {
+    return { kind: "unknown", rule: 2, message: `The facilitator answered /settle with HTTP 409 (duplicate_settlement: the same settlement is already in flight or has a replay marker), which is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
+  }
+  // 3. No boolean `success` (L-089; wording unchanged).
+  if (typeof body.success !== "boolean") {
+    return { kind: "unknown", rule: 3, message: "The facilitator's answer to /settle was not a settlement result (no boolean success). The settle request was sent; whether the money moved is unknown until the chain is checked." };
+  }
+  // 4. `success: true` settles on a 2xx status only.
+  if (body.success === true) {
+    if (status >= 200 && status <= 299) {
+      return { kind: "settled", rule: 4, payer: typeof body.payer === "string" ? body.payer : "unknown", tx: typeof body.transaction === "string" ? body.transaction : "" };
+    }
+    return { kind: "unknown", rule: 4, message: `The facilitator answered /settle with success: true on HTTP ${status}; a success on a non-2xx status contradicts itself, so it is not read as a verdict. ${SETTLE_UNKNOWN_TAIL}` };
+  }
+  const reason = body.errorReason;
+  // 5. settlement_pending: "It is not a verdict." On EVM `transaction` carries
+  //    the broadcast hash when the transaction was already broadcast.
+  if (reason === SETTLEMENT_PENDING) {
+    const tx = typeof body.transaction === "string" && body.transaction.length > 0 ? body.transaction : undefined;
+    return {
+      kind: "unknown",
+      rule: 5,
+      message: `The facilitator has not yet settled this payment (settlement_pending): it may still land on-chain.${tx ? ` It reports the broadcast transaction ${tx}.` : ""} Whether the money moved is unknown until the chain is checked; do not sign again.`,
+      ...(tx ? { broadcastTx: tx } : {}),
+    };
+  }
+  // 6. A failure with no usable reason cannot be classified.
+  if (typeof reason !== "string" || reason.length === 0) {
+    return { kind: "unknown", rule: 6, message: `The facilitator answered /settle with HTTP ${status} and success: false but no reason (errorReason absent, empty or not a string), so the answer cannot be classified. ${SETTLE_UNKNOWN_TAIL}` };
+  }
+  // 7. The only refusals: "a recorded failure" (200) and "invalid input,
+  //    missing/invalid credentials, or a policy refusal" (400, 401, 403).
+  if (
+    body.success === false &&
+    typeof reason === "string" &&
+    reason.length > 0 &&
+    ((status === 200 && reason !== SETTLEMENT_PENDING) || status === 400 || status === 401 || status === 403)
+  ) {
+    const shownReason = clipReason(reason);
+    return { kind: "refused", rule: 7, status, reason: shownReason, error: `The facilitator reports that this settlement failed (HTTP ${status}, reason: ${shownReason}). By its account no money moved.` };
+  }
+  // 8. Anything else: every other 4xx, every 2xx other than 200, any 1xx or 3xx.
+  return { kind: "unknown", rule: 8, message: `The facilitator answered /settle with HTTP ${status}, success: false and reason ${clipReason(reason)}: a combination PayAI does not document as a definitive refusal. ${SETTLE_UNKNOWN_TAIL}` };
+}
+
+// The /settle leg. Returns a settled or refused verdict with the body it came
+// from; every other outcome (a rejected fetch, an unreadable body, an answer
+// classifySettle calls unknown) is logged ONCE as x402_settle_outcome_unknown
+// and thrown, so no caller can read it as a refusal. When a pending answer
+// names its broadcast transaction, the log line carries it as broadcast_tx.
+async function settleOrThrow(
+  env: Env,
+  rpcBody: unknown,
+  reqs: PaymentRequirements,
+): Promise<{ body: Record<string, unknown>; verdict: Exclude<SettleVerdict, { kind: "unknown" }> }> {
+  let broadcastTx: string | undefined;
+  try {
+    const answer = await facilitator(env, "/settle", rpcBody);
+    const verdict = classifySettle(answer.status, answer.body);
+    if (verdict.kind === "unknown") {
+      broadcastTx = verdict.broadcastTx;
+      throw new SocietyError(502, verdict.message);
+    }
+    return { body: answer.body, verdict };
+  } catch (e) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        event: "x402_settle_outcome_unknown",
+        resource: reqs.resource,
+        pay_to: reqs.payTo,
+        amount_atomic: reqs.maxAmountRequired,
+        reason: e instanceof Error ? e.message : String(e),
+        ...(broadcastTx ? { broadcast_tx: broadcastTx } : {}),
+      }),
+    );
+    throw e;
+  }
+}
+
 export async function payAndSettle(
   env: Env,
   request: Request,
@@ -180,7 +300,7 @@ export async function payAndSettle(
 
   const rpcBody = { x402Version: 1, paymentPayload, paymentRequirements: reqs };
 
-  const verdict = await facilitator(env, "/verify", rpcBody);
+  const verdict = (await facilitator(env, "/verify", rpcBody)).body;
   if (verdict.isValid !== true) {
     return {
       ok: false,
@@ -199,40 +319,37 @@ export async function payAndSettle(
   // money that did move would otherwise be findable only on the chain. The
   // pay route also logs its own line with the listing's ids.
   //
-  // Only a well-formed answer is an answer (CODEX, build review 2026-09-24,
-  // finding 1). facilitator() returns any parsed JSON object whatever the
-  // HTTP status, so an intermediary's JSON error page, or a reply without a
-  // boolean `success`, used to read as a refusal here: handlePayListing then
-  // released its reservation and a retry could pay twice if the facilitator
-  // had in fact broadcast. Such a body says nothing about whether the money
-  // moved, so it takes the unknown-outcome path an unreadable body already
-  // takes: thrown, never read as a refusal. handlePayListing keeps its
+  // Only a verdict is an answer (docs/BRIEF-X402-SETTLE-HONESTY.md B2; it
+  // extends CODEX's build finding 1 of 2026-09-24, L-089, which closed the
+  // answer with no boolean `success`). classifySettle reads the HTTP status
+  // and the body together, as PayAI's own page says to
+  // (https://docs.payai.network/x402/facilitators/capacity-and-limits.md,
+  // "Read the status and response body together" and "The settlement_pending
+  // response"). A 5xx, a 409 (duplicate_settlement), a body with no boolean
+  // `success`, a success on a non-2xx status, a settlement_pending ("It is not
+  // a verdict ... the payment may still land on-chain"), a failure with no
+  // reason, and every status-and-shape combination PayAI does not document as
+  // definitive all take the unknown-outcome path an unreadable body already
+  // takes: thrown, logged, never read as a refusal. handlePayListing keeps its
   // reservation (settlement_unconfirmed); the other callers answer 502,
   // "unknown until the chain is checked", instead of a 402 that invites a
-  // second payment. An explicit `success: false` is still a refusal.
-  let settlement: Record<string, unknown>;
-  try {
-    settlement = await facilitator(env, "/settle", rpcBody);
-    if (typeof settlement.success !== "boolean") {
-      throw new SocietyError(502, "The facilitator's answer to /settle was not a settlement result (no boolean success). The settle request was sent; whether the money moved is unknown until the chain is checked.");
-    }
-  } catch (e) {
-    console.log(JSON.stringify({ level: "error", event: "x402_settle_outcome_unknown", resource: reqs.resource, pay_to: reqs.payTo, amount_atomic: reqs.maxAmountRequired, reason: e instanceof Error ? e.message : String(e) }));
-    throw e;
-  }
-  if (settlement.success !== true) {
+  // second payment while the first may still land. A refusal is ONLY
+  // `success: false` with a non-empty string errorReason on a 200 (other than
+  // settlement_pending: "a recorded failure") or on a 400, 401 or 403
+  // ("invalid input, missing/invalid credentials, or a policy refusal"); its
+  // 402 names the facilitator's own status and reason.
+  const settled = await settleOrThrow(env, rpcBody, reqs);
+  if (settled.verdict.kind === "refused") {
     return {
       ok: false,
       response: Response.json(
-        { x402Version: 1, error: String(settlement.errorReason ?? "settlement failed"), accepts: [reqs] },
+        { x402Version: 1, error: settled.verdict.error, accepts: [reqs] },
         { status: 402 },
       ),
     };
   }
 
-  const payer = typeof settlement.payer === "string" ? settlement.payer : "unknown";
-  const tx = typeof settlement.transaction === "string" ? settlement.transaction : "";
-  return { ok: true, payer, tx, settlement };
+  return { ok: true, payer: settled.verdict.payer, tx: settled.verdict.tx, settlement: settled.body };
 }
 
 export async function handlePatron(request: Request, env: Env): Promise<Response> {
