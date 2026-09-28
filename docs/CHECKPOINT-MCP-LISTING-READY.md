@@ -170,6 +170,62 @@ taught at `/api/surface` (a separately passing test already covers that).
 
 ## A5: Served-text corrections
 
+Every served sentence below is the hub's wording from the brief, verbatim (line-wrap
+only, matching the surrounding surface's own wrap width).
+
+**File list:**
+- `src/inbox.ts` (edit): the `renderSkillMd` Join paragraph (A5(a)); `SKILL_VERSION`
+  `"1.0.1"` -> `"1.0.2"`, with a new line added to the version-history comment.
+- `docs/HEARTBEAT-SKILL-TEXT.md` (edit): the `## /skill.md` fenced block's Join
+  paragraph, changed in lockstep with `inbox.ts` -- the doc-fidelity test
+  (`test/inbox-d1.test.ts`, "D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md's three
+  fenced blocks...") is what proves the two stayed byte-identical after
+  placeholder substitution, in both registration modes; it passed on the first
+  try, meaning both edits matched.
+- `src/discovery.ts` (edit): `renderLlmsTxt`'s write section 402 sentence (A5(b)).
+- `src/mcp.ts` (edit): the `register` tool's `description` (static, mode-independent)
+  and its thrown message (now mode-aware, built from `env.REGISTRATION_MODE` read
+  the same way `register-gate.ts` reads it) (A5(c)).
+- `src/doc.ts` (edit): `DEFERRED-DOOR-402-WORDING` planted immediately above `export
+  const FRONT_DOOR_TEMPLATE`, naming both un-touched lines (`:182`, `:271`) and the
+  reason (A5(d)) -- the template string itself carries zero byte changes, proven by
+  `topics-d1.test.ts`'s v5 hash pin staying green throughout this item.
+- `test/inbox-d1.test.ts` (edit): the pinned sha256 (line ~1112) and the
+  `SKILL_VERSION` assertion (line ~1113), both taken from the test's own failure
+  output after the text change, never computed by hand (advisor's own instruction,
+  followed literally -- see the transcript for the two independent confirmations,
+  one via a throwaway script, one via the real guard/pin code path).
+- `test/secret-literal-guard.test.ts` (edit): the `src/mcp.ts` `PROSE_ALLOW` entry's
+  `sha` updated to the new register-refusal literal's hash (also taken from the
+  guard's own real lexer/hash code path, via a temporary debug line, run, then
+  reverted -- restore verified byte-exact before moving on). Baseline counts
+  (total 69, wire 23, prose 46) unchanged: one literal's VALUE changed, none was
+  added or removed.
+- `test/mcp-listing-served-text.test.ts` (new): A5(b) and A5(c)'s own dedicated
+  coverage -- neither had an existing pinned test the way A5(a) did. Six tests:
+  the register tool's static description; the thrown message's two mode variants
+  (open carries no invite clause; invite_only is the open text with one sentence
+  appended, byte-for-byte, not a rewritten message); the old undifferentiated
+  wording is gone in both modes; the llms.txt sentence in both registration
+  modes; the sentence's exact position relative to `${join.transition}`.
+
+**Not changed, per A5(d):** `src/doc.ts`'s two "The first request returns 402..."
+sentences inside `FRONT_DOOR_TEMPLATE` (:182, :271) -- editing them mints
+constitution v6, out of this session's grant. `src/showhome.ts:459`'s funnel stage
+label (`"4_payment_attempt": "paid door: POST /api/register returns 402. ..."`) --
+left alone exactly as the brief instructed; verified untouched by re-reading the
+file before finishing this item.
+
+**A note on wrapping (A5(b)):** the new llms.txt sentence is noticeably longer than
+the old one, so it wraps across six lines instead of two, at roughly the same
+~70-78-char width the surrounding template already uses. `test/mcp-listing-served-
+text.test.ts`'s own regexes had to be written with `\s+` between phrases that
+straddle a wrap point (a first draft using a literal space failed on exactly this,
+caught immediately by running it) -- recorded because the SAME care applies to
+reading this sentence back out of the served page: a client matching on a literal
+space between "checks" and "returns", say, would misparse it the same way the
+test's first draft did.
+
 ## A6: The deploy script
 
 ## Annotations table (A3)
@@ -215,3 +271,6 @@ the call chain, confirmed by reading each function in full).
 | M6 | A3: flip `me`'s `readOnlyHint` from `false` to `true` | mcp-tool-annotations.test.ts | yes -- only the `me is NOT read-only` test fails, cleanly (`true !== false`); nothing else moves, including the `/mcp/read` all-readOnly test (`me` is not on that door) |
 | M7 | A4: delete the `/api/stats` `ROUTES` entry entirely | discovery.test.ts | yes -- exactly the four tests that reference `/api/stats` fail, each on its own assertion (`GET /api/stats missing from ROUTES`; `/api/stats must be in the Read section`; `/api/stats must appear in the OpenAPI doc`; the surface `stats && stats.auth === "none"` check); the other 39 tests, including `/api/search`'s own tests, stay green |
 | M8 | A4: revert `AUTH_LABEL.mixed` to the old `"per-tool-call -- see /mcp's tools/list"` | discovery.test.ts | yes -- only the mixed-heading test fails, on its own assertion (`AUTH_LABEL.mixed must no longer open with the /mcp-only claim`, actual `"per-tool-call -- see /mcp's tools/list"`) |
+| M9 | A5(a): revert `inbox.ts`'s Join paragraph to the old text, `SKILL_VERSION` left at `"1.0.2"` | inbox-d1.test.ts | yes -- the pinned-hash test (10) fails on its own assertion (actual `285458...`, expected `cc13bf...`); the D-018 doc-fidelity test fails too (`renderSkillMd must equal the doc's /skill.md block (open)`), expected fallout since both read the same renderer -- 46/48 stay green |
+| M10 | A5(b): revert `discovery.ts`'s 402 sentence to the old text | mcp-listing-served-text.test.ts | yes -- exactly the two A5(b) tests fail, cleanly, on their own regex/content assertions; the four A5(c) tests are untouched |
+| M11 | A5(c): revert `mcp.ts`'s register thrown message to the old, non-mode-aware text | mcp-listing-served-text.test.ts, secret-literal-guard.test.ts | yes -- all three A5(c) message tests fail on their own assertions (`$1 x402 payment, which this MCP tool cannot carry` not found; open text not a byte-for-byte prefix of invite text; the old "plus an invite code..." phrase is back); secret-literal-guard also fails (expected fallout -- the allowlist's `sha` now names the NEW text, which is no longer in the source once reverted) |

@@ -244,7 +244,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/mcp.ts", sha: "2cf530512f2dd7ce27d4369003459722461fcb64e68ecc5c16415d0246018602", note: "credential arg: secret issued OR ch1 assertion (recurs verbatim)" },
   { file: "src/mcp.ts", sha: "609798938cfbdab31876455a028bedb9f51a889517281aa862adb346bade9fc0", note: "rotate: secret citizen gets fresh secret; pubkey citizen swaps key" },
   { file: "src/mcp.ts", sha: "bbbd572da044852cf6a6b29c9e5960efd9de7fb46ef4628db393eb08608d3b93", note: "read one proposal: ballots roll-call, not secret" },
-  { file: "src/mcp.ts", sha: "a338b3a9cb75fb6bbc0521273bb1df90013ecf09f72bde5a5c162582d733c4eb", note: "register tool refusal: use HTTP door, optional public_key no secret" },
+  { file: "src/mcp.ts", sha: "080faea4f53d44c3552b9a9efc0b7906cf25dac13679e238e8248478b7f89d31", note: "register tool refusal (A5(c), 2026-09-28): mode-aware base text, use HTTP door, optional public_key no secret" },
   { file: "src/mcp.ts", sha: "38c507d5f2358a398f6cda1e4d87f2306af0e3ffa927d7038514c30bacdbbeac", note: "MCP init: authenticate writes with credential (secret or assertion)" },
   { file: "src/showhome.ts", sha: "f2b9bde96aba1ad26cc67d18004ae7e871ff0f7e147b5af8a8ac5fc36598c76b", note: "visitor token shown once; not a citizen secret" },
   { file: "src/showhome.ts", sha: "5c4e8c2527a40c80e258a64b3a66e06de64405de4df67b105aacc1c254b59c49", note: "showhome/reply: citizen answers with credential (secret or assertion)" },

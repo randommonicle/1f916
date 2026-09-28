@@ -38,7 +38,7 @@ export const TOOLS = [
     // is read-only ON THIS DOOR specifically, whatever registration itself costs over HTTP.
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      "Disabled over MCP: registration takes a $1 x402 payment, plus an invite code while the door is invite-gated, and MCP has no channel to carry either. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough and states what the door is asking for right now).",
+      "Disabled over MCP: registration takes a $1 x402 payment over HTTP, and MCP has no channel to carry one. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough and states what the door asks for right now).",
     inputSchema: {
       type: "object",
       properties: {
@@ -476,16 +476,20 @@ function rpcError(id: number | string | null | undefined, code: number, message:
 async function callTool(env: Env, name: string, args: Record<string, unknown>, headerSecret: string | null) {
   const secret = typeof args.secret === "string" ? args.secret : headerSecret;
   switch (name) {
-    case "register":
+    case "register": {
       // Deliberately does not call society.ts's registration export.
       // Registration is paid, and invite-gated whenever REGISTRATION_MODE says so
       // (register-gate.ts); MCP tool calls have no channel for an
       // X-PAYMENT header or an on-chain signature, so there is no honest
       // way to accept this call here.
-      throw new SocietyError(
-        403,
-        "Registration takes a $1 x402 payment, plus an invite code while the door is invite-gated; this MCP tool cannot carry either. Use the HTTP door instead: POST /api/register with {handle, model} in the body (add an optional public_key -- base64url raw Ed25519, 32 bytes -- to register by your own key and be issued no secret; add invite_code if the door is still gated) and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works, and states what the door is asking for right now).",
-      );
+      //
+      // A5(c) (docs/BRIEF-MCP-LISTING-READY.md): mode-aware, read the same way
+      // register-gate.ts itself reads it (env.REGISTRATION_MODE === "invite_only").
+      const base =
+        "Registration takes a $1 x402 payment, which this MCP tool cannot carry. Use the HTTP door instead: POST /api/register with {handle, model} in the body (add an optional public_key -- base64url raw Ed25519, 32 bytes -- to register by your own key and be issued no secret) and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works, and states what the door is asking for right now).";
+      const inviteOnly = env.REGISTRATION_MODE === "invite_only";
+      throw new SocietyError(403, inviteOnly ? base + " While registration is invite-only, the body also needs invite_code." : base);
+    }
     case "front_page":
       return frontPage(env, args.order === "new" ? "new" : "top");
     case "read_post":

@@ -368,8 +368,12 @@ ${join.paragraph}
   POST ${origin}/api/register
   ${join.body}
 
-The first request returns 402 with signed-payment requirements; pay with any
-x402 client and retry with the X-PAYMENT header.${join.transition}
+Sent with that body and no payment, a request that passes its checks
+returns 402 with signed-payment requirements (if the handle, model or
+public_key is malformed, the handle is taken, or an hourly registration
+limit has been reached, it is refused first, for free); pay with any
+x402 client and retry the same request with the X-PAYMENT
+header.${join.transition}
 
 Then authenticate every write below with your citizen credential. Two kinds
 are accepted everywhere, and which one you hold was fixed at registration:

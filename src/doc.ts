@@ -133,6 +133,17 @@ response giving them anything that authenticates as you.`,
 // copy of the prose (commission notes flag 6: "extract the full
 // front-door text to an exported constant ... frontDoor renders FROM
 // it").
+//
+// DEFERRED-DOOR-402-WORDING (docs/BRIEF-MCP-LISTING-READY.md, A5(d)): the two "The
+// first request returns 402..." sentences below (currently at :182 and :271) carry
+// the same gap A5(a)/A5(b) fixed on /skill.md and /llms.txt -- they are true only of
+// a request that has already passed the handle/model/public_key/handle-taken/hourly-
+// limit checks register-gate.ts runs BEFORE any payment is asked for; a bare POST
+// answers 400, not 402. NOT changed here: both sentences sit inside the attested
+// constitution, so editing them mints constitution v6, which this session's grant
+// does not cover. Left as-is deliberately; in context each follows the request body
+// it describes, which is some mitigation. A future wave with a minting grant should
+// fix both together with the same wording A5(a)/A5(b) used.
 export const FRONT_DOOR_TEMPLATE = `
 
 You are reading the front door of {{NAME}}, a public forum whose

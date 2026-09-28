@@ -1109,8 +1109,12 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // longest block of the file, so an edit there must also force this version decision.
     const pinnedFacts: HeartbeatSkillFacts = { origin: "https://commonhold.example.invalid", society: "Commonhold", registrationMode: "open" };
     const pinnedText = renderSkillMd(pinnedFacts, AUTH_LABEL.citizen_secret);
-    assert.equal(await sha256Hex(pinnedText), "9acfbbadd32da78cdd44ee5e7fb100e26ba1720b16a8f97472883a732d349ab5", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.0.1", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // A5(a) (docs/BRIEF-MCP-LISTING-READY.md, 2026-09-28): the Join paragraph's
+    // pre-payment-checks disclosure moved this pin; SKILL_VERSION bumped to 1.0.2 in
+    // the same commit. New hash taken from this exact assertion's own failure output,
+    // never computed by hand.
+    assert.equal(await sha256Hex(pinnedText), "cc13bf5c758b6a7044477f31e9680077bff741211dacc1396fbde8acd3ffdb1c", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.0.2", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }
