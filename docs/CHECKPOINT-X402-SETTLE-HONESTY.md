@@ -41,6 +41,11 @@ that holds the original bytes and checks the sha256 after writing them back).
 - `test/register-scripts-unknown-outcome.test.ts` (new): the helper on a rejected fetch and a 502;
   a positive control; the wiring scan of all three scripts.
 
+**As built (plan drift, recorded).** The discovery 402s and the `validatePaymentRequirements` check
+landed in their own file, `test/x402-discovery-d1.test.ts` (commit 4), not in the route file or the
+scripts test as planned above; the policing test `test/secret-literal-guard.test.ts` also changed
+(commit 4: one reviewed `PROSE_ALLOW` entry and its moved baseline).
+
 **No new dependencies.**
 
 **Commit order.** 1: B1 + B2 (with the listings.ts and pay-listing.mjs phrases). 2: B3. 3: B2b. 4: B4.
@@ -239,6 +244,23 @@ case-collision check's positive control, `cols` / `COLS`, is detected). A first 
 collision check used `Select-Object -CaseSensitive`, which PowerShell 5.1 does not have; it errored
 per group and printed 0, a check that could not go red, and was replaced before it was relied on.
 
+### Commit 7: docs only, the review before hand-off
+
+**Found.** The B2b positive control (a 201 and a 402 come back `answered`, print nothing, and carry
+the signed request through) had no red-proof: M28-M36 all mutate the unknown paths, which it never
+enters. M45 and M46 close it; M47 shows the commit-4 `PROSE_ALLOW` entry is exact-keyed (a changed
+served literal fails the guard). No test or source changed in this commit.
+
+**Readings recorded for the gate.**
+- B2b's second-leg 502 is no longer only the unknown-settle answer: since B3 a verify 5xx is also a
+  502, whose body says "No money moved". The helper warns on every 502 (over-cautious in the safe
+  direction) and prints the server's own body first, so the operator sees which one it was.
+- Settle rule 6 reads "empty" literally: a whitespace-only `errorReason` counts as non-empty, so a
+  200 with `success: false` and `errorReason: " "` is a refusal (rule 7).
+- The facilitator's `transaction` string is shown unclipped in the rule-5 message and the
+  `broadcast_tx` log field (clipping a hash would print a wrong one); the reason strings are clipped
+  to 200.
+
 ## Closing walk
 
 - B1 `facilitator()` keeps the status: commit 1. B2 rules 1-8, the `:196-212` comment, the
@@ -250,7 +272,8 @@ per group and printed 0, a check that could not go red, and was replaced before 
 - Byte-identity: the patron, listing-create and listing-pay requirements keep their pre-wave keys and
   order (unit golden string plus three route 402s).
 - Non-minting: `src/doc.ts` has 0 diff lines against `origin/main`; the existing v5 pin stays green.
-- Red-proofs M1-M44, each failing its own assertion (`ERR_ASSERTION`), each restored byte-exact.
+- Red-proofs M1-M47, each failing its own assertion (`ERR_ASSERTION`), each restored byte-exact;
+  every new test has at least one (the B2b positive control from M45/M46, commit 7).
 - Not done here, by the hard rules: no push, no deploy, no remote `wrangler`, no network call to a
   live service. No `*.local.*` file and no `.env` was opened. The D-018 gate and the deploy are next,
   and are not this builder's.
@@ -309,3 +332,6 @@ named.
 | M42 | the handle description matches its rule | `{2,32}` -> `{3,32}` in `assertValidHandle` | discovery: 4 / 1 | pin test: `2 characters` | byte-exact |
 | M43 | the model description matches its rule | `model.length > 64` -> `> 63` in `assertValidModel` (anchored on its signature: `correctModel` has its own copy) | discovery: 4 / 1 | pin test: `64 characters` | byte-exact |
 | M44 | the declaration reaches the facilitator | `paymentRequirements: { ...reqs, outputSchema: undefined }` in the rpc body | discovery: 4 / 1 | /verify-body test: deepEqual (undefined vs the declaration) | byte-exact |
+| M45 | only an unknown outcome prints | `response.status === 502` -> `!== 999` (every outcome reports) | B2b test: 3 / 1 | positive control: `HTTP 201`, outcome `unknown` vs `answered` | byte-exact |
+| M46 | the helper sends the signed header | `"X-PAYMENT": paymentHeader` dropped from the helper's fetch | B2b test: 2 / 2 | positive control: `X-PAYMENT` undefined vs `SIGNED-HEADER`; wiring: `register-maintainer.mjs: no X-PAYMENT request outside the helper` | byte-exact |
+| M47 | the new PROSE_ALLOW entry is exact | a full stop added to the public_key description | secret-literal-guard: 5 / 1 | `Unreviewed secret-bearing literal(s) in src/` (the changed literal is an offender) | byte-exact |
