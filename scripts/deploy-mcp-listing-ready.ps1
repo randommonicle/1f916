@@ -45,10 +45,21 @@ function Format-ErrBody($bodyText) {
 # read once more, through Format-ErrBody, then discarded. The temp file is removed
 # in a `finally`, so a 200 whose body is not valid JSON (ConvertFrom-Json throws,
 # ErrorActionPreference = "Stop") still cleans it up.
+# C3 (review round 1, CODEX): curl.exe's own -w "%{http_code}" prints WHATEVER
+# status line it last saw, even when the transfer itself failed partway (a
+# connection that sends response headers -- so curl records "200" -- then stalls
+# or drops before the body finishes hits curl's own --max-time and exits non-zero,
+# but -w had already captured "200"). Trusting $code alone on that path would read
+# a failed transfer as a clean 200. $LASTEXITCODE is curl.exe's own exit code (the
+# last native exe in this line, so PowerShell attributes it correctly even piped
+# through -o/-w); checked BEFORE $code is ever trusted, on every curl.exe call in
+# this script, per this same rule.
 function Get-Json($url) {
   $tmp = [System.IO.Path]::GetTempFileName()
   try {
     $code = (curl.exe -s --max-time 20 -o $tmp -w "%{http_code}" $url)
+    $curlExit = $LASTEXITCODE
+    if ($curlExit -ne 0) { Stop-Here "GET $url -> curl.exe exited $curlExit (a stalled or failed transfer, not a trustworthy HTTP answer); investigate before trusting anything it returned." }
     if ($code -ne "200") {
       $bodyText = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
       Stop-Here "GET $url -> $code, expected 200 ($(Format-ErrBody $bodyText))."
@@ -62,7 +73,14 @@ function Get-Json($url) {
 # -match on an array filters instead of testing the whole body) -- this is also
 # what makes a served sentence that line-wraps across several lines (A5(b)'s new,
 # longer 402 sentence wraps across six) matchable by a single-line pattern below.
-function Get-Flat($url) { ((curl.exe -s --max-time 20 $url | Out-String) -replace '\s+', ' ') }
+# C3: split out of the old one-liner so $LASTEXITCODE can be read and checked
+# before the (possibly truncated, from a stalled transfer) body is trusted.
+function Get-Flat($url) {
+  $text = (curl.exe -s --max-time 20 $url | Out-String)
+  $curlExit = $LASTEXITCODE
+  if ($curlExit -ne 0) { Stop-Here "GET $url -> curl.exe exited $curlExit (a stalled or failed transfer); investigate before trusting anything it returned." }
+  return ($text -replace '\s+', ' ')
+}
 # ErrorActionPreference = "Stop" makes a non-2xx THROW before a caller's own status
 # check can ever run, so the real status check has to live on both paths out of
 # this function, the normal return AND the catch. The error body is read from
@@ -171,7 +189,14 @@ for ($i = 0; $i -lt 12; $i++) {
   $polled = $null
   try {
     $polledRaw = (curl.exe -s --max-time 10 "$BASE/api/surface")
-    $polled = $polledRaw | ConvertFrom-Json
+    # C3: a non-zero curl.exe exit (a stalled/failed transfer inside the poll's own
+    # --max-time) means $polledRaw is not a trustworthy body -- never parsed, never
+    # used, just one more "not yet" iteration, exactly like a JSON parse failure
+    # below. This is the one curl.exe call in the script that does NOT Stop-Here on
+    # a bad exit code: failing the STEP here means failing this one iteration, not
+    # the poll as a whole -- the loop's own 12x5s budget and the post-loop check are
+    # what catch a poll that never recovers.
+    if ($LASTEXITCODE -eq 0) { $polled = $polledRaw | ConvertFrom-Json }
   } catch {
     $polled = $null
   }
@@ -251,7 +276,12 @@ if ($door -notmatch "Heartbeat: GET") { Stop-Here "the heartbeat door note is no
 $bad = @()
 foreach ($sweepPath in "/", "/api/official", "/llms.txt", "/openapi.json", "/api/topics", "/api/front", "/treasury", "/api/showhome", "/api/search?q=a", "/api/stats") {
   $sweepCode = (curl.exe -s --max-time 20 -o NUL -w "%{http_code}" "$BASE$sweepPath")
-  if ($sweepCode -ne "200") { $bad += "$sweepPath=$sweepCode" }
+  $sweepCurlExit = $LASTEXITCODE
+  # C3: a stalled/failed transfer that still printed "200" via -w must not read as
+  # a pass -- named separately from an honest non-200, so the log line says WHICH
+  # failure mode this was.
+  if ($sweepCurlExit -ne 0) { $bad += "$sweepPath=curl-exit-$sweepCurlExit" }
+  elseif ($sweepCode -ne "200") { $bad += "$sweepPath=$sweepCode" }
 }
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after deploy: " + ($bad -join ", ")) }
 Write-Host "[done] MCP listing readiness (wave A) deployed and ridden. Log the worker version id and these lines in HANDOVER.md. HEAD $head"

@@ -394,3 +394,25 @@ with a comment naming the reasoning.
 
 Both restored byte-exact (sha256 compared). Suite: 1299/1299 (no new test, an
 existing one regrouped), typecheck exit 0.
+
+### C3: `scripts/deploy-mcp-listing-ready.ps1` trusted curl.exe's status without its exit code
+
+CODEX: `curl.exe -w "%{http_code}"` prints whatever status line it last saw, even
+when the transfer itself failed partway -- a connection that sends response
+headers (so `-w` records "200") and then stalls or drops before the body
+finishes hits `--max-time` and exits non-zero, but the captured status string is
+still `"200"`. All four `curl.exe` call sites (`Get-Json`, `Get-Flat`, the
+propagation poll, the closing sweep) now read `$LASTEXITCODE` immediately after
+the call and check it before the status/body is trusted:
+- `Get-Json`/`Get-Flat`/the sweep: a non-zero exit `Stop-Here`s (or, in the
+  sweep's loop, is recorded in `$bad` as `curl-exit-N` rather than a real HTTP
+  code) -- these are places a stalled transfer must never be read as a pass.
+- The propagation poll (12x5s retry loop): a non-zero exit is treated the same
+  as a JSON parse failure -- one more "not yet" iteration, never a hard stop --
+  since the loop's own purpose is to tolerate exactly this kind of transient
+  failure; `Get-Flat` split out of its old one-liner form so `$LASTEXITCODE`
+  could be read before the whitespace-collapse.
+
+Parsed with PowerShell's AST parser after the edit: 0 errors. No red-proof --
+this script is never run by anything `npm test` exercises (Ben's hand-run
+artifact only, same as A6's own record).
