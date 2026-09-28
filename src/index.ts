@@ -80,6 +80,21 @@ function text(body: string): Response {
   return new Response(body, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
+// A1 (docs/BRIEF-MCP-LISTING-READY.md): the MCP doors (src/mcp.ts, src/mcp-read.ts)
+// build their own Response objects with bare Response.json()/new Response, never this
+// file's json() helper, so neither carried Access-Control-Allow-Origin -- a POST from
+// a browser-based MCP client or inspector had no way to read the answer. This wraps
+// whatever handleMcp/handleMcpRead already produced, adding the one header, without
+// mutating res.headers in place: a Response constructed by Response.json() may hold
+// an immutable Headers object, so a fresh Headers copy plus a new Response is the safe
+// way to add one, matching the copy-then-construct shape used everywhere else a
+// Response is rebuilt in this codebase.
+function withCors(res: Response): Response {
+  const headers = new Headers(res.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
 function bearer(request: Request): string | null {
   const auth = request.headers.get("Authorization");
   return auth?.startsWith("Bearer ") ? auth.slice(7) : null;
@@ -119,12 +134,18 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method;
 
+    // A1 (docs/BRIEF-MCP-LISTING-READY.md): Access-Control-Allow-Origin: * is safe on
+    // every route this Worker serves, MCP included -- there is no ambient credential
+    // (no cookies); a bearer secret or a signed assertion is supplied explicitly by
+    // the caller, so a cross-origin page reading the response can do nothing it could
+    // not already do by calling the route directly with the same credential.
     if (method === "OPTIONS") {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-PAYMENT",
+          "Access-Control-Allow-Headers":
+            "Content-Type, Authorization, X-PAYMENT, Mcp-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID",
           "Access-Control-Expose-Headers": "X-PAYMENT-RESPONSE",
         },
       });
@@ -239,16 +260,10 @@ export default {
           ),
         );
       if (path === "/api/patron" && method === "POST") return await handlePatron(request, env);
-      // DEFERRED-MCP-DISPATCH-AWAIT (D-018 gate R7/L3 aside, pre-existing, every tool on
-      // both doors, NOT fixed this wave): these two returns are missing `await` inside this
-      // try -- every other dispatch line in this block awaits its handler (handlePatron
-      // just above does), so a non-SocietyError thrown by ANY MCP tool call (this wave's
-      // inbox tool included) rejects fetch()'s own returned promise AFTER this function has
-      // already returned, escaping the catch block below and its JSON 500 (with its log
-      // line) entirely. The fix is `return await handleMcp(request, env)` /
-      // `return await handleMcpRead(request, env)`.
-      if (path === "/mcp") return handleMcp(request, env);
-      if (path === "/mcp/read") return handleMcpRead(request, env);
+      // A1 (docs/BRIEF-MCP-LISTING-READY.md): both lines now `await` their handler and wrap
+      // the result in withCors, closing DEFERRED-MCP-DISPATCH-AWAIT and adding CORS.
+      if (path === "/mcp") return withCors(await handleMcp(request, env));
+      if (path === "/mcp/read") return withCors(await handleMcpRead(request, env));
 
       // The JSON API
       if (path === "/api/register" && method === "POST") return await handleRegisterGate(request, env);
