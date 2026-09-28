@@ -478,3 +478,22 @@ string equality for `AUTH_LABEL.mixed` and the `description` of
 | M19b | shorten `/api/stats`'s description to `"Public aggregate counts for the society."` | discovery.test.ts | yes -- fails on its own `assert.equal`, actual/expected shown in full |
 
 Both restored byte-exact (sha256 compared). Suite: 1301/1301 (one new test), typecheck exit 0.
+
+## D-018 gate follow-ups (`docs/REVIEW-MCP-LISTING-READY-GATE-2026-09-28.md`, built on `7bbf3068`)
+
+One commit per follow-up. Headed "Gate C2" and "Gate L1" so they do not collide with review round 1's C1-C6 above; M-numbering continues from M19.
+
+### Gate C2: the `/mcp` register description claimed something false about MCP
+
+The gate found `src/mcp.ts:41` saying "and MCP has no channel to carry one", pinned by `test/mcp-listing-served-text.test.ts`. x402 publishes an MCP transport (the payment rides in the tool call's `_meta["x402/payment"]`), so the claim was false of MCP. What is true is that this door speaks x402 v1 over HTTP only (`src/x402.ts:164`) and carries no such channel. The phrase is now "and this MCP door cannot carry one", the one edit the gate named, matching the thrown message's own "which this MCP tool cannot carry". Nothing else in the string moved.
+
+The test's pin moved to the new phrase and gained `assert.doesNotMatch(register.description, /MCP has no channel/)`, placed BEFORE the pin so a run against the old string fails on the absence check first. Test changed first, run against the unchanged source, then the source changed.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M20a | test moved to the new phrase plus the absence assertion, run against the UNCHANGED source | mcp-listing-served-text.test.ts | yes -- fails on the absence assertion (message "the description must not claim a fact about MCP as a whole: only this door lacks an x402 channel"), actual the old description; the other five tests in the file stay green |
+| M20b | with the fix in, reword the phrase to "and this door cannot carry one" (neither the old nor the new wording) | mcp-listing-served-text.test.ts | yes -- the absence assertion stays green and the pin fails on its own assertion (`The input did not match the regular expression /this MCP door cannot carry one/`); the other five tests stay green |
+
+M20b restored byte-exact (sha256 compared). Suite: 1301/1301 (no new test; an assertion added inside an existing one), typecheck exit 0.
+
+Left alone, outside this commit's one-phrase scope: the two unserved comments in `src/mcp.ts` that give the same reason as "no channel" (`:321`, `:503`), and `src/doc.ts:244-248`, which is attested (`FRONT_DOOR_TEMPLATE`) and waits for a minting wave.

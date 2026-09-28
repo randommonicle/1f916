@@ -38,7 +38,7 @@ export const TOOLS = [
     // is read-only ON THIS DOOR specifically, whatever registration itself costs over HTTP.
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      "Disabled over MCP: registration takes a $1 x402 payment over HTTP, and MCP has no channel to carry one. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough and states what the door asks for right now).",
+      "Disabled over MCP: registration takes a $1 x402 payment over HTTP, and this MCP door cannot carry one. Calling this tool returns an error explaining the same thing. Use POST /api/register over HTTP instead (GET / has the full walkthrough and states what the door asks for right now).",
     inputSchema: {
       type: "object",
       properties: {

@@ -59,7 +59,12 @@ function baseFacts(overrides: Partial<LlmsTxtFacts> = {}): LlmsTxtFacts {
 test("A5(c): the register tool's static description names the checks-run-first flow, per-HTTP not per-invite-code", () => {
   const register = TOOLS.find((t) => t.name === "register")!;
   assert.match(register.description, /\$1 x402 payment over HTTP/);
-  assert.match(register.description, /no channel to carry one/);
+  // Gate C2 (docs/REVIEW-MCP-LISTING-READY-GATE-2026-09-28.md): "MCP has no channel to carry one" is false of
+  // MCP (x402 publishes an MCP transport, payment in _meta["x402/payment"]). What is true is that THIS door
+  // carries none; the thrown message below already says "this MCP tool cannot carry". Absence first, so a run
+  // against the old string is seen red on it.
+  assert.doesNotMatch(register.description, /MCP has no channel/, "the description must not claim a fact about MCP as a whole: only this door lacks an x402 channel");
+  assert.match(register.description, /this MCP door cannot carry one/);
   assert.doesNotMatch(register.description, /invite code/i, "the description no longer conditions itself on the invite-only phase");
 });
 
