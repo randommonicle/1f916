@@ -333,6 +333,27 @@ printed, and `refusedLine` is pinned verbatim. The wiring test now also pins eac
 branch to `refusedLine`, the import, and no `console.error` line naming `GET /treasury`, `GET
 /api/citizens` or `GET /api/official`. `npm test`: pass 1300, fail 0. Typecheck 0.
 
+### Commit R3: F3 and F4, a blank reason is no reason
+
+**What.** Settle rule 6 now catches an `errorReason` that is absent, not a string, or blank after
+trimming; rule 7 requires a reason that is not blank. So `200 {"success":false,"errorReason":" "}` is
+unknown and the pay route keeps its reservation; before this it was a refusal that released it (both
+seats; my own point (b)). `verifyReason` returns the first NON-BLANK string among `invalidReason`,
+`errorReason`, `error`, `message`, else "none given", so an empty or blank key no longer masks a real
+reason in a later key or prints "reason: " (GEMINI; point (c)). Both supersede the literal readings I
+recorded in commit 7. The verify rule-3 expression (`String(invalidReason ?? "payment invalid")`) is
+unchanged, as the brief requires.
+
+**Coverage, stated.** Rule 7's own non-blank condition is defence in depth: with rule 6 intact, a blank
+reason never reaches it. M64 is the evidence (that mutation alone leaves 37 of 37 green) and is not a
+red-proof. The route test goes red only when both rules are reverted to the pre-review code (M63).
+
+**Tests.** `test/x402.test.ts`: three blank-reason rows in the settle table (`" "` at 200 and 403, a
+tab-and-newline reason at 401), each decided by rule 6, and a new F4 test (an empty `invalidReason`
+before a real `errorReason`, blank before `error`, blank before `message`, blank throughout).
+`test/x402-settle-route-d1.test.ts`: `" "` at 200 and at 403 keeps the reservation. `npm test`: pass
+1302, fail 0. Typecheck 0.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -404,3 +425,8 @@ named.
 | M59 | each script prints the shared refusal line | keyauth-ride's branch goes back to its own wording | B2b test: 7 / 1 | wiring: `keyauth-ride.mjs: the one non-201 branch left prints the shared refusal line`, 0 !== 1 | byte-exact |
 | M60 | only a 201 is a success answer | the gate lets every 2xx through | B2b test: 7 / 1 | `HTTP 200: unknown` (answered) | byte-exact |
 | M61 | the refusal line's wording | "so by their account no money moved." -> "so nothing happened." | B2b test: 7 / 1 | 4xx test: strictEqual on `refusedLine(409)` | byte-exact |
+| M62 | rule 6 catches a blank reason (F3) | rule 6's `reason.trim().length === 0` -> `reason.length === 0` | x402.test + route: 36 / 1 | settle table: `HTTP 200 {"success":false,"errorReason":" "}: decided by rule 6`, 8 !== 6 (label only: rule 7 still refuses nothing blank) | byte-exact |
+| M63 | a blank reason never releases (F3) | rules 6 and 7 both reverted to the pre-review conditions (two edits) | route + x402.test: 35 / 2 | F3 route test: `200 with errorReason " ": 502, not a 402 that releases`, 402 !== 502; settle table kind | byte-exact |
+| M64 | EVIDENCE, not a red-proof | rule 7's non-blank condition alone reverted, rule 6 intact | x402.test + route: 37 / 0 | none, as expected: rule 7's own check is defence in depth | byte-exact |
+| M65 | verifyReason skips an empty string (F4) | its non-blank check removed (the first string again) | x402.test: 24 / 1 | F4 test: `an empty invalidReason does not mask errorReason` | byte-exact |
+| M66 | verifyReason skips a blank string (F4) | `v.trim().length > 0` -> `v.length > 0` | x402.test: 24 / 1 | F4 test: `a blank invalidReason does not mask error` | byte-exact |

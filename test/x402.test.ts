@@ -290,11 +290,15 @@ const SETTLE_ROWS: SettleRow[] = [
   { status: 200, body: { success: false, errorReason: "settlement_pending" }, kind: "unknown", rule: 5 },
   { status: 400, body: { success: false, errorReason: "settlement_pending" }, kind: "unknown", rule: 5 },
   { status: 403, body: { success: false, errorReason: "settlement_pending" }, kind: "unknown", rule: 5 },
-  // rule 6: success:false with errorReason absent, empty or not a string
+  // rule 6: success:false with errorReason absent, not a string, or blank after trimming
   { status: 200, body: { success: false }, kind: "unknown", rule: 6 },
   { status: 200, body: { success: false, errorReason: "" }, kind: "unknown", rule: 6 },
   { status: 400, body: { success: false, errorReason: 42 }, kind: "unknown", rule: 6 },
   { status: 403, body: { success: false, errorReason: null }, kind: "unknown", rule: 6 },
+  // F3 (build review round 1): a blank reason is no reason (each was a rule-7 refusal before the fix)
+  { status: 200, body: { success: false, errorReason: " " }, kind: "unknown", rule: 6 },
+  { status: 403, body: { success: false, errorReason: " " }, kind: "unknown", rule: 6 },
+  { status: 401, body: { success: false, errorReason: "\t\n " }, kind: "unknown", rule: 6 },
   // rule 7: the two documented refusals, and only those
   { status: 200, body: { success: false, errorReason: "insufficient_funds" }, kind: "refused", rule: 7 },
   { status: 400, body: { success: false, errorReason: "policy" }, kind: "refused", rule: 7 },
@@ -467,6 +471,17 @@ test("B3 classifyVerify: only a 2xx with isValid:true proceeds; a 2xx without it
     if (v.kind === "invalid" || v.kind === "refused") assert.equal(v.error, r.text, `${label}: error`);
     if (v.kind === "failed") assert.equal(v.message, r.text, `${label}: message`);
   }
+});
+
+test("F4 (build review round 1) classifyVerify: an empty or blank string is no reason, so it never masks a real one in a later key, and alone it is 'none given'", () => {
+  const reasonOf = (body: Record<string, unknown>) => {
+    const v = classifyVerify(403, body);
+    return v.kind === "refused" ? v.error : `not refused: ${v.kind}`;
+  };
+  assert.equal(reasonOf({ invalidReason: "", errorReason: "real_reason" }), hubVerifyRefused(403, "real_reason"), "an empty invalidReason does not mask errorReason");
+  assert.equal(reasonOf({ invalidReason: "   ", error: "the error" }), hubVerifyRefused(403, "the error"), "a blank invalidReason does not mask error");
+  assert.equal(reasonOf({ errorReason: "\t\n", message: "the message" }), hubVerifyRefused(403, "the message"), "a blank errorReason does not mask message");
+  assert.equal(reasonOf({ invalidReason: "", errorReason: " " }), hubVerifyRefused(403, "none given"), "blank throughout is none given, never 'reason: '");
 });
 
 test("B3 classifyVerify: the reason is the first STRING among invalidReason, errorReason, error, message, clipped to 200 characters, else 'none given'", () => {

@@ -260,16 +260,19 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
       ...(tx ? { broadcastTx: tx } : {}),
     };
   }
-  // 6. A failure with no usable reason cannot be classified.
-  if (typeof reason !== "string" || reason.length === 0) {
-    return { kind: "unknown", rule: 6, message: `The facilitator answered /settle with HTTP ${status} and success: false but no reason (errorReason absent, empty or not a string), so the answer cannot be classified. ${SETTLE_UNKNOWN_TAIL}` };
+  // 6. A failure with no usable reason cannot be classified: errorReason absent,
+  //    not a string, or blank after trimming (build review round 1, F3: " "
+  //    establishes no recorded failure, so it must never release a reservation).
+  if (typeof reason !== "string" || reason.trim().length === 0) {
+    return { kind: "unknown", rule: 6, message: `The facilitator answered /settle with HTTP ${status} and success: false but no reason (errorReason absent, not a string, or blank), so the answer cannot be classified. ${SETTLE_UNKNOWN_TAIL}` };
   }
   // 7. The only refusals: "a recorded failure" (200) and "invalid input,
-  //    missing/invalid credentials, or a policy refusal" (400, 401, 403).
+  //    missing/invalid credentials, or a policy refusal" (400, 401, 403), each
+  //    with a reason that is not blank.
   if (
     body.success === false &&
     typeof reason === "string" &&
-    reason.length > 0 &&
+    reason.trim().length > 0 &&
     ((status === 200 && reason !== SETTLEMENT_PENDING) || status === 400 || status === 401 || status === 403)
   ) {
     const shownReason = clipReason(reason);
@@ -294,12 +297,13 @@ export type VerifyVerdict =
   | { kind: "failed"; rule: 5; message: string };
 
 const VERIFY_REASON_KEYS = ["invalidReason", "errorReason", "error", "message"] as const;
-// The first STRING among those keys (an empty one counts: the brief says "the
-// first string"), clipped to 200 characters, else "none given".
+// The first NON-BLANK string among those keys, clipped to 200 characters, else
+// "none given" (build review round 1, F4: an empty or blank string used to be
+// taken, masking a real reason in a later key and printing "reason: ").
 function verifyReason(body: Record<string, unknown>): string {
   for (const key of VERIFY_REASON_KEYS) {
     const v = body[key];
-    if (typeof v === "string") return v.slice(0, FACILITATOR_REASON_MAX);
+    if (typeof v === "string" && v.trim().length > 0) return v.slice(0, FACILITATOR_REASON_MAX);
   }
   return "none given";
 }

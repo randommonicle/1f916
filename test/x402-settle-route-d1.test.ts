@@ -399,6 +399,15 @@ test("F1: a /settle request that fails in transit answers 502 with the in-transi
   }
 });
 
+// F3 (build review round 1, both seats): a blank errorReason establishes no
+// recorded failure. Before the fix both answers below were rule-7 refusals and
+// released the listing, inviting a second payment.
+test("F3 on the pay route: success:false with a BLANK errorReason is no recorded failure -- at 200 and at 403 the reservation is kept", async () => {
+  for (const status of [200, 403]) {
+    await assertUnknownKeepsReservation({ label: `${status} with errorReason " "`, status, body: { success: false, errorReason: " " } });
+  }
+});
+
 test("F1 on the pay route: a /settle request that fails in transit answers settlement_unconfirmed and KEEPS the reservation", async () => {
   await assertUnknownKeepsReservation({ label: "a /settle that fails in transit", settle: { reject: TRANSIT }, inMessage: hubSettleTransit(TRANSIT) });
 });
