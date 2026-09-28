@@ -12,7 +12,17 @@ byte).
 
 ## Commit log
 
-(filled in per commit below, each with: what, the key decision, any deviation)
+| commit | what |
+|---|---|
+| `a519b161` | A1: CORS on both MCP doors (`withCors`), the missing `await` (`DEFERRED-MCP-DISPATCH-AWAIT` closed), preflight headers widened |
+| `9537b5bd` | A2: protocol version negotiation (`SUPPORTED_PROTOCOL_VERSIONS`, `negotiateProtocolVersion`), both doors' `initialize`, `serverInfo.title` |
+| `061b9a8a` | A3: `title` + `annotations` on all 22 `TOOLS` entries |
+| `06d9c097` | A4: `/api/search`, `/api/stats`, `/api/showhome/reply` added to `ROUTES`; `AUTH_LABEL.mixed` widened |
+| `ff0a249c` | A5: the 402/checks-first served-text correction on `/skill.md`, `/llms.txt` and the `/mcp` register tool's refusal; `FRONT_DOOR_TEMPLATE` deliberately untouched |
+| (this one) | A6: `scripts/deploy-mcp-listing-ready.ps1`, written and parsed, never run |
+
+Full detail, deviations and key decisions for each item are in that item's own
+section below.
 
 ## A1: CORS on both MCP doors, and the missing `await`
 
@@ -227,6 +237,54 @@ space between "checks" and "returns", say, would misparse it the same way the
 test's first draft did.
 
 ## A6: The deploy script
+
+**File list:**
+- `scripts/deploy-mcp-listing-ready.ps1` (new): worker-only, no migration, modelled
+  on `scripts/deploy-heartbeat-inbox.ps1` -- same helper shapes (`Stop-Here`,
+  `Format-ErrBody`, `Get-Json`, `Get-Flat`, `Get-Sha256Hex`, `Invoke-RideGet`), same
+  git/test pre-deploy gates, same `-DryRun`, same 12x5s propagation-poll-before-
+  riding pattern, `--max-time` on every `curl.exe`. Parsed with
+  `[System.Management.Automation.Language.Parser]::ParseFile`, 0 errors. **Never
+  run** (the commission's hard rule) -- written and parsed only.
+
+**Deviations from the precedent script, each a deliberate adaptation, not a
+drift:**
+1. **The checkout sanity check** (precedent: `Test-Path "src/inbox.ts"`) is
+   replaced with `Select-String -Path "src/mcp.ts" -Pattern
+   "SUPPORTED_PROTOCOL_VERSIONS"`. `src/inbox.ts` predates this wave (the
+   heartbeat+inbox wave shipped it) and would exist on `main` regardless of
+   whether A1-A5 ever landed -- it proves the wrong thing here. A2's own new
+   export is unique to this wave's own diff.
+2. **The propagation-poll signal** (precedent: poll `GET /api/inbox` from 404 to
+   200, since that wave added a brand-new route) has no equivalent here -- A1-A5
+   all edit EXISTING dispatch paths, adding no new one. Instead the script polls
+   `GET /api/surface`'s `skill.version` field from `1.0.1`/whatever it reads
+   before deploy to `1.0.2` after (A5(a)'s own version bump), tolerating a
+   transient parse failure per iteration as "not yet" rather than a hard stop
+   mid-poll (the precedent's raw-status-code poll has no JSON to fail to parse;
+   this one does, so it needed the extra tolerance).
+3. **A new helper, `Invoke-RidePost`**, `Invoke-RideGet`'s own shape widened for
+   a POST body and request headers -- needed because A1's CORS check and A2's
+   negotiation check both require a JSON-RPC POST with an `Origin` header and a
+   parsed response body, which the precedent script's all-GET ride never needed.
+4. **Wrap-tolerant matching for A5(b)'s served sentence**: `/llms.txt`'s new,
+   longer 402 sentence line-wraps across six lines instead of two (the same
+   fact `test/mcp-listing-served-text.test.ts` hit and fixed with `\s+`
+   regexes). The script reuses `Get-Flat` (whitespace already collapsed to
+   single spaces by `-replace '\s+', ' '`) rather than adding a second
+   flattening helper, so the same `[regex]::Escape("...")` pattern that would
+   read naturally off the served prose still matches regardless of exactly
+   where the server wrapped it.
+
+**Ride order** follows the brief's own list (A6's paragraph) exactly: 4a CORS +
+negotiation on `/mcp/read` initialize, 4b `/mcp/read` tools/list (title +
+`readOnlyHint:true` on every tool), 4c `/mcp` tools/list (`me` is
+`readOnlyHint:false`), 4d `/skill.md` version + Join sentence + `/api/surface`
+sha256 match, 4e `/llms.txt`'s corrected sentence, 4f `/api/surface` lists the
+three new routes, 4g `attest` still v5 with all four chains verified. 4h (not
+named individually in the brief, carried over from the precedent script's own
+closing habit) sweeps a handful of untouched surfaces for a plain 200, including
+the two new GET routes themselves.
 
 ## Annotations table (A3)
 
