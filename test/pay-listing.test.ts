@@ -400,6 +400,9 @@ test("execute: a 502 settlement_unconfirmed keeps the tombstone 'signing', rewri
   // docs/BRIEF-X402-SETTLE-HONESTY.md B2: since a pending answer IS read and is
   // not a verdict, the message no longer says the answer could not be read.
   assert.match(String(r.message), /did not receive a settlement verdict from the facilitator \(HTTP 502, settlement_unconfirmed\)/);
+  // The server's settle request may have failed in transit and never left, so
+  // the script claims no delivery either (build review round 2).
+  assert.ok(String(r.message).startsWith("The server did not receive a settlement verdict"), String(r.message));
   assert.match(String(r.message), /AMBIGUOUS/);
   assert.match(String(r.message), /DO NOT re-run/);
   const t = JSON.parse(store()!);

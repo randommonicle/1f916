@@ -80,11 +80,11 @@ In this order, first match wins. "Unknown" means the existing unknown-outcome pa
 4. `success: true`: settled if the status is 2xx; any other status with `success: true` is unknown.
 5. `success: false` and `errorReason === "settlement_pending"`: unknown. When `transaction` is a
    non-empty string, the log line carries it as `broadcast_tx` and the 502 message names it.
-6. `success: false` with `errorReason` absent, empty or not a string: unknown (not classifiable).
+6. `success: false` with `errorReason` absent, blank (empty or whitespace only after trimming) or not a string: unknown (not classifiable). (Amended after build review round 1: the brief said "empty"; a whitespace-only reason records no failure either.)
 7. A refusal ONLY in the two combinations PayAI documents as definitive (amended after CODEX round
    1, exchange `REVIEW_x402-settle-honesty-brief-2026-09-28.md`): HTTP **200** with
-   `success: false` and a non-empty string `errorReason` other than `settlement_pending` ("a
-   recorded failure"); or HTTP **400, 401 or 403** with `success: false` and a non-empty string
+   `success: false` and a non-blank string `errorReason` other than `settlement_pending` ("a
+   recorded failure"); or HTTP **400, 401 or 403** with `success: false` and a non-blank string
    `errorReason` ("invalid input, missing/invalid credentials, or a policy refusal"). It stays a
    refusal (the pay route releases its own reservation as today), and the 402 body's `error` names
    the facilitator's status and reason instead of the bare reason.
@@ -106,7 +106,10 @@ answer; a pending or unreadable one is not (x402.ts)". The `settlement_unconfirm
 not a verdict: change "and no settlement result was read (${reason})" to "and no settlement
 verdict was returned (${reason})". Make the matching one-phrase change in
 `scripts/pay-listing.mjs:616` ("could not read the facilitator's answer" becomes "did not receive
-a settlement verdict from the facilitator") and its test.
+a settlement verdict from the facilitator") and its test. (Amended after build review round 1: neither
+sentence now opens with a delivery claim. A `/settle` request that fails in transit may never have
+left, so the route says "No settlement verdict was returned for the settle request (${reason})" and
+the script "The server did not receive a settlement verdict from the facilitator (HTTP ...)".)
 
 **B2b. The operator's registration script (CODEX round 1, finding 2; pre-existing).** When the
 signed POST's `fetch` rejects, `scripts/register-maintainer.mjs:402-406` prints "The facilitator
@@ -122,15 +125,16 @@ landed. (`post-listing.mjs` and `pay-listing.mjs` already keep a tombstone and r
 leave them.)
 
 In all three registration scripts (`register-maintainer.mjs`, `lobby-sponsor.mjs`,
-`keyauth-ride.mjs`), on a rejected signed `fetch` AND on a second-leg 502 (the server's
-unknown-outcome answer), print the signed authorisation's `from`, `nonce` and `validBefore`, and
+`keyauth-ride.mjs`), on a rejected signed `fetch` AND on any second-leg answer that is not a
+verdict (amended after build review round 1: every 5xx, every status other than the expected 201
+that is not a 4xx, and a body that cannot be read; a 4xx stays a refusal), print the signed authorisation's `from`, `nonce` and `validBefore`, and
 this warning (hub words):
 
 `Outcome unknown: the payment may have settled. Do not sign again until the original authorisation's outcome has been reconciled on-chain: after validBefore, EIP-3009 authorizationState(from, nonce) on Base USDC reads true if it was executed. Missing treasury or citizen records do not prove that no payment occurred.`
 
 Use one shared helper if the scripts already share a module (`lobby-sponsor.mjs` and
 `keyauth-ride.mjs` import from `register-maintainer.mjs`); otherwise identical text. Tests: a
-rejected second `fetch` and a second-leg 502 each print the warning and the three identifiers, and
+rejected second `fetch`, a second-leg 5xx and an unreadable second-leg body each print the warning and the three identifiers, and
 never "safe to"; a test that asserted only the absence of "safe to" would pass with the warning
 deleted, so assert the warning itself.
 

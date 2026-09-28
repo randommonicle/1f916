@@ -138,7 +138,10 @@ async function assertUnknownKeepsReservation(c: UnknownCase): Promise<void> {
     assert.equal(res.status, 502, `${c.label}: 502, not a 402 that releases`);
     const body = (await res.json()) as { error: string; message: string; wallet_row_id: number; wallet_row_hash: string };
     assert.equal(body.error, "settlement_unconfirmed", c.label);
-    assert.ok(body.message.startsWith("The settle request was sent and no settlement verdict was returned ("), `${c.label}: ${body.message}`);
+    // The route's own sentence claims no delivery: a request that failed in
+    // transit may never have left (build review round 2, the builder's point).
+    assert.ok(body.message.startsWith("No settlement verdict was returned for the settle request ("), `${c.label}: ${body.message}`);
+    assert.equal(body.message.includes("was sent and"), false, `${c.label}: the old delivery claim is gone: ${body.message}`);
     if (c.inMessage !== undefined) assert.ok(body.message.includes(c.inMessage), `${c.label}: the message carries the facilitator-side reason: ${body.message}`);
     if (c.namesTx) assert.ok(body.message.includes(`It reports the broadcast transaction ${PENDING_TX}.`), `${c.label}: the message names the broadcast transaction: ${body.message}`);
     else assert.equal(body.message.includes("broadcast transaction"), false, `${c.label}: no broadcast transaction is claimed`);

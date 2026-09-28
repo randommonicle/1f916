@@ -472,3 +472,14 @@ named.
 | M73 | a blank reason is quoted as blank (F5) | blank -> "no errorReason" | x402.test: 25 / 1 | F6: `HTTP 200 {... " "}: the message, exactly` | byte-exact |
 | M74 | a non-string reason is quoted as one (F5) | not-a-string -> "no errorReason" | x402.test: 25 / 1 | F6: `HTTP 400 {... 42}: the message, exactly` | byte-exact |
 | M75 | the quoted reason is clipped to 200 (F5) | `clipReason(v)` -> `v` | x402.test: 25 / 1 | F6: `HTTP 429 {... "rrrr..."}: the message, exactly` | byte-exact |
+
+## Note: hub fix before build review round 2 (2026-09-28 evening session)
+
+The builder's open point: the pay route's `settlement_unconfirmed` message opened "The settle request was sent and ..." even when the request failed in transit (F1's case), where it may never have left. Hub wording, applied by the hub: the route now opens "No settlement verdict was returned for the settle request (${reason})." (`src/listings.ts`), and `scripts/pay-listing.mjs`'s `leg2_unconfirmed` message opens "The server did not receive a settlement verdict from the facilitator (HTTP ...)". The other "was sent" sentences in `src/x402.ts` stay: each is served only after an answer arrived, so the request was delivered.
+
+| # | guards | mutation | tests (pass / fail) | failing assertion | restore |
+|---|---|---|---|---|---|
+| M76 | the route claims no delivery | the pre-fix sentence (the tests changed first, run against the old source) | route + pay-listing: red on the in-transit case and every unknown case | `a /settle that fails in transit: The settle request was sent and ...` (startsWith) | the new source; 68 / 0 |
+| M77 | the script claims no delivery | the pre-fix script sentence (same run) | pay-listing: red | `startsWith("The server did not receive a settlement verdict")` | the new source; 68 / 0 |
+
+The brief is amended in its three stale places (rule 6 "empty" becomes "blank after trimming", rule 7 "non-empty" becomes "non-blank"; B2's closing sentence now records this fix; B2b's "a second-leg 502" becomes every 5xx, every non-201 non-4xx status and an unreadable body, a 4xx staying a refusal), each marked "amended after build review round 1".
