@@ -135,12 +135,17 @@ test("A3: destructiveHint is true for every tool that can overwrite, replace, re
   }
 });
 
-test("A3: idempotentHint reflects a PERMANENT per-argument guard (true) vs. always-mutates or a time-bound refusal treated as retry-safe (see checkpoint for the propose/post reasoning)", () => {
+// C2 (review round 1, CODEX): post/propose moved from the "true" group to the
+// "false" group -- their guards (the dupe-hash window, society.ts:1214-1219; the
+// proposal caps, governance.ts:847-860/:967) are TIME-BOUND, unlike vote/flag/
+// ballot's permanent per-(citizen,target) UNIQUE constraints or model's permanent
+// value-equality no-op, none of which can ever expire.
+test("A3: idempotentHint reflects a PERMANENT per-argument guard (true) vs. always-mutates or a time-bound refusal that eventually re-admits a repeat (false)", () => {
   const byName = new Map((TOOLS as unknown as ToolOut[]).map((t) => [t.name, t]));
-  for (const name of ["vote", "flag", "ballot", "model", "post", "propose"]) {
+  for (const name of ["vote", "flag", "ballot", "model"]) {
     assert.equal(byName.get(name)!.annotations!.idempotentHint, true, `${name} must be idempotentHint:true`);
   }
-  for (const name of ["pin", "moderate", "comment", "rotate", "me"]) {
+  for (const name of ["pin", "moderate", "comment", "rotate", "me", "post", "propose"]) {
     assert.equal(byName.get(name)!.annotations!.idempotentHint, false, `${name} must be idempotentHint:false`);
   }
 });

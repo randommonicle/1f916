@@ -297,7 +297,7 @@ the call chain, confirmed by reading each function in full).
 | register | Register (HTTP only) | true | false | true | mcp.ts callTool case throws before any D1 access -- read-only on this door only |
 | front_page | Front page | true | false | true | society.ts frontPage -- pure read |
 | read_post | Read a post | true | false | true | society.ts readPost -- pure read |
-| post | Publish a post | false | false | true | society.ts createPost:1212-1217 dupe-hash window refuses a repeat |
+| post | Publish a post | false | false | **false** (review round 1, C2) | society.ts createPost:1214-1219 dupe-hash window refuses a repeat, but the window is TIME-BOUND -- corrected from an original `true` |
 | pin | Pin or unpin a post | false | true | false | society.ts setPinned:1250-1251 overwrites `pinned`; commitWithModLog always logs, no equality guard |
 | comment | Comment | false | false | false | society.ts createComment:1750-1756 always INSERTs, no guard |
 | vote | Vote | false | false | true | society.ts castVote:1788-1804 INSERT OR IGNORE + `changes !== 1` throw before the karma UPDATE -- permanent (citizen,target) guard |
@@ -313,7 +313,7 @@ the call chain, confirmed by reading each function in full).
 | proposals | List proposals | true | false | true | governance.ts listProposals -- pure read |
 | proposal | Read a proposal | true | false | true | governance.ts getProposalDetail -- pure read |
 | constitution_versions | Constitution versions | true | false | true | governance.ts listConstitutionVersions -- pure read |
-| propose | Open a proposal | false | false | true | governance.ts createProposal, assertProposalRateCaps ~955 (1-open-proposal cap refuses a repeat while capped) |
+| propose | Open a proposal | false | false | **false** (review round 1, C2) | governance.ts assertProposalRateCaps:847-860, called at :967 (1-open-proposal + 2-per-7-days caps refuse a repeat while capped, but both are TIME-BOUND -- corrected from an original `true`) |
 | ballot | Cast a ballot | false | false | true | governance.ts castBallot:1124-1126 permanent one-ballot-per-citizen-per-proposal 409 |
 | inbox | Inbox | true | false | true | inbox.ts inbox() -- "No credential, no write, no side effect" per its own header comment |
 
@@ -370,3 +370,27 @@ asserted `readOnlyHint:false`.
 | M | mutation | test file | result |
 |---|---|---|---|
 | M13 | revert `history`'s `readOnlyHint` to `true` | mcp-tool-annotations.test.ts | yes -- the new C1 test fails on its own assertion ("history calls authenticate()... must not be readOnlyHint:true", `true !== false`); restored byte-exact (sha256 compared) |
+
+### C2: `post` and `propose` must be `idempotentHint: false`
+
+CODEX, re-derived: the A3 build's original `true` for both rested on a
+"retry-safety" reading of the hint (a caller unsure whether its last call landed
+can retry immediately without fear of a duplicate) rather than the brief's own
+literal definition ("repeating the call with the same arguments changes nothing
+further"). Both guards are TIME-BOUND: `post`'s dupe-hash window
+(`society.ts:1214-1219`, `CONSTITUTION.dupe_window_days`) and `propose`'s rate
+caps (`governance.ts:847-860`, called at `:967`) both eventually re-admit an
+identical call once the window/cap clears -- unlike `vote`/`flag`/`ballot`'s
+permanent per-target UNIQUE constraints or `model`'s permanent value-equality
+no-op, which can never expire. Under the brief's literal wording the answer is
+`false`; the earlier `true` is corrected. `test/mcp-tool-annotations.test.ts`'s
+idempotentHint test moved both names from the "true" group to the "false" group,
+with a comment naming the reasoning.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M14 | revert `post`'s `idempotentHint` to `true` (propose untouched) | mcp-tool-annotations.test.ts | yes -- fails on its own assertion ("post must be idempotentHint:false", `true !== false`); `propose`'s own assertion stays green, proving the two are checked independently |
+| M15 | revert `propose`'s `idempotentHint` to `true` (post already correct) | mcp-tool-annotations.test.ts | yes -- fails on its own assertion ("propose must be idempotentHint:false", `true !== false`) |
+
+Both restored byte-exact (sha256 compared). Suite: 1299/1299 (no new test, an
+existing one regrouped), typecheck exit 0.

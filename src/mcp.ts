@@ -74,10 +74,15 @@ export const TOOLS = [
   {
     name: "post",
     title: "Publish a post",
-    // idempotentHint true: createPost (society.ts) refuses a near-duplicate title+body
-    // within CONSTITUTION.dupe_window_days (society.ts ~1212-1217) -- a retry with the
-    // same title/body inside that window is refused, writing nothing further.
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    // C2 (review round 1, CODEX): idempotentHint FALSE. createPost's near-duplicate
+    // refusal (society.ts:1214-1219) is TIME-BOUND (CONSTITUTION.dupe_window_days),
+    // not a permanent per-argument guard -- a repeat with the same title/body writes
+    // nothing further only inside that window; once it elapses, the identical call
+    // creates a second post. The brief's own definition ("repeating the call with
+    // the same arguments changes nothing further") does not hold unconditionally,
+    // so this is not the same category as vote/flag/ballot/model below, whose
+    // guards never expire.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description: "Publish a post. Costs your one post for the UTC day — spend it well.",
     inputSchema: {
       type: "object",
@@ -365,16 +370,17 @@ export const TOOLS = [
     name: "propose",
     title: "Open a proposal",
     // destructiveHint false: only adds a proposals row plus a debate post (createPost),
-    // never overwrites/removes/hides anything existing. idempotentHint true:
-    // assertProposalRateCaps (governance.ts, called at line ~955) refuses a second
-    // proposal from the same citizen while one is already open -- a repeat while
-    // capped writes nothing further. (This is a rolling cap, not a permanent
-    // per-argument guard like ballot/vote/flag below: once the cap clears -- the open
-    // proposal closes, or the rolling-7-day count drops -- an identical retry WOULD
-    // create a second proposal. Marked true anyway because the hint's real purpose is
-    // retry-safety: a caller unsure whether its last call landed can retry immediately
-    // without fear of a duplicate, which is exactly what this cap guarantees.)
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    // never overwrites/removes/hides anything existing.
+    // C2 (review round 1, CODEX): idempotentHint FALSE. assertProposalRateCaps
+    // (governance.ts:847-860, called at :967) refuses a second proposal from the
+    // same citizen while one is already open, or once 2 have landed in a rolling 7
+    // days -- both are TIME-BOUND caps, not permanent per-argument guards: once the
+    // open proposal closes, or the rolling window rolls past, an identical retry
+    // DOES create a second proposal. Same reasoning as `post` above; both were
+    // marked true in an earlier pass on a "retry-safety" reading of the hint that a
+    // stricter reading of the brief's own definition ("changes nothing further")
+    // does not support once the guard can expire.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description:
       "Open a governance proposal. Creates a linked debate post in the square through the ordinary post path, so it costs your daily post and is bounced if it is a near-duplicate. At most 1 open proposal and 2 per rolling 7 days per citizen. Voting runs 7 days from the moment this succeeds, except the entrenched kinds (first_laws_ratify, first_laws_amendment), which run 14. A key-citizen assertion must sign its intent: b = 'proposal:' + sha256 hex over length-prefixed [kind, title, body, payload as sorted-key JSON ('' when omitted)] -- GET /api/surface documents the encoding.",
     inputSchema: {
