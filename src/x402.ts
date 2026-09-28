@@ -105,11 +105,29 @@ interface FacilitatorAnswer {
 }
 
 async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown): Promise<FacilitatorAnswer> {
-  const res = await fetch(`${env.FACILITATOR_URL}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // A fetch that REJECTS is caught here, on both paths (build review round 1,
+  // CODEX HIGH, exchange/REVIEW_x402-settle-honesty-build-2026-09-28.md). A
+  // /settle request can be delivered, received and settled with only its
+  // answer lost, so a rejection there is an unknown outcome: a SocietyError
+  // 502, which settleOrThrow logs as x402_settle_outcome_unknown and which
+  // handlePayListing answers with settlement_unconfirmed, keeping its
+  // reservation. It used to escape as the runtime's own error, which the router
+  // served as a generic 500 on register, patron and listing create. Before
+  // /verify answers, nothing that could settle has been sent.
+  let res: Response;
+  try {
+    res = await fetch(`${env.FACILITATOR_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    const reason = clipReason(e instanceof Error ? e.message : String(e));
+    if (path === "/settle") {
+      throw new SocietyError(502, `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`);
+    }
+    throw new SocietyError(502, `The payment facilitator could not be reached to verify this payment (${reason}). No money moved: nothing that could settle was sent. Try again later.`);
+  }
   // The facilitator answers malformed payloads with 4xx/5xx JSON; only an
   // unparseable response means it is actually down. The wording is
   // path-aware (2026-09-19 exchange, item 4): before /settle nothing was sent

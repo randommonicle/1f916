@@ -194,8 +194,9 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   //
   // DEFERRED-LANDED-PAYMENT-NO-SEAT (docs/BRIEF-X402-SETTLE-HONESTY.md B5; Ben's
   // decision): an unknown settle outcome (x402.ts settleOrThrow: pending, 409,
-  // 5xx, an unreadable body and the rest) propagates out of this call as a 502,
-  // before the ledger line and before register(). When such a registration's
+  // 5xx, a request that failed in transit, an unreadable body and the rest)
+  // propagates out of this call as a 502, before the ledger line and before
+  // register(). When such a registration's
   // money later lands, the payer has paid with no seat, and no route completes
   // the registration from the landed payment. The operator sees
   // x402_settle_outcome_unknown in the log and a gap between the treasury's

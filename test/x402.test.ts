@@ -395,6 +395,48 @@ test("B2 through payAndSettle: a pending /settle is thrown as a 502 carrying the
   assert.equal("broadcast_tx" in noTx.events[0]!, false, "no broadcast transaction is claimed when none was reported");
 });
 
+// ---------- F1 (build review round 1, CODEX HIGH): a facilitator request that fails in transit ----------
+
+test("F1 through payAndSettle: a /settle fetch that REJECTS is a 502 with the hub's in-transit message, logged exactly once as x402_settle_outcome_unknown; a /verify fetch that rejects is a 502 'could not be reached', /settle is never called, and no settle-outcome line is written", async () => {
+  const reqs = testRequirements();
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const good = btoa(JSON.stringify(payloadFor(authFor(reqs))));
+  const run = async (rejectOn: "/verify" | "/settle") => {
+    const lines: string[] = [];
+    let settles = 0;
+    globalThis.fetch = (async (url: unknown) => {
+      const href = String(url);
+      if (href.endsWith("/settle")) settles++;
+      if (href.endsWith(rejectOn)) throw new TypeError("fetch failed: other side closed");
+      return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    let thrown: unknown;
+    try {
+      await payAndSettle(FAKE_ENV, new Request("https://example.test/api/register", { method: "POST", headers: { "X-PAYMENT": good } }), reqs);
+    } catch (e) {
+      thrown = e;
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+    const events = lines.map((l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return null; } }).filter((e) => e?.event === "x402_settle_outcome_unknown");
+    return { thrown, events, settles };
+  };
+  const settleTransit = "The request to the facilitator's /settle failed in transit (fetch failed: other side closed); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.";
+  const s = await run("/settle");
+  assert.ok(s.thrown instanceof SocietyError && s.thrown.status === 502, "a SocietyError 502, never the runtime's own error (a generic 500 at the router)");
+  assert.equal((s.thrown as SocietyError).message, settleTransit);
+  assert.equal(s.events.length, 1, "exactly one unknown-outcome line");
+  assert.equal(s.events[0]!.reason, settleTransit);
+  const v = await run("/verify");
+  assert.ok(v.thrown instanceof SocietyError && v.thrown.status === 502, "a SocietyError 502");
+  assert.equal((v.thrown as SocietyError).message, "The payment facilitator could not be reached to verify this payment (fetch failed: other side closed). No money moved: nothing that could settle was sent. Try again later.");
+  assert.equal(v.settles, 0, "/settle is never called after a /verify that failed in transit");
+  assert.equal(v.events.length, 0, "no settle-outcome line: nothing was sent that could settle");
+});
+
 // ---------- B3 (docs/BRIEF-X402-SETTLE-HONESTY.md): classifyVerify ----------
 
 const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.`;

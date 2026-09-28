@@ -278,6 +278,36 @@ served literal fails the guard). No test or source changed in this commit.
   live service. No `*.local.*` file and no `.env` was opened. The D-018 gate and the deploy are next,
   and are not this builder's.
 
+## Build review round 1 (exchange/REVIEW_x402-settle-honesty-build-2026-09-28.md)
+
+Six fixes (F1-F6) from the coordinator; the hub verified F1 and F2 at source. Same rules; red-proof
+rows M48 onward.
+
+### Commit R1: F1, a facilitator request that fails in transit (server side)
+
+**What.** `facilitator()` catches a rejected fetch on both paths. `/settle`: `SocietyError(502, "The
+request to the facilitator's /settle failed in transit (<reason>); it may have been received and
+settled. Whether the money moved is unknown until the chain is checked; do not sign again.")`, which
+`settleOrThrow` logs as `x402_settle_outcome_unknown` and `handlePayListing` answers with
+`settlement_unconfirmed`, keeping its reservation. `/verify`: `SocietyError(502, "The payment
+facilitator could not be reached to verify this payment (<reason>). No money moved: nothing that could
+settle was sent. Try again later.")`. Both are the hub's words; `<reason>` is the runtime's message,
+clipped to 200. Before this, the rejection escaped as the runtime's own error and the router served its
+generic 500 on register, patron and listing create (CODEX HIGH; my own report's point (e)).
+
+**Tests.** Route: register, patron and listing create answer 502 with the in-transit message and write
+nothing (citizens, ledger, reg_log, listings); listing pay answers `settlement_unconfirmed`, keeps its
+reservation and pinned pair, and a retry never reaches `/settle`; a `/verify` in transit answers 502 on
+register and pay, never reaches `/settle`, writes and reserves nothing. Unit: through `payAndSettle`,
+one log line with the in-transit reason; none for `/verify`. `answerOf` now maps a non-`SocietyError`
+to the router's own generic 500 (`src/index.ts:519-521`), so a mutation that lets the runtime's error
+escape fails the test's assertion rather than the test. `npm test`: pass 1296, fail 0. Typecheck 0.
+
+**Unchanged wording, noted.** The pay route's own 502 still opens "The settle request was sent and no
+settlement verdict was returned (...)". For a request that failed in transit, "was sent" is stronger
+than the inner reason ("may have been received"). That sentence is the brief's B2 wording and predates
+this fix for the rejected-fetch case, so it is left for the hub.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -335,3 +365,8 @@ named.
 | M45 | only an unknown outcome prints | `response.status === 502` -> `!== 999` (every outcome reports) | B2b test: 3 / 1 | positive control: `HTTP 201`, outcome `unknown` vs `answered` | byte-exact |
 | M46 | the helper sends the signed header | `"X-PAYMENT": paymentHeader` dropped from the helper's fetch | B2b test: 2 / 2 | positive control: `X-PAYMENT` undefined vs `SIGNED-HEADER`; wiring: `register-maintainer.mjs: no X-PAYMENT request outside the helper` | byte-exact |
 | M47 | the new PROSE_ALLOW entry is exact | a full stop added to the public_key description | secret-literal-guard: 5 / 1 | `Unreviewed secret-bearing literal(s) in src/` (the changed literal is an offender) | byte-exact |
+| M48 | a rejected fetch is caught (F1) | `throw e;` ahead of the new catch body (the rejection escapes, as before) | route + x402.test: 31 / 4 | register: `register: the in-transit 502` (the router's generic 500); pay: `the message carries the facilitator-side reason`; verify: `register: the verify in-transit 502`; unit: `a SocietyError 502, never the runtime's own error` | byte-exact |
+| M49 | the /settle in-transit wording (F1) | "it may have been received and settled." -> "it was not received." | route + x402.test: 32 / 3 | register, pay and unit: strictEqual / includes on the hub's message | byte-exact |
+| M50 | a /settle in transit never says "no money moved" (F1) | the catch's `path === "/settle"` -> `!==` (the two messages swapped) | route + x402.test: 31 / 4 | register: `register: the in-transit 502` (it served "could not be reached ... No money moved"); verify and unit likewise | byte-exact |
+| M51 | the in-transit outcome is logged (F1) | the log event renamed | x402.test: 21 / 3 | F1 unit: `exactly one unknown-outcome line`, 0 !== 1 (the L1 and B2 log tests also red) | byte-exact |
+| M52 | the /verify in-transit wording (F1) | "could not be reached to verify this payment" -> "was unreachable" | route + x402.test: 33 / 2 | register: `register: the verify in-transit 502`; unit strictEqual | byte-exact |

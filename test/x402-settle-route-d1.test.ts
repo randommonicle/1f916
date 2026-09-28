@@ -40,7 +40,9 @@ function callWorker(request: Request, env: Env): Promise<Response> {
   return (worker.fetch as unknown as (r: Request, e: Env, c: unknown) => Promise<Response>)(request, env, ctx);
 }
 
-type Answer = { status: number; body: unknown };
+// An answer with a status and a JSON body, or a fetch that REJECTS with the
+// given message (a request that failed in transit).
+type Answer = { status: number; body: unknown } | { reject: string };
 const SETTLED: Answer = { status: 200, body: { success: true, payer: "0x00000000000000000000000000000000000000fa", transaction: "0x" + "ab".repeat(32) } };
 
 // Each call answers with the given status and JSON body; the defaults are a
@@ -48,7 +50,10 @@ const SETTLED: Answer = { status: 200, body: { success: true, payer: "0x00000000
 function stubFacilitator(answers: { verify?: Answer; settle?: Answer } = {}) {
   const original = globalThis.fetch;
   const calls = { verify: 0, settle: 0 };
-  const respond = (a: Answer) => new Response(JSON.stringify(a.body), { status: a.status, headers: { "content-type": "application/json" } });
+  const respond = (a: Answer) => {
+    if ("reject" in a) throw new TypeError(a.reject);
+    return new Response(JSON.stringify(a.body), { status: a.status, headers: { "content-type": "application/json" } });
+  };
   globalThis.fetch = (async (url: unknown) => {
     const href = String(url);
     if (href === `${FACILITATOR_URL}/verify`) {
@@ -105,7 +110,9 @@ function listingRow(f: PayFixture) {
   return { ...(f.d1.raw.prepare("SELECT status, paying_since, paying_wallet_row_id, paying_wallet_row_hash FROM listings WHERE id = ?").get(f.listingId) as { status: string; paying_since: number | null; paying_wallet_row_id: number | null; paying_wallet_row_hash: string | null }) };
 }
 
-type UnknownCase = { label: string; status: number; body: Record<string, unknown>; namesTx?: boolean };
+// `settle` is the /settle answer; `inMessage`, when given, must appear in the
+// served settlement_unconfirmed message.
+type UnknownCase = { label: string; status?: number; body?: Record<string, unknown>; settle?: Answer; namesTx?: boolean; inMessage?: string };
 
 // Brief B6's list.
 const UNKNOWN_SETTLES: UnknownCase[] = [
@@ -125,13 +132,14 @@ const UNKNOWN_SETTLES: UnknownCase[] = [
 // at the reservation before it can reach /settle again.
 async function assertUnknownKeepsReservation(c: UnknownCase): Promise<void> {
   const f = await payFixture();
-  const stub = stubFacilitator({ settle: { status: c.status, body: c.body } });
+  const stub = stubFacilitator({ settle: c.settle ?? { status: c.status!, body: c.body } });
   try {
     const res = await handlePayListing(payReq(f), f.env, f.funder, f.listingId);
     assert.equal(res.status, 502, `${c.label}: 502, not a 402 that releases`);
     const body = (await res.json()) as { error: string; message: string; wallet_row_id: number; wallet_row_hash: string };
     assert.equal(body.error, "settlement_unconfirmed", c.label);
     assert.ok(body.message.startsWith("The settle request was sent and no settlement verdict was returned ("), `${c.label}: ${body.message}`);
+    if (c.inMessage !== undefined) assert.ok(body.message.includes(c.inMessage), `${c.label}: the message carries the facilitator-side reason: ${body.message}`);
     if (c.namesTx) assert.ok(body.message.includes(`It reports the broadcast transaction ${PENDING_TX}.`), `${c.label}: the message names the broadcast transaction: ${body.message}`);
     else assert.equal(body.message.includes("broadcast transaction"), false, `${c.label}: no broadcast transaction is claimed`);
     assert.equal(body.wallet_row_id, f.row.id, c.label);
@@ -318,7 +326,8 @@ async function answerOf(p: Promise<Response>): Promise<{ status: number; error: 
     return { status: res.status, error: String(((await res.json()) as { error?: unknown }).error) };
   } catch (e) {
     if (e instanceof SocietyError) return { status: e.status, error: e.message };
-    throw e;
+    // Anything else is what src/index.ts's catch serves: its generic 500.
+    return { status: 500, error: "Internal error. The society apologizes." };
   }
 }
 
@@ -333,6 +342,89 @@ test("B3 on the pay route: a 403 or a 503 from /verify never reserves the listin
       assert.deepEqual(await answerOf(handlePayListing(payReq(f), f.env, f.funder, f.listingId)), c.answer, `${c.label}: the route's answer`);
       assert.equal(stub.calls.settle, 0, `${c.label}: /settle is never called`);
       assert.deepEqual(listingRow(f), { status: "open", paying_since: null, paying_wallet_row_id: null, paying_wallet_row_hash: null }, `${c.label}: never reserved`);
+    } finally {
+      stub.restore();
+      f.d1.close();
+    }
+  }
+});
+
+// ---------- F1 (build review round 1, CODEX HIGH): a facilitator request that fails in transit ----------
+
+const TRANSIT = "fetch failed: other side closed";
+// The hub's words, typed here rather than imported.
+const hubSettleTransit = (reason: string) => `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`;
+const hubVerifyTransit = (reason: string) => `The payment facilitator could not be reached to verify this payment (${reason}). No money moved: nothing that could settle was sent. Try again later.`;
+
+function listingCreateRequest(): Request {
+  const bounty = 1000;
+  return new Request("https://example.test/api/listing", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(computeListingFeeCents(bounty))) },
+    body: JSON.stringify({
+      title: "Review my auth middleware",
+      description: "Stuck on token refresh, please review for race conditions",
+      acceptance_condition: "a reviewer identifies at least one real correctness issue or confirms none exist",
+      bounty_cents: bounty,
+      expires_at: Date.now() + 7 * 86_400_000,
+    }),
+  });
+}
+const written = (d1: LocalD1) => ({ citizens: count(d1, "citizens"), ledger: count(d1, "ledger"), reg: count(d1, "reg_log"), listings: count(d1, "listings") });
+
+test("F1: a /settle request that fails in transit answers 502 with the in-transit message on register, patron and listing create -- never the router's generic 500 -- and writes nothing", async () => {
+  const doors: { label: string; call: (d1: LocalD1, funder: { id: number; handle: string }) => Promise<Response> }[] = [
+    { label: "register", call: (d1) => callWorker(registerReq("transit-payer"), testEnv(d1)) },
+    {
+      label: "patron",
+      call: (d1) => callWorker(new Request("https://example.test/api/patron", { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(TREASURY_ADDRESS, "1000000") }, body: JSON.stringify({ message: "hello" }) }), testEnv(d1)),
+    },
+    { label: "listing create", call: (d1, funder) => handleCreateListing(listingCreateRequest(), testEnv(d1), funder) },
+  ];
+  for (const door of doors) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: { reject: TRANSIT } });
+    try {
+      // The listing door's funder exists before the snapshot, so every door is held to the same "nothing written".
+      const funderId = insertCitizen(d1);
+      const funder = { ...(d1.raw.prepare("SELECT id, handle FROM citizens WHERE id = ?").get(funderId) as { id: number; handle: string }) };
+      const before = written(d1);
+      assert.deepEqual(await answerOf(door.call(d1, funder)), { status: 502, error: hubSettleTransit(TRANSIT) }, `${door.label}: the in-transit 502`);
+      assert.equal(stub.calls.settle, 1, `${door.label}: the settle request was attempted`);
+      assert.deepEqual(written(d1), before, `${door.label}: no citizen, ledger line, reg_log row or listing is written`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("F1 on the pay route: a /settle request that fails in transit answers settlement_unconfirmed and KEEPS the reservation", async () => {
+  await assertUnknownKeepsReservation({ label: "a /settle that fails in transit", settle: { reject: TRANSIT }, inMessage: hubSettleTransit(TRANSIT) });
+});
+
+test("F1: a /verify request that fails in transit answers 502 'could not be reached' on register and on the pay route; /settle is never called, nothing is written and nothing is reserved", async () => {
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ verify: { reject: TRANSIT } });
+    try {
+      const before = written(d1);
+      assert.deepEqual(await answerOf(callWorker(registerReq("verify-transit"), testEnv(d1))), { status: 502, error: hubVerifyTransit(TRANSIT) }, "register: the verify in-transit 502");
+      assert.equal(stub.calls.verify, 1, "register: /verify was attempted");
+      assert.equal(stub.calls.settle, 0, "register: /settle is never called");
+      assert.deepEqual(written(d1), before, "register: nothing is written");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  {
+    const f = await payFixture();
+    const stub = stubFacilitator({ verify: { reject: TRANSIT } });
+    try {
+      assert.deepEqual(await answerOf(handlePayListing(payReq(f), f.env, f.funder, f.listingId)), { status: 502, error: hubVerifyTransit(TRANSIT) }, "pay: the verify in-transit 502");
+      assert.equal(stub.calls.settle, 0, "pay: /settle is never called");
+      assert.deepEqual(listingRow(f), { status: "open", paying_since: null, paying_wallet_row_id: null, paying_wallet_row_hash: null }, "pay: never reserved");
     } finally {
       stub.restore();
       f.d1.close();
