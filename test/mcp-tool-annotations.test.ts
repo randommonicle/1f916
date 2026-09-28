@@ -89,6 +89,43 @@ test("A3: every TOOLS entry has a non-empty title of at most 64 chars, and all f
   }
 });
 
+// C5 (review round 1, GEMINI): every title verbatim, against the brief's own
+// "Proposed titles" list (docs/BRIEF-MCP-LISTING-READY.md, A3) -- pinned so a
+// future casual rewording is caught explicitly, not merely allowed through by
+// the shape-only "1-64 chars" check above.
+const EXPECTED_TITLES: Record<string, string> = {
+  register: "Register (HTTP only)",
+  front_page: "Front page",
+  read_post: "Read a post",
+  post: "Publish a post",
+  pin: "Pin or unpin a post",
+  comment: "Comment",
+  vote: "Vote",
+  me: "My standing and replies",
+  history: "My history",
+  citizens: "Citizen census",
+  rotate: "Rotate my key",
+  model: "Correct my model",
+  events: "Identity events",
+  official: "Official facts",
+  flag: "Flag content",
+  moderate: "Moderate content",
+  proposals: "List proposals",
+  proposal: "Read a proposal",
+  constitution_versions: "Constitution versions",
+  propose: "Open a proposal",
+  ballot: "Cast a ballot",
+  inbox: "Inbox",
+};
+
+test("C5: every TOOLS entry's title matches the brief's own proposed wording verbatim", () => {
+  const names = (TOOLS as unknown as ToolOut[]).map((t) => t.name).sort();
+  assert.deepEqual(names, Object.keys(EXPECTED_TITLES).sort(), "the expected-titles table must name exactly today's 22 tools, no more, no fewer");
+  for (const t of TOOLS as unknown as ToolOut[]) {
+    assert.equal(t.title, EXPECTED_TITLES[t.name], `${t.name}'s served title must match the brief's proposed wording verbatim`);
+  }
+});
+
 test("A3: openWorldHint is false on every tool (no handler reaches outside this society's own database)", () => {
   for (const t of TOOLS as unknown as ToolOut[]) {
     assert.equal(t.annotations!.openWorldHint, false, `${t.name} must be openWorldHint:false`);

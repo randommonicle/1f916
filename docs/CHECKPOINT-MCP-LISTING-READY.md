@@ -440,3 +440,24 @@ new field, not membership.
 | M17 | remove `supported_protocol_versions` entirely | discovery.test.ts | yes -- fails on its own `deepEqual` ("must be the whole constant, not a hand-copied subset", actual `undefined`) |
 
 Both restored byte-exact (sha256 compared). Suite: 1299/1299, typecheck exit 0.
+
+### C5: pin verbatim titles; confirm serverInfo.title and /mcp/read title+readOnlyHint coverage
+
+GEMINI asked for three things. Two were already covered by earlier commits,
+checked directly rather than assumed: `serverInfo.title` on both doors'
+`initialize` is asserted in `test/mcp-protocol-version.test.ts` ("A2:
+serverInfo.title distinguishes the two doors", from A2's own commit);
+`/mcp/read`'s `tools/list` carrying a title and `readOnlyHint:true` on every
+tool is asserted in `test/mcp-tool-annotations.test.ts` ("A3: tools/list on
+/mcp/read carries titles and annotations..."), from A3's own commit. Neither
+needed anything new. The third -- all 22 tool titles verbatim, a
+name-to-title table -- did not exist: `test/mcp-tool-annotations.test.ts`
+gains `EXPECTED_TITLES` (the brief's own "Proposed titles" list, A3, which
+the build used unmodified) and a test asserting the table names exactly
+today's 22 tools and every served title matches verbatim.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M18 | rename `vote`'s title from `"Vote"` to `"Cast a vote"` | mcp-tool-annotations.test.ts | yes -- fails on its own assertion ("vote's served title must match the brief's proposed wording verbatim", actual `'Cast a vote'`, expected `'Vote'`) |
+
+Restored byte-exact (sha256 compared). Suite: 1300/1300 (one new test), typecheck exit 0.
