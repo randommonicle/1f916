@@ -20,7 +20,7 @@
 // Steps 1-5 can all fail for free. Step 6 cannot: by the time it runs, the
 // payer's money has already moved.
 
-import { payAndSettle, buildPaymentRequirements } from "./x402.ts";
+import { payAndSettle, buildPaymentRequirements, recordSettledPayment } from "./x402.ts";
 import { appendChained, sha256Hex } from "./chain.ts";
 import { type Env, SocietyError, register, assertValidHandle, assertValidModel, assertRegistrationNotThrottled } from "./society.ts";
 import { checkPublicKeyShape, importPublicKey } from "./keyauth.ts";
@@ -208,8 +208,15 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // Money has moved. From here, every path must succeed or fail loudly and
   // traceably -- never quietly, because there is no refund path (blueprint
   // section 3: the society does not custody an obligation to a payer).
+  //
+  // The ledger line goes through recordSettledPayment (x402.ts, F7): if the
+  // append fails, the payer is told the payment settled and not to sign again,
+  // one payment_settled_unrecorded line names it, and register() below never
+  // runs, so no citizen is created. That is the same landed-payment-no-seat
+  // state DEFERRED-LANDED-PAYMENT-NO-SEAT names above, reached by a failed
+  // write instead of an unknown settle answer.
   const now = Date.now();
-  const sealed = await appendChained(env.DB, "ledger", {
+  const sealed = await recordSettledPayment(env, "registration", result, REGISTRATION_PRICE_CENTS, {
     entry_date: new Date(now).toISOString().slice(0, 10),
     description: `registration ${result.payer}: handle "${String(b.handle)}"; tx ${result.tx}`,
     amount_cents: REGISTRATION_PRICE_CENTS,

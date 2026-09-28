@@ -56,6 +56,10 @@ function extractExportBody(source: string, signature: string): string {
 
 const SRC = readSourceWithoutComments(LISTINGS_PATH);
 
+// A ledger booking in listings.ts: the shared post-settlement helper (x402.ts recordSettledPayment,
+// which calls appendChained(env.DB, "ledger", row)) or a bare appendChained call.
+const LEDGER_BOOKING = /(?:appendChained\s*\(\s*env\.DB\s*,\s*["']ledger["']|recordSettledPayment\s*\(\s*env\s*,\s*["']listing_fee["'])/;
+
 // ---------- (a) payTo/amount are never read from the request body ----------
 
 test("handlePayListing never reads payTo or amount_cents off the parsed request body -- both come from stored rows only", () => {
@@ -101,11 +105,12 @@ test("handlePayListing never references the chained 'ledger' table or calls appe
   const body = extractExportBody(SRC, "export async function handlePayListing");
   assert.ok(!/["']ledger["']/.test(body), "handlePayListing must never reference the ledger table by name");
   assert.ok(!/\bappendChained\b/.test(body), "handlePayListing must never call appendChained -- listing_payments (unchained) is its only write, alongside the guarded UPDATE");
+  assert.ok(!/\brecordSettledPayment\b/.test(body), "handlePayListing must never call recordSettledPayment -- the bounty is not treasury money");
 });
 
 test("positive control: handleCreateListing DOES book the posting fee to the chained ledger (the scan above is not vacuous)", () => {
   const body = extractExportBody(SRC, "export async function handleCreateListing");
-  assert.match(body, /appendChained\s*\(\s*env\.DB\s*,\s*["']ledger["']/, "the posting fee must be booked via appendChained(env.DB, \"ledger\", ...)");
+  assert.match(body, LEDGER_BOOKING, "the posting fee must be booked via recordSettledPayment(env, \"listing_fee\", ...) or appendChained(env.DB, \"ledger\", ...)");
   assert.match(body, /amount_cents\s*:\s*feeCents/, "the ledger line must book the FEE, not the bounty");
 });
 
@@ -115,7 +120,7 @@ test("positive control: handleCreateListing DOES book the posting fee to the cha
 // the fee itself stopped being booked -- either is a defect this single
 // count catches without needing to know which function moved.
 test("exactly one appendChained(..., \"ledger\", ...) call exists in the whole file -- the posting fee, and nothing else, is ever booked as treasury income", () => {
-  const matches = SRC.match(/appendChained\s*\(\s*env\.DB\s*,\s*["']ledger["']/g) ?? [];
+  const matches = SRC.match(new RegExp(LEDGER_BOOKING.source, "g")) ?? [];
   assert.equal(matches.length, 1, `expected exactly one ledger-booking call in listings.ts, found ${matches.length}`);
 });
 

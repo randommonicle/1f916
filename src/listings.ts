@@ -23,8 +23,7 @@
 // Every other payTo in this file is the default (the treasury), for the
 // posting fee.
 
-import { appendChained } from "./chain.ts";
-import { buildPaymentRequirements, payAndSettle, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
+import { buildPaymentRequirements, payAndSettle, recordSettledPayment, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
@@ -395,7 +394,10 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
   // §5). Ledger first (cites the title, not an id that doesn't exist yet),
   // then the listing row itself -- mirroring register-gate.ts's own
   // ledger-then-risky-write order and its honest paid-but-failed handling.
-  const sealed = await appendChained(env.DB, "ledger", {
+  // The ledger line goes through recordSettledPayment (x402.ts, F7): if the
+  // append fails, the funder is told the fee settled and not to sign again, and
+  // the listing row below is never inserted.
+  const sealed = await recordSettledPayment(env, "listing_fee", result, feeCents, {
     entry_date: new Date(now).toISOString().slice(0, 10),
     description: `listing posting fee, funder ${citizen.handle} (${result.payer}): "${title}"; tx ${result.tx}`,
     amount_cents: feeCents,

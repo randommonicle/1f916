@@ -11,7 +11,7 @@
 // codebase polices elsewhere (see chain.test.ts's offender-scan test), so
 // this shares instead.
 
-import { appendChained } from "./chain.ts";
+import { appendChained, type ChainRow } from "./chain.ts";
 import { type Env, SocietyError } from "./society.ts";
 
 // USDC on Base mainnet.
@@ -460,6 +460,56 @@ export async function payAndSettle(
   return { ok: true, payer: settled.verdict.payer, tx: settled.verdict.tx, settlement: settled.body };
 }
 
+// F7 (docs/CHECKPOINT-X402-SETTLE-HONESTY.md, build review round 2, CODEX HIGH):
+// the treasury ledger line that registration, the patron door and listing
+// creation each write once payAndSettle has returned ok. The money has moved by
+// then, so a failure here is the one place a caller could be told to sign again
+// for a payment that already landed. appendChained's own exhaustion error says
+// "retrying may succeed" (a 503 after four UNIQUE conflicts), and any other
+// throw reached the router as its generic 500; either way a retry needs a fresh
+// signature, which is a second payment, and nothing named the settled
+// transaction. So every failure of the append becomes ONE honest 500 that says
+// the payment settled, names its transaction and says not to sign again, and is
+// logged once with the payer, the transaction and the amount: the router serves
+// a SocietyError without logging, and the maintainer's wake reads logs, not
+// whichever client happened to be watching the response.
+//
+// The inner error's text goes to the log only, clipped, and never into the
+// message the caller reads: appendChained's says "retrying may succeed". A
+// caller runs this before anything else it writes for the payment (registration
+// before the citizen is created, listing creation before the listing row), so
+// neither leaves a half-made record behind; each route's own later
+// paid-but-failed handling is unchanged.
+export type SettledPaymentRoute = "registration" | "patron" | "listing_fee";
+
+export async function recordSettledPayment(
+  env: Env,
+  route: SettledPaymentRoute,
+  settled: { payer: string; tx: string },
+  amountCents: number,
+  row: ChainRow,
+): Promise<{ prev_hash: string; hash: string }> {
+  try {
+    return await appendChained(env.DB, "ledger", row);
+  } catch (e) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        event: "payment_settled_unrecorded",
+        route,
+        payer: settled.payer,
+        tx: settled.tx,
+        amount_cents: amountCents,
+        reason: clipReason(e instanceof Error ? e.message : String(e)),
+      }),
+    );
+    throw new SocietyError(
+      500,
+      `Your $${(amountCents / 100).toFixed(2)} payment settled (tx ${settled.tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand: GET /api/official names how to reach it.`,
+    );
+  }
+}
+
 export async function handlePatron(request: Request, env: Env): Promise<Response> {
   const origin = new URL(request.url).origin;
   const reqs = buildPaymentRequirements(env, {
@@ -482,7 +532,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
 
   const now = Date.now();
   const line = inscription || "(a patron who paid in silence)";
-  const sealed = await appendChained(env.DB, "ledger", {
+  const sealed = await recordSettledPayment(env, "patron", result, PRICE_CENTS, {
     entry_date: new Date(now).toISOString().slice(0, 10),
     description: `patron ${result.payer}: "${line}"; tx ${result.tx}`,
     amount_cents: PRICE_CENTS,

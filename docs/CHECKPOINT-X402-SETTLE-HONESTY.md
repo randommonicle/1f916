@@ -483,3 +483,63 @@ The builder's open point: the pay route's `settlement_unconfirmed` message opene
 | M77 | the script claims no delivery | the pre-fix script sentence (same run) | pay-listing: red | `startsWith("The server did not receive a settlement verdict")` | the new source; 68 / 0 |
 
 The brief is amended in its three stale places (rule 6 "empty" becomes "blank after trimming", rule 7 "non-empty" becomes "non-blank"; B2's closing sentence now records this fix; B2b's "a second-leg 502" becomes every 5xx, every non-201 non-4xx status and an unreadable body, a 4xx staying a refusal), each marked "amended after build review round 1".
+
+## F7 (build review round 2, CODEX HIGH): a payment that settled but could not be booked
+
+**Status: built and red-proofed, and BLOCKED: not committed.** Two source scans in `test/listings-policing.test.ts`, a file outside this unit's fence, pin the old call spelling and now fail (see "Blocked" below); nothing else is red. Baseline 1303 tests, all pass, `tsc` exit 0. Now 1311 tests (8 new), 1309 pass, 2 fail, `tsc` exit 0.
+
+### The finding and the fix
+
+After `payAndSettle` returns `ok` the money has moved. Registration (`src/register-gate.ts`), the patron door (`src/x402.ts`) and listing create (`src/listings.ts`, step 4) each then appended the treasury ledger line with `appendChained(env.DB, "ledger", ...)` outside any catch. A throw there reached the payer as `chain head for ledger moved four times running; ... The write was never committed -- retrying may succeed.` (`src/chain.ts`, a 503 after four UNIQUE conflicts) or as the router's generic 500 (`src/index.ts`). Either way a retry needs a fresh signature, which is a second payment, and nothing logged named the settled transaction.
+
+`recordSettledPayment(env, route, settled, amountCents, row)` in `src/x402.ts` (exported; `route` is `"registration" | "patron" | "listing_fee"`) calls `appendChained(env.DB, "ledger", row)` and returns its result. On any throw it logs one line, `{"level":"error","event":"payment_settled_unrecorded","route","payer","tx","amount_cents","reason"}`, where `reason` is the inner error's message clipped to 200 characters by the file's own `clipReason`, and throws `SocietyError(500, ...)` with the hub's words: "Your $D payment settled (tx T), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand: GET /api/official names how to reach it." (`D` is `(amountCents / 100).toFixed(2)`.) The inner error's text never reaches the caller. All three routes use it, so registration stops before the citizen is created and listing create before the listing insert; each route's own later paid-but-failed handling is unchanged. In that state a registrant holds a landed payment and no seat, the same state `DEFERRED-LANDED-PAYMENT-NO-SEAT` in `src/register-gate.ts` names for an unknown settle answer (its comment now says so).
+
+### Tests
+
+`test/x402-post-settle-record-d1.test.ts`, 8 tests on the real `schema.sql` in the local D1 with the facilitator stubbed to verify and settle: for each of the three routes, every `INSERT INTO ledger` fails through a SQLite trigger, in two flavours, (a) `RAISE(ABORT, 'UNIQUE constraint failed: ledger.hash')` (appendChained retries four times, then throws its 503) and (b) `RAISE(ABORT, 'disk I/O error')` (rethrown at once); a control with no trigger (each door succeeds, books one line of the amount signed and returns that line's hash as its receipt, and logs nothing); and a unit test of the helper (reason clipped to 200, a thrown non-Error logged as a string, five cents served as `$0.05`). Each failure test asserts, answer first: status 500 and the message equal to the hub's words with the settled tx and the amount signed (registration and patron `$1.00`, listing create `$1.50`, the fee on a $10 bounty); neither `retrying may succeed` nor `never committed`; one verify and one settle; exactly one `payment_settled_unrecorded` line with exactly the fields level, event, route, payer, tx, amount_cents, reason; no `_paid_but_failed` line; and no ledger line, citizen, reg_log row or listing written. A probe confirmed node:sqlite surfaces a trigger's `RAISE` text verbatim as `Error.message`, so (a) reaches appendChained's `String(e).includes("UNIQUE")` retry and (b) does not.
+
+### Red-proofs (M78 onward)
+
+Runner: `f7-redproof.mjs` in the session scratchpad (the find string must occur exactly once; original bytes held in memory and written back in a `finally`; the sha256 of the restored file compared). Only the F7 test file is run. Every failure below is `AssertionError [ERR_ASSERTION]`, and the failing assertion is the one named.
+
+| # | guards | mutation | tests (pass / fail) | failing assertion | restore |
+|---|---|---|---|---|---|
+| M78 | registration books through the helper | `src/register-gate.ts`: the call put back to the bare `await appendChained(env.DB, "ledger", {` | F7 file: 6 / 2 | `registration (a) ...: the honest 500` (deepEqual; actual `{status: 503, error: "chain head for ledger moved four times running; ... retrying may succeed."}`) and `registration (b) ...: the honest 500` (actual `{status: 500, error: "Internal error. The society apologizes."}`) | byte-exact |
+| M79 | patron books through the helper | `src/x402.ts`: the patron call put back to the bare `appendChained` | 6 / 2 | `patron (a) ...: the honest 500` and `patron (b) ...: the honest 500`, the same two actuals | byte-exact |
+| M80 | listing create books through the helper | `src/listings.ts`: the call put back to the bare `appendChained`, with its import restored (two edits) | 6 / 2 | `listing_fee (a) ...: the honest 500` and `listing_fee (b) ...: the honest 500`, the same two actuals | byte-exact |
+| M81 | one log line names the settled payment | the helper's `console.log(` -> `[].push(` (the line is built and swallowed) | 1 / 7 | `<route>: exactly one payment_settled_unrecorded line` (0 !== 1) on all six route tests; the unit test's `records.length` (0 !== 1) | byte-exact |
+| M82 | the logged reason is clipped to 200 | the `clipReason(...)` dropped | 7 / 1 | unit: `clipped to 200 characters` (300 !== 200) | byte-exact |
+| M83 | the caller never reads the inner error's text | the served message gets the inner message appended | 1 / 7 | `<route> ...: the honest 500` on all six route tests (deepEqual on the message); the unit test's message strictEqual | byte-exact |
+| M84 | the amount served is the amount signed | the listing call site passes `100` instead of `feeCents` | 6 / 2 | `listing_fee (a) ...: the honest 500` and `(b)` (`$1.00` served, `$1.50` expected) | byte-exact |
+| M85 | the helper returns appendChained's result | it returns an empty hash instead | 7 / 1 | control: `registration: the receipt is the hash of the line just written` (`''` vs the head hash) | byte-exact |
+
+- M81's first attempt used `void (` with a trailing comma, a SyntaxError, so it is a setup error and not a red-proof; it was rerun as `[].push(`. The runner now flags any run that is not exactly 8 tests or that shows a SyntaxError or ReferenceError.
+- The assertions that no ledger line, citizen, reg_log row or listing was written hold before the fix too (the trigger blocks the row, and both pre-fix throws happen before the citizen is created and before the listing insert), so they are harness checks, not red-proof evidence. The answer assertion comes first in each test for that reason.
+- The two flavours are shown to take different appendChained paths by the logged reason: (a) starts `chain head for ledger moved four times running`, (b) is exactly `disk I/O error`.
+
+### Blocked: two policing scans pin the old call spelling
+
+`test/listings-policing.test.ts` scans `src/listings.ts` (comments stripped) for `/appendChained\s*\(\s*env\.DB\s*,\s*["']ledger["']/`. The fix moves that call into `src/x402.ts` by design, so the pattern finds none and two tests fail:
+
+1. `positive control: handleCreateListing DOES book the posting fee to the chained ledger (the scan above is not vacuous)`
+2. `exactly one appendChained(..., "ledger", ...) call exists in the whole file -- the posting fee, and nothing else, is ever booked as treasury income` (expected 1, found 0)
+
+The invariant they police still holds: `listings.ts` has exactly one ledger booking, `recordSettledPayment(env, "listing_fee", result, feeCents, {`, whose row books `amount_cents: feeCents`. That file is outside this unit's fence, and the brief's rule for a guard going red is to stop and report, so it is untouched and nothing is committed.
+
+Proposed amendment, needing the fence widened. It was verified in a scratchpad mirror only (a copy of `src/listings.ts` beside a patched copy of the test; the worktree's guard was never edited). After `const SRC`, define `const LEDGER_BOOKING = /(?:appendChained\s*\(\s*env\.DB\s*,\s*["']ledger["']|recordSettledPayment\s*\(\s*env\s*,\s*["']listing_fee["'])/;`. Use it in the positive control's first `assert.match`, and as `SRC.match(new RegExp(LEDGER_BOOKING.source, "g"))` in the count test. In the `handlePayListing` test "never references the chained 'ledger' table or calls appendChained", add `assert.ok(!/\brecordSettledPayment\b/.test(body), ...)`: the bounty is not treasury money, and without it a `recordSettledPayment` call in that function would pass every other scan. Mirror results: amended guard against the new source, 7 / 0; the fee no longer booked, 5 / 2 (the positive control, and the count with found 0); `handlePayListing` booking through the helper, 5 / 2 (the new assertion, and a count of 2); a second bare ledger booking in `handleCreateListing`, 6 / 1 (a count of 2).
+
+Near miss, fixed in scope: `test/register-gate.test.ts`'s scan for `register(` outside `register-gate.ts` reads raw text, comments included, and flagged my first comment in `src/x402.ts` that mentioned it. The comment was reworded.
+
+### Script reading (no change)
+
+`scripts/register-maintainer.mjs` `sendSignedPayment`, shared by `lobby-sponsor.mjs` and `keyauth-ride.mjs`: only a 201 or a 4xx is an answer. Every other status, so every 5xx including this 500, prints the server's body, the signed authorisation's from, nonce and validBefore and `UNKNOWN_OUTCOME_WARNING` ("Do not sign again until the original authorisation's outcome has been reconciled on-chain"), returns `outcome: "unknown"` and exits 1 (`test/register-scripts-unknown-outcome.test.ts`, F1). `scripts/post-listing.mjs` treats any non-201 on the signed leg as `leg2_not_201`, prints `recoveryMessage` ("DO NOT re-run ... Only if you confirm NOTHING settled may you delete this file") and leaves the tombstone `signing` (`test/post-listing.test.ts`, "a non-201 leaves the tombstone 'signing'"). Neither tells a paid caller to sign again, so neither changes. One observation: `recoveryMessage` lists `GET /treasury` first among its checks, and after this fix a settled but unbooked payment has no treasury line. The message also sends the reader to the wallet balance and the Base transactions and allows deleting the tombstone only if NOTHING settled, so it stays safe.
+
+### F7 limits, recorded and not changed (the hub's words are verbatim)
+
+- The served sentence says the society "could not record" the payment. A database error returned after a write had in fact committed would make that untrue for that one row. The log line carries the tx and the inner reason, so the maintainer checks `GET /treasury` before booking by hand.
+- A facilitator success body with no `transaction` string yields `tx: ""` (`classifySettle` rule 4), so the served sentence reads `(tx )`, the log's `tx` is empty, and the ledger description would end `tx ` as well. This is the same for every paid-but-failed message already in `register-gate.ts` and `listings.ts`.
+
+### F7 closing walk
+
+- Touched: `src/x402.ts`, `src/register-gate.ts`, `src/listings.ts` (its `appendChained` import, now unused, is removed), `test/x402-post-settle-record-d1.test.ts`, this file. `src/doc.ts` has 0 diff lines against `origin/main`; `migrations/`, `wrangler.jsonc` and `test/secret-literal-guard.test.ts` are untouched, and the D-061 guard is green.
+- Not committed, because of the block above. No push, no deploy, no remote call; no `*.local.*` or `.env` opened; git run only against this worktree.
