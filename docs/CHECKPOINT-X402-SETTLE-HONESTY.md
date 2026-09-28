@@ -308,6 +308,31 @@ settlement verdict was returned (...)". For a request that failed in transit, "w
 than the inner reason ("may have been received"). That sentence is the brief's B2 wording and predates
 this fix for the rejected-fetch case, so it is left for the hub.
 
+### Commit R2: F1 (scripts) and F2, the shared helper's unknown outcomes
+
+**What.** `sendSignedPayment` now answers `answered` ONLY for a 201 (the registration) or a 4xx (a
+refusal: the server runs its checks again before it settles, and a 402 is the facilitator's own
+refusal). Everything else prints the three identifiers and the warning and returns `unknown`: a
+rejected fetch (as before); a body that cannot be read, since the headers can arrive and the body fail
+(F2, CODEX); every 5xx, not only a 502, since a write that fails after a settlement is a 500 with no
+treasury row (F1); and, my extension, any other status (a 200, a 202, a 3xx is no answer this door
+gives). A new shared `refusedLine(status)` replaces each script's own non-201 text, the only failure
+branch left in the scripts. Removed: register-maintainer's "check GET /treasury and GET /api/official",
+lobby-sponsor's `:325` "check GET /treasury and GET /api/citizens before re-running", keyauth-ride's
+"check GET /treasury and GET /api/official first".
+
+**Choice (report).** A 4xx whose body cannot be read is `unknown`, not a refusal. The F2 rule ("a
+body-read failure on the signed leg is an unknown outcome too") is applied before the F1 rule (a 4xx
+stays a refusal). That errs cautious: at worst the operator waits for validBefore before signing again.
+
+**Tests.** `test/register-scripts-unknown-outcome.test.ts` +4: every 5xx (500 carrying "Your $1 payment
+settled (tx ...)", 500 generic, 503, 504) is unknown with the warning and the server's words; a body
+whose stream errors (on a 502 and on a 201) is unknown, never a throw (`send()` turns a throw into a
+failing assertion); a 200, 202 or 302 is unknown; a 400, 403, 409 or 429 is `answered` with nothing
+printed, and `refusedLine` is pinned verbatim. The wiring test now also pins each script's one non-201
+branch to `refusedLine`, the import, and no `console.error` line naming `GET /treasury`, `GET
+/api/citizens` or `GET /api/official`. `npm test`: pass 1300, fail 0. Typecheck 0.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -370,3 +395,12 @@ named.
 | M50 | a /settle in transit never says "no money moved" (F1) | the catch's `path === "/settle"` -> `!==` (the two messages swapped) | route + x402.test: 31 / 4 | register: `register: the in-transit 502` (it served "could not be reached ... No money moved"); verify and unit likewise | byte-exact |
 | M51 | the in-transit outcome is logged (F1) | the log event renamed | x402.test: 21 / 3 | F1 unit: `exactly one unknown-outcome line`, 0 !== 1 (the L1 and B2 log tests also red) | byte-exact |
 | M52 | the /verify in-transit wording (F1) | "could not be reached to verify this payment" -> "was unreachable" | route + x402.test: 33 / 2 | register: `register: the verify in-transit 502`; unit strictEqual | byte-exact |
+| M53 | every 5xx is unknown (F1) | the helper's gate -> `response.status === 502` (the pre-review helper) | B2b test: 6 / 2 | 5xx test: `HTTP 500: unknown` (answered); other-status test likewise | byte-exact |
+| M54 | an unreadable body is unknown (F2) | the body-read catch re-throws | B2b test: 7 / 1 | `HTTP 502 with an unreadable body: unknown, never a throw` | byte-exact |
+| M55 | a 4xx stays a refusal (F1) | the gate -> `response.status !== 201` (a 4xx becomes unknown) | B2b test: 6 / 2 | positive control `HTTP 402`; 4xx test | byte-exact |
+| M56 | the 5xx path prints the report (F1) | its `unknown(...)` -> a bare `{ outcome: "unknown" }` | B2b test: 5 / 3 | `second-leg 502: the warning, verbatim`; 5xx and other-status tests | byte-exact |
+| M57 | the unreadable path prints the report (F2) | its `unknown(...)` -> a bare `{ outcome: "unknown" }` | B2b test: 7 / 1 | `HTTP 502, unreadable body: the warning, verbatim` | byte-exact |
+| M58 | no error print points at a record (F1) | lobby-sponsor's refusal branch gets "Check GET /treasury and GET /api/citizens before re-running." | B2b test: 7 / 1 | wiring: `lobby-sponsor.mjs: an error print points at a record as proof` | byte-exact |
+| M59 | each script prints the shared refusal line | keyauth-ride's branch goes back to its own wording | B2b test: 7 / 1 | wiring: `keyauth-ride.mjs: the one non-201 branch left prints the shared refusal line`, 0 !== 1 | byte-exact |
+| M60 | only a 201 is a success answer | the gate lets every 2xx through | B2b test: 7 / 1 | `HTTP 200: unknown` (answered) | byte-exact |
+| M61 | the refusal line's wording | "so by their account no money moved." -> "so nothing happened." | B2b test: 7 / 1 | 4xx test: strictEqual on `refusedLine(409)` | byte-exact |

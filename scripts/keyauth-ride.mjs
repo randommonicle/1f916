@@ -49,6 +49,7 @@ import {
   encodePaymentHeader,
   describeWouldSign,
   sendSignedPayment,
+  refusedLine,
 } from "./register-maintainer.mjs";
 
 // The audience is a PROTOCOL CONSTANT, not the request Host header (keyauth.ts
@@ -351,11 +352,12 @@ async function cmdRegister(flags) {
     return;
   }
 
-  // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md): a rejected fetch or a 502 prints the
+  // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md): anything but a 201 or a 4xx prints the
   // authorisation and the reconcile-on-chain warning (register-maintainer.mjs
   // sendSignedPayment). The old advice (look for a new citizen or a new
   // registration payment before running again) proved nothing: an unknown
-  // settle outcome throws before the server writes either record.
+  // settle outcome throws before the server writes either record, and a write
+  // that fails after a settlement leaves none.
   const sent = await sendSignedPayment(target, body, paymentHeader, authorization);
   if (sent.outcome === "unknown") {
     process.exitCode = 1;
@@ -370,9 +372,9 @@ async function cmdRegister(flags) {
     return;
   }
   if (second.status !== 201) {
-    console.error(`Registration failed after the payment attempt: HTTP ${second.status}.`);
+    // Only a 4xx reaches here: sendSignedPayment treats every other status as an unknown outcome.
+    console.error(refusedLine(second.status));
     console.error(secondJson ? JSON.stringify(secondJson, null, 2) : secondText);
-    console.error("If the message above names a settled tx, your money moved but registration did not complete. Do NOT just re-run: check GET /treasury and GET /api/official first.");
     process.exitCode = 1;
     return;
   }

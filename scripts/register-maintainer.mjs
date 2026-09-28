@@ -258,17 +258,20 @@ export function describeWouldSign(from, reqs, now = Date.now()) {
 //
 // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md; CODEX round 1 finding 2, round 2):
 // register-maintainer.mjs, lobby-sponsor.mjs and keyauth-ride.mjs each send ONE
-// signed x402 request to POST /api/register. Two of its outcomes say nothing
-// about whether the money moved: a fetch that REJECTS (the request can be
-// delivered, verified and settled and only its response lost) and a 502 (the
-// server's unknown-outcome answer, src/x402.ts settleOrThrow). The server's
-// unknown path throws before its ledger insert and before registration
-// (src/register-gate.ts), so a missing treasury line or citizen proves nothing
-// either: only the chain can say. On both, every script prints the signed
-// authorisation's from, nonce and validBefore and the same warning, from this
-// one helper, and nothing that calls a re-run safe. It takes the fetch and the
-// printer as parameters so test/register-scripts-unknown-outcome.test.ts can
-// drive it without a wallet or a network.
+// signed x402 request to POST /api/register. Only a 201 and a 4xx say what
+// happened to the money; every other outcome says nothing: a fetch that REJECTS
+// (the request can be delivered, verified and settled and only its response
+// lost), a body that cannot be read, a 502 (the server's unknown-outcome answer,
+// src/x402.ts settleOrThrow) and every other 5xx (a 500 when a write fails after
+// a settlement). The server's unknown path throws before its ledger insert and
+// before registration (src/register-gate.ts), and a failed write after a
+// settlement leaves no treasury line either, so a missing treasury line or
+// citizen proves nothing: only the chain can say. On all of them every script
+// prints the signed authorisation's from, nonce and validBefore and the same
+// warning, from this one helper, and nothing that calls a re-run safe. It takes
+// the fetch and the printer as parameters so
+// test/register-scripts-unknown-outcome.test.ts can drive it without a wallet or
+// a network.
 
 export const UNKNOWN_OUTCOME_WARNING =
   "Outcome unknown: the payment may have settled. Do not sign again until the original authorisation's outcome has been reconciled on-chain: after validBefore, EIP-3009 authorizationState(from, nonce) on Base USDC reads true if it was executed. Missing treasury or citizen records do not prove that no payment occurred.";
@@ -289,27 +292,47 @@ export function unknownOutcomeLines(authorization) {
   ];
 }
 
-// Sends the signed request. Returns { outcome: "unknown" } after printing the
-// identifiers and the warning (a rejected fetch, or a 502), or
-// { outcome: "answered", response, json, text } for the caller's own
-// status handling (201, 402, and every other status as before).
+// Sends the signed request. It comes back { outcome: "answered", response, json,
+// text } for the caller's own handling ONLY on a 201 (the registration) or a 4xx
+// (a refusal: the server runs its checks again before it settles, and a 402 is
+// the facilitator's own refusal). Everything else prints the identifiers and
+// the warning and comes back { outcome: "unknown" } (build review round 1, F1
+// and F2): a fetch that rejects; a body that cannot be read (the headers can
+// arrive and the body fail); every 5xx, a 502 unknown-outcome answer or a 500
+// when a write fails AFTER a settlement, which leaves no treasury row to find;
+// and any other status (a 200 or a 3xx is no answer this door gives).
 export async function sendSignedPayment(target, body, paymentHeader, authorization, { fetchImpl = fetch, printError = console.error } = {}) {
+  const unknown = (extra) => {
+    for (const line of unknownOutcomeLines(authorization)) printError(line);
+    return { outcome: "unknown", ...extra };
+  };
   let response;
   try {
     response = await fetchImpl(target, { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeader }, body });
   } catch (e) {
     printError(`The signed payment request errored in transit: ${e?.message ?? e}.`);
-    for (const line of unknownOutcomeLines(authorization)) printError(line);
-    return { outcome: "unknown" };
+    return unknown({});
   }
-  const { json, text } = await readJson(response);
-  if (response.status === 502) {
-    printError("The server answered the signed request with HTTP 502:");
+  let json;
+  let text;
+  try {
+    ({ json, text } = await readJson(response));
+  } catch (e) {
+    printError(`The server's answer to the signed request (HTTP ${response.status}) could not be read: ${e?.message ?? e}.`);
+    return unknown({ status: response.status, unreadable: true });
+  }
+  if (response.status !== 201 && !(response.status >= 400 && response.status <= 499)) {
+    printError(`The server answered the signed request with HTTP ${response.status}:`);
     printError(json ? JSON.stringify(json, null, 2) : text);
-    for (const line of unknownOutcomeLines(authorization)) printError(line);
-    return { outcome: "unknown", status: 502 };
+    return unknown({ status: response.status });
   }
   return { outcome: "answered", response, json, text };
+}
+
+// What every script prints for a 4xx on the signed request, the only failure
+// that reaches a script's own handling: a refusal, with nothing to reconcile.
+export function refusedLine(status) {
+  return `Registration was refused: HTTP ${status}. A 4xx on the signed request is a refusal: the server runs its checks again before it settles, and a 402 is the facilitator's own refusal of the payment, so by their account no money moved.`;
 }
 
 // ---------- CLI orchestration (not exercised by tests) ----------
@@ -451,7 +474,7 @@ async function main() {
     return;
   }
 
-  // B2b: a rejected fetch or a 502 prints the authorisation and the warning (sendSignedPayment).
+  // B2b: anything but a 201 or a 4xx prints the authorisation and the warning (sendSignedPayment).
   const sent = await sendSignedPayment(target, body, paymentHeader, authorization);
   if (sent.outcome === "unknown") {
     process.exitCode = 1;
@@ -466,13 +489,9 @@ async function main() {
     return;
   }
   if (second.status !== 201) {
-    console.error(`Registration failed after the payment attempt: HTTP ${second.status}.`);
+    // Only a 4xx reaches here: sendSignedPayment treats every other status as an unknown outcome.
+    console.error(refusedLine(second.status));
     console.error(secondJson ? JSON.stringify(secondJson, null, 2) : secondText);
-    console.error("");
-    console.error("If the message above names a settled transaction, your money already moved even though");
-    console.error("registration did not complete -- register-gate.ts is designed to name the tx in exactly this");
-    console.error("case, so it can be put right by hand. Do NOT just re-run this script: read docs/SEEDING.md's");
-    console.error("failure-modes section, and check GET /treasury and GET /api/official on the target server first.");
     process.exitCode = 1;
     return;
   }

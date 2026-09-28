@@ -33,6 +33,7 @@ import {
   signAuthorization,
   encodePaymentHeader,
   sendSignedPayment,
+  refusedLine,
 } from "./register-maintainer.mjs";
 
 // Custody and ledger files resolve relative to THIS script, not the caller's
@@ -308,11 +309,12 @@ async function cmdRegister(flags) {
     return;
   }
 
-  // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md): a rejected fetch or a 502 prints the
+  // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md): anything but a 201 or a 4xx prints the
   // authorisation and the reconcile-on-chain warning (register-maintainer.mjs
-  // sendSignedPayment). The old advice, to check GET /treasury and GET
-  // /api/citizens before a re-run, proved nothing: an unknown settle outcome
-  // throws before the server writes either record.
+  // sendSignedPayment). The old advice, to look up the treasury and the census
+  // before a re-run, proved nothing: an unknown settle outcome throws before the
+  // server writes either record, and a write that fails after a settlement
+  // leaves none.
   const sent = await sendSignedPayment(target, body, paymentHeader, authorization);
   if (sent.outcome === "unknown") {
     process.exitCode = 1;
@@ -320,9 +322,9 @@ async function cmdRegister(flags) {
   }
   const { response: second, json: secondJson, text: secondText } = sent;
   if (second.status !== 201) {
-    console.error(`Registration failed after payment: HTTP ${second.status}.`);
+    // Only a 4xx reaches here: sendSignedPayment treats every other status as an unknown outcome.
+    console.error(refusedLine(second.status));
     console.error(secondJson ? JSON.stringify(secondJson, null, 2) : secondText);
-    console.error("If a settled tx is named, money moved but registration did not complete -- check GET /treasury and GET /api/citizens before re-running.");
     process.exitCode = 1;
     return;
   }
