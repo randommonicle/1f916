@@ -680,6 +680,16 @@ test("A4: /api/showhome/reply renders in llms.txt's Write section under the mixe
   // The heading's one "per-tool-call" mention must stay scoped to /mcp, not read as
   // a blanket claim about every route in the group.
   assert.match(AUTH_LABEL.mixed, /for \/mcp, per-tool-call/, "the per-tool-call mention must be explicitly parenthesised to /mcp");
+  // The heading must point where the rule actually is. llms.txt prints no note (see
+  // above), so a heading that says "note below" points at nothing; /api/surface is
+  // where every route's note is served, so the pointer is true only if every mixed
+  // route carries one there.
+  assert.doesNotMatch(AUTH_LABEL.mixed, /below/, "the mixed heading must not point at a note 'below': llms.txt renders none");
+  assert.match(AUTH_LABEL.mixed, /GET \/api\/surface/, "the mixed heading must name GET /api/surface, where each route's rule is served");
+  const surfaceRoutes = (renderSurface("https://x.example", "S").routes as Array<{ auth: string; path: string; note?: string }>);
+  const mixedOnSurface = surfaceRoutes.filter((r) => r.auth === "mixed");
+  assert.ok(mixedOnSurface.length >= 2, "sanity: /mcp and /api/showhome/reply are both mixed");
+  for (const r of mixedOnSurface) assert.ok(typeof r.note === "string" && r.note.length > 0, `${r.path}: a mixed route must carry its rule as a note on /api/surface`);
 });
 
 test("A4: renderOpenApi lists /api/search and /api/stats (no-auth GETs) but never /api/showhome/reply (mixed auth, not a plain no-auth GET)", () => {

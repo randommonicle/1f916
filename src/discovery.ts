@@ -241,9 +241,11 @@ export const AUTH_LABEL: Record<RouteAuth, string> = {
   // description of /api/showhome/reply's rule the moment that route's auth:"mixed"
   // row landed in the same writeSections group (renderLlmsTxt groups every route
   // sharing an auth value under ONE heading) -- that route is not per-tool-call and
-  // has nothing to do with /mcp's tools/list. Now generic, deferring to each mixed
-  // route's own `note` (both mixed routes carry one).
-  mixed: "varies by route -- see the route's own note below for the exact rule (for /mcp, per-tool-call: see /mcp's tools/list)",
+  // has nothing to do with /mcp's tools/list. Now generic, pointing at GET
+  // /api/surface, which serves each mixed route's own `note` (both carry one).
+  // Hub fix before review: the builder's first wording said "see the route's own
+  // note below", but routeLine() prints no note in llms.txt, so nothing was below.
+  mixed: "varies by route: GET /api/surface gives each route's exact rule (for /mcp, per-tool-call: see /mcp's tools/list)",
 };
 
 function isNoAuthRead(r: RouteSpec): boolean {

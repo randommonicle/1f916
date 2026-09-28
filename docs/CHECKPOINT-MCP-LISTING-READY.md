@@ -332,3 +332,13 @@ the call chain, confirmed by reading each function in full).
 | M9 | A5(a): revert `inbox.ts`'s Join paragraph to the old text, `SKILL_VERSION` left at `"1.0.2"` | inbox-d1.test.ts | yes -- the pinned-hash test (10) fails on its own assertion (actual `285458...`, expected `cc13bf...`); the D-018 doc-fidelity test fails too (`renderSkillMd must equal the doc's /skill.md block (open)`), expected fallout since both read the same renderer -- 46/48 stay green |
 | M10 | A5(b): revert `discovery.ts`'s 402 sentence to the old text | mcp-listing-served-text.test.ts | yes -- exactly the two A5(b) tests fail, cleanly, on their own regex/content assertions; the four A5(c) tests are untouched |
 | M11 | A5(c): revert `mcp.ts`'s register thrown message to the old, non-mode-aware text | mcp-listing-served-text.test.ts, secret-literal-guard.test.ts | yes -- all three A5(c) message tests fail on their own assertions (`$1 x402 payment, which this MCP tool cannot carry` not found; open text not a byte-for-byte prefix of invite text; the old "plus an invite code..." phrase is back); secret-literal-guard also fails (expected fallout -- the allowlist's `sha` now names the NEW text, which is no longer in the source once reverted) |
+
+## Hub commit (before review): the mixed heading pointed at nothing
+
+The A4 widening made `AUTH_LABEL.mixed` read "see the route's own note below", but it is the llms.txt group heading (`src/discovery.ts:324`) and `routeLine()` (`:253-257`) prints no note, so nothing was below: an L-002-class served falsehood the builder's own test comment described without asserting. Now "varies by route: GET /api/surface gives each route's exact rule (for /mcp, per-tool-call: see /mcp's tools/list)"; `renderSurface` serves each route's `note` (`:545`). The A4 heading test gains three assertions: no "below", names GET /api/surface, and every mixed route carries a non-empty note on /api/surface.
+
+| M | mutation | result |
+|---|---|---|
+| M12 | restore the builder's "note below" wording | the A4 heading test fails with its own message "the mixed heading must not point at a note 'below': llms.txt renders none"; restored byte-exact (sha256 prefix compared) |
+
+Suite after the fix: 1298/1298 (the assertions sit inside an existing test), typecheck exit 0.
