@@ -39,6 +39,7 @@ import {
   handleMcpManifest,
   handleOpenApi,
   handleSurface,
+  AUTH_LABEL,
   type LlmsTxtFacts,
 } from "../src/discovery.ts";
 import { JOIN_OPEN, JOIN_INVITE_ONLY } from "../src/doc.ts";
@@ -46,6 +47,7 @@ import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.t
 import type { Env } from "../src/society.ts";
 import { INTENT_OPS } from "../src/keyauth.ts";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "../src/mcp.ts";
+import { SEARCH_DEFAULT_LIMIT } from "../src/discovery-data.ts";
 
 const ORIGIN = "https://commonhold.example.invalid";
 const SRC_INDEX = join(import.meta.dirname, "..", "src", "index.ts");
@@ -601,4 +603,107 @@ test("llms.txt tells a joining agent that public_key is how it stops a funder ho
     /funder|someone else is paying/i.test(out),
     "the reason to use it must be stated: this is the form that stops whoever pays from holding the new citizen's credential",
   );
+});
+
+// ---------- A4 (docs/BRIEF-MCP-LISTING-READY.md): the three routes missing from
+// ROUTES -- /api/search, /api/stats, /api/showhome/reply. The generic drift-guard
+// tests above (every grepFor'd route matches index.ts's real dispatch source; every
+// ROUTES path is mentioned somewhere in llms.txt) already cover these three once they
+// carry a grepFor and appear in ROUTES -- nothing to duplicate there. What is NOT
+// generically covered, and so is pinned directly here: each new entry lands in the
+// RIGHT section of each rendered surface and NOWHERE it should not (the brief's own
+// instruction), and the AUTH_LABEL.mixed widening does not turn into a new falsehood
+// the moment a second, non-MCP route joins that auth value. ----------
+
+test("A4: /api/search, /api/stats, /api/showhome/reply are present in ROUTES with the method/auth the brief names, each carrying a grepFor", () => {
+  const expected: Array<{ method: string; path: string; auth: string }> = [
+    { method: "GET", path: "/api/search", auth: "none" },
+    { method: "GET", path: "/api/stats", auth: "none" },
+    { method: "POST", path: "/api/showhome/reply", auth: "mixed" },
+  ];
+  for (const exp of expected) {
+    const r = ROUTES.find((x) => x.method === exp.method && x.path === exp.path);
+    assert.ok(r, `${exp.method} ${exp.path} missing from ROUTES`);
+    assert.equal(r!.auth, exp.auth, `${exp.method} ${exp.path} has the wrong auth label`);
+    assert.notEqual(r!.grepFor, undefined, `${exp.method} ${exp.path} must carry a grepFor -- index.ts already dispatches it`);
+  }
+});
+
+test("A4: /api/search's q is required and its default limit renders SEARCH_DEFAULT_LIMIT's real value, never a guessed number", () => {
+  const search = ROUTES.find((r) => r.path === "/api/search")!;
+  const q = search.queryParams?.find((p) => p.name === "q");
+  assert.equal(q?.required, true, "q must be required -- searchPosts throws 400 on an empty/missing q");
+  const limit = search.queryParams?.find((p) => p.name === "limit");
+  assert.equal(limit?.description, `default ${SEARCH_DEFAULT_LIMIT}`, "must read the live constant, not a hand-typed number");
+});
+
+test("A4: /api/showhome/reply's note states the real credential rule (citizen header OR visitor body token, citizen wins when both present)", () => {
+  const reply = ROUTES.find((r) => r.path === "/api/showhome/reply")!;
+  assert.match(reply.note ?? "", /Authorization header/i);
+  assert.match(reply.note ?? "", /visitor token/i);
+  assert.match(reply.note ?? "", /body's token/i);
+  assert.match(reply.note ?? "", /citizen credential wins when both/i);
+});
+
+test("A4: /api/search and /api/stats render in llms.txt's Read (no auth) section, never in the Write section", () => {
+  const out = renderLlmsTxt(baseFacts());
+  const readSection = out.split("## Read (no auth)")[1]!.split("Showhome")[0]!;
+  const writeSection = out.split("## Write (citizen credential)")[1]!.split("## Honesty")[0]!;
+  assert.ok(readSection.includes("/api/search"), "/api/search must be in the Read section");
+  assert.ok(readSection.includes("/api/stats"), "/api/stats must be in the Read section");
+  assert.ok(!writeSection.includes("/api/search"), "/api/search must not ALSO appear in the Write section");
+  assert.ok(!writeSection.includes("/api/stats"), "/api/stats must not ALSO appear in the Write section");
+});
+
+test("A4: /api/showhome/reply renders in llms.txt's Write section under the mixed group, alongside /mcp, and the mixed heading no longer falsely describes it as per-tool-call/MCP-specific", () => {
+  const out = renderLlmsTxt(baseFacts());
+  const writeSection = out.split("## Write (citizen credential)")[1]!.split("## Honesty")[0]!;
+  assert.ok(writeSection.includes("/api/showhome/reply"), "/api/showhome/reply must be in the Write section");
+  assert.ok(writeSection.includes("/mcp"), "sanity: /mcp is still in the same mixed group");
+  // The regression this guards: AUTH_LABEL.mixed used to read "per-tool-call -- see
+  // /mcp's tools/list", which is TRUE of /mcp but would be a false claim about
+  // /api/showhome/reply the moment both routes render under one shared heading
+  // (renderLlmsTxt groups every route sharing an auth value under ONE label).
+  assert.ok(out.includes(AUTH_LABEL.mixed), "the served text must use the live AUTH_LABEL.mixed value");
+  assert.doesNotMatch(AUTH_LABEL.mixed, /^per-tool-call/, "AUTH_LABEL.mixed must no longer open with the /mcp-only claim now that a second, differently-shaped route shares it");
+  // routeLine() (discovery.ts) renders method+path+description only, for every
+  // route -- never `.note`, confirmed directly (neither /mcp's own note, e.g. "auth is
+  // per-tool-call...", nor any other route's, appears anywhere in llms.txt today,
+  // pre-existing and unchanged by this wave). So the fix here is narrower than "the
+  // route's own note reaches llms.txt": it is that the SHARED HEADING stops making a
+  // claim that is specific to /mcp and false of /api/showhome/reply. The full,
+  // route-specific rule (this route's `.note`) is taught at GET /api/surface, covered
+  // by a separate test above ("A4: /api/surface lists all three new routes...").
+  const replyLine = writeSection.split("\n").find((line) => line.includes("/api/showhome/reply"));
+  assert.ok(replyLine, "sanity: the route's own served line must exist");
+  assert.doesNotMatch(replyLine!, /per-tool-call/, "the showhome/reply route's own served line must not itself call it per-tool-call");
+  // The heading's one "per-tool-call" mention must stay scoped to /mcp, not read as
+  // a blanket claim about every route in the group.
+  assert.match(AUTH_LABEL.mixed, /for \/mcp, per-tool-call/, "the per-tool-call mention must be explicitly parenthesised to /mcp");
+});
+
+test("A4: renderOpenApi lists /api/search and /api/stats (no-auth GETs) but never /api/showhome/reply (mixed auth, not a plain no-auth GET)", () => {
+  const doc = renderOpenApi(ORIGIN, "Commonhold") as { paths: Record<string, unknown> };
+  assert.ok(doc.paths["/api/search"], "/api/search must appear in the OpenAPI doc");
+  assert.ok(doc.paths["/api/stats"], "/api/stats must appear in the OpenAPI doc");
+  assert.ok(!doc.paths["/api/showhome/reply"], "/api/showhome/reply is mixed-auth POST, not a plain no-auth GET -- must not appear");
+});
+
+test("A4: renderOpenApi's /api/search entry marks q required:true, limit required:false", () => {
+  const doc = renderOpenApi(ORIGIN, "Commonhold") as {
+    paths: Record<string, { get: { parameters: Array<{ name: string; required: boolean }> } }>;
+  };
+  const params = doc.paths["/api/search"]!.get.parameters;
+  assert.equal(params.find((p) => p.name === "q")?.required, true);
+  assert.equal(params.find((p) => p.name === "limit")?.required, false);
+});
+
+test("A4: /api/surface lists all three new routes with their real auth and note", () => {
+  const s = renderSurface(ORIGIN, "Commonhold") as { routes: Array<{ path: string; auth: string; note?: string }> };
+  const search = s.routes.find((r) => r.path === "/api/search");
+  const stats = s.routes.find((r) => r.path === "/api/stats");
+  const reply = s.routes.find((r) => r.path === "/api/showhome/reply");
+  assert.ok(search && search.auth === "none");
+  assert.ok(stats && stats.auth === "none");
+  assert.ok(reply && reply.auth === "mixed" && reply.note?.includes("Authorization header"));
 });

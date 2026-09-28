@@ -126,6 +126,48 @@ recording because they are not obvious from the tool names alone):**
 
 ## A4: The three routes missing from `ROUTES`
 
+**File list:**
+- `src/discovery.ts` (edit): imports `SEARCH_DEFAULT_LIMIT` from
+  `discovery-data.ts` (drift-proofing the served default, per the brief's own
+  "read the constant" instruction, rather than hand-typing a guessed number the
+  way `/api/front`'s pre-existing `"default 30"` entry does); three new `ROUTES`
+  entries (`GET /api/search`, `GET /api/stats`, `POST /api/showhome/reply`),
+  each with a `grepFor` matching its real dispatch line; `AUTH_LABEL.mixed`
+  widened (deviation, below).
+- `test/discovery.test.ts` (edit): extended the existing file (per the brief's
+  own "do not write a parallel list" instruction) with 8 new tests -- ROUTES
+  presence/shape, `/api/search`'s live-constant default and required `q`,
+  `/api/showhome/reply`'s note content, each surface's Read/Write/openapi/surface
+  placement, and the `AUTH_LABEL.mixed` non-falsehood.
+
+**Deviation, disclosed:** `AUTH_LABEL.mixed` (`"per-tool-call -- see /mcp's
+tools/list"`) is TRUE of `/mcp` but would become a served FALSEHOOD about
+`/api/showhome/reply` the moment both routes share one `auth: "mixed"` value --
+`renderLlmsTxt`'s `writeSections` groups every route sharing an auth value under
+ONE heading (`ROUTES.filter((r) => r.auth === auth)`), so adding the new route
+under the existing label would have made the Write section state, of a route
+that is neither per-tool-call nor about `/mcp`'s `tools/list`, exactly that.
+Caught only by actually rendering the output and reading it (the brief's own
+instruction to "confirm each new entry appears where it should"), not by
+guessing from the ROUTES table alone -- a red-proofed test written against a
+first draft that skipped this step failed on a real, if narrow, discrepancy.
+Fixed by widening the label to defer to each mixed route's own `note` (both
+mixed routes carry one), with the `/mcp`-specific detail kept but explicitly
+scoped ("for /mcp, per-tool-call..."). `src/index.ts` untouched (no dispatch
+change; both routes were already live).
+
+**A correction to my own test, recorded because a wrong first draft is a
+finding too:** the first version of the "no longer falsely describes" test
+asserted that `/api/showhome/reply`'s `.note` text reaches `llms.txt`'s served
+output. It does not, and never has, for ANY route -- `routeLine()`
+(`src/discovery.ts`) renders `method`+`path`+`description` only; `.note` is
+served exclusively via `GET /api/surface` (and, for a no-auth GET, via
+`/openapi.json`'s `description` field). Verified directly (`/mcp`'s own note,
+"auth is per-tool-call...", does not appear in `llms.txt` either, unchanged by
+this wave). The test was corrected to check what is actually true: the shared
+heading stops making an `/mcp`-specific claim, and the route's real rule is
+taught at `/api/surface` (a separately passing test already covers that).
+
 ## A5: Served-text corrections
 
 ## A6: The deploy script
@@ -171,3 +213,5 @@ the call chain, confirmed by reading each function in full).
 | M4 | A2: restore the echo on `/mcp/read` only | mcp-protocol-version.test.ts | yes -- only the `/mcp/read` negotiation test fails, same assertion shape; `/mcp` stays green |
 | M5 | A3: delete `flag`'s `annotations` field entirely | mcp-tool-annotations.test.ts | yes -- the primary shape test fails on its own assertion (`flag must carry annotations`, `actual: undefined, expected: true`); four downstream tests that index into `annotations` unconditionally also fail, three with a TypeError -- expected fallout from one blunt mutation touching a shared fixture, the same pattern `docs/CHECKPOINT-HEARTBEAT-INBOX.md`'s M22 records, not a separate defect; the tools/list test fails on its own assertion too |
 | M6 | A3: flip `me`'s `readOnlyHint` from `false` to `true` | mcp-tool-annotations.test.ts | yes -- only the `me is NOT read-only` test fails, cleanly (`true !== false`); nothing else moves, including the `/mcp/read` all-readOnly test (`me` is not on that door) |
+| M7 | A4: delete the `/api/stats` `ROUTES` entry entirely | discovery.test.ts | yes -- exactly the four tests that reference `/api/stats` fail, each on its own assertion (`GET /api/stats missing from ROUTES`; `/api/stats must be in the Read section`; `/api/stats must appear in the OpenAPI doc`; the surface `stats && stats.auth === "none"` check); the other 39 tests, including `/api/search`'s own tests, stay green |
+| M8 | A4: revert `AUTH_LABEL.mixed` to the old `"per-tool-call -- see /mcp's tools/list"` | discovery.test.ts | yes -- only the mixed-heading test fails, on its own assertion (`AUTH_LABEL.mixed must no longer open with the /mcp-only claim`, actual `"per-tool-call -- see /mcp's tools/list"`) |
