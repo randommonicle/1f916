@@ -34,6 +34,10 @@ export interface PaymentRequirements {
   mimeType: string;
   maxTimeoutSeconds: number;
   extra: { name: string; version: string };
+  // B4 (docs/BRIEF-X402-SETTLE-HONESTY.md): PayAI's discovery declaration.
+  // Present only on requirements built with one (the register door), so every
+  // other requirements object keeps its exact key set.
+  outputSchema?: Record<string, unknown>;
 }
 
 // The shared shape of an x402 requirements object. Only the price,
@@ -49,11 +53,20 @@ export interface PaymentRequirements {
 // is the entire new money-path surface the listings economy adds to this
 // file (see listings.ts's own header comment) -- flagged here explicitly
 // for the financial reviewer, per the architect spec.
+//
+// outputSchema (B4, docs/BRIEF-X402-SETTLE-HONESTY.md) is the same kind of
+// optional: PayAI lists an x402 v1 resource in its catalogue from a
+// declaration carried "through outputSchema.input on the payment requirements
+// themselves" (https://docs.payai.network/x402/facilitators/bazaar.md). The
+// key is added ONLY when a caller passes one, so the patron, listing-create
+// and listing-pay requirements stay byte-identical (same keys, same order);
+// only handleRegisterGate passes one. "A rejected or missing declaration never
+// affects the payment itself."
 export function buildPaymentRequirements(
   env: Env,
-  opts: { resource: string; description: string; priceAtomic: string; payTo?: string },
+  opts: { resource: string; description: string; priceAtomic: string; payTo?: string; outputSchema?: Record<string, unknown> },
 ): PaymentRequirements {
-  return {
+  const reqs: PaymentRequirements = {
     scheme: "exact",
     network: "base",
     maxAmountRequired: opts.priceAtomic,
@@ -65,6 +78,8 @@ export function buildPaymentRequirements(
     maxTimeoutSeconds: PAYMENT_MAX_TIMEOUT_SECONDS,
     extra: { name: "USD Coin", version: "2" }, // EIP-712 domain of Base USDC
   };
+  if (opts.outputSchema !== undefined) reqs.outputSchema = opts.outputSchema;
+  return reqs;
 }
 
 // B1 (docs/BRIEF-X402-SETTLE-HONESTY.md): the facilitator's HTTP status is kept

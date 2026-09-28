@@ -156,6 +156,45 @@ print the warning verbatim and the three identifiers and never "safe to"; a posi
 402 print nothing and pass the signed request through unchanged); the wiring scan. `npm test`: pass
 1287, fail 0. `npm run typecheck`: exit 0.
 
+### Commit 4: B4, the PayAI discovery declaration (register only)
+
+**What.** `PaymentRequirements` gains optional `outputSchema?: Record<string, unknown>`;
+`buildPaymentRequirements` takes an optional `outputSchema` and adds the key, last, ONLY when given.
+`src/register-gate.ts` exports `REGISTER_OUTPUT_SCHEMA` (the brief's object, verbatim) and passes it;
+no other caller does, so the patron, listing-create and listing-pay requirements keep exactly the
+pre-wave keys in the pre-wave order (pinned by `Object.keys` and a golden `JSON.stringify`).
+
+**Checked against the code before building.** The handle description matches `assertValidHandle`
+(`/^[a-z0-9_-]{2,32}$/i`: without the `u` flag, `i` folds no non-ASCII character into `[a-z]`, so
+"ASCII letters" is exact; probed with U+00E9, U+0131, U+017F and U+212A, all refused). The model
+description matches `assertValidModel` (`trim().length >= 1`, `length <= 64` in UTF-16 code units;
+probed with 32 and 33 astral characters). The public_key description matches `register()` (a
+public-key registration's 201 carries no `secret` field). Production runs `REGISTRATION_MODE:
+"open"` (wrangler.jsonc), so the declared body omitting `invite_code` is right today; it would be
+incomplete if the door went back to invite-only (report).
+
+**Additions beyond B6's list.** The declaration reaches the facilitator (the register door's
+/verify request carries it in `paymentRequirements`, which is where PayAI reads it); a pin test that
+the two descriptions still match the rules they restate (a rule change fails the build rather than
+leaving a stale served description).
+
+**The D-061 secret-literal guard.** The public_key description (the hub's words) contains "secret",
+so `test/secret-literal-guard.test.ts` went red on it, as designed. It describes the public-key
+path's 201 and is not a secret-only citizen-auth instruction, so it got a reviewed `PROSE_ALLOW`
+entry (sha256 of the full decoded value, `9b8f9ece...`), and the guard's pinned baseline moved from
+69 / 23 / 46 to 70 / 23 / 47 (total / wire / prose). This edit to a policing test is flagged for the
+gate's review.
+
+**Test design fixes during red-proofing.** The pin test's `ok()` helper first let a thrown
+`SocietyError` escape and the register test called `validatePaymentRequirements` bare; both now fail
+as assertions (`ok()` returns a boolean; `assert.doesNotThrow`). The runner's code/name extraction
+was also fixed: a deep-equal diff's `...` elision had ended its block scan early, hiding the `code:`
+line; after the fix every commit-4 failure shows `ERR_ASSERTION` (11 of 11), and commit 3's log shows
+11 of 11 `AssertionError`.
+
+**Tests.** `test/x402-discovery-d1.test.ts` (new) +5; `test/secret-literal-guard.test.ts` one
+`PROSE_ALLOW` entry and the moved baseline. `npm test`: pass 1292, fail 0. `npm run typecheck`: 0.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -202,3 +241,11 @@ named.
 | M34 | keyauth-ride goes through the helper | its pre-wave second leg restored | B2b test: 3 / 1 | wiring: `keyauth-ride.mjs: ... exactly once and stops on unknown` | byte-exact |
 | M35 | register-maintainer goes through the helper | its pre-wave second leg ("safe to just run") restored | B2b test: 3 / 1 | wiring: `register-maintainer.mjs: ... exactly once and stops on unknown` | byte-exact |
 | M36 | the script stops on unknown | the `return` removed from keyauth-ride's unknown branch | B2b test: 3 / 1 | wiring: `keyauth-ride.mjs: ... exactly once and stops on unknown` | byte-exact |
+| M37 | the key only when given | the guard -> an unconditional `reqs.outputSchema = opts.outputSchema` | discovery: 4 / 1 | unit: `no outputSchema key at all, not even an undefined one` (deepEqual on `Object.keys`). The served 402s stay unchanged under this mutation (JSON drops an undefined key), so only the unit test can see it | byte-exact |
+| M38 | register declares | `outputSchema: REGISTER_OUTPUT_SCHEMA` removed from register-gate.ts | discovery: 3 / 2 | register route: deepEqual `accepts[0].outputSchema` (undefined vs the declaration); the /verify-body test | byte-exact |
+| M39 | the declaration's content | `discoverable: true` -> `false` | discovery: 3 / 2 | register route and /verify-body: deepEqual on the declaration | byte-exact |
+| M40 | only register declares | every caller gets a default declaration | discovery: 3 / 2 | unit key set; patron / listing 402s: `patron` (`"outputSchema" in reqs` true) | byte-exact |
+| M41 | the operator's script accepts it | `validatePaymentRequirements` refuses an `outputSchema` key | discovery: 4 / 1 | register route: `Got unwanted exception: the operator's registration script still signs against it` (doesNotThrow) | byte-exact |
+| M42 | the handle description matches its rule | `{2,32}` -> `{3,32}` in `assertValidHandle` | discovery: 4 / 1 | pin test: `2 characters` | byte-exact |
+| M43 | the model description matches its rule | `model.length > 64` -> `> 63` in `assertValidModel` (anchored on its signature: `correctModel` has its own copy) | discovery: 4 / 1 | pin test: `64 characters` | byte-exact |
+| M44 | the declaration reaches the facilitator | `paymentRequirements: { ...reqs, outputSchema: undefined }` in the rpc body | discovery: 4 / 1 | /verify-body test: deepEqual (undefined vs the declaration) | byte-exact |

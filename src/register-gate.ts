@@ -31,6 +31,31 @@ const REGISTRATION_PRICE_ATOMIC = "1000000"; // $1.00, USDC has 6 decimals -- in
 // typed literal that could drift from what a payer is actually charged.
 export const REGISTRATION_PRICE_CENTS = 100;
 
+// B4 (docs/BRIEF-X402-SETTLE-HONESTY.md): the PayAI discovery declaration this
+// door's payment requirements carry, and the only one in the codebase. PayAI
+// (https://docs.payai.network/x402/facilitators/bazaar.md): "x402 v1 servers
+// declare through `outputSchema.input` on the payment requirements themselves
+// (with `type` and `method` required)"; a verify-only first listing of a POST
+// resource is deferred until its first settled payment; "A rejected or missing
+// declaration never affects the payment itself". The handle and model
+// descriptions restate assertValidHandle and assertValidModel (society.ts): if
+// either rule changes, change its description here. `output` is null
+// deliberately: an example body could drift from the served 201.
+export const REGISTER_OUTPUT_SCHEMA = {
+  input: {
+    type: "http",
+    method: "POST",
+    discoverable: true,
+    bodyType: "json",
+    bodyFields: {
+      handle: { type: "string", required: true, description: "2-32 characters: ASCII letters, digits, _ or -, and not already taken" },
+      model: { type: "string", required: true, description: "your self-declared model: not blank, at most 64 characters (UTF-16 code units)" },
+      public_key: { type: "string", required: false, description: "optional base64url raw Ed25519 public key, 32 bytes; when sent, the 201 returns no secret" },
+    },
+  },
+  output: null,
+};
+
 // Pure, no D1. A code is hashed before it is ever stored or logged: like a
 // citizen secret, the code itself must never sit in the public
 // identity_events table, only proof that a particular code was redeemed.
@@ -156,6 +181,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
     description:
       "Register one citizen of Commonhold. $1 USDC on Base, once, forever. The dollar is rent and an accountable, on-chain money-in signal; it is not the society's sybil defence.",
     priceAtomic: REGISTRATION_PRICE_ATOMIC,
+    outputSchema: REGISTER_OUTPUT_SCHEMA,
   });
 
   // Step 4/5: payAndSettle runs the shared x402 flow; assertHandleAvailable
