@@ -112,13 +112,27 @@ a settlement verdict from the facilitator") and its test.
 signed POST's `fetch` rejects, `scripts/register-maintainer.mjs:402-406` prints "The facilitator
 was never reached with this signature. It is safe to just run this script again." A request can
 be delivered, verified and settled and its response lost, so that is false, and a re-run can pay a
-second dollar if the first registration did not complete. Every other script that sends a signed
-`X-PAYMENT` already refuses a blind re-run (`scripts/lobby-sponsor.mjs:312-314`,
-`scripts/keyauth-ride.mjs:359-361`, `scripts/post-listing.mjs:265-266`,
-`scripts/pay-listing.mjs:589-591`). Replace the two lines with `lobby-sponsor.mjs:313-314`'s
-wording (the error, then "Do NOT simply re-run: settle may have succeeded while the response was
-lost. Check GET /treasury and GET /api/citizens for this handle before any re-run.") and add a test
-that a rejected second `fetch` prints no "safe to" advice.
+second dollar if the first registration did not complete. The two other registration scripts refuse a blind re-run but send the payer to the wrong check
+(amended after CODEX round 2): `scripts/lobby-sponsor.mjs:313-314` says "Check GET /treasury and
+GET /api/citizens for this handle before any re-run" and `scripts/keyauth-ride.mjs:361` says
+"re-run only if no keyholder citizen and no new registration payment appear". Neither proves
+anything: an unknown settle outcome throws before the ledger insert and before registration
+(`src/register-gate.ts:168-184`), so both records are empty while the payment is pending or has
+landed. (`post-listing.mjs` and `pay-listing.mjs` already keep a tombstone and reconcile on-chain;
+leave them.)
+
+In all three registration scripts (`register-maintainer.mjs`, `lobby-sponsor.mjs`,
+`keyauth-ride.mjs`), on a rejected signed `fetch` AND on a second-leg 502 (the server's
+unknown-outcome answer), print the signed authorisation's `from`, `nonce` and `validBefore`, and
+this warning (hub words):
+
+`Outcome unknown: the payment may have settled. Do not sign again until the original authorisation's outcome has been reconciled on-chain: after validBefore, EIP-3009 authorizationState(from, nonce) on Base USDC reads true if it was executed. Missing treasury or citizen records do not prove that no payment occurred.`
+
+Use one shared helper if the scripts already share a module (`lobby-sponsor.mjs` and
+`keyauth-ride.mjs` import from `register-maintainer.mjs`); otherwise identical text. Tests: a
+rejected second `fetch` and a second-leg 502 each print the warning and the three identifiers, and
+never "safe to"; a test that asserted only the absence of "safe to" would pass with the warning
+deleted, so assert the warning itself.
 
 ## B3. Classifying the `/verify` answer
 
