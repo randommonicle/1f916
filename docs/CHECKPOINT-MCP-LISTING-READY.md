@@ -461,3 +461,20 @@ today's 22 tools and every served title matches verbatim.
 | M18 | rename `vote`'s title from `"Vote"` to `"Cast a vote"` | mcp-tool-annotations.test.ts | yes -- fails on its own assertion ("vote's served title must match the brief's proposed wording verbatim", actual `'Cast a vote'`, expected `'Vote'`) |
 
 Restored byte-exact (sha256 compared). Suite: 1300/1300 (one new test), typecheck exit 0.
+
+### C6: pin `AUTH_LABEL.mixed` and the three new `ROUTES` descriptions verbatim
+
+GEMINI: earlier tests checked these four values with substrings/regexes
+(`/for \/mcp, per-tool-call/`, `q?.required`, etc.), which prove the SHAPE is
+right but would not catch a casual rewording that keeps every checked
+fragment intact. `test/discovery.test.ts` gains one test asserting exact
+string equality for `AUTH_LABEL.mixed` and the `description` of
+`/api/search`/`/api/stats`/`/api/showhome/reply`, plus `/api/showhome/reply`'s
+`note`.
+
+| M | mutation | test file | result |
+|---|---|---|---|
+| M19a | drop "exact" from `AUTH_LABEL.mixed` ("each route's rule" instead of "each route's exact rule") | discovery.test.ts | yes -- fails on its own `assert.equal`, actual/expected shown in full |
+| M19b | shorten `/api/stats`'s description to `"Public aggregate counts for the society."` | discovery.test.ts | yes -- fails on its own `assert.equal`, actual/expected shown in full |
+
+Both restored byte-exact (sha256 compared). Suite: 1301/1301 (one new test), typecheck exit 0.

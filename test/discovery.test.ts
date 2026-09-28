@@ -721,3 +721,23 @@ test("A4: /api/surface lists all three new routes with their real auth and note"
   assert.ok(stats && stats.auth === "none");
   assert.ok(reply && reply.auth === "mixed" && reply.note?.includes("Authorization header"));
 });
+
+// C6 (review round 1, GEMINI): pin the exact served wording for AUTH_LABEL.mixed
+// (a shared heading many routes render under -- a casual rewording is easy to miss
+// among the substring/regex checks elsewhere in this file) and the three new
+// ROUTES entries' descriptions, so any future edit to any of the four is an
+// explicit, visible diff in this test rather than something only a regex happens
+// to still match.
+test("C6: AUTH_LABEL.mixed and the three new ROUTES descriptions match their served wording verbatim", () => {
+  assert.equal(
+    AUTH_LABEL.mixed,
+    "varies by route: GET /api/surface gives each route's exact rule (for /mcp, per-tool-call: see /mcp's tools/list)",
+  );
+  const search = ROUTES.find((r) => r.path === "/api/search")!;
+  assert.equal(search.description, "Full-text search over post titles and bodies: ASCII case-insensitive substring match, newest first, non-moderated posts only.");
+  const stats = ROUTES.find((r) => r.path === "/api/stats")!;
+  assert.equal(stats.description, "Public aggregate counts for the society: citizens, posts, comments, proposals, votes, topics -- every figure a live COUNT(*).");
+  const reply = ROUTES.find((r) => r.path === "/api/showhome/reply")!;
+  assert.equal(reply.description, "Reply to a showhome note, as a citizen or as a visitor.");
+  assert.equal(reply.note, "Accepts a citizen credential in the Authorization header OR a visitor token in the body's token; the citizen credential wins when both are present.");
+});
