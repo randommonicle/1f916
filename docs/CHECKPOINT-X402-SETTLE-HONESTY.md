@@ -121,6 +121,41 @@ reason chain and clip); `test/x402-settle-route-d1.test.ts` +2 (register: 403 ->
 invalid 200 -> unchanged 402, none reaching /settle or writing; pay: 403 and 503 never reserve and
 never settle). `npm test`: pass 1283, fail 0. `npm run typecheck`: exit 0.
 
+### Commit 3: B2b, the three registration scripts on an unknown outcome
+
+**What.** One shared helper in `scripts/register-maintainer.mjs` (the module `lobby-sponsor.mjs` and
+`keyauth-ride.mjs` already import from): `UNKNOWN_OUTCOME_WARNING` (the hub's words verbatim),
+`unknownOutcomeLines(authorization)` (from, nonce, validBefore with its ISO time, then the warning),
+and `sendSignedPayment(target, body, paymentHeader, authorization, { fetchImpl, printError })`, which
+sends the signed request and, on a rejected fetch OR a 502, prints the identifiers and the warning and
+returns `{ outcome: "unknown" }`; any other status comes back `answered` for the script's own handling
+(201 / 402 / other, unchanged). All three scripts hoist `authorization` out of the signing `try` and
+send their signed leg through the helper, stopping (exit code 1) on unknown. Removed: the false "The
+facilitator was never reached with this signature. It is safe to just run this script again."
+(register-maintainer) and the two re-run checks that proved nothing (treasury/citizens, lobby-sponsor;
+keyholder/new payment, keyauth-ride).
+
+**Key decision.** The scripts cannot be run in a test (their CLI paths read the Ben-custody payer
+wallet before the signed leg), so the helper takes its fetch and printer as parameters and is driven
+directly; a wiring test then pins, per script, the one call-and-stop block, that no other request
+carries the signed header, the helper's import, and the absence of the old advice. The rejected-fetch
+line keeps the two scripts' existing accurate wording ("errored in transit"), not register-maintainer's
+"could not be sent", which was itself a claim that nothing was sent.
+
+**Found by the wiring test while building.** My first comment in keyauth-ride.mjs quoted the old advice
+verbatim, and the test's absence check flagged it; the comment was reworded, the check kept.
+
+**Scope kept to the brief (report).** Only a rejected fetch and a 502 print the warning. The server's
+generic 500 ("Internal error", a non-SocietyError) can also hide an unknown outcome on registration (a
+rejected `/settle` fetch inside `facilitator()` is a TypeError, and an `appendChained` failure after a
+settle is not a SocietyError); on a 500 the scripts still print their pre-existing advice, which
+points at GET /treasury. Not widened.
+
+**Tests.** `test/register-scripts-unknown-outcome.test.ts` (new) +4: a rejected fetch and a 502 each
+print the warning verbatim and the three identifiers and never "safe to"; a positive control (201 and
+402 print nothing and pass the signed request through unchanged); the wiring scan. `npm test`: pass
+1287, fail 0. `npm run typecheck`: exit 0.
+
 ## Red-proof table
 
 Every run below is the runner in the session scratchpad (`redproof.mjs`): the find string must occur
@@ -158,3 +193,12 @@ named.
 | M25 | verify's 200-character clip | the reason's `.slice(0, FACILITATOR_REASON_MAX)` removed | x402.test: 22 / 1 | reason test: strictEqual, `e`x250 vs `e`x200 | byte-exact |
 | M26 | verify rule 4's wording | "refused to verify this payment" -> "declined to ..." | x402.test + route: 27 / 4 | register: `verify 403: error`; pay route answer; both unit tests | byte-exact |
 | M27 | verify rule 5's wording | "failed to verify this payment" -> "could not verify ..." | x402.test + route: 28 / 3 | register: `verify 503: error`; pay route answer; rule table | byte-exact |
+| M28 | the warning is printed | `UNKNOWN_OUTCOME_WARNING` dropped from `unknownOutcomeLines` | B2b test: 2 / 2 | rejected fetch and 502: `the warning, verbatim` | byte-exact |
+| M29 | the nonce is printed | the nonce line removed | B2b test: 2 / 2 | rejected fetch: `its nonce`; 502 likewise | byte-exact |
+| M30 | the rejected-fetch path reports | the report loop removed from the `catch` | B2b test: 3 / 1 | rejected fetch: `the warning, verbatim` | byte-exact |
+| M31 | a 502 is unknown | `response.status === 502` -> `=== 503` | B2b test: 3 / 1 | 502 test: strictEqual, outcome `answered` vs `unknown` | byte-exact |
+| M32 | nothing calls a re-run safe | a line "It is safe to run this script again." added to the `catch` | B2b test: 3 / 1 | rejected fetch: `nothing calls a re-run safe` (doesNotMatch /safe to/i) | byte-exact |
+| M33 | lobby-sponsor goes through the helper | its pre-wave second leg (own fetch, treasury/citizens advice) restored | B2b test: 3 / 1 | wiring: `lobby-sponsor.mjs: the signed leg goes through sendSignedPayment exactly once and stops on unknown` | byte-exact |
+| M34 | keyauth-ride goes through the helper | its pre-wave second leg restored | B2b test: 3 / 1 | wiring: `keyauth-ride.mjs: ... exactly once and stops on unknown` | byte-exact |
+| M35 | register-maintainer goes through the helper | its pre-wave second leg ("safe to just run") restored | B2b test: 3 / 1 | wiring: `register-maintainer.mjs: ... exactly once and stops on unknown` | byte-exact |
+| M36 | the script stops on unknown | the `return` removed from keyauth-ride's unknown branch | B2b test: 3 / 1 | wiring: `keyauth-ride.mjs: ... exactly once and stops on unknown` | byte-exact |

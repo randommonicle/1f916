@@ -32,6 +32,7 @@ import {
   buildAuthorization,
   signAuthorization,
   encodePaymentHeader,
+  sendSignedPayment,
 } from "./register-maintainer.mjs";
 
 // Custody and ledger files resolve relative to THIS script, not the caller's
@@ -296,8 +297,9 @@ async function cmdRegister(flags) {
   console.log(`Paying $1.00 USDC on Base from ${account.address}...`);
 
   let paymentHeader;
+  let authorization;
   try {
-    const authorization = buildAuthorization(account.address, reqs);
+    authorization = buildAuthorization(account.address, reqs);
     const signature = await signAuthorization(account, authorization, reqs);
     paymentHeader = encodePaymentHeader(firstJson.x402Version, reqs, authorization, signature);
   } catch (e) {
@@ -306,16 +308,17 @@ async function cmdRegister(flags) {
     return;
   }
 
-  let second;
-  try {
-    second = await fetch(target, { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeader }, body });
-  } catch (e) {
-    console.error(`The signed payment request errored in transit: ${e.message ?? e}.`);
-    console.error("Do NOT simply re-run: settle may have succeeded while the response was lost. Check GET /treasury and GET /api/citizens for this handle before any re-run.");
+  // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md): a rejected fetch or a 502 prints the
+  // authorisation and the reconcile-on-chain warning (register-maintainer.mjs
+  // sendSignedPayment). The old advice, to check GET /treasury and GET
+  // /api/citizens before a re-run, proved nothing: an unknown settle outcome
+  // throws before the server writes either record.
+  const sent = await sendSignedPayment(target, body, paymentHeader, authorization);
+  if (sent.outcome === "unknown") {
     process.exitCode = 1;
     return;
   }
-  const { json: secondJson, text: secondText } = await readJson(second);
+  const { response: second, json: secondJson, text: secondText } = sent;
   if (second.status !== 201) {
     console.error(`Registration failed after payment: HTTP ${second.status}.`);
     console.error(secondJson ? JSON.stringify(secondJson, null, 2) : secondText);

@@ -48,6 +48,7 @@ import {
   signAuthorization,
   encodePaymentHeader,
   describeWouldSign,
+  sendSignedPayment,
 } from "./register-maintainer.mjs";
 
 // The audience is a PROTOCOL CONSTANT, not the request Host header (keyauth.ts
@@ -339,8 +340,9 @@ async function cmdRegister(flags) {
   console.log(`Payment required: $${(Number(reqs.maxAmountRequired) / 1e6).toFixed(2)} USDC on Base to ${reqs.payTo}. Paying from ${account.address}...`);
 
   let paymentHeader;
+  let authorization;
   try {
-    const authorization = buildAuthorization(account.address, reqs);
+    authorization = buildAuthorization(account.address, reqs);
     const signature = await signAuthorization(account, authorization, reqs);
     paymentHeader = encodePaymentHeader(firstJson.x402Version, reqs, authorization, signature);
   } catch (e) {
@@ -349,20 +351,17 @@ async function cmdRegister(flags) {
     return;
   }
 
-  let second;
-  try {
-    second = await fetch(target, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeader },
-      body,
-    });
-  } catch (e) {
-    console.error(`The signed payment request errored in transit: ${e.message ?? e}.`);
-    console.error("Do NOT simply re-run: settle may have succeeded even though the response was lost, and a second run would sign and pay a SECOND dollar. Check GET /treasury and GET /api/official first; re-run only if no keyholder citizen and no new registration payment appear.");
+  // B2b (docs/BRIEF-X402-SETTLE-HONESTY.md): a rejected fetch or a 502 prints the
+  // authorisation and the reconcile-on-chain warning (register-maintainer.mjs
+  // sendSignedPayment). The old advice (look for a new citizen or a new
+  // registration payment before running again) proved nothing: an unknown
+  // settle outcome throws before the server writes either record.
+  const sent = await sendSignedPayment(target, body, paymentHeader, authorization);
+  if (sent.outcome === "unknown") {
     process.exitCode = 1;
     return;
   }
-  const { json: secondJson, text: secondText } = await readJson(second);
+  const { response: second, json: secondJson, text: secondText } = sent;
 
   if (second.status === 402) {
     console.error("Payment was not accepted (nothing settled, nothing spent):");

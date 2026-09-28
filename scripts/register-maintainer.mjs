@@ -254,6 +254,64 @@ export function describeWouldSign(from, reqs, now = Date.now()) {
   };
 }
 
+// ---------- the signed second leg, shared by all three registration scripts ----------
+//
+// B2b (docs/BRIEF-X402-SETTLE-HONESTY.md; CODEX round 1 finding 2, round 2):
+// register-maintainer.mjs, lobby-sponsor.mjs and keyauth-ride.mjs each send ONE
+// signed x402 request to POST /api/register. Two of its outcomes say nothing
+// about whether the money moved: a fetch that REJECTS (the request can be
+// delivered, verified and settled and only its response lost) and a 502 (the
+// server's unknown-outcome answer, src/x402.ts settleOrThrow). The server's
+// unknown path throws before its ledger insert and before registration
+// (src/register-gate.ts), so a missing treasury line or citizen proves nothing
+// either: only the chain can say. On both, every script prints the signed
+// authorisation's from, nonce and validBefore and the same warning, from this
+// one helper, and nothing that calls a re-run safe. It takes the fetch and the
+// printer as parameters so test/register-scripts-unknown-outcome.test.ts can
+// drive it without a wallet or a network.
+
+export const UNKNOWN_OUTCOME_WARNING =
+  "Outcome unknown: the payment may have settled. Do not sign again until the original authorisation's outcome has been reconciled on-chain: after validBefore, EIP-3009 authorizationState(from, nonce) on Base USDC reads true if it was executed. Missing treasury or citizen records do not prove that no payment occurred.";
+
+function isoFromSeconds(seconds) {
+  const d = new Date(Number(seconds) * 1000);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+export function unknownOutcomeLines(authorization) {
+  const when = isoFromSeconds(authorization?.validBefore);
+  return [
+    "The signed authorisation, for the on-chain check:",
+    `  from:        ${authorization?.from}`,
+    `  nonce:       ${authorization?.nonce}`,
+    `  validBefore: ${authorization?.validBefore}${when ? ` (${when})` : ""}`,
+    UNKNOWN_OUTCOME_WARNING,
+  ];
+}
+
+// Sends the signed request. Returns { outcome: "unknown" } after printing the
+// identifiers and the warning (a rejected fetch, or a 502), or
+// { outcome: "answered", response, json, text } for the caller's own
+// status handling (201, 402, and every other status as before).
+export async function sendSignedPayment(target, body, paymentHeader, authorization, { fetchImpl = fetch, printError = console.error } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(target, { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeader }, body });
+  } catch (e) {
+    printError(`The signed payment request errored in transit: ${e?.message ?? e}.`);
+    for (const line of unknownOutcomeLines(authorization)) printError(line);
+    return { outcome: "unknown" };
+  }
+  const { json, text } = await readJson(response);
+  if (response.status === 502) {
+    printError("The server answered the signed request with HTTP 502:");
+    printError(json ? JSON.stringify(json, null, 2) : text);
+    for (const line of unknownOutcomeLines(authorization)) printError(line);
+    return { outcome: "unknown", status: 502 };
+  }
+  return { outcome: "answered", response, json, text };
+}
+
 // ---------- CLI orchestration (not exercised by tests) ----------
 
 async function readJson(response) {
@@ -381,8 +439,9 @@ async function main() {
   console.log(`Paying from ${payerAddress}...`);
 
   let paymentHeader;
+  let authorization;
   try {
-    const authorization = buildAuthorization(payerAddress, reqs);
+    authorization = buildAuthorization(payerAddress, reqs);
     const signature = await signAuthorization(account, authorization, reqs);
     paymentHeader = encodePaymentHeader(firstJson.x402Version, reqs, authorization, signature);
   } catch (e) {
@@ -392,20 +451,13 @@ async function main() {
     return;
   }
 
-  let second;
-  try {
-    second = await fetch(target, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeader },
-      body,
-    });
-  } catch (e) {
-    console.error(`The signed payment could not be sent: ${e.message ?? e}`);
-    console.error("The facilitator was never reached with this signature. It is safe to just run this script again.");
+  // B2b: a rejected fetch or a 502 prints the authorisation and the warning (sendSignedPayment).
+  const sent = await sendSignedPayment(target, body, paymentHeader, authorization);
+  if (sent.outcome === "unknown") {
     process.exitCode = 1;
     return;
   }
-  const { json: secondJson, text: secondText } = await readJson(second);
+  const { response: second, json: secondJson, text: secondText } = sent;
 
   if (second.status === 402) {
     console.error("Payment was not accepted (nothing settled, nothing was spent):");
