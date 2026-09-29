@@ -617,3 +617,29 @@ Same method as F8. In a Git Bash argument a leading `//` is rewritten to `/` by 
 - Baseline 1346 tests, all pass, `tsc` exit 0. After F8: 1352 (6 new). After F9: 1357 (5 new), all pass, `tsc` exit 0.
 - F9 touched `src/x402.ts` (the helper and the patron site), `src/listings.ts` (its import and two sites), the new test file, this file and the brief. `src/society.ts`, `src/doc.ts`, `migrations/`, `wrangler.*`, `scripts/` and `test/secret-literal-guard.test.ts` are untouched; the D-061 guard is green. No push, no deploy, no rebase, no remote call; git run only against this worktree.
 - Limit, not changed: a client that decodes the header with `atob` and `JSON.parse` alone sees the euro sign as its UTF-8 bytes read as Latin-1; a client written for the old header could not have received such a body at all (it was a 500), so no working client is affected.
+
+## F10/F11 (exchange 2026-09-29, CODEX round 1)
+
+Builds on `2058f79a`. Baseline: 1357 tests, all pass, `tsc` exit 0.
+
+### F10 (MEDIUM, reproduced by CODEX and the hub): the settlement header can never throw or change the outcome
+
+`encodePaymentResponseHeader` still threw after the payment was booked: `JSON.stringify` recurses, so a valid settlement body with deeply nested arrays (`JSON.parse` accepts 20,000 levels) threw `RangeError: Maximum call stack size exceeded`, and the patron route answered a generic 500 with the ledger row committed; the two listing sites share the helper. A very large body would also have made a huge header.
+
+Rule now: header construction after settlement can never throw and never changes the outcome. The helper is `encodePaymentResponseHeader(settlement: unknown, ctx: { route: string; tx: string }): string | null` in `src/x402.ts`. The whole encoding is in a try/catch and returns null on any throw; it also returns null when the encoded string is longer than the exported constant `PAYMENT_RESPONSE_HEADER_MAX = 8192`. On null it logs exactly one line, `{"level":"warn","event":"payment_response_header_omitted","route","tx","reason"}`, with `reason` either `unencodable: <inner message clipped to 200>` or `too large: <N> characters` (N the encoded length). It is warn, not error: the payment succeeded and the body already names the tx. All three call sites compute the header first and spread it conditionally, so a null omits `X-PAYMENT-RESPONSE` and status and body are unchanged. The `route` values are `patron`, `listing_fee` (listing create) and `listing_pay` (pay listing).
+
+Tests (`test/x402-post-payment-honesty-d1.test.ts`, now 16): the F9 route tests were folded into one table of the three sites (`SITES`: how to call it, the route name, and the row the payment writes) so the F9 and F10 route tests share it, with their names unchanged. New: an F10 unit test (control: `JSON.stringify` of the 20,000-deep value throws `RangeError` in this runtime; the helper returns null with one warn line whose reason starts `unencodable: `; a body encoding to exactly 8192 characters is served and one byte more returns null with reason `too large: 8196 characters`); per site, a successful settle body nested 20,000 arrays deep (written as text in the facilitator stub, since `JSON.stringify` cannot build it): success status, no `X-PAYMENT-RESPONSE`, `Access-Control-Allow-Origin` still present, exactly one omitted line with that site's route and tx, the payment row exists, settled once; and one size test on the patron door, a settle body with a 10,000-character string field: header omitted, reason matching `too large: N characters` with N over the cap. The F9 unit test still asserts ASCII is byte-identical to `btoa(JSON.stringify(x))` and that the euro sign round-trips, and now also that an encodable body logs nothing.
+
+### Red-proofs, F10 (M96 onward)
+
+Same method as F8 and F9 (original copied aside, one mutation, only the new test file run, restored and compared with `cmp`).
+
+| # | guards | mutation | tests (pass / fail) | failing assertion | restore |
+|---|---|---|---|---|---|
+| M96 | the encoding is caught | the helper's try/catch removed | 12 / 4 | F10 unit: `RangeError: Maximum call stack size exceeded` thrown out of the helper; F10 route patron: the status assertion, body `{"error":"Internal error. The society apologizes."}` (the router's generic 500, ledger row committed); F10 route listing create and pay listing: the same `RangeError` thrown out of the handler | byte-exact |
+| M97 | the size cap | the `too large` line removed | 14 / 2 | F10 unit: `one byte more is 8196 characters, over the cap`; F10 route patron size test: `the header is omitted` | byte-exact |
+| M98 | the patron site honours null | the conditional spread replaced by `"X-PAYMENT-RESPONSE": String(paymentResponse)` | 14 / 2 | F10 route patron (deep) and the size test: `the header is omitted` (the header is present, holding the text `null`) | byte-exact |
+| M99 | listing create honours null | the same replacement | 15 / 1 | F10 route listing create: `the header is omitted` | byte-exact |
+| M100 | pay listing honours null | the same replacement | 15 / 1 | F10 route pay listing: `the header is omitted` | byte-exact |
+
+- The 20,000-deep control is a runtime property (the stack limit of this Node, 24.15): the unit test asserts it, so on a runtime that serialised that depth the unit test, not the routes, would say so.

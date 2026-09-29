@@ -518,11 +518,34 @@ export async function recordSettledPayment(
 // are base64'd, so the header is ASCII whatever the body holds. For pure-ASCII input
 // the output is byte-identical to the old encoding; a client reads it back by decoding
 // base64 to bytes and the bytes as UTF-8.
-export function encodePaymentResponseHeader(settlement: unknown): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(settlement));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
+//
+// F10 (exchange 2026-09-29, CODEX round 1, MEDIUM): building the header must also never
+// throw or change the outcome. JSON.stringify recurses, so a valid settlement body with
+// deeply nested arrays (JSON.parse accepts 20,000 levels) threw RangeError here and the
+// patron route answered a generic 500 with the ledger row already committed; a very
+// large body would also make a huge header. So the whole encoding sits in a try/catch,
+// and a header longer than PAYMENT_RESPONSE_HEADER_MAX is refused: either way the
+// helper returns null, logs ONE warn line (warn, not error: the payment succeeded and
+// the body already names the tx), and every caller omits the header and serves its
+// normal status and body.
+export const PAYMENT_RESPONSE_HEADER_MAX = 8192;
+
+export function encodePaymentResponseHeader(settlement: unknown, ctx: { route: string; tx: string }): string | null {
+  const omitted = (reason: string): null => {
+    console.log(JSON.stringify({ level: "warn", event: "payment_response_header_omitted", route: ctx.route, tx: ctx.tx, reason }));
+    return null;
+  };
+  let encoded: string;
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(settlement));
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    encoded = btoa(binary);
+  } catch (e) {
+    return omitted(`unencodable: ${clipReason(e instanceof Error ? e.message : String(e))}`);
+  }
+  if (encoded.length > PAYMENT_RESPONSE_HEADER_MAX) return omitted(`too large: ${encoded.length} characters`);
+  return encoded;
 }
 
 export async function handlePatron(request: Request, env: Env): Promise<Response> {
@@ -554,6 +577,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
     created_at: now,
   });
 
+  const paymentResponse = encodePaymentResponseHeader(result.settlement, { route: "patron", tx: result.tx });
   return Response.json(
     {
       thanks: "Your line is in the books, permanently: GET /treasury",
@@ -572,7 +596,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
       status: 200,
       headers: {
         "Access-Control-Allow-Origin": "*",
-        "X-PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement),
+        ...(paymentResponse !== null ? { "X-PAYMENT-RESPONSE": paymentResponse } : {}),
       },
     },
   );

@@ -441,6 +441,7 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
     console.log(JSON.stringify({ level: "error", event: "listing_throttle_record_failed", listing_id: listingId, reason: e instanceof Error ? e.message : String(e) }));
   }
 
+  const paymentResponse = encodePaymentResponseHeader(result.settlement, { route: "listing_fee", tx: result.tx });
   return Response.json(
     {
       listing_id: listingId,
@@ -456,7 +457,7 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
     },
     {
       status: 201,
-      headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement) },
+      headers: { "Access-Control-Allow-Origin": "*", ...(paymentResponse !== null ? { "X-PAYMENT-RESPONSE": paymentResponse } : {}) },
     },
   );
 }
@@ -865,6 +866,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     );
   }
 
+  const paymentResponse = encodePaymentResponseHeader(result.settlement, { route: "listing_pay", tx: result.tx });
   return Response.json(
     {
       listing_id: listingId,
@@ -880,7 +882,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
       note: "Payment settled and this listing is now marked paid to this submission.",
       verify: "GET /api/listings/payments",
     },
-    { status: 200, headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement) } },
+    { status: 200, headers: { "Access-Control-Allow-Origin": "*", ...(paymentResponse !== null ? { "X-PAYMENT-RESPONSE": paymentResponse } : {}) } },
   );
 }
 
