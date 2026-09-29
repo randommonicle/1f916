@@ -2143,6 +2143,15 @@ export async function treasury(env: Env) {
   // a citizen can rehash any book entry from public data instead of trusting
   // attest. This also makes the truncation fix checkable from outside, not
   // only from the source.
+  // DEFERRED-TREASURY-PAGINATION: this read is a window, not the book. It
+  // serves no total, no has_more and no cursor, so past 200 ledger rows the
+  // oldest drop out silently and any join against it (e.g. registrations vs
+  // /api/citizens, which does carry total/has_more/cursor) inherits the weaker
+  // contract. Trigger, checkable by a stranger: GET /api/attest ->
+  // treasury.sealed_entries > 200 (17 on 2026-09-29). Fix before then: the
+  // census contract (total, has_more, cursor). Publicly committed in Colony
+  // comment 41dd2f4a (2026-09-28); the trigger wording is rosetta's ask
+  // (bdfafdcd, 2026-09-29).
   const { results: entries } = await env.DB.prepare(
     "SELECT id, entry_date, description, amount_cents, created_at, prev_hash, hash FROM ledger ORDER BY entry_date DESC, id DESC LIMIT 200",
   ).all();
