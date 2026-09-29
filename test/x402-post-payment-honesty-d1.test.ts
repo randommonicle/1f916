@@ -28,10 +28,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
-import { paymentHeaderFor, TEST_PAYER } from "./helpers/x402-payload.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createLocalD1, insertCitizen, insertListing, insertSubmission, type LocalD1 } from "./helpers/local-d1.ts";
+import { declareTestWallet } from "./helpers/wallet-pin.ts";
+import { paymentHeaderFor, atomicFromCents, TEST_PAYER } from "./helpers/x402-payload.ts";
 import { encodeBase64Url } from "../src/keyauth.ts";
 import { sha256Hex } from "../src/chain.ts";
+import { encodePaymentResponseHeader } from "../src/x402.ts";
+import { handleCreateListing, computeListingFeeCents, handlePayListing } from "../src/listings.ts";
 import type { Env } from "../src/society.ts";
 import worker from "../src/index.ts";
 
@@ -281,3 +287,150 @@ for (const variant of VARIANTS) {
     }
   });
 }
+
+// ---------- F9 ----------
+
+// The header value decoded the way a client must: base64 to bytes, the bytes as UTF-8.
+function decodeSettlementHeader(header: string | null): string {
+  assert.ok(header, "X-PAYMENT-RESPONSE is present");
+  assert.match(header, /^[A-Za-z0-9+/]*={0,2}$/, "the header is plain base64, so ASCII");
+  const binary = atob(header);
+  return new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+}
+
+const EURO = "€"; // above U+00FF, so btoa applied to the JSON text throws
+
+test("F9 unit: the helper round-trips a body with non-Latin-1 characters through UTF-8, and equals btoa(JSON.stringify(x)) for pure ASCII", () => {
+  const withEuro = { note: EURO, success: true };
+  // The control: this input is exactly what the old encoding could not carry.
+  assert.throws(() => btoa(JSON.stringify(withEuro)), "btoa on the raw JSON text throws for a character above U+00FF");
+  const encoded = encodePaymentResponseHeader(withEuro);
+  assert.match(encoded, /^[A-Za-z0-9+/]*={0,2}$/);
+  assert.equal(new TextDecoder().decode(Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))), JSON.stringify(withEuro));
+  assert.deepEqual(JSON.parse(decodeSettlementHeader(encoded)), withEuro);
+
+  // A supplementary-plane character (a surrogate pair in UTF-16, four UTF-8 bytes) survives too.
+  const astral = { payer_name: "café 😀", success: true };
+  assert.deepEqual(JSON.parse(decodeSettlementHeader(encodePaymentResponseHeader(astral))), astral);
+
+  for (const ascii of [{ success: true, payer: TEST_PAYER, transaction: TX }, { note: "plain" }, [], "text", null, {}]) {
+    assert.equal(encodePaymentResponseHeader(ascii), btoa(JSON.stringify(ascii)), `ASCII input is byte-identical to the old encoding: ${JSON.stringify(ascii)}`);
+  }
+});
+
+const SETTLEMENT_WITH_EURO = { note: EURO };
+function assertSettlementHeader(res: Response, label: string): void {
+  const decoded = JSON.parse(decodeSettlementHeader(res.headers.get("X-PAYMENT-RESPONSE"))) as Record<string, unknown>;
+  assert.deepEqual(decoded, { success: true, payer: TEST_PAYER, transaction: TX, note: EURO }, `${label}: the header decodes as UTF-8 to the facilitator's settlement body`);
+  assert.ok(JSON.stringify(decoded).includes(EURO), `${label}: the character survives`);
+}
+
+async function loadCitizen(d1: LocalD1, id: number) {
+  return d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(id) as {
+    id: number;
+    handle: string;
+    model: string;
+    karma: number;
+    created_at: number;
+    last_seen_at: number;
+  };
+}
+
+test("F9 route, patron: a successful settlement body holding a non-Latin-1 character is 200 with X-PAYMENT-RESPONSE decoding as UTF-8", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator(SETTLEMENT_WITH_EURO);
+  try {
+    const res = await callWorker(
+      new Request("https://example.test/api/patron", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(TREASURY_ADDRESS, "1000000") },
+        body: JSON.stringify({ message: "hello" }),
+      }),
+      testEnv(d1),
+    );
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assertSettlementHeader(res, "patron");
+    assert.equal(count(d1, "ledger"), 1, "and the payment is booked once");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F9 route, listing create: a successful settlement body holding a non-Latin-1 character is 201 with X-PAYMENT-RESPONSE decoding as UTF-8", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator(SETTLEMENT_WITH_EURO);
+  try {
+    const bounty = 1000;
+    const funder = await loadCitizen(d1, insertCitizen(d1));
+    const res = await handleCreateListing(
+      new Request("https://example.test/api/listing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(computeListingFeeCents(bounty))) },
+        body: JSON.stringify({
+          title: "Review my auth middleware",
+          description: "Stuck on token refresh, please review for race conditions",
+          acceptance_condition: "a reviewer identifies at least one real correctness issue or confirms none exist",
+          bounty_cents: bounty,
+          expires_at: Date.now() + 7 * 86_400_000,
+        }),
+      }),
+      testEnv(d1),
+      funder,
+    );
+    assert.equal(res.status, 201, JSON.stringify(await res.clone().json()));
+    assertSettlementHeader(res, "listing create");
+    assert.equal(count(d1, "ledger"), 1, "and the fee is booked once");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F9 route, pay listing: a successful settlement body holding a non-Latin-1 character is 200 with X-PAYMENT-RESPONSE decoding as UTF-8", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator(SETTLEMENT_WITH_EURO);
+  try {
+    const bounty = 1200;
+    const reviewerWallet = "0x" + "0a".repeat(20);
+    const funderId = insertCitizen(d1);
+    const funder = await loadCitizen(d1, funderId);
+    const reviewerId = insertCitizen(d1);
+    const row = await declareTestWallet(d1, reviewerId, reviewerWallet);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: bounty });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    const res = await handlePayListing(
+      new Request(`https://example.test/api/listing/${listingId}/pay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(reviewerWallet, atomicFromCents(bounty)) },
+        body: JSON.stringify({ submission_id: submissionId, wallet_row_id: row.id, wallet_row_hash: row.hash }),
+      }),
+      testEnv(d1),
+      funder,
+      listingId,
+    );
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assertSettlementHeader(res, "pay listing");
+    assert.equal(count(d1, "listing_payments"), 1, "and the payment is in the payments book once");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// The scan: any spelling of btoa applied straight to JSON.stringify's output is the
+// bug, wherever it sits in src/ (a fourth site would be a fourth 500 after payment).
+const RAW_BTOA_OF_JSON = /btoa\s*\(\s*JSON\s*\.\s*stringify\s*\(/;
+
+test("F9 scan: no btoa(JSON.stringify( remains anywhere in src/ (comments included), and the pattern matches every spelling it is meant to catch", () => {
+  for (const spelling of ["btoa(JSON.stringify(x))", "btoa( JSON.stringify( x ) )", 'h["X"] = btoa(\n  JSON . stringify(x))']) {
+    assert.match(spelling, RAW_BTOA_OF_JSON, `the pattern catches: ${spelling}`);
+  }
+  assert.doesNotMatch("encodePaymentResponseHeader(x); btoa(binary)", RAW_BTOA_OF_JSON);
+
+  const srcDir = fileURLToPath(new URL("../src/", import.meta.url));
+  const files = (readdirSync(srcDir, { recursive: true }) as string[]).filter((f) => f.endsWith(".ts"));
+  assert.ok(files.length > 10 && files.includes("x402.ts") && files.includes("listings.ts"), `the scan reads the source tree (${files.length} files)`);
+  const offenders = files.filter((f) => RAW_BTOA_OF_JSON.test(readFileSync(join(srcDir, f), "utf8")));
+  assert.deepEqual(offenders, [], "no src file applies btoa directly to JSON.stringify's output");
+});

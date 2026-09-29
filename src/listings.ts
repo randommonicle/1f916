@@ -23,7 +23,7 @@
 // Every other payTo in this file is the default (the treasury), for the
 // posting fee.
 
-import { buildPaymentRequirements, payAndSettle, recordSettledPayment, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
+import { buildPaymentRequirements, payAndSettle, recordSettledPayment, encodePaymentResponseHeader, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
@@ -456,7 +456,7 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
     },
     {
       status: 201,
-      headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": btoa(JSON.stringify(result.settlement)) },
+      headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement) },
     },
   );
 }
@@ -880,7 +880,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
       note: "Payment settled and this listing is now marked paid to this submission.",
       verify: "GET /api/listings/payments",
     },
-    { status: 200, headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": btoa(JSON.stringify(result.settlement)) } },
+    { status: 200, headers: { "Access-Control-Allow-Origin": "*", "X-PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement) } },
   );
 }
 

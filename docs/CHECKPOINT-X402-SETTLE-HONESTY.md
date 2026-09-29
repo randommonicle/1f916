@@ -588,3 +588,32 @@ Method: original file copied aside, one mutation applied (the find string must o
 
 - Touched: `src/register-gate.ts`, `src/x402.ts` (one word: `clipReason` exported), `test/x402-post-payment-honesty-d1.test.ts` (new), this file and the brief. `src/society.ts`, `src/doc.ts`, `migrations/`, `wrangler.*`, `scripts/` and `test/secret-literal-guard.test.ts` are untouched; the D-061 guard is green.
 - `test/register-scripts-unknown-outcome.test.ts` contains the old sentence as a stub answer for the scripts' 5xx handling; it tests the scripts, not this route, and stays green.
+
+### F9 (MEDIUM): the X-PAYMENT-RESPONSE header is UTF-8 safe
+
+`btoa(JSON.stringify(result.settlement))` throws `InvalidCharacterError` on any character above U+00FF, so a successful settlement body that merely contained one (a payer name, a note) became a generic 500 after the money moved and was booked. Three sites: the patron door (`src/x402.ts`), listing create and pay listing (`src/listings.ts`).
+
+One exported helper, `encodePaymentResponseHeader(settlement: unknown): string` in `src/x402.ts`: `JSON.stringify`, then `TextEncoder().encode`, then a binary string built byte by byte, then `btoa`. All three sites use it. For pure-ASCII input its output is byte-identical to the old encoding (asserted, including `[]`, `{}`, `null` and a bare string). A client reads the header back by decoding base64 to bytes and the bytes as UTF-8; a client that did `JSON.parse(atob(header))` gets the same result as before for ASCII bodies and mojibake for the non-Latin-1 characters that used to be a 500.
+
+Tests (same file as F8): a unit test (the control that the old encoding throws on the euro sign; the helper round-trips the euro sign and a supplementary-plane character through `TextDecoder`; ASCII equals `btoa(JSON.stringify(x))`), one route test per call site with the facilitator stub's successful settle body carrying the euro sign (patron: 200 through the worker; listing create: 201 through `handleCreateListing`; pay listing: 200 through `handlePayListing` with a real declared wallet row and submission), each asserting the status, that `X-PAYMENT-RESPONSE` is plain base64 and decodes as UTF-8 to the facilitator's body, and that the payment is booked once; and a source scan (any whitespace spelling of `btoa(JSON.stringify(` in any `.ts` file under `src/`, comments included, with the pattern itself checked against three spellings and a non-match, and the file list checked to be non-empty). No site's harness was disproportionately costly; none is skipped.
+
+### Red-proofs, F9 (M91 onward)
+
+Same method as F8. In a Git Bash argument a leading `//` is rewritten to `/` by path conversion; M95's first attempt began with `//`, produced a SyntaxError and is a setup error, not a red-proof; it was rerun with a leading space.
+
+| # | guards | mutation | tests (pass / fail) | failing assertion | restore |
+|---|---|---|---|---|---|
+| M91 | the patron site uses the helper | `src/x402.ts`: `encodePaymentResponseHeader(result.settlement)` back to `btoa(JSON.stringify(result.settlement))` | 9 / 2 | `F9 route, patron`: `AssertionError` on the status, body `{"error":"Internal error. The society apologizes."}`; and `F9 scan`: `no src file applies btoa directly to JSON.stringify's output` | byte-exact |
+| M92 | the listing-create site uses the helper | `src/listings.ts` (create): reverted to raw `btoa` | 9 / 2 | `F9 route, listing create`: `InvalidCharacterError: Invalid character at btoa ... at handleCreateListing (src/listings.ts:459)`; and the F9 scan | byte-exact |
+| M93 | the pay-listing site uses the helper | `src/listings.ts` (pay): reverted to raw `btoa` | 9 / 2 | `F9 route, pay listing`: `InvalidCharacterError: Invalid character at btoa ... at handlePayListing (src/listings.ts:883)`; and the F9 scan | byte-exact |
+| M94 | the helper encodes UTF-8 | the helper's byte loop replaced by `binary = JSON.stringify(settlement)` (Latin-1 only, the old behaviour behind the new name) | 7 / 4 | `F9 unit`: `InvalidCharacterError: Invalid character at btoa (src/x402.ts:525)`; the three route tests (patron: generic 500 body; listing create and pay listing: the same `InvalidCharacterError`) | byte-exact |
+| M95 | the scan can go red on its own | a comment `// old: btoa(JSON.stringify(x))` added above the helper in `src/x402.ts` | 10 / 1 | `F9 scan`: `no src file applies btoa directly to JSON.stringify's output`; every other test green | byte-exact |
+
+- M91 to M93 each fail two tests, the route test and the scan, because a reverted site is also a raw `btoa(JSON.stringify(` in `src/`. M95 isolates the scan: it fails alone.
+- The unit test's first assertion (`btoa` on the euro-bearing JSON throws) is a control on the input, not on the source.
+
+### F8/F9 closing walk
+
+- Baseline 1346 tests, all pass, `tsc` exit 0. After F8: 1352 (6 new). After F9: 1357 (5 new), all pass, `tsc` exit 0.
+- F9 touched `src/x402.ts` (the helper and the patron site), `src/listings.ts` (its import and two sites), the new test file, this file and the brief. `src/society.ts`, `src/doc.ts`, `migrations/`, `wrangler.*`, `scripts/` and `test/secret-literal-guard.test.ts` are untouched; the D-061 guard is green. No push, no deploy, no rebase, no remote call; git run only against this worktree.
+- Limit, not changed: a client that decodes the header with `atob` and `JSON.parse` alone sees the euro sign as its UTF-8 bytes read as Latin-1; a client written for the old header could not have received such a body at all (it was a 500), so no working client is affected.

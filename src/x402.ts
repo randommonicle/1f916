@@ -510,6 +510,21 @@ export async function recordSettledPayment(
   }
 }
 
+// F9 (docs/CHECKPOINT-X402-SETTLE-HONESTY.md, build review round 3, CODEX MEDIUM): the
+// X-PAYMENT-RESPONSE header carries the facilitator's settlement body. btoa applied
+// straight to that JSON text throws on any character above U+00FF, so a successful
+// settlement that merely contained one (a name, a note) became a generic 500 AFTER the
+// money moved and was booked. The text is encoded as UTF-8 bytes first and those bytes
+// are base64'd, so the header is ASCII whatever the body holds. For pure-ASCII input
+// the output is byte-identical to the old encoding; a client reads it back by decoding
+// base64 to bytes and the bytes as UTF-8.
+export function encodePaymentResponseHeader(settlement: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(settlement));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 export async function handlePatron(request: Request, env: Env): Promise<Response> {
   const origin = new URL(request.url).origin;
   const reqs = buildPaymentRequirements(env, {
@@ -557,7 +572,7 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
       status: 200,
       headers: {
         "Access-Control-Allow-Origin": "*",
-        "X-PAYMENT-RESPONSE": btoa(JSON.stringify(result.settlement)),
+        "X-PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement),
       },
     },
   );
