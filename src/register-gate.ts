@@ -271,9 +271,15 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // the ledger line is written and the citizen exists, so a failure of this append
   // must not turn the 201 into a raw error that withholds the credential register()
   // returned. It is logged once instead (the hash, never the code) and the caller
-  // gets their 201. The cost is that the code is not marked spent, so one more paid
-  // registration could redeem it: the same blast radius this file already accepts
-  // for the concurrent race (assertInviteNotRedeemed's comment).
+  // gets their 201. The cost, stated exactly (F11, exchange 2026-09-29, CODEX round 1,
+  // reproduced as 201, 201, 201 with three citizens and no redemption row): the code
+  // is not marked spent, so for as long as this append keeps failing the code stays
+  // redeemable by EVERY further paid registration, not one more. Each still pays $1
+  // and passes the registration throttle, and none is silent: each logs its own
+  // invite_redeemed_unrecorded line, which is the operator's signal to mark the code
+  // spent by hand. That is wider than the concurrent race assertInviteNotRedeemed's
+  // comment accepts (one extra registration); it is chosen over carrying the
+  // credential in an error.
   if (inviteCode && citizen.citizen_id != null) {
     let inviteHash = "";
     try {

@@ -643,3 +643,23 @@ Same method as F8 and F9 (original copied aside, one mutation, only the new test
 | M100 | pay listing honours null | the same replacement | 15 / 1 | F10 route pay listing: `the header is omitted` | byte-exact |
 
 - The 20,000-deep control is a runtime property (the stack limit of this Node, 24.15): the unit test asserts it, so on a runtime that serialised that depth the unit test, not the routes, would say so.
+
+### F11 (MEDIUM, reproduced by CODEX as 201, 201, 201 with three citizens and no redemption row): F8b's stated cost was too small
+
+The F8b comment in `src/register-gate.ts` and the brief amendment said that with the `invite_redeemed` append failing "one more paid registration could redeem" the code. While the append keeps failing, the code is never marked spent, so it stays redeemable by every further paid registration. Reworded, in both places, to say exactly that: for as long as the append keeps failing the code is redeemable by every further paid registration, not one more; each still pays $1 and passes the registration throttle; it is wider than the concurrent race `assertInviteNotRedeemed` accepts; and each such registration logs its own `invite_redeemed_unrecorded` line, which is the operator's signal to mark the code spent by hand. The design is unchanged (the 201 with the credential beats carrying the credential in an error). No behaviour changed in this commit; the comment, the brief line and one new test.
+
+Test: `F11 invite-mode registration under a PERSISTENT invite_redeemed failure` (now 17 in the file): two sequential registrations with the same code under a persistent trigger on `invite_redeemed` inserts both return 201 and hand over a credential, there are two citizens and two ledger rows, zero `invite_redeemed` rows, exactly two `invite_redeemed_unrecorded` lines (one per citizen id, both carrying the same code hash), and the code's plaintext appears in no log line.
+
+### Red-proofs, F11 (M101 onward)
+
+| # | guards | mutation | tests (pass / fail) | failing assertion | restore |
+|---|---|---|---|---|---|
+| M101 | the credential is never withheld, across repeated use | the try/catch around the `invite_redeemed` append removed | 14 / 3 | F11: the status assertion, `[{"error":"Internal error. The society apologizes."},{"error":"Internal error. The society apologizes."}]` (both registrations 500); F8b (a) and (b) fail as in M89 | byte-exact |
+| M102 | each such registration logs its own line | the `invite_redeemed_unrecorded` `console.log(` replaced by `[].push(` | 14 / 3 | F11: `each registration logs its own invite_redeemed_unrecorded line, the operator's signal`; F8b (a) and (b): `exactly one invite_redeemed_unrecorded line` | byte-exact |
+
+- M101 and M102 are the two ways the pinned cost can be broken by removing behaviour. A narrowing (a second use of the code refused) would fail the `[201, 201]` status assertion, but it has no one-line mutation, so that direction is argued, not red-proofed.
+
+### F10/F11 closing walk
+
+- 1357 to 1362 (F10, 5 new) to 1363 (F11, 1 new), all pass, `tsc` exit 0 (its `include` is `src/**/*.ts`, so the test file is exercised by `npm test` only).
+- F10 touched `src/x402.ts`, `src/listings.ts`, the test file, this file and the brief; F11 touched `src/register-gate.ts` (a comment), the test file, this file and the brief. `src/society.ts`, `src/doc.ts`, `migrations/`, `wrangler.*`, `scripts/` and `test/secret-literal-guard.test.ts` are untouched. No push, no deploy, no rebase.

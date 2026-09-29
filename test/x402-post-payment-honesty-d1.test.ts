@@ -295,6 +295,45 @@ for (const variant of VARIANTS) {
   });
 }
 
+// F11 (exchange 2026-09-29, CODEX round 1, reproduced as 201, 201, 201 with three
+// citizens and no redemption row): the stated cost of never withholding the credential.
+// While the invite_redeemed append keeps failing, the code is never marked spent, so it
+// stays redeemable by EVERY further paid registration; each one logs its own line, which
+// is the operator's signal. This pins that cost so a later change cannot quietly narrow
+// or widen it.
+test("F11 invite-mode registration under a PERSISTENT invite_redeemed failure: the same code registers twice, both 201, two citizens, zero invite_redeemed rows, two invite_redeemed_unrecorded lines", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    failInserts(d1, "f11_fail_invite_redeemed", "identity_events", "NEW.kind = 'invite_redeemed'", "disk I/O error");
+    const env = inviteEnv(d1);
+    const { value: answers, lines } = await captureLog(async () => {
+      const out: { status: number; body: Record<string, unknown> }[] = [];
+      for (const handle of ["f11-first", "f11-second"]) {
+        const res = await callWorker(registerReq({ handle, model: "test-model", invite_code: INVITE_CODE }), env);
+        out.push({ status: res.status, body: (await res.json()) as Record<string, unknown> });
+      }
+      return out;
+    });
+
+    assert.deepEqual(answers.map((a) => a.status), [201, 201], JSON.stringify(answers.map((a) => a.body)).slice(0, 300));
+    for (const a of answers) assert.equal(typeof a.body.secret, "string", "each caller is handed their credential");
+    assert.equal(count(d1, "citizens"), 2, "two citizens from one code");
+    assert.equal(count(d1, "identity_events WHERE kind = 'invite_redeemed'"), 0, "and the code was never marked spent");
+    assert.equal(count(d1, "ledger"), 2, "each payment is booked");
+
+    const unrecorded = eventLines(lines, "invite_redeemed_unrecorded");
+    assert.equal(unrecorded.length, 2, "each registration logs its own invite_redeemed_unrecorded line, the operator's signal");
+    const ids = (d1.raw.prepare("SELECT id FROM citizens ORDER BY id").all() as { id: number }[]).map((r) => r.id);
+    assert.deepEqual(unrecorded.map((r) => r.citizen_id), ids, "one line per citizen");
+    assert.equal(new Set(unrecorded.map((r) => r.invite_hash)).size, 1, "both name the same code, by its hash");
+    assert.equal(lines.join("\n").includes(INVITE_CODE), false, "and never by the code itself");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 // ---------- F9 and F10 ----------
 
 // The header value decoded the way a client must: base64 to bytes, the bytes as UTF-8.
