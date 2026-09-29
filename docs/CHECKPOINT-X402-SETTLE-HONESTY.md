@@ -543,3 +543,48 @@ Near miss, fixed in scope: `test/register-gate.test.ts`'s scan for `register(` o
 
 - Touched: `src/x402.ts`, `src/register-gate.ts`, `src/listings.ts` (its `appendChained` import, now unused, is removed), `test/x402-post-settle-record-d1.test.ts`, this file. `src/doc.ts` has 0 diff lines against `origin/main`; `migrations/`, `wrangler.jsonc` and `test/secret-literal-guard.test.ts` are untouched, and the D-061 guard is green.
 - Not committed, because of the block above. No push, no deploy, no remote call; no `*.local.*` or `.env` opened; git run only against this worktree.
+
+## F8/F9 (build review round 3, CODEX)
+
+Baseline before this section: 1346 tests, all pass, `tsc` exit 0 (head `f5dd2e98`, rebased onto main `71812d05`).
+
+### F8a (HIGH): registration's paid-but-failed 500 never carries inner error text
+
+The `catch (e)` around `register(...)` in `src/register-gate.ts` served the inner SocietyError's message verbatim (`: ${detail}`). When `register()`'s `key_registered` append exhausts `appendChained` AFTER the citizen row exists, a caller whose money moved read "retrying may succeed" (a second payment), and a UNIQUE text inside would have been mapped by `register()` to "handle ... is taken", while a citizen holding their key already existed.
+
+The `registration_paid_but_failed` log line is unchanged (the inner reason belongs there). The thrown message is now one of two hub-worded messages, chosen by `publicKey !== null`, status still 500, with `$` + `(REGISTRATION_PRICE_CENTS / 100).toFixed(2)` (so `$1.00`, where it read `$1`) and `String(b.handle)`:
+
+- public key supplied: says the payment settled (tx), registration did not complete, do not sign again, the payment is in the books (GET /treasury); a citizen may still have been created and GET /api/citizens lists each handle with the public key on record; if the handle is listed there with the supplied key the seat is the caller's and the key already works, otherwise no seat was created; logged for the maintainer.
+- no public key: the same first sentence, then "No credential was delivered to you, so no seat is usable by you.", then the maintainer sentence.
+
+Paging clause. `/api/citizens` IS paged: `citizenDirectory` (`src/society.ts`) serves `page_size` 1000, `has_more`, and, while `has_more`, `next_since` and `next_since_id`, and `src/index.ts` reads the query parameters `since` and `since_id`. The clause added after "on record" is exactly: `The list is paged: while has_more is true, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going.` It is in the public-key message only (the no-key message sends the caller nowhere).
+
+State the message describes and the tests document: after F8a(i) the money is booked, the citizen row exists with the supplied key, and the identity chain has no `key_registered` row for it. Putting that right is the maintainer's, from the log line.
+
+### F8b (HIGH, invite mode only, not reachable on the live open-mode door): the credential is never withheld
+
+The `invite_redeemed` append after `register()` ran outside any catch: a throw gave the caller a raw 503/500 after payment, ledger and citizen creation, and they never received the credential `register()` returned. It is now inside try/catch; on any throw one line `{"level":"error","event":"invite_redeemed_unrecorded","payer","tx","citizen_id","invite_hash","reason"}` is logged (`invite_hash` is the `inviteCodeHash` value, never the code; `reason` clipped to 200 with `clipReason`, now exported from `src/x402.ts`) and the normal 201 is served. Hub design choice, recorded for Ben: the cost is that the code is not marked spent, so one more paid registration could redeem it, the same blast radius `assertInviteNotRedeemed` already accepts for the concurrent race.
+
+### F8 tests
+
+`test/x402-post-payment-honesty-d1.test.ts` (F7's harness: facilitator stub, local D1 on the real `schema.sql`, SQLite `RAISE` triggers, log capture): F8a(i) x2 (public-key registration; trigger on `identity_events` `WHEN NEW.kind = 'key_registered'`; (a) `UNIQUE constraint failed: identity_events.hash`, (b) `disk I/O error`), F8a(ii) (secret registration; trigger on `citizens`), an F8b control (no trigger: 201, one `invite_redeemed` row holding the code's hash, no unrecorded line) and F8b x2 (trigger `WHEN NEW.kind = 'invite_redeemed'`, the same two variants). The message assertions are deepEqual against the hub words typed in the test, plus a no-inner-text scan for `retrying may succeed`, `never committed`, `UNIQUE`, `disk I/O`, `is taken`, `chain head`. F8b asserts 201, that the served secret's sha256 is the citizen row's `secret_hash`, no `invite_redeemed` row, exactly one unrecorded line with payer, tx, citizen_id and the code's hash, and that the code's plaintext appears nowhere in the captured log.
+
+### Red-proofs, F8 (M86 onward)
+
+Method: original file copied aside, one mutation applied (the find string must occur exactly once), only the new test file run, the file restored from the copy and compared with `cmp`. Every failure is `AssertionError [ERR_ASSERTION]`.
+
+| # | guards | mutation | tests (pass / fail) | failing assertion | restore |
+|---|---|---|---|---|---|
+| M86 | the caller never reads the inner error's text | `src/register-gate.ts`: the served message put back to the pre-fix `...registration then failed: ${detail}. ...` | 3 / 3 | `the public-key hub words, verbatim` on F8a(i) (a) and (b) (actual begins `Your $1 payment settled (tx 0xabab...) but registration then failed: chain head for identity_events moved four times running; ... retrying may succeed..`) and `the no-key hub words, verbatim` on F8a(ii) | byte-exact |
+| M87 | each hub-word variant goes to its own case | the condition swapped, `publicKey !== null` to `publicKey === null` | 3 / 3 | `the public-key hub words, verbatim` on both F8a(i) tests and `the no-key hub words, verbatim` on F8a(ii) | byte-exact |
+| M88 | the public-key message names how to page the census | the paging clause deleted | 4 / 2 | `the public-key hub words, verbatim` on both F8a(i) tests | byte-exact |
+| M89 | the credential is never withheld | the try/catch around the `invite_redeemed` append removed (`if (true) { ... } else {`) | 4 / 2 | F8b (a): status 503, body `{"error":"chain head for identity_events moved four times running; ... retrying may succeed."}`; F8b (b): status 500, body `{"error":"Internal error. The society apologizes."}` (the 201 assertion, whose message carries the body) | byte-exact |
+| M90 | the log holds the hash and never the code | `invite_hash: inviteHash` to `invite_hash: inviteCode` | 4 / 2 | `the hash of the code, never the code` on F8b (a) and (b) | byte-exact |
+
+- The status, ledger-row and citizen-row assertions inside the F8a tests hold before the fix too (the failure happens after the payment is booked either way), so they are harness checks; the message assertion is first in each test for that reason.
+- The F8b control shows the trigger is the only thing that changes the outcome: with no trigger the same request is a 201 that writes the `invite_redeemed` row.
+
+### F8 closing walk
+
+- Touched: `src/register-gate.ts`, `src/x402.ts` (one word: `clipReason` exported), `test/x402-post-payment-honesty-d1.test.ts` (new), this file and the brief. `src/society.ts`, `src/doc.ts`, `migrations/`, `wrangler.*`, `scripts/` and `test/secret-literal-guard.test.ts` are untouched; the D-061 guard is green.
+- `test/register-scripts-unknown-outcome.test.ts` contains the old sentence as a stub answer for the scripts' 5xx handling; it tests the scripts, not this route, and stays green.

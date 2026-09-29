@@ -11,7 +11,7 @@
 //      which runs AFTER settle -- a payer with a bad model string or an
 //      already-throttled IP could pay $1, settle on-chain, and only then
 //      be told the registration would have failed anyway (the "Your $1
-//      payment settled ... but registration then failed" 500). See
+//      payment settled ... but registration did not complete" 500). See
 //      assertValidModel / assertRegistrationNotThrottled in society.ts.
 //   4. build payment requirements, hand off to payAndSettle
 //   5. handle-availability check #2, run by payAndSettle between a
@@ -20,7 +20,7 @@
 // Steps 1-5 can all fail for free. Step 6 cannot: by the time it runs, the
 // payer's money has already moved.
 
-import { payAndSettle, buildPaymentRequirements, recordSettledPayment } from "./x402.ts";
+import { payAndSettle, buildPaymentRequirements, recordSettledPayment, clipReason } from "./x402.ts";
 import { appendChained, sha256Hex } from "./chain.ts";
 import { type Env, SocietyError, register, assertValidHandle, assertValidModel, assertRegistrationNotThrottled } from "./society.ts";
 import { checkPublicKeyShape, importPublicKey } from "./keyauth.ts";
@@ -241,22 +241,62 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
         reason: e instanceof SocietyError ? e.message : String(e),
       }),
     );
-    const detail = e instanceof SocietyError ? e.message : "registration failed after payment";
+    // F8a (docs/CHECKPOINT-X402-SETTLE-HONESTY.md, build review round 3, CODEX HIGH):
+    // the served message never carries the inner error's text. register() can fail
+    // AFTER the citizen row exists (a public-key citizen's key_registered append),
+    // and its errors then say things that are false for this caller: appendChained's
+    // "retrying may succeed" invites a second payment, and a UNIQUE text is mapped
+    // to "handle ... is taken" for a seat that may already be the payer's. The inner
+    // reason stays in the log line above. Which of the two messages is true depends
+    // only on whether a credential could have reached the payer: a public-key
+    // registration delivers none (the key is the payer's own), so a citizen may exist
+    // and the caller can check; a secret registration delivers its secret only in
+    // the 201 this throw replaces, so no seat is usable by them either way.
+    const price = (REGISTRATION_PRICE_CENTS / 100).toFixed(2);
+    const handle = String(b.handle);
+    const moved = `Your $${price} payment settled (tx ${result.tx}) but registration did not complete. Do not sign again: this payment has already moved, and it is in the books (GET /treasury).`;
+    const tail = "This is logged for the maintainer to put right by hand: GET /api/official names how to reach it.";
     throw new SocietyError(
       500,
-      `Your $1 payment settled (tx ${result.tx}) but registration then failed: ${detail}. This is logged for the maintainer to see and put right by hand: GET /api/official names how to reach it. Your payment is already in the books: GET /treasury.`,
+      publicKey !== null
+        ? `${moved} A citizen may still have been created: GET /api/citizens lists each handle with the public key on record. The list is paged: while has_more is true, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going. If "${handle}" is listed there with the public key you supplied, the seat is yours and your key already works. If it is not listed, or is listed with another key, no seat was created for you. ${tail}`
+        : `${moved} No credential was delivered to you, so no seat is usable by you. ${tail}`,
     );
   }
 
   // Only log the invite as redeemed once a citizen genuinely exists to
   // attach it to -- identity_events.citizen_id is NOT NULL (schema.sql).
+  //
+  // F8b (build review round 3, CODEX HIGH; invite mode only): the money has moved,
+  // the ledger line is written and the citizen exists, so a failure of this append
+  // must not turn the 201 into a raw error that withholds the credential register()
+  // returned. It is logged once instead (the hash, never the code) and the caller
+  // gets their 201. The cost is that the code is not marked spent, so one more paid
+  // registration could redeem it: the same blast radius this file already accepts
+  // for the concurrent race (assertInviteNotRedeemed's comment).
   if (inviteCode && citizen.citizen_id != null) {
-    await appendChained(env.DB, "identity_events", {
-      citizen_id: citizen.citizen_id,
-      kind: "invite_redeemed",
-      detail: await inviteCodeHash(inviteCode),
-      created_at: now,
-    });
+    let inviteHash = "";
+    try {
+      inviteHash = await inviteCodeHash(inviteCode);
+      await appendChained(env.DB, "identity_events", {
+        citizen_id: citizen.citizen_id,
+        kind: "invite_redeemed",
+        detail: inviteHash,
+        created_at: now,
+      });
+    } catch (e) {
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "invite_redeemed_unrecorded",
+          payer: result.payer,
+          tx: result.tx,
+          citizen_id: citizen.citizen_id,
+          invite_hash: inviteHash,
+          reason: clipReason(e instanceof Error ? e.message : String(e)),
+        }),
+      );
+    }
   }
 
   return Response.json(

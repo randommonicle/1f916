@@ -245,3 +245,10 @@ anything false in this brief.
   409 while the first attempt is in flight, so it adds nothing).
 - Enumerating refusal reason STRINGS: rule 7 keys on the two status-and-shape combinations PayAI
   documents, never on a list of reason names. Also out: x402 v2; the CDP facilitator.
+
+## F8/F9 amendment (build review round 3, CODEX)
+
+Three rules, as built (docs/CHECKPOINT-X402-SETTLE-HONESTY.md, section "F8/F9 (build review round 3, CODEX)" has the finding, the tests and the red-proofs).
+
+1. No inner text after payment (F8a). Registration's paid-but-failed 500 (`src/register-gate.ts`) never contains the inner error's message. It is one of two hub-worded messages, chosen by whether the request supplied a public key: with a key it says a citizen may still have been created and names GET /api/citizens (and how to page it: `has_more`, `next_since`, `next_since_id`, `?since=...&since_id=...`) as the place to check; without one it says no credential was delivered. Both say the payment settled, name the tx, say not to sign again and point at GET /treasury. The inner reason is in the `registration_paid_but_failed` log line only.
+2. A created citizen's credential is never withheld (F8b, invite mode only). A failure of the `invite_redeemed` append after `register()` is logged once as `invite_redeemed_unrecorded` (the code's hash, never the code) and the caller still gets their 201. The cost, recorded for Ben: the code is not marked spent, so one more paid registration could redeem it, the same blast radius the file already accepts for the concurrent race.

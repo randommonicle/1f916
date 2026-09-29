@@ -220,7 +220,7 @@ export function assertPayloadMatchesRequirements(paymentPayload: unknown, reqs: 
 // reservation, and a wrong one invites a second payment.
 export const SETTLEMENT_PENDING = "settlement_pending";
 const FACILITATOR_REASON_MAX = 200;
-const clipReason = (v: unknown) => (typeof v === "string" ? v : String(v)).slice(0, FACILITATOR_REASON_MAX);
+export const clipReason = (v: unknown) => (typeof v === "string" ? v : String(v)).slice(0, FACILITATOR_REASON_MAX);
 const SETTLE_UNKNOWN_TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked.";
 // How an unknown-outcome message quotes the answer's errorReason: exactly as
 // given, never interpreted (build review round 1, F5). A message states the
