@@ -254,3 +254,7 @@ The hub ruled on the list above (RULED marks inline). Accepted as named limits, 
   the INSERT) from the claim, never re-attempting, even if the handle is free again; `finishRegistration` refuses such a row too (defence in depth).
 - Tests (`test/settlement-replay-fixes-d1.test.ts`): the wording; the recorded reason, one log line, no generic line; the reconciler skips it; an identical re-send
   gets the same answer with no citizen created and no second log line; both modes; following the showhome instruction through the real router (L-109).
+- Red-proofs (10 mutations, multi-file from saved copies, all restored): reconciler not excluding the rows; reason never recorded; UNIQUE on `citizens.handle`
+  not recognised; log written on every recognition (caught by the stale-copy test: a worker that read the claim before the reason was recorded must not log
+  again); an identical re-send re-attempting (needs BOTH the `respondToExistingClaim` check and the finisher's defence removed: each layer alone stays green);
+  the answer inviting a re-send; naming no handle; losing the showhome instruction (two tests red); the claim-answer path not serving it. All red.

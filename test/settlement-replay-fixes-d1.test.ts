@@ -30,6 +30,8 @@ import {
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
 import { runReconciler } from "../src/settlement-reconcile.ts";
+import { finishRegistration } from "../src/register-gate.ts";
+import type { ClaimRow } from "../src/settlement-claims.ts";
 
 const settledAnswer = () => new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: TX }), { status: 200, headers: { "content-type": "application/json" } });
 
@@ -128,6 +130,32 @@ test("F1 follows its own instruction (L-109): the showhome note the answer asks 
     assert.ok(note.status === 200 || note.status === 201, `the note landed (${note.status})`);
     const room = await (await callWorker(new Request("https://example.test/api/showhome"), testEnv(d1))).text();
     assert.ok(room.includes(TX), "and it is on the record the maintainer reads");
+  } finally {
+    fx.stub.restore();
+    d1.close();
+  }
+});
+
+test("F1: the log line is written once even when two workers meet the same lost handle (the second finds the reason already recorded)", async () => {
+  const d1 = createLocalD1();
+  const fx = await handleLostAfterPayment(d1, await realPublicKey());
+  try {
+    assert.equal((await fx.send()).status, 409);
+    const recorded = oneClaim(d1) as unknown as ClaimRow;
+    assert.equal(recorded.verdict_reason, "handle_taken");
+    // A worker that read the claim BEFORE the reason was recorded now attempts the citizen write with its stale copy.
+    const stale = { ...recorded, verdict_reason: null } as ClaimRow;
+    const { value, lines } = await captureLog(async () => {
+      try {
+        await finishRegistration(testEnv(d1), stale, { ip: null, inviteCode: null, deliver: true });
+        return null;
+      } catch (e) {
+        return e as { status?: number; code?: string };
+      }
+    });
+    assert.equal(value?.status, 409, "it still answers the honest 409");
+    assert.equal(value?.code, "registration_handle_taken_after_payment");
+    assert.equal(eventLines(lines, "registration_handle_taken_after_payment").length, 0, "but the reason was already recorded, so no second log line");
   } finally {
     fx.stub.restore();
     d1.close();
