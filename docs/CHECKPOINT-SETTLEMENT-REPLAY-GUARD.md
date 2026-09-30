@@ -292,3 +292,28 @@ The hub ruled on the list above (RULED marks inline). Accepted as named limits, 
   spent (caught by the insert count, not by the total: the estimates are conservative); no deferral; deferral logging nothing; the standing ceiling ignoring what is left
   (a second cheap row starting); a throw escaping the reconciler stopping the clerk. The first run of this set found two greens that I closed with new tests (the concierge
   engaged day; the clerk's insert count) and one (the escape) with a dropped-table test.
+
+### F4. The backstop wording, and the repeat clause only where it is true (follows F1, F3 and item 8)
+
+- `RECONCILE_BACKSTOP` now reads: "The society's reconciler makes one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, oldest attempt
+  first, so a payment can wait more than one day." No deadline, no "at the latest". The clause "Repeating this identical request re-checks it sooner."
+  (`RECONCILE_REPEAT_CLAUSE`) is a separate constant, appended by `reconcileTail(route)` ONLY for register, patron and listing_create, where an identical re-send really
+  re-checks (a pending claim: lease, chain read, re-POST) or finishes (a settled one). It is NOT on any `listing_pay` answer (the reservation answers a re-send first; the
+  lease-held "repeat in a few minutes" sentence is also dropped for it), NOT on the F1 handle-taken answer, and B6b holds (a secret-mode settled_unbooked answer names no
+  deadline and no daily pass).
+- Sites: `claimAnswer` (pending, settled_unbooked), the registration failure tail (public-key: backstop + clause; secret-mode keeps its own re-send sentence), listing create's
+  "failed to save" (backstop + clause), pay listing's "recording it failed" (backstop only), and the `settlement_claim_unrecorded` answer in `payAndSettle` (tail by route).
+  The F8a tests and the listing tests that type these words were updated.
+- One behaviour fix the follow-test forced: a request that settled but could not record the claim (`settlement_claim_unrecorded`) now releases its own lease before
+  answering, so the re-send it tells the payer to make re-checks at once instead of meeting a live lease held by a dead request.
+- Tests: the wording; every route x state x lease combination of `claimAnswer` (listing_pay none, the others carry it, secret-mode none, handle-taken none); and the clause is
+  FOLLOWED (L-109): register pending (under a live lease the re-send asks nobody; once the lease is gone the identical request really re-checks the chain and re-POSTs), patron
+  pending (every identical request re-checks), a public-key registration settled-but-not-booked (the re-send finishes it), the "could not record" answer for a registration
+  (its re-send re-checks the chain and books it) and for a pay listing (backstop, no clause).
+- Red-proofs (11, all restored): the old promise; listing_pay carrying the clause; register lacking it; a listing_pay lease-held invitation; the registration failure tail without
+  the clause; the pay-listing failure message with it; the listing-create message without it; the unrecorded tail ignoring the route; the dead request keeping its lease; a
+  deadline on the secret-mode answer; the backstop on the handle-taken answer. All red.
+
+## Fix pass report
+
+F1-F4 done on this branch; items 1, 3, 4, 5, 7, 9, 10, 11, 12, 13, 15, 16 recorded as RULED: accepted; item 8 stands (F4 makes the text say so).
