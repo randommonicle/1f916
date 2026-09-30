@@ -505,7 +505,7 @@ export async function recordSettledPayment(
     );
     throw new SocietyError(
       500,
-      `Your $${(amountCents / 100).toFixed(2)} payment settled (tx ${settled.tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand: GET /api/official names how to reach it.`,
+      `Your $${(amountCents / 100).toFixed(2)} payment settled (tx ${settled.tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`,
     );
   }
 }

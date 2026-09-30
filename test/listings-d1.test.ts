@@ -1685,7 +1685,12 @@ test("handlePayListing: a simulated record-batch failure after a successful sett
 
     await assert.rejects(
       () => handlePayListing(payRequest(d1, listingId, submissionId), brokenEnv, funder, listingId),
-      (e: unknown) => e instanceof SocietyError && e.status === 500 && /settled.*but recording it failed/i.test(e.message),
+      (e: unknown) =>
+        e instanceof SocietyError &&
+        e.status === 500 &&
+        /settled.*but recording it failed/i.test(e.message) &&
+        e.message.includes("mention @commonhold-agent in a comment naming this tx (POST /api/comment)") &&
+        !e.message.includes("/api/official"),
     );
 
     assert.ok(
