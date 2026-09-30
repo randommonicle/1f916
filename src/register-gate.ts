@@ -15,15 +15,35 @@
 //      assertValidModel / assertRegistrationNotThrottled in society.ts.
 //   4. build payment requirements, hand off to payAndSettle
 //   5. handle-availability check #2, run by payAndSettle between a
-//      confirmed-valid signature and the irreversible settle call
-//   6. ledger entry, then register() itself
+//      confirmed-valid signature and the irreversible settle call; the
+//      settlement claim (settlement-claims.ts) is taken right after it
+//   6. the paid act, booked from the claim: ledger entry, then the citizen
 // Steps 1-5 can all fail for free. Step 6 cannot: by the time it runs, the
-// payer's money has already moved.
+// payer's money has already moved. A replay of a signed authorisation is answered
+// from its claim before step 2 (replayForClaim), never settled a second time.
 
-import { payAndSettle, buildPaymentRequirements, recordSettledPayment, clipReason } from "./x402.ts";
-import { appendChained, sha256Hex } from "./chain.ts";
-import { type Env, SocietyError, register, assertValidHandle, assertValidModel, assertRegistrationNotThrottled } from "./society.ts";
-import { checkPublicKeyShape, importPublicKey } from "./keyauth.ts";
+import {
+  payAndSettle,
+  buildPaymentRequirements,
+  recordSettledPayment,
+  clipReason,
+  replayForClaim,
+  finishUnderOwnLease,
+  ledgerReceipt,
+  type PaidClaim,
+} from "./x402.ts";
+import { appendChained, appendChainedStmt, sha256Hex } from "./chain.ts";
+import {
+  type Env,
+  SocietyError,
+  assertValidHandle,
+  assertValidModel,
+  assertRegistrationNotThrottled,
+  newSecret,
+  registrationResponseBody,
+} from "./society.ts";
+import { checkPublicKeyShape, importPublicKey, publicKeyFingerprint } from "./keyauth.ts";
+import { getClaim, intentOf, keyOfRow, refsOf, runBookingStep, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
 
 const REGISTRATION_PRICE_ATOMIC = "1000000"; // $1.00, USDC has 6 decimals -- independent of x402.ts's patron price
 // Exported (heartbeat-inbox wave, step (b)): /skill.md renders its stated price from this
@@ -138,6 +158,36 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
     await assertInviteNotRedeemed(env, inviteCode);
   }
 
+  // The requirements are pure (env and origin only), so they are built here, before
+  // the free checks, for the claim consult below.
+  const reqs = buildPaymentRequirements(env, {
+    resource: `${origin}/api/register`,
+    description:
+      "Register one citizen of Commonhold. $1 USDC on Base, once, forever. The dollar is rent and an accountable, on-chain money-in signal; it is not the society's sybil defence.",
+    priceAtomic: REGISTRATION_PRICE_ATOMIC,
+    outputSchema: REGISTER_OUTPUT_SCHEMA,
+  });
+
+  // The claim (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md): this signed authorisation pays for
+  // THIS registration. The intent is what the request asked for, as sent; a booking that
+  // is resumed later (by the payer's identical re-send or by the reconciler) writes
+  // exactly this. The registration requirements omit the handle, so the same signed
+  // header carrying another handle has an identical /settle body and differs only here
+  // (B4a): that is how a replay with a second handle is told from the payer's own re-send.
+  const ip = request.headers.get("CF-Connecting-IP");
+  const claim: PaidClaim = {
+    route: "register",
+    intent: { handle: b.handle ?? null, model: b.model ?? null, public_key: b.public_key ?? null },
+    finish: (row) => registrationResponse(env, row, { ip, inviteCode }),
+  };
+
+  // B4, consult-first: a header that already has a claim is answered from the claim
+  // BEFORE the free checks below. Step 2 would otherwise tell the payer's own identical
+  // re-send of a finished registration that the handle is taken, and could never let a
+  // settled-but-unbooked one finish.
+  const replay = await replayForClaim(env, request, reqs, claim);
+  if (replay) return replay;
+
   // Step 2: availability check #1. Cheap, and saves a payer signing a
   // payment for a handle that was never going to be theirs.
   await assertHandleAvailable(env, b.handle);
@@ -154,78 +204,180 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // register()'s contract for its one legitimate caller (this file --
   // register-gate.test.ts's offender-scan test) or for any future one.
   assertValidModel(b.model);
-  await assertRegistrationNotThrottled(env, request.headers.get("CF-Connecting-IP"));
+  await assertRegistrationNotThrottled(env, ip);
 
   // Step 3b: the optional public key, validated HERE for exactly the reason
   // steps 2 and 3 are here -- a malformed key must be refused while refusal is
   // still free, never after a payer's dollar has settled and there is no refund
   // path. Both checks run: the shape check is pure and synchronous, and
   // importKey is the only thing that can tell us the runtime's own Ed25519
-  // accepts these 32 bytes. register() re-runs both as a deterministic backstop.
+  // accepts these 32 bytes. The booking re-runs both as a deterministic backstop.
   //
   // Absent means the ordinary secret-issuing registration, unchanged. Present
   // means the 201 carries no secret at all, so whoever pays for this seat gets a
   // receipt and nothing that can act as the citizen.
-  let publicKey: string | null = null;
   if (b.public_key !== undefined && b.public_key !== null) {
     const shape = checkPublicKeyShape(b.public_key);
     if (!shape.ok) throw new SocietyError(400, `public_key: ${shape.reason}`);
     if (!(await importPublicKey(b.public_key as string))) {
       throw new SocietyError(400, "public_key decodes to 32 bytes but is not a key this runtime's Ed25519 will accept.");
     }
-    publicKey = b.public_key as string;
   }
-
-  const reqs = buildPaymentRequirements(env, {
-    resource: `${origin}/api/register`,
-    description:
-      "Register one citizen of Commonhold. $1 USDC on Base, once, forever. The dollar is rent and an accountable, on-chain money-in signal; it is not the society's sybil defence.",
-    priceAtomic: REGISTRATION_PRICE_ATOMIC,
-    outputSchema: REGISTER_OUTPUT_SCHEMA,
-  });
 
   // Step 4/5: payAndSettle runs the shared x402 flow; assertHandleAvailable
   // runs again as its afterVerify hook, between a confirmed-valid signature
   // and the irreversible settle call -- the last point this can fail for
   // free. This narrows the handle-taken race; it does not close it (see
   // the risk note in docs/PHASE0-PLAN.md section 4 and the honest failure
-  // handling below, which is what covers the residual case: a race lost in
-  // the gap between this check and settle actually landing).
+  // handling in registrationResponse below, which is what covers the residual
+  // case: a race lost in the gap between this check and settle actually landing).
+  // The claim is taken after that hook and before /settle.
   //
-  // DEFERRED-LANDED-PAYMENT-NO-SEAT (docs/BRIEF-X402-SETTLE-HONESTY.md B5; Ben's
-  // decision): an unknown settle outcome (x402.ts settleOrThrow: pending, 409,
-  // 5xx, a request that failed in transit, an unreadable body and the rest)
-  // propagates out of this call as a 502, before the ledger line and before
-  // register(). When such a registration's
-  // money later lands, the payer has paid with no seat, and no route completes
-  // the registration from the landed payment. The operator sees
-  // x402_settle_outcome_unknown in the log and a gap between the treasury's
-  // booked and on-chain totals. Pre-existing on the unreadable-body path; this
-  // wave widens only which answers reach it, never what happens after.
-  const result = await payAndSettle(env, request, reqs, () => assertHandleAvailable(env, b.handle));
+  // An unknown settle outcome (x402.ts settleOrThrow: pending, 409, 5xx, a request that
+  // failed in transit, an unreadable body and the rest) propagates out of this call as a
+  // 502 and leaves the claim `pending`. It is no longer a landed payment with no seat
+  // (DEFERRED-LANDED-PAYMENT-NO-SEAT, docs/BRIEF-X402-SETTLE-HONESTY.md B5): the
+  // reconciler re-checks the chain for it at its daily run, and the payer's identical
+  // re-send re-checks it sooner, and a public-key registration is finished either way.
+  const result = await payAndSettle(env, request, reqs, () => assertHandleAvailable(env, b.handle), claim);
   if (!result.ok) return result.response;
 
   // Money has moved. From here, every path must succeed or fail loudly and
   // traceably -- never quietly, because there is no refund path (blueprint
   // section 3: the society does not custody an obligation to a payer).
-  //
-  // The ledger line goes through recordSettledPayment (x402.ts, F7): if the
-  // append fails, the payer is told the payment settled and not to sign again,
-  // one payment_settled_unrecorded line names it, and register() below never
-  // runs, so no citizen is created. That is the same landed-payment-no-seat
-  // state DEFERRED-LANDED-PAYMENT-NO-SEAT names above, reached by a failed
-  // write instead of an unknown settle answer.
-  const now = Date.now();
-  const sealed = await recordSettledPayment(env, "registration", result, REGISTRATION_PRICE_CENTS, {
-    entry_date: new Date(now).toISOString().slice(0, 10),
-    description: `registration ${result.payer}: handle "${String(b.handle)}"; tx ${result.tx}`,
-    amount_cents: REGISTRATION_PRICE_CENTS,
-    created_at: now,
-  });
+  const claimRow = result.claim as ClaimRow;
+  return finishUnderOwnLease(env, result, async () => (await registrationResponse(env, claimRow, { ip, inviteCode })) as Response);
+}
 
-  let citizen: Awaited<ReturnType<typeof register>>;
+export interface RegistrationFinishOpts {
+  ip: string | null;
+  inviteCode: string | null;
+  // True when the caller is the payer's own request: the only caller that can hand a
+  // secret-mode registration its secret, because a secret exists only in the 201 that
+  // carries it (B5b). The reconciler passes false.
+  deliver: boolean;
+}
+
+export type RegistrationOutcome = { done: true; body: Record<string, unknown> } | { done: false; reason: "awaiting_identical_resend" };
+
+// Finishes a paid registration from its claim (B5): every write is skipped if the
+// claim already records it, and each row-creating write is one batch with the UPDATE
+// that records it. Steps, in order: the treasury line; the citizen (recognised by
+// booked_refs, never by handle, because a citizen a DIFFERENT request created under
+// that handle is not this claim's); for a public-key registration, the key_registered
+// line, which is the route's last write. A secret-mode registration's last write is the
+// citizen itself, and its secret leaves only in the 201: the reconciler books nothing
+// for it (B5, B6b) and the row waits for the payer's identical re-send.
+export async function finishRegistration(env: Env, row: ClaimRow, opts: RegistrationFinishOpts): Promise<RegistrationOutcome> {
+  const intent = intentOf(row) as { handle: string; model: string; public_key: string | null };
+  const publicKey = typeof intent.public_key === "string" ? intent.public_key : null;
+  const secretMode = publicKey === null;
+  if (secretMode && !opts.deliver) return { done: false, reason: "awaiting_identical_resend" };
+
+  assertValidHandle(intent.handle);
+  assertValidModel(intent.model);
+  const key = keyOfRow(row);
+  const payer = row.payer ?? "unknown";
+  const tx = row.tx ?? "";
+  let refs = refsOf(row);
+
+  // The ledger line first, through recordSettledPayment (x402.ts, F7): if the append
+  // fails, the payer is told the payment settled and not to sign again, one
+  // payment_settled_unrecorded line names it, and no citizen is created.
+  let ledgerId = refs.ledger_id;
+  if (ledgerId == null) {
+    const now = Date.now();
+    await recordSettledPayment(
+      env,
+      "registration",
+      { payer, tx },
+      REGISTRATION_PRICE_CENTS,
+      {
+        entry_date: new Date(now).toISOString().slice(0, 10),
+        description: `registration ${payer}: handle "${intent.handle}"; tx ${tx}`,
+        amount_cents: REGISTRATION_PRICE_CENTS,
+        created_at: now,
+      },
+      { key, final: false },
+    );
+    ledgerId = refsOf((await getClaim(env, key)) as ClaimRow).ledger_id as number;
+  }
+  const sealed = await ledgerReceipt(env, ledgerId);
+
+  let citizenId: number | undefined;
+  let body: Record<string, unknown>;
   try {
-    citizen = await register(env, b.handle, b.model, request.headers.get("CF-Connecting-IP"), publicKey);
+    refs = refsOf((await getClaim(env, key)) as ClaimRow);
+    citizenId = refs.citizen_id;
+    let secret: string | undefined;
+    if (citizenId == null) {
+      // The registration throttle's own bookkeeping (what register() wrote before its
+      // INSERT): best effort here, because the claim makes the paid act resumable and a
+      // throttle row must never be the reason a paid citizen is not created.
+      if (opts.ip) {
+        try {
+          await env.DB.prepare("INSERT INTO reg_log (ip_hash, created_at) VALUES (?, ?)")
+            .bind(await sha256Hex("reg:" + opts.ip), Date.now())
+            .run();
+          await env.DB.prepare("DELETE FROM reg_log WHERE created_at < ?").bind(Date.now() - 86_400_000).run();
+        } catch (e) {
+          console.log(JSON.stringify({ level: "warn", event: "registration_throttle_record_failed", reason: clipReason(e instanceof Error ? e.message : String(e)) }));
+        }
+      }
+      // THE BURNED PREIMAGE (society.ts register(), migration 0012): a secret is generated for
+      // BOTH kinds of citizen because secret_hash is NOT NULL; for a public-key citizen it is
+      // never returned and never retained.
+      secret = newSecret();
+      const secretHash = await sha256Hex(secret);
+      const now = Date.now();
+      await runBookingStep(
+        env,
+        key,
+        {
+          ref: "citizen_id",
+          final: secretMode,
+          statements: async (gate) => [
+            env.DB.prepare(
+              `INSERT INTO citizens (handle, model, secret_hash, public_key, karma, created_at, last_seen_at) SELECT ?, ?, ?, ?, 0, ?, ? WHERE EXISTS (${gate.sql})`,
+            ).bind(intent.handle, intent.model.trim(), secretHash, publicKey, now, now, ...gate.args),
+          ],
+        },
+        now,
+      );
+      refs = refsOf((await getClaim(env, key)) as ClaimRow);
+      citizenId = refs.citizen_id;
+      if (citizenId == null) throw new Error("the claim is not settled_unbooked: no citizen was recorded for it");
+    } else if (secretMode) {
+      // A secret-mode citizen exists under this claim but the claim is not booked: the
+      // secret cannot be recovered, so nothing here may invent one.
+      throw new Error("a citizen whose credential cannot be reissued exists under this claim, but the claim is not booked");
+    }
+
+    if (publicKey !== null && refs.key_event_id == null) {
+      // CODEX round 2 (society.ts register()): without this the sealed custody history has
+      // no beginning. The fingerprint is a public-key derivative, so it belongs in
+      // identity_events' public `detail`. Its hash covers the citizen id, so it is a second
+      // step after the citizen, each its own resume point.
+      const fp = await publicKeyFingerprint(publicKey);
+      const now = Date.now();
+      const cid = citizenId;
+      await runBookingStep(
+        env,
+        key,
+        {
+          ref: "key_event_id",
+          final: true,
+          chain: "identity_events",
+          statements: async (gate) => [
+            (await appendChainedStmt(env.DB, "identity_events", { citizen_id: cid, kind: "key_registered", detail: `key sha256:${fp}`, created_at: now }, gate)).stmt,
+          ],
+        },
+        now,
+      );
+      refs = refsOf((await getClaim(env, key)) as ClaimRow);
+      if (refs.key_event_id == null) throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
+    }
+    body = registrationResponseBody(citizenId, intent.handle, publicKey, secret ?? "");
   } catch (e) {
     // Structured, not just thrown: the maintainer's wake reads logs, not
     // whichever payer's client happened to be watching the response.
@@ -233,18 +385,18 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
       JSON.stringify({
         level: "error",
         event: "registration_paid_but_failed",
-        payer: result.payer,
-        tx: result.tx,
+        payer,
+        tx,
         amount_cents: REGISTRATION_PRICE_CENTS,
-        handle_attempted: String(b.handle ?? ""),
+        handle_attempted: String(intent.handle ?? ""),
         ledger_receipt: sealed.hash,
         reason: e instanceof SocietyError ? e.message : String(e),
       }),
     );
     // F8a (docs/CHECKPOINT-X402-SETTLE-HONESTY.md, build review round 3, CODEX HIGH):
-    // the served message never carries the inner error's text. register() can fail
-    // AFTER the citizen row exists (a public-key citizen's key_registered append),
-    // and its errors then say things that are false for this caller: appendChained's
+    // the served message never carries the inner error's text. The booking can fail
+    // AFTER the citizen row exists (a public-key citizen's key_registered append), and
+    // its errors then say things that are false for this caller: appendChained's
     // "retrying may succeed" invites a second payment, and a UNIQUE text is mapped
     // to "handle ... is taken" for a seat that may already be the payer's. The inner
     // reason stays in the log line above. Which of the two messages is true depends
@@ -253,9 +405,15 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
     // and the caller can check; a secret registration delivers its secret only in
     // the 201 this throw replaces, so no seat is usable by them either way.
     const price = (REGISTRATION_PRICE_CENTS / 100).toFixed(2);
-    const handle = String(b.handle);
-    const moved = `Your $${price} payment settled (tx ${result.tx}) but registration did not complete. Do not sign again: this payment has already moved, and it is in the books (GET /treasury).`;
-    const tail = "This is logged for the maintainer to put right by hand. To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
+    const handle = String(intent.handle);
+    const moved = `Your $${price} payment settled (tx ${tx}) but registration did not complete. Do not sign again: this payment has already moved, and it is in the books (GET /treasury).`;
+    // B6a/B6b: the claim stays settled_unbooked, so the message says how it resolves. A
+    // public-key registration is one the reconciler can finish, so it carries the daily
+    // backstop; a secret-mode one waits for the payer's identical re-send (the only request
+    // that can carry a secret) and names no deadline.
+    const tail = `This is logged for the maintainer to put right by hand. ${
+      publicKey !== null ? RECONCILE_BACKSTOP : "Repeating this identical request re-attempts it without a second charge and, if it completes, hands you a fresh secret."
+    } To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
     throw new SocietyError(
       500,
       publicKey !== null
@@ -269,8 +427,8 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   //
   // F8b (build review round 3, CODEX HIGH; invite mode only): the money has moved,
   // the ledger line is written and the citizen exists, so a failure of this append
-  // must not turn the 201 into a raw error that withholds the credential register()
-  // returned. It is logged once instead (the hash, never the code) and the caller
+  // must not turn the 201 into a raw error that withholds the credential the
+  // registration returned. It is logged once instead (the hash, never the code) and the caller
   // gets their 201. The cost, stated exactly (F11, exchange 2026-09-29, CODEX round 1,
   // reproduced as 201, 201, 201 with three citizens and no redemption row): the code
   // is not marked spent, so for as long as this append keeps failing the code stays
@@ -280,24 +438,24 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // spent by hand. That is wider than the concurrent race assertInviteNotRedeemed's
   // comment accepts (one extra registration); it is chosen over carrying the
   // credential in an error.
-  if (inviteCode && citizen.citizen_id != null) {
+  if (opts.inviteCode && citizenId != null) {
     let inviteHash = "";
     try {
-      inviteHash = await inviteCodeHash(inviteCode);
+      inviteHash = await inviteCodeHash(opts.inviteCode);
       await appendChained(env.DB, "identity_events", {
-        citizen_id: citizen.citizen_id,
+        citizen_id: citizenId,
         kind: "invite_redeemed",
         detail: inviteHash,
-        created_at: now,
+        created_at: Date.now(),
       });
     } catch (e) {
       console.log(
         JSON.stringify({
           level: "error",
           event: "invite_redeemed_unrecorded",
-          payer: result.payer,
-          tx: result.tx,
-          citizen_id: citizen.citizen_id,
+          payer,
+          tx,
+          citizen_id: citizenId,
           invite_hash: inviteHash,
           reason: clipReason(e instanceof Error ? e.message : String(e)),
         }),
@@ -305,11 +463,16 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
     }
   }
 
-  return Response.json(
-    {
-      ...citizen,
-      payment: { payer: result.payer, tx: result.tx, amount_cents: REGISTRATION_PRICE_CENTS, ledger_receipt: sealed.hash },
-    },
-    { status: 201, headers: { "Access-Control-Allow-Origin": "*" } },
-  );
+  return {
+    done: true,
+    body: { ...body, payment: { payer, tx, amount_cents: REGISTRATION_PRICE_CENTS, ledger_receipt: sealed.hash } },
+  };
+}
+
+// The payer's-request face of finishRegistration: the 201 the first request would have
+// served, or null when the registration could not be delivered to this caller.
+async function registrationResponse(env: Env, row: ClaimRow, opts: { ip: string | null; inviteCode: string | null }): Promise<Response | null> {
+  const out = await finishRegistration(env, row, { ...opts, deliver: true });
+  if (!out.done) return null;
+  return Response.json(out.body, { status: 201, headers: { "Access-Control-Allow-Origin": "*" } });
 }

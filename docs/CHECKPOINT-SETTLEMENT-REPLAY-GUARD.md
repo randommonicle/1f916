@@ -41,3 +41,29 @@ second citizen.
 - `src/chain.ts`: `chainHeadMovedError(table)`, the one wording of the four-times-moved 503, now shared.
 - `test/settlement-claims-d1.test.ts`: 11 tests on the primitives.
 - Red-proofs: recorded below once run (see "Red-proof log").
+
+### 2. Register and patron wired (B3, B4/B4a, B5/B5a-d); tests 1, 1b, 2, 3, 5, 6a-c, 9, 12
+
+- `src/x402.ts`: `payAndSettle` takes a `PaidClaim` (route, intent, `finish`). The claim INSERT sits after `afterVerify` and
+  before `/settle`; a conflict is RETURNED (`ok:false`), never thrown, answered by the claim's state (`respondToExistingClaim`).
+  An unknown outcome leaves the claim `pending` and releases the lease; rule 7 marks it `refused`; a settled answer marks it
+  `settled_unbooked` and hands the row to the route. `replayForClaim` is the consult-first read (used by register and patron),
+  so a replay is answered before `/verify` spends facilitator credits. `recordSettledPayment` writes the treasury line as the
+  claim's booking step (`runBookingStep`, ledger ref). Patron booking is `finishPatron`.
+- `src/register-gate.ts`: `finishRegistration` is the one booking function (treasury line, citizen, key_registered line), run by the
+  original request, the payer's identical re-send and (commit 4) the reconciler. The citizen is recognised by `booked_refs`, never
+  by handle. Secret mode: the citizen INSERT is the final step; the reconciler books nothing for it (B5, B6b).
+  `society.ts`: `registrationResponseBody` extracted from `register()` (same bytes), `newSecret` exported. `register()` itself is
+  untouched and is no longer called by the gate (its offender-scan test still holds).
+- Decision: the served "registration did not complete" messages (hub words, F8a) now carry the B6a backstop sentence (public-key)
+  or the re-send sentence (secret mode, B6b, no deadline). The F8a tests type the new words literally.
+- Decision: `test/helpers/x402-payload.ts` gives every header its own nonce unless a test passes one (the old constant zero nonce
+  would now be a replay).
+- Decision: the ledger description still names the facilitator's reported `payer` (kept in the claim's `payer` column), so a resumed
+  booking writes byte-identical text.
+- Secret-literal guard: four reviewed entries (B5d, B6b twice, the claim-gated citizens INSERT); baseline 74 / 23 / 51.
+- OPEN FOR HUB: a registration whose handle is taken by a DIFFERENT seat after payment (the race step 2 and afterVerify narrow but
+  cannot close) leaves its claim `settled_unbooked`: the brief has no terminal state for it (B2: "No other transitions"). The payer is
+  told to re-send; the re-send fails the same way; the reconciler will retry it daily and log each attempt. There is no refund path.
+  The operator decides each such row by hand. Not resolved here because any automatic terminal state would either drop a paid
+  registration silently or invent a refund.

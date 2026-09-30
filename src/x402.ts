@@ -11,8 +11,29 @@
 // codebase polices elsewhere (see chain.test.ts's offender-scan test), so
 // this shares instead.
 
-import { appendChained, type ChainRow } from "./chain.ts";
+import { appendChained, appendChainedStmt, type ChainRow } from "./chain.ts";
 import { type Env, SocietyError } from "./society.ts";
+import {
+  acquireLease,
+  claimAnswer,
+  claimIdentity,
+  claimKeyFromPayload,
+  claimResponse,
+  getClaim,
+  keyOfRow,
+  markRefused,
+  markSettled,
+  noteUnknown,
+  refsOf,
+  releaseLease,
+  runBookingStep,
+  sameRequest,
+  takeClaim,
+  type ClaimIdentity,
+  type ClaimKey,
+  type ClaimRow,
+  type ClaimSpec,
+} from "./settlement-claims.ts";
 
 // USDC on Base mainnet.
 export const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -151,9 +172,22 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`);
 }
 
+// A paid act's claim (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md): the route and the
+// business intent it is paying for, plus `finish`, which completes the act from
+// its claim row. `finish` is what an identical request does when it meets a
+// settled_unbooked claim: the route's own booking, run again from booked_refs.
+// It answers a Response when the act is now fully booked, or null when this
+// caller could not finish it (the claim answer is served instead).
+export interface PaidClaim extends ClaimSpec {
+  finish: (row: ClaimRow) => Promise<Response | null>;
+}
+
+// `claim` is the settled_unbooked claim row for callers that book with one
+// (every route does); `owner` is the lease holder id a caller releases through
+// finishUnderOwnLease if booking does not complete.
 export type SettleResult =
   | { ok: false; response: Response }
-  | { ok: true; payer: string; tx: string; settlement: Record<string, unknown> };
+  | { ok: true; payer: string; tx: string; settlement: Record<string, unknown>; claim: ClaimRow | null; owner: string };
 
 // The shared verify+settle core. Returns either a 402 Response to send back
 // as-is (no payment attached, an invalid signature, or a settlement the
@@ -345,6 +379,7 @@ async function settleOrThrow(
   env: Env,
   rpcBody: unknown,
   reqs: PaymentRequirements,
+  claimKey?: ClaimKey,
 ): Promise<{ body: Record<string, unknown>; verdict: Exclude<SettleVerdict, { kind: "unknown" }> }> {
   let broadcastTx: string | undefined;
   try {
@@ -365,6 +400,8 @@ async function settleOrThrow(
         amount_atomic: reqs.maxAmountRequired,
         reason: e instanceof Error ? e.message : String(e),
         ...(broadcastTx ? { broadcast_tx: broadcastTx } : {}),
+        // The claim's identity (public: it is the authorisation's own from and nonce), never its body (B7).
+        ...(claimKey ? { claim_from: claimKey.from, claim_nonce: claimKey.nonce } : {}),
       }),
     );
     throw e;
@@ -376,6 +413,7 @@ export async function payAndSettle(
   request: Request,
   reqs: PaymentRequirements,
   afterVerify?: () => Promise<void>,
+  claim?: PaidClaim,
 ): Promise<SettleResult> {
   const paymentHeader = request.headers.get("X-PAYMENT");
   if (!paymentHeader) {
@@ -400,7 +438,17 @@ export async function payAndSettle(
   }
   assertPayloadMatchesRequirements(paymentPayload, reqs);
 
-  const rpcBody = { x402Version: 1, paymentPayload, paymentRequirements: reqs };
+  const rpcBody = buildRpcBody(paymentPayload, reqs);
+
+  // The claim's identity (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md B1/B4a): the signed
+  // authorisation's (network, asset, from, nonce), lower-cased, plus the hashes of the
+  // exact /settle body and of the business intent. A malformed authorisation is
+  // refused here, free, before anything is sent to the facilitator.
+  let claimId: ClaimIdentity | null = null;
+  if (claim) {
+    const { key, validBefore } = claimKeyFromPayload(paymentPayload, reqs);
+    claimId = await claimIdentity(key, validBefore, rpcBody, claim);
+  }
 
   // B3: the /verify answer, status and body together (classifyVerify). A
   // failure (5xx) is a 502 that says no money moved; a refusal (4xx) or an
@@ -420,6 +468,20 @@ export async function payAndSettle(
   }
 
   if (afterVerify) await afterVerify();
+
+  // B3: the claim is taken after every free business check (afterVerify included,
+  // which for pay listing is the reservation) and immediately before /settle. The
+  // INSERT is the claim; a conflict is refused with NO /settle call, answered by the
+  // existing claim's state. A conflict is RETURNED, never thrown, so a caller that
+  // reserved something in afterVerify (pay listing) releases it on the ok:false path
+  // instead of keeping it as if a settle had been sent.
+  const owner = crypto.randomUUID();
+  if (claim && claimId) {
+    const taken = await takeClaim(env, claimId, claim, owner, Date.now());
+    if (!taken.taken) {
+      return { ok: false, response: await respondToExistingClaim(env, taken.row, taken.identical, reqs, claim) };
+    }
+  }
 
   // Every unknown /settle outcome is logged here, for every caller (re-gate
   // L1, 2026-09-24): registration, the patron line and listing creation
@@ -446,8 +508,26 @@ export async function payAndSettle(
   // settlement_pending: "a recorded failure") or on a 400, 401 or 403
   // ("invalid input, missing/invalid credentials, or a policy refusal"); its
   // 402 names the facilitator's own status and reason.
-  const settled = await settleOrThrow(env, rpcBody, reqs);
+  let settled: Awaited<ReturnType<typeof settleOrThrow>>;
+  try {
+    settled = await settleOrThrow(env, rpcBody, reqs, claimId?.key);
+  } catch (e) {
+    // An unknown outcome leaves the claim `pending` (the money may have moved): record
+    // the last thing the facilitator said and let go of the lease so an identical
+    // re-send can reconcile at once. Never a state change, never a release of anything.
+    if (claimId) {
+      const key = claimId.key;
+      await quietly("note_unknown", () => noteUnknown(env, key, e instanceof Error ? e.message : String(e), owner, Date.now()));
+    }
+    throw e;
+  }
   if (settled.verdict.kind === "refused") {
+    // Rule 7, a recorded refusal: terminal, and the authorisation body is cleared (B7).
+    if (claimId) {
+      const key = claimId.key;
+      const reason = settled.verdict.error;
+      await quietly("mark_refused", () => markRefused(env, key, reason, Date.now()));
+    }
     return {
       ok: false,
       response: Response.json(
@@ -457,7 +537,119 @@ export async function payAndSettle(
     };
   }
 
-  return { ok: true, payer: settled.verdict.payer, tx: settled.verdict.tx, settlement: settled.body };
+  let row: ClaimRow | null = null;
+  if (claimId) {
+    try {
+      await markSettled(env, claimId.key, settled.verdict.tx, settled.verdict.payer, Date.now());
+      row = await getClaim(env, claimId.key);
+      if (!row) throw new Error("the claim row is missing after settlement");
+    } catch (e) {
+      // The money moved and the claim cannot say so. Nothing is booked (every booking
+      // step is gated on the claim), so the honest answer is the F7 one: settled, named,
+      // do not sign again. The row stays pending; the reconciler re-POSTs the stored body
+      // and PayAI serves the cached success, which is how it gets booked.
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "settlement_claim_unrecorded",
+          tx: settled.verdict.tx,
+          payer: settled.verdict.payer,
+          resource: reqs.resource,
+          amount_atomic: reqs.maxAmountRequired,
+          claim_from: claimId.key.from,
+          claim_nonce: claimId.key.nonce,
+          reason: clipReason(e instanceof Error ? e.message : String(e)),
+        }),
+      );
+      throw new SocietyError(
+        500,
+        `Your payment settled (tx ${settled.verdict.tx}), but the society could not record that it had. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand, and the society re-checks unresolved payments once a day. ${SHOWHOME_REPORT_POINTER}`,
+      );
+    }
+  }
+
+  return { ok: true, payer: settled.verdict.payer, tx: settled.verdict.tx, settlement: settled.body, claim: row, owner };
+}
+
+// The exact /settle (and /verify) request body for one payment: the decoded payload and
+// OUR requirements, never the client's. Its text is what a claim hashes (B1/B4a).
+function buildRpcBody(paymentPayload: unknown, reqs: PaymentRequirements) {
+  return { x402Version: 1, paymentPayload, paymentRequirements: reqs };
+}
+
+// A claim-table write that must never change what the caller is told (the answer is
+// already decided): attempted, and on failure logged once, loudly, without the body.
+async function quietly(step: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    console.log(JSON.stringify({ level: "error", event: "settlement_claim_write_failed", step, reason: clipReason(e instanceof Error ? e.message : String(e)) }));
+  }
+}
+
+// B4: what a request is told when its signed authorisation already has a claim. No
+// /settle is ever called from here. A request that is not byte- and intent-identical
+// is a conflict (B4a). An identical one is answered by the claim's state, and on a
+// settled_unbooked claim the route's own `finish` completes the booking under a
+// lease (B5); a live lease held by another worker is named, not raced.
+async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolean, reqs: PaymentRequirements, claim: PaidClaim): Promise<Response> {
+  if (!identical) return claimResponse(claimAnswer(row, false, reqs));
+  if (row.state === "settled_unbooked") {
+    const owner = crypto.randomUUID();
+    const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
+    if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+    try {
+      const done = await claim.finish(leased);
+      if (done) return done;
+    } finally {
+      await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
+    }
+    return claimResponse(claimAnswer((await getClaim(env, keyOfRow(row))) ?? row, true, reqs));
+  }
+  return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: row.state === "pending" && (row.leased_until ?? 0) > Date.now() }));
+}
+
+// B4, consult-first: a request whose X-PAYMENT already has a claim is answered from the
+// claim BEFORE the free checks that would wrongly refuse a replay (register's "handle is
+// taken" fires before any 402 is issued, so an identical re-send of a finished
+// registration would otherwise read as a stranger asking for a taken handle). Null
+// means no header, an unreadable one (payAndSettle reports that), or no claim: carry on.
+export async function replayForClaim(env: Env, request: Request, reqs: PaymentRequirements, claim: PaidClaim): Promise<Response | null> {
+  const header = request.headers.get("X-PAYMENT");
+  if (!header) return null;
+  let id: ClaimIdentity;
+  try {
+    const payload = JSON.parse(atob(header)) as unknown;
+    const { key, validBefore } = claimKeyFromPayload(payload, reqs);
+    id = await claimIdentity(key, validBefore, buildRpcBody(payload, reqs), claim);
+  } catch {
+    return null;
+  }
+  const row = await getClaim(env, id.key);
+  if (!row) return null;
+  return respondToExistingClaim(env, row, row.route === claim.route && sameRequest(row, id), reqs, claim);
+}
+
+// Runs a route's booking for the request that holds the claim's lease. If it throws,
+// the lease is let go first, so the payer's identical re-send is not told "another
+// attempt is in progress" by a request that has already failed.
+export async function finishUnderOwnLease<T>(env: Env, result: Extract<SettleResult, { ok: true }>, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (result.claim) {
+      const key = keyOfRow(result.claim);
+      await quietly("release_lease", () => releaseLease(env, key, result.owner));
+    }
+    throw e;
+  }
+}
+
+// The ledger row a claim recorded, for the receipt a response carries.
+export async function ledgerReceipt(env: Env, ledgerId: number): Promise<{ prev_hash: string; hash: string }> {
+  const r = await env.DB.prepare("SELECT prev_hash, hash FROM ledger WHERE id = ?").bind(ledgerId).first<{ prev_hash: string; hash: string }>();
+  if (!r) throw new Error(`ledger row ${ledgerId} recorded in the claim does not exist`);
+  return r;
 }
 
 // F7 (docs/CHECKPOINT-X402-SETTLE-HONESTY.md, build review round 2, CODEX HIGH):
@@ -480,17 +672,46 @@ export async function payAndSettle(
 // before the citizen is created, listing creation before the listing row), so
 // neither leaves a half-made record behind; each route's own later
 // paid-but-failed handling is unchanged.
+// How a payer whose money moved, and who is not a citizen, reaches the maintainer (gate M1).
+// One literal: every settled-but-incomplete message of this file interpolates it.
+const SHOWHOME_REPORT_POINTER =
+  "To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
+
 export type SettledPaymentRoute = "registration" | "patron" | "listing_fee";
 
+// With `claim` (every route does), the ledger row is written as that claim's booking
+// step (B5a/B5c): ONE batch with the UPDATE that records its id in booked_refs,
+// gated on the claim still being settled_unbooked with no ledger row recorded. A step
+// that finds the row already recorded returns the recorded row, so a finisher that
+// runs twice books the treasury line once. `final` moves the claim to `booked` in the
+// same batch, for a route whose ledger line is its last write.
 export async function recordSettledPayment(
   env: Env,
   route: SettledPaymentRoute,
   settled: { payer: string; tx: string },
   amountCents: number,
   row: ChainRow,
+  claim?: { key: ClaimKey; final: boolean },
 ): Promise<{ prev_hash: string; hash: string }> {
   try {
-    return await appendChained(env.DB, "ledger", row);
+    if (!claim) return await appendChained(env.DB, "ledger", row);
+    await runBookingStep(
+      env,
+      claim.key,
+      {
+        ref: "ledger_id",
+        final: claim.final,
+        chain: "ledger",
+        statements: async (gate) => [(await appendChainedStmt(env.DB, "ledger", row, gate)).stmt],
+      },
+      Date.now(),
+    );
+    const now = await getClaim(env, claim.key);
+    const ledgerId = now ? refsOf(now).ledger_id : undefined;
+    // Not recorded after the step: the claim was not settled_unbooked (nothing was
+    // written), which is a failure to book, never a silent success.
+    if (ledgerId == null) throw new Error("the claim is not settled_unbooked: no treasury line was recorded for it");
+    return await ledgerReceipt(env, ledgerId);
   } catch (e) {
     console.log(
       JSON.stringify({
@@ -505,7 +726,7 @@ export async function recordSettledPayment(
     );
     throw new SocietyError(
       500,
-      `Your $${(amountCents / 100).toFixed(2)} payment settled (tx ${settled.tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`,
+      `Your $${(amountCents / 100).toFixed(2)} payment settled (tx ${settled.tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. ${SHOWHOME_REPORT_POINTER}`,
     );
   }
 }
@@ -565,25 +786,54 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
     /* a patron may pay in silence */
   }
 
-  const result = await payAndSettle(env, request, reqs);
-  if (!result.ok) return result.response;
-
-  const now = Date.now();
   const line = inscription || "(a patron who paid in silence)";
-  const sealed = await recordSettledPayment(env, "patron", result, PRICE_CENTS, {
-    entry_date: new Date(now).toISOString().slice(0, 10),
-    description: `patron ${result.payer}: "${line}"; tx ${result.tx}`,
-    amount_cents: PRICE_CENTS,
-    created_at: now,
-  });
+  const claim: PaidClaim = { route: "patron", intent: { line }, finish: (row) => finishPatron(env, row, null) };
+  // B4: a header that already has a claim is answered from it, before /verify spends the
+  // facilitator's credits on a replay.
+  const replay = await replayForClaim(env, request, reqs, claim);
+  if (replay) return replay;
+  const result = await payAndSettle(env, request, reqs, undefined, claim);
+  if (!result.ok) return result.response;
+  return finishUnderOwnLease(env, result, () => finishPatron(env, result.claim as ClaimRow, result.settlement));
+}
 
-  const paymentResponse = encodePaymentResponseHeader(result.settlement, { route: "patron", tx: result.tx });
+// The patron door's whole paid act: one treasury line. Reads the claim, writes the line
+// as the claim's final booking step unless one is already recorded, and answers as the
+// first request would. `settlement` is the facilitator's body when the caller has it (the
+// request that settled), and null on a resumed booking, which then omits the
+// X-PAYMENT-RESPONSE header it has no body for.
+async function finishPatron(env: Env, row: ClaimRow, settlement: Record<string, unknown> | null): Promise<Response> {
+  const line = String(JSON.parse(row.intent_json).line);
+  const payer = row.payer ?? "unknown";
+  const tx = row.tx ?? "";
+  const ledgerId = refsOf(row).ledger_id;
+  let sealed: { prev_hash: string; hash: string };
+  if (ledgerId == null) {
+    const now = Date.now();
+    sealed = await recordSettledPayment(
+      env,
+      "patron",
+      { payer, tx },
+      PRICE_CENTS,
+      {
+        entry_date: new Date(now).toISOString().slice(0, 10),
+        description: `patron ${payer}: "${line}"; tx ${tx}`,
+        amount_cents: PRICE_CENTS,
+        created_at: now,
+      },
+      { key: keyOfRow(row), final: true },
+    );
+  } else {
+    sealed = await ledgerReceipt(env, ledgerId);
+  }
+
+  const paymentResponse = settlement ? encodePaymentResponseHeader(settlement, { route: "patron", tx }) : null;
   return Response.json(
     {
       thanks: "Your line is in the books, permanently: GET /treasury",
       inscription: line,
-      payer: result.payer,
-      transaction: result.tx,
+      payer,
+      transaction: tx,
       network: "base",
       // 'Permanently' is a strong word for a row in someone else's database.
       // This hash is what makes it checkable: it seals your line to every
