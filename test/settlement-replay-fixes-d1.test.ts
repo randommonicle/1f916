@@ -16,9 +16,10 @@ import { insertListing, insertSubmission } from "./helpers/local-d1.ts";
 import { declareTestWallet } from "./helpers/wallet-pin.ts";
 import { atomicFromCents } from "./helpers/x402-payload.ts";
 import { handlePayListing } from "../src/listings.ts";
-import { claimKeyFromPayload, markExpired, getClaim } from "../src/settlement-claims.ts";
+import { claimKeyFromPayload, markExpired, getClaim, acquireLease, claimAnswer, RECONCILE_BACKSTOP, RECONCILE_REPEAT_CLAUSE } from "../src/settlement-claims.ts";
 import {
   TEST_PAYER,
+  TREASURY_ADDRESS,
   TX,
   authStateAnswer,
   callWorker,
@@ -28,6 +29,7 @@ import {
   eventLines,
   json,
   oneClaim,
+  patronReq,
   paymentHeaderFor,
   realPublicKey,
   registerHeader,
@@ -334,5 +336,184 @@ test("F2: a worker that LOST the race to move the claim releases nothing (the re
   } finally {
     stub.restore();
     d1.close();
+  }
+});
+
+// ---------- F4: the backstop wording, and the "repeat this request" clause only where a re-send really re-checks ----------
+
+const REPEAT = "Repeating this identical request re-checks it sooner.";
+const STATES = ["pending", "settled_unbooked"] as const;
+
+function claimFixtureRow(route: "register" | "patron" | "listing_create" | "listing_pay", state: (typeof STATES)[number], intent: Record<string, unknown>): ClaimRow {
+  return {
+    network: "base", asset: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", from_addr: TEST_PAYER, nonce: "0x" + "00".repeat(31) + "01", route,
+    intent_json: JSON.stringify(intent), intent_hash: "x", rpc_body: "{}", rpc_body_hash: "y", valid_before: 9_999_999_999, state, tx: state === "pending" ? null : TX,
+    payer: TEST_PAYER, verdict_reason: null, booked_refs: "{}", created_at: 1, updated_at: 1, lease_owner: null, leased_until: null,
+  };
+}
+
+test("F4: the backstop states a daily pass at 06:00 UTC that works a limited number of rows, oldest attempt first, so a row can wait more than one day; it promises no deadline", () => {
+  assert.match(RECONCILE_BACKSTOP, /one pass a day, at 06:00 UTC/);
+  assert.match(RECONCILE_BACKSTOP, /limited number of unresolved payments per pass, oldest attempt first/);
+  assert.match(RECONCILE_BACKSTOP, /can wait more than one day/);
+  assert.doesNotMatch(RECONCILE_BACKSTOP, /at the latest|next one|resolves by/i, "the old promise is gone");
+  assert.equal(RECONCILE_REPEAT_CLAUSE, REPEAT);
+});
+
+test("F4: a listing_pay answer carries NO repeat clause (the reservation answers a re-send first); register, patron and listing_create answers carry it", () => {
+  const intents = { register: { handle: "h", model: "m", public_key: "AAAA" }, patron: { line: "x" }, listing_create: { title: "t", fee_cents: 150 }, listing_pay: { listing_id: 3, amount_cents: 1200 } } as const;
+  for (const route of ["register", "patron", "listing_create", "listing_pay"] as const) {
+    for (const state of STATES) {
+      for (const leaseHeld of [false, true]) {
+        const text = String((claimAnswer(claimFixtureRow(route, state, intents[route]), true, {}, { leaseHeld }).body as { error: string }).error);
+        assert.match(text, /more than one day/, `${route}/${state}: the limited daily pass is stated`);
+        if (route === "listing_pay") {
+          assert.doesNotMatch(text, /Repeating this identical request|repeat this identical request/, `${route}/${state}/lease ${leaseHeld}: no invitation to repeat`);
+        } else if (state === "settled_unbooked" || !leaseHeld) {
+          assert.ok(text.includes(REPEAT), `${route}/${state}: where a re-send really re-checks or finishes the claim, the clause is served`);
+        } else {
+          assert.match(text, /repeat this identical request in a few minutes/);
+          assert.ok(text.includes(REPEAT));
+        }
+      }
+    }
+  }
+  // B6b: a secret-mode registration that is settled_unbooked waits for the payer's re-send and names no deadline and no daily pass
+  const secret = String((claimAnswer(claimFixtureRow("register", "settled_unbooked", { handle: "h", model: "m", public_key: null }), true, {}).body as { error: string }).error);
+  assert.match(secret, /identical re-send/);
+  assert.doesNotMatch(secret, /06:00|more than one day|Repeating this identical request re-checks/);
+  // F1: the handle-taken answer has no re-send promise and no backstop
+  const lost = { ...claimFixtureRow("register", "settled_unbooked", { handle: "h", model: "m", public_key: "AAAA" }), verdict_reason: "handle_taken" };
+  const lostText = String((claimAnswer(lost, true, {}).body as { error: string }).error);
+  assert.doesNotMatch(lostText, /Repeating this identical request|06:00|more than one day/);
+});
+
+test("F4 follows its clause (register, pending): a re-send under a live lease is told to repeat and asks nobody; repeated once the lease is gone, it really re-checks the chain", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+  try {
+    const header = registerHeader();
+    const body = { handle: "follow-register", model: "m" };
+    const send = () => callWorker(registerReq(body, header), testEnv(d1));
+    assert.equal((await send()).status, 502);
+    const row = oneClaim(d1) as unknown as ClaimRow;
+    const key = { network: row.network, asset: row.asset, from: row.from_addr, nonce: row.nonce };
+    assert.ok(await acquireLease(testEnv(d1), key, "another-worker", Date.now()));
+
+    const busy = String((await json(await send())).error);
+    assert.ok(busy.includes(REPEAT), "the clause is served");
+    assert.match(busy, /repeat this identical request in a few minutes/);
+    assert.equal(stub.rpcUrls.length, 0, "while another worker holds the row the re-send asks nobody");
+
+    d1.raw.prepare("UPDATE settlement_claims SET leased_until = ?").run(Date.now() - 1);
+    const again = await send();
+    assert.equal(again.status, 502, "still unresolved (the authorisation is unused and still valid)");
+    assert.ok(stub.rpcUrls.length >= 2, "FOLLOWING the clause: the identical request really re-checked the chain (two RPCs)");
+    assert.ok(stub.calls.settle >= 2, "and re-POSTed the stored body to the facilitator");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F4 follows its clause (patron, pending): the identical request re-checks the chain and the stored payment", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    const send = () => callWorker(patronReq("follow-patron", header), testEnv(d1));
+    const first = await send();
+    assert.equal(first.status, 502);
+    assert.equal(stub.rpcUrls.length, 0);
+    const resend = await send();
+    const text = String((await json(resend)).error);
+    assert.ok(text.includes(REPEAT), "the clause is served");
+    assert.ok(stub.rpcUrls.length >= 2, "and that very request re-checked the chain");
+    const checked = stub.rpcUrls.length;
+    await send();
+    assert.ok(stub.rpcUrls.length > checked, "as does every further identical request");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F4 follows its clause (register, public-key, settled but not booked): the message carries it and the identical re-send finishes the booking", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const header = registerHeader();
+    const body = { handle: "follow-keyed", model: "m", public_key: await realPublicKey() };
+    const send = () => callWorker(registerReq(body, header), testEnv(d1));
+    d1.raw.exec("CREATE TRIGGER no_key_line BEFORE INSERT ON identity_events WHEN NEW.kind = 'key_registered' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    const failed = await send();
+    assert.equal(failed.status, 500);
+    const text = String((await json(failed)).error);
+    assert.ok(text.includes(RECONCILE_BACKSTOP) && text.includes(REPEAT));
+    d1.raw.exec("DROP TRIGGER no_key_line");
+    const done = await send();
+    assert.equal(done.status, 201, "FOLLOWING the clause: the identical request finished it");
+    assert.equal(oneClaim(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F4: the 'settled but the society could not record that it had' answer takes its tail from the route: a registration's carries the clause and its re-send re-checks; a pay listing's carries none", async () => {
+  // register: the claim's markSettled fails after the money moved
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ rpc: () => authStateAnswer(true) });
+    try {
+      const header = registerHeader();
+      const body = { handle: "unrecorded", model: "m", public_key: await realPublicKey() };
+      const send = () => callWorker(registerReq(body, header), testEnv(d1));
+      d1.raw.exec("CREATE TRIGGER no_settled BEFORE UPDATE ON settlement_claims WHEN NEW.state = 'settled_unbooked' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+      const res = await send();
+      assert.equal(res.status, 500);
+      const text = String((await json(res)).error);
+      assert.match(text, /payment settled \(tx 0xabab.*could not record that it had/);
+      assert.ok(text.includes(RECONCILE_BACKSTOP) && text.includes(REPEAT));
+      d1.raw.exec("DROP TRIGGER no_settled");
+      const rpcBefore = stub.rpcUrls.length;
+      const again = await send();
+      assert.ok(stub.rpcUrls.length > rpcBefore, "FOLLOWING the clause: the identical request re-checked the chain");
+      assert.equal(again.status, 201, "and, the chain showing the authorisation spent, booked it");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // pay listing: the same failure; the answer names the daily pass and does NOT tell the funder to repeat
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator();
+    try {
+      const funderId = insertCitizen(d1);
+      const reviewerId = insertCitizen(d1);
+      const pin = await declareTestWallet(d1, reviewerId, REVIEWER_WALLET);
+      const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: BOUNTY });
+      const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+      const funder = d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(funderId) as never;
+      d1.raw.exec("CREATE TRIGGER no_settled BEFORE UPDATE ON settlement_claims WHEN NEW.state = 'settled_unbooked' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+      const res = await handlePayListing(
+        new Request(`https://example.test/api/listing/${listingId}/pay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(REVIEWER_WALLET, atomicFromCents(BOUNTY)) },
+          body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+        }),
+        testEnv(d1),
+        funder,
+        listingId,
+      );
+      const text = JSON.stringify(await json(res));
+      assert.ok(text.includes("could not record that it had"), "the same failure, served through the pay route's unconfirmed answer");
+      assert.ok(text.includes(RECONCILE_BACKSTOP), "it names the daily, limited pass");
+      assert.equal(text.includes(REPEAT) || text.includes("Repeating this identical request"), false, "and gives a funder no repeat clause");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
   }
 });

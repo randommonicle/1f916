@@ -34,7 +34,7 @@ import {
   PAYMENT_MAX_TIMEOUT_SECONDS,
   type PaidClaim,
 } from "./x402.ts";
-import { getClaim, intentOf, keyOfRow, refsOf, runBookingStep, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
+import { getClaim, intentOf, keyOfRow, refsOf, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
@@ -515,7 +515,7 @@ async function finishListingCreate(
       );
       throw new SocietyError(
         500,
-        `Your posting fee settled (tx ${tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand. ${RECONCILE_BACKSTOP} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Your payment is already in the books: GET /treasury.`,
+        `Your posting fee settled (tx ${tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand. ${reconcileTail("listing_create")} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Your payment is already in the books: GET /treasury.`,
       );
     }
     // The daily/IP throttle record is bookkeeping, not authoritative -- a

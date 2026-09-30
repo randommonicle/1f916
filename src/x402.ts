@@ -27,6 +27,7 @@ import {
   markRefused,
   markSettled,
   noteUnknown,
+  reconcileTail,
   refsOf,
   releaseLease,
   runBookingStep,
@@ -592,9 +593,12 @@ export async function payAndSettle(
           reason: clipReason(e instanceof Error ? e.message : String(e)),
         }),
       );
+      // Let go of the lease: the answer below tells the payer a re-send re-checks it, and a re-send must not meet a live lease held by this dead request.
+      const heldKey = claimId.key;
+      await quietly("release_lease", () => releaseLease(env, heldKey, owner));
       throw new SocietyError(
         500,
-        `Your payment settled (tx ${settled.verdict.tx}), but the society could not record that it had. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand, and the society re-checks unresolved payments once a day. ${SHOWHOME_REPORT_POINTER}`,
+        `Your payment settled (tx ${settled.verdict.tx}), but the society could not record that it had. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. ${reconcileTail(claim?.route ?? "register")} ${SHOWHOME_REPORT_POINTER}`,
       );
     }
   }

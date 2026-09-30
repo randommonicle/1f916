@@ -399,10 +399,20 @@ export function describeClaim(row: ClaimRow): string {
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 const txPart = (row: ClaimRow) => (row.tx ? ` (tx ${row.tx})` : "");
 
-// The daily backstop every reconcilable unresolved state promises (B6a). A
-// secret-mode registration that is settled_unbooked gets no deadline (B6b).
+// What the reconciler really does (B6a, hub ruling F4): ONE pass a day, at 06:00 UTC, and it works a limited number of unresolved payments per
+// pass, oldest attempt first, and only what the concierge and the clerk leave room for that day (scheduled(), F3), so a payment can wait MORE than
+// one day. It promises no deadline. A secret-mode registration that is settled_unbooked gets no deadline at all (B6b).
 export const RECONCILE_BACKSTOP =
-  "The society re-checks every unresolved payment once a day, at its 06:00 UTC run, so this resolves by the next one at the latest; repeating this identical request re-checks it sooner.";
+  "The society's reconciler makes one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, oldest attempt first, so a payment can wait more than one day.";
+
+// Appended ONLY where an identical re-send really re-checks or finishes the claim (registration, the patron door, listing creation). NOT on a
+// listing_pay answer (the pay route's reservation answers a re-send first, so repeating does nothing) and NOT on the handle-taken answer (F1:
+// no retry can book it). Each place it is served has a test that follows it.
+export const RECONCILE_REPEAT_CLAUSE = "Repeating this identical request re-checks it sooner.";
+
+export function reconcileTail(route: ClaimRoute): string {
+  return route === "listing_pay" ? RECONCILE_BACKSTOP : `${RECONCILE_BACKSTOP} ${RECONCILE_REPEAT_CLAUSE}`;
+}
 
 // F1: what a payer is told when the handle was lost after payment. It names the tx and the handle, says the payment
 // settled, says plainly that re-sending cannot book it and is not needed, and invites no new signature: the way out
@@ -461,8 +471,8 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
         status: 502,
         body: {
           error: `The outcome of this payment is still unknown${txPart(row)}: the settle request was sent and whether the money moved is not yet established. Do not sign again; this request changed nothing. ${
-            opts.leaseHeld ? "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. " : ""
-          }${opts.detail ? `${opts.detail} ` : ""}${RECONCILE_BACKSTOP}`,
+            opts.leaseHeld ? (row.route === "listing_pay" ? "Another attempt to resolve it is in progress. " : "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. ") : ""
+          }${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`,
           code: SETTLEMENT_UNRESOLVED,
         },
       };
@@ -474,7 +484,7 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
           error: `Your ${money(claimAmountCents(row))} payment settled${txPart(row)} but its booking is not finished: ${describeClaim(row)} is not yet fully recorded. Do not sign again: this payment has already moved. ${
             claimIsSecretRegistration(row)
               ? "It waits for your identical re-send of this same request, which finishes it and delivers a fresh secret."
-              : `${opts.detail ? `${opts.detail} ` : ""}${RECONCILE_BACKSTOP}`
+              : `${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`
           }`,
           code: SETTLEMENT_UNRESOLVED,
         },

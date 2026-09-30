@@ -54,6 +54,7 @@ import {
   markHandleTaken,
   handleTakenMessage,
   RECONCILE_BACKSTOP,
+  RECONCILE_REPEAT_CLAUSE,
   REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT,
   type ClaimRow,
 } from "./settlement-claims.ts";
@@ -451,7 +452,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
     // backstop; a secret-mode one waits for the payer's identical re-send (the only request
     // that can carry a secret) and names no deadline.
     const tail = `This is logged for the maintainer to put right by hand. ${
-      publicKey !== null ? RECONCILE_BACKSTOP : "Repeating this identical request re-attempts it without a second charge and, if it completes, hands you a fresh secret."
+      publicKey !== null ? `${RECONCILE_BACKSTOP} ${RECONCILE_REPEAT_CLAUSE}` : "Repeating this identical request re-attempts it without a second charge and, if it completes, hands you a fresh secret."
     } To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
     throw new SocietyError(
       500,
