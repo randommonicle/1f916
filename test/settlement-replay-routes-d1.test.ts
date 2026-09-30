@@ -3,118 +3,36 @@
 // docs/REVIEW-X402-SETTLE-HONESTY-GATE-2026-09-29.md): one signed authorisation is
 // booked once. Numbered as the brief numbers them ("Tests (replace the Tests
 // section above)", 1-13, plus 14 from B6a); each test's red-proof is recorded in
-// docs/CHECKPOINT-SETTLEMENT-REPLAY-GUARD.md.
-//
-// The facilitator is genuinely external, so its HTTP surface is stubbed via
-// globalThis.fetch exactly as test/x402-post-payment-honesty-d1.test.ts stubs it; the Base
-// RPCs (the reconciler's authorizationState reads) are stubbed the same way. Nothing else is
-// mocked: createLocalD1 is real SQLite with the real schema.sql, each failed write is a real
-// SQLite trigger raising, and every request goes through the real Worker router.
+// docs/CHECKPOINT-SETTLEMENT-REPLAY-GUARD.md. This file: registration and the patron
+// door (tests 1, 2, 3, 5, 6, 9, 12); the harness is test/helpers/settlement-harness.ts.
 //
 // Run: npm test
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
-import { paymentHeaderFor, freshNonce, TEST_PAYER } from "./helpers/x402-payload.ts";
-import { encodeBase64Url } from "../src/keyauth.ts";
-import type { Env } from "../src/society.ts";
-import worker from "../src/index.ts";
-
-export const TREASURY_ADDRESS = "0xa7f7985eb19b8c44f12a0654df1ef89d1dd527c9";
-export const FACILITATOR_URL = "https://facilitator.example.invalid";
-export const TX = "0x" + "ab".repeat(32);
-
-const ctx = { waitUntil: () => {}, passThroughOnException: () => {} };
-function callWorker(request: Request, env: Env): Promise<Response> {
-  return (worker.fetch as unknown as (r: Request, e: Env, c: unknown) => Promise<Response>)(request, env, ctx);
-}
-const testEnv = (d1: LocalD1, extra: Record<string, unknown> = {}): Env =>
-  ({ DB: d1.DB, TREASURY_ADDRESS, FACILITATOR_URL, REGISTRATION_MODE: "open", ...extra }) as unknown as Env;
-
-// The facilitator. /verify is valid; /settle answers `settle(n)` for its nth call (default: a
-// settled answer with TX). Delays let two requests be in flight at once. Every /settle body is
-// kept, so a test can assert what was (and was not) put to the facilitator.
-interface StubOpts {
-  settle?: (n: number) => Response | Promise<Response>;
-  verifyDelayMs?: number;
-  settleDelayMs?: number;
-  onVerify?: () => void;
-}
-function stubFacilitator(opts: StubOpts = {}) {
-  const original = globalThis.fetch;
-  const calls = { verify: 0, settle: 0 };
-  const settleBodies: string[] = [];
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-    const href = String(url);
-    if (href === `${FACILITATOR_URL}/verify`) {
-      calls.verify++;
-      opts.onVerify?.();
-      if (opts.verifyDelayMs) await sleep(opts.verifyDelayMs);
-      return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }
-    if (href === `${FACILITATOR_URL}/settle`) {
-      const n = ++calls.settle;
-      settleBodies.push(String(init?.body ?? ""));
-      if (opts.settleDelayMs) await sleep(opts.settleDelayMs);
-      if (opts.settle) return opts.settle(n);
-      return new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: TX }), { status: 200, headers: { "content-type": "application/json" } });
-    }
-    throw new Error(`unexpected fetch in settlement-replay-routes-d1.test.ts: ${href}`);
-  }) as typeof fetch;
-  return { calls, settleBodies, restore: () => void (globalThis.fetch = original) };
-}
-
-const count = (d1: LocalD1, fromWhere: string): number => (d1.raw.prepare(`SELECT COUNT(*) AS n FROM ${fromWhere}`).get() as { n: number }).n;
-const claimRows = (d1: LocalD1) => d1.raw.prepare("SELECT * FROM settlement_claims ORDER BY created_at, nonce").all() as Record<string, unknown>[];
-const oneClaim = (d1: LocalD1) => {
-  const rows = claimRows(d1);
-  assert.equal(rows.length, 1, "exactly one claim row");
-  return rows[0] as { state: string; tx: string | null; rpc_body: string | null; booked_refs: string; route: string; lease_owner: string | null };
-};
-
-function failInserts(d1: LocalD1, name: string, table: string, when: string | null, message: string): void {
-  assert.equal(message.includes("'"), false, "the message is embedded in a SQL string literal");
-  d1.raw.exec(`CREATE TRIGGER ${name} BEFORE INSERT ON ${table} ${when ? `WHEN ${when}` : ""} BEGIN SELECT RAISE(ABORT, '${message}'); END;`);
-}
-const dropTrigger = (d1: LocalD1, name: string) => d1.raw.exec(`DROP TRIGGER ${name}`);
-
-async function captureLog<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
-  const originalLog = console.log;
-  const lines: string[] = [];
-  console.log = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
-  try {
-    return { value: await fn(), lines };
-  } finally {
-    console.log = originalLog;
-  }
-}
-const eventLines = (lines: string[], event: string) =>
-  lines.flatMap((l) => {
-    try {
-      const o = JSON.parse(l) as Record<string, unknown>;
-      return o.event === event ? [o] : [];
-    } catch {
-      return [];
-    }
-  });
-
-async function realPublicKey(): Promise<string> {
-  const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
-  return encodeBase64Url(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey)));
-}
-
-export const registerHeader = () => paymentHeaderFor(TREASURY_ADDRESS, "1000000");
-function registerReq(body: Record<string, unknown>, header: string): Request {
-  return new Request("https://example.test/api/register", { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": header }, body: JSON.stringify(body) });
-}
-function patronReq(message: string, header: string): Request {
-  return new Request("https://example.test/api/patron", { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": header }, body: JSON.stringify({ message }) });
-}
-async function json(res: Response): Promise<Record<string, any>> {
-  return (await res.json()) as Record<string, any>;
-}
+import { insertCitizen } from "./helpers/local-d1.ts";
+import {
+  TEST_PAYER,
+  TREASURY_ADDRESS,
+  TX,
+  callWorker,
+  captureLog,
+  count,
+  createLocalD1,
+  dropTrigger,
+  eventLines,
+  failInserts,
+  json,
+  oneClaim,
+  patronReq,
+  paymentHeaderFor,
+  realPublicKey,
+  registerHeader,
+  registerReq,
+  stubFacilitator,
+  testEnv,
+} from "./helpers/settlement-harness.ts";
+import { freshNonce } from "./helpers/x402-payload.ts";
 
 // ---------- 1. an identical replay after `booked` ----------
 

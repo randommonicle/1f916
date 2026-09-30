@@ -67,3 +67,24 @@ second citizen.
   told to re-send; the re-send fails the same way; the reconciler will retry it daily and log each attempt. There is no refund path.
   The operator decides each such row by hand. Not resolved here because any automatic terminal state would either drop a paid
   registration silently or invent a refund.
+
+### 3. Listing create and pay listing wired (B3 reservation + claim atomicity); test 10a-d, listing create
+
+- `src/listings.ts`: `handleCreateListing` and `handlePayListing` take a `PaidClaim`, run `replayForClaim` after their requirements
+  are built, and book through `finishListingCreate` (ledger step, then the listing row as the final step) and `finishPayListing`
+  (the `listing_payments` row and the flip to paid in ONE batch with the claim update, final step).
+- **Decision (B3, pay listing): the conflict is RETURNED, not thrown.** payAndSettle returns `ok:false` for a claim conflict, so the
+  pay route's existing `!result.ok` branch releases its own reservation. The catch that keeps the reservation on a thrown unknown
+  outcome is never reached by a conflict. Order (i): reservation, then a claim conflict: listing back to `open` (10a). Order (ii): a
+  reservation that fails takes no claim (10b). A claim already present before `/verify` is answered without any facilitator call (10a').
+- **Decision: pay-listing booking is gated on the listing still being `paying`** (the INSERT and the UPDATE both, and the claim's
+  `changes() = 1` ties the reference to the UPDATE). A listing a person has since released books nothing and the claim stays
+  `settled_unbooked` (10d).
+- **Decision: the funder's own identical re-send cannot finish a pay-listing claim**, because the reservation it meets first (listing
+  `paying`) answers the existing 409 before any claim is read. The reconciler is the finisher for that route (B5 says the same).
+- The exported booking entry points for the reconciler (`finishListingCreateBooking`, `finishPayListingBooking`) sit at the END of
+  `listings.ts`: `test/listings-policing.test.ts` reads each handler from its signature to the next top-level export, and the
+  ledger and payment-row scans must keep reading the handlers whole.
+- Served text: listing create's "failed to save" and pay listing's "recording it failed" messages now carry the B6a backstop sentence
+  (the pointer literals that `post-payment-pointer.test.ts` counts are unchanged).
+- Test harness split out to `test/helpers/settlement-harness.ts`; listing tests in `test/settlement-replay-listings-d1.test.ts`.
