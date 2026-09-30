@@ -1,6 +1,6 @@
 # Brief: /treasury gets the census contract (DEFERRED-TREASURY-PAGINATION)
 
-Status: DRAFT, 2026-09-30. Not built. Needs an exchange round before any builder reads it.
+Status: exchange-CONVERGED 2026-09-30 (GEMINI + CODEX; Amendments A1-A12 at the end override the body). Not built.
 
 ## Why
 
