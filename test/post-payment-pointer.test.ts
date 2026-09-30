@@ -20,7 +20,7 @@ import { SocietyError, type Env } from "../src/society.ts";
 const SHOWHOME_POINTER =
   "To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
 const CITIZEN_POINTER =
-  "To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0.";
+  "To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true).";
 
 const src = (f: string) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
 
@@ -65,17 +65,31 @@ test("M1: the citizen pointer's exact inbox URL answers 200 and lists a mention 
         .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at, kind) VALUES (?, 't', 'b', 'd1', 0, 'm', 1000, 'post')")
         .run(funder).lastInsertRowid,
     );
+    const insertC = d1.raw.prepare("INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at) VALUES (?, NULL, ?, ?, 0, 'm', ?)");
+    // Exchange round 2 (CODEX): more than one page of earlier mentions, so the report is NOT on page 1.
+    for (let i = 0; i < 105; i++) insertC.run(post, funder, `@commonhold-agent earlier note ${i}`, 1500 + i);
     const comment = Number(
       d1.raw
         .prepare("INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at) VALUES (?, NULL, ?, ?, 0, 'm', 2000)")
         .run(post, funder, `@commonhold-agent my listing payment settled as tx ${TX} but was not recorded`).lastInsertRowid,
     );
-    const url = /GET (\/api\/inbox\?\S+?)\.$/.exec(CITIZEN_POINTER)?.[1];
+    const url = /GET (\/api\/inbox\?\S+) \(follow next_cursor while has_more is true\)\.$/.exec(CITIZEN_POINTER)?.[1];
     assert.ok(url, "the pointer names a GET /api/inbox URL");
-    const res = await (worker.fetch as unknown as (r: Request, e: Env, c: unknown) => Promise<Response>)(new Request(`${ORIGIN}${url}`), envOf(d1), ctx);
-    assert.equal(res.status, 200, `the served URL ${url} must answer 200`);
-    const body = (await res.json()) as { mentions: { id: number }[] };
-    assert.ok(body.mentions.some((m) => m.id === comment), "the mention naming the tx is listed");
+    const call = (u: string) => (worker.fetch as unknown as (r: Request, e: Env, c: unknown) => Promise<Response>)(new Request(`${ORIGIN}${u}`), envOf(d1), ctx);
+    type Page = { mentions: { id: number }[]; has_more: boolean; next_cursor: string };
+    const first = await call(url!);
+    assert.equal(first.status, 200, `the served URL ${url} must answer 200`);
+    let page = (await first.json()) as Page;
+    assert.ok(!page.mentions.some((m) => m.id === comment), "page 1 is full of earlier mentions, so the report is not on it");
+    assert.equal(page.has_more, true, "the served instruction to follow next_cursor is needed here");
+    const seen = new Set(page.mentions.map((m) => m.id));
+    for (let guard = 0; page.has_more && guard < 10; guard++) {
+      const next = await call(`/api/inbox?handle=commonhold-agent&cursor=${encodeURIComponent(page.next_cursor)}`);
+      assert.equal(next.status, 200);
+      page = (await next.json()) as Page;
+      for (const m of page.mentions) seen.add(m.id);
+    }
+    assert.ok(seen.has(comment), "following next_cursor from the served URL reaches the mention naming the tx");
   } finally {
     d1.close?.();
   }
