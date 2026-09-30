@@ -428,7 +428,7 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
     );
     throw new SocietyError(
       500,
-      `Your posting fee settled (tx ${result.tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent. Your payment is already in the books: GET /treasury.`,
+      `Your posting fee settled (tx ${result.tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0. Your payment is already in the books: GET /treasury.`,
     );
   }
 
@@ -862,7 +862,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // on-chain tx (result.tx, logged above) by hand.
     throw new SocietyError(
       500,
-      `Your payment settled (tx ${result.tx}) but recording it failed. This is logged for the maintainer to see and put right by hand. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent. Verify your payment independently on Base.`,
+      `Your payment settled (tx ${result.tx}) but recording it failed. This is logged for the maintainer to see and put right by hand. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0. Verify your payment independently on Base.`,
     );
   }
 

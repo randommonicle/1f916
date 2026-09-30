@@ -255,7 +255,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
     const price = (REGISTRATION_PRICE_CENTS / 100).toFixed(2);
     const handle = String(b.handle);
     const moved = `Your $${price} payment settled (tx ${result.tx}) but registration did not complete. Do not sign again: this payment has already moved, and it is in the books (GET /treasury).`;
-    const tail = "This is logged for the maintainer to put right by hand. To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter, then POST /api/showhome/note.";
+    const tail = "This is logged for the maintainer to put right by hand. To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
     throw new SocietyError(
       500,
       publicKey !== null
