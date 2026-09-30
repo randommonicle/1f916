@@ -274,3 +274,21 @@ The hub ruled on the list above (RULED marks inline). Accepted as named limits, 
 - Red-proofs (8, all restored): the terminal update releasing nothing; the reconciler passing no row on expired; on refused; release without `status = 'paying'`; without the
   pinned-row conditions; without the `paying_since` condition; without `changes() = 1`; the release as a separate statement. All red. Not independently provable:
   `paid_submission_id IS NULL` (a `paying` listing with a paid submission cannot be made by any route; it is defence in depth behind `status = 'paying'`).
+
+### F3. The concierge keeps first claim: sweep -> concierge -> reconciler -> clerk (item 14; supersedes the commit-4 order)
+
+- `scheduled()` (clerk cron): the concierge runs right after the sweep, exactly as its existing comment says; THEN the reconciler with
+  `runReconciler(env, sweep + concierge.actualCost + CLERK_WAKE_FIXED_COST)`; THEN the clerk, charged `priorCost + concierge.actualCost + reconcileCost`. `runReconciler`
+  now takes `reservedCost`, computes `left = 50 - reservedCost - FINALISE_RESERVE`, and if `left < select + one worst-case row (19)` works NONE, spends nothing and writes
+  one `settlement_reconcile_deferred` line (`reserved_cost`, `budget_left`, `needed`); otherwise its ceiling is `min(26, left)`. A throw escaping the reconciler is priced
+  as the whole ceiling, logged, and never stops the clerk.
+- Measured through the real `scheduled()` with the counter (per invocation, cap 50): a quiet day with a worst-case row (four RPC fetches), a busy clerk (5 flagged posts,
+  10 drafts offered) and the concierge running: 42 subrequests, the row BOOKED, the clerk shed to 6 of 10 inserts to pay for it; a contested day (2 due proposals, sweep
+  21): 34, the concierge NOT shed (the old order shed it on exactly this day), the reconciler deferred with one line, the row untouched, and the next day (35) books it; a
+  day the concierge really engages and posts: the reconciler sees what is really left, defers, and the clerk still runs. Consequence to know: on any day the concierge
+  engages and posts (cost up to 16) the reconciler cannot afford a worst-case row and defers, so rows can wait several days (F4's wording says so); the payer's identical
+  re-send is the fast path.
+- Red-proofs (10, all restored): the old order; the reconciler not charged the concierge's actual cost, the clerk's minimum, or both; the clerk not charged what the reconciler
+  spent (caught by the insert count, not by the total: the estimates are conservative); no deferral; deferral logging nothing; the standing ceiling ignoring what is left
+  (a second cheap row starting); a throw escaping the reconciler stopping the clerk. The first run of this set found two greens that I closed with new tests (the concierge
+  engaged day; the clerk's insert count) and one (the escape) with a dropped-table test.

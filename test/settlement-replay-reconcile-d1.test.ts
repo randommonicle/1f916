@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/index.ts";
 import { insertCitizen, insertProposal } from "./helpers/local-d1.ts";
-import { installSubrequestCounter, makeModelRpcResponder } from "./helpers/subrequest-counter.ts";
+import { installSubrequestCounter, clerkDraftText, rpcBalanceResponse } from "./helpers/subrequest-counter.ts";
 import {
   FACILITATOR_URL,
   TEST_PAYER,
@@ -45,7 +45,6 @@ import {
   RECONCILE_SUBREQUEST_CEILING,
 } from "../src/settlement-reconcile.ts";
 import { RECONCILE_EXPIRY_MARGIN_SECONDS } from "../src/x402.ts";
-import { MAINTAINER_MODELS } from "../src/maintainer/anthropic.ts";
 import { CLERK_CRON } from "../src/maintainer/schedule.ts";
 
 const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
@@ -491,10 +490,13 @@ test("budget: a second worst-case row is SHED, not started (the ceiling), and wa
 
 // ---------- the budget: priced, and proven by counting the real subrequests ----------
 
-// The facilitator, the Base RPCs and the model behind ONE responder, so every outbound call is counted.
-function worstCaseResponder() {
+// The facilitator, the Base RPCs and the model behind ONE responder, so every outbound call is counted. The concierge's own prompt wraps its
+// target in <target> tags (test/maintainer-scheduled-budget.test.ts tells the two apart the same way); everything else from the model is the clerk's.
+function anthropicText(text: string): Response {
+  return new Response(JSON.stringify({ content: [{ type: "text", text }], stop_reason: "end_turn", usage: { input_tokens: 80, output_tokens: 40 } }), { status: 200, headers: { "content-type": "application/json" } });
+}
+function worstCaseResponder(clerkDrafts = 0) {
   let rpcN = 0;
-  const models = makeModelRpcResponder({ judgmentModel: MAINTAINER_MODELS.judgment, clerkModel: MAINTAINER_MODELS.clerk });
   return (url: string, init: { body?: unknown } | undefined): Response => {
     if (url === `${FACILITATOR_URL}/settle`) return settledAnswer();
     const body = typeof init?.body === "string" ? init.body : "";
@@ -503,11 +505,21 @@ function worstCaseResponder() {
       if (rpcN++ < 2) throw new Error("rpc unreachable");
       return authStateAnswer(true);
     }
-    return models(url, init);
+    if (url.includes("api.anthropic.com")) {
+      let prompt = "";
+      try {
+        prompt = (JSON.parse(body) as { messages?: Array<{ content?: string }> }).messages?.[0]?.content ?? "";
+      } catch {
+        /* an unreadable prompt is the clerk's */
+      }
+      if (prompt.includes("<target")) return anthropicText("That is a genuinely interesting angle: what led you to it, and how does it square with the treasury's own numbers?");
+      return anthropicText(clerkDraftText(Array.from({ length: clerkDrafts }, (_, i) => ({ kind: "bookkeeping_note", note: `drift note ${i}` }))));
+    }
+    return rpcBalanceResponse();
   };
 }
 
-test("budget: the worst-case row (a pending public-key registration through every step) costs no more than its price, and scheduled() with it stays within 50", async () => {
+test("budget: the worst-case row (a pending public-key registration through every step) costs no more than its price, counted", async () => {
   // ---- the row alone, counted
   {
     const d1 = createLocalD1();
@@ -546,46 +558,174 @@ test("budget: the worst-case row (a pending public-key registration through ever
     }
   }
 
-  // ---- scheduled(), the clerk cron: the worst row AND two due proposals AND the wake, in one invocation
-  {
-    const d1 = createLocalD1();
-    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: bothRpcs(true) });
-    let seat: { send: () => Promise<Response> };
-    try {
-      insertCitizen(d1, { handle: "commonhold-agent", model: "claude-fable-5" });
-      for (let i = 0; i < 4; i++) insertCitizen(d1);
-      seat = await pendingRegistration(d1);
-      assert.equal((await seat.send()).status, 502);
-    } finally {
-      stub.restore();
-    }
-    let counting = false;
-    const counter = installSubrequestCounter(worstCaseResponder());
-    const counted = createLocalD1({ onExec: (k) => counting && counter.consume(k) });
-    try {
-      // a fresh database that carries the pending claim and the maintainer, two due proposals, and the cohort
-      const claim = d1.raw.prepare("SELECT * FROM settlement_claims").get() as Record<string, unknown>;
-      insertCitizen(counted, { handle: "commonhold-agent", model: "claude-fable-5" });
-      for (let i = 0; i < 4; i++) insertCitizen(counted);
-      counted.raw
-        .prepare(`INSERT INTO settlement_claims (${Object.keys(claim).join(", ")}) VALUES (${Object.keys(claim).map(() => "?").join(", ")})`)
-        .run(...(Object.values(claim) as never[]));
-      const now = Date.now();
-      insertProposal(counted, { kind: "resolution", status: "open", opened_at: now - 9 * 86_400_000, closes_at: now - 3_000 });
-      insertProposal(counted, { kind: "resolution", status: "open", opened_at: now - 9 * 86_400_000, closes_at: now - 2_000 });
-      const env = { ...testEnv(counted), ANTHROPIC_API_KEY: "test-key", REGISTRATION_MODE: "invite_only" } as unknown as Env;
-      counting = true;
+});
+
+// scheduled() on the 06:00 clerk cron, end to end and COUNTED: the governance sweep, the concierge, the reconciler and the clerk in ONE 50-subrequest
+// invocation, in the order hub ruling F3 fixed (sweep -> concierge -> reconciler -> clerk). The database carries one worst-case pending claim (a
+// public-key registration whose chain read needs all four RPC fetches) and `dueProposals` proposals the sweep must tally.
+async function scheduledClerkDay(opts: { due?: number; candidate?: boolean; flagged?: number; clerkDrafts?: number; dropClaims?: boolean } = {}) {
+  const dueProposals = opts.due ?? 0;
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: bothRpcs(true) });
+  try {
+    insertCitizen(d1, { handle: "commonhold-agent", model: "claude-fable-5" });
+    for (let i = 0; i < 4; i++) insertCitizen(d1);
+    const seat = await pendingRegistration(d1);
+    assert.equal((await seat.send()).status, 502);
+  } finally {
+    stub.restore();
+  }
+  let counting = false;
+  // One counter across two invocations: its own limit is lifted and each invocation's spend is asserted against 50 by the caller.
+  const counter = installSubrequestCounter(worstCaseResponder(opts.clerkDrafts ?? 0), 10_000);
+  const counted = createLocalD1({ onExec: (k) => counting && counter.consume(k) });
+  const claim = d1.raw.prepare("SELECT * FROM settlement_claims").get() as Record<string, unknown>;
+  insertCitizen(counted, { handle: "commonhold-agent", model: "claude-fable-5" });
+  for (let i = 0; i < 4; i++) insertCitizen(counted);
+  counted.raw.prepare(`INSERT INTO settlement_claims (${Object.keys(claim).join(", ")}) VALUES (${Object.keys(claim).map(() => "?").join(", ")})`).run(...(Object.values(claim) as never[]));
+  const now = Date.now();
+  for (let i = 0; i < dueProposals; i++) insertProposal(counted, { kind: "resolution", status: "open", opened_at: now - 9 * 86_400_000, closes_at: now - (i + 2) * 1_000 });
+  if (opts.candidate) {
+    // a silent, >= 24 h old, zero-comment post: a real concierge candidate (as in test/maintainer-scheduled-budget.test.ts)
+    const authorId = insertCitizen(counted, { handle: "sisyphus" });
+    counted.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, 'm', ?)").run(authorId, "a post nobody answered", "body", "dupe-concierge-target", now - 25 * 60 * 60 * 1000);
+  }
+  for (let i = 0; i < (opts.flagged ?? 0); i++) {
+    // flagged, recent posts so the clerk's own gather has real content to draft against
+    const postId = Number(counted.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (1, ?, ?, ?, 0, 'm', ?)").run(`P${i}`, `body ${i}`, `h${i}`, now - 60_000).lastInsertRowid);
+    counted.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (1, 'post', ?, 'spam', ?)").run(postId, now - (5 - i) * 100);
+  }
+  if (opts.dropClaims) counted.raw.exec("DROP TABLE settlement_claims");
+  const env = { ...testEnv(counted), ANTHROPIC_API_KEY: "test-key", REGISTRATION_MODE: "invite_only" } as unknown as Env;
+  const fire = async () => {
+    counting = true;
+    const before = counter.total();
+    const { lines } = await captureLog(async () => {
       await (worker.scheduled as unknown as (c: unknown, e: Env, x: unknown) => Promise<void>)({ cron: CLERK_CRON, scheduledTime: Date.now(), noRetry: () => {} }, env, { waitUntil: () => {}, passThroughOnException: () => {} });
-      counting = false;
-      assert.equal(counter.breached(), false, `scheduled() with the worst reconcile row, a 2-due sweep and the clerk wake stayed within 50 (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
-      assert.ok(counter.total() <= 50, `total ${counter.total()} <= 50`);
-      const row = counted.raw.prepare("SELECT state FROM settlement_claims").get() as { state: string };
-      assert.equal(row.state, "booked", "the reconciler really ran inside scheduled(), so the proof is not vacuous");
-    } finally {
-      counter.restore();
-      counted.close();
-      d1.close();
-    }
+    });
+    counting = false;
+    return { lines, spent: counter.total() - before };
+  };
+  const state = () => (counted.raw.prepare("SELECT state FROM settlement_claims").get() as { state: string }).state;
+  const one = (sql: string) => counted.raw.prepare(sql).get() as Record<string, unknown>;
+  const conciergeRuns = () => counted.raw.prepare("SELECT skipped_reason FROM concierge_runs ORDER BY id").all() as { skipped_reason: string | null }[];
+  return { fire, state, one, conciergeRuns, counter, close: () => { counter.restore(); counted.close(); d1.close(); } };
+}
+
+test("F3 (quiet day): sweep -> concierge -> reconciler -> clerk: the worst-case row is booked inside scheduled(), the concierge ran, and the whole invocation stays within 50", async () => {
+  const day = await scheduledClerkDay({ flagged: 5, clerkDrafts: 10 });
+  try {
+    const { lines, spent } = await day.fire();
+    assert.equal(day.counter.breached(), false);
+    assert.ok(spent <= 50, `total ${spent} <= 50`);
+    assert.equal(day.state(), "booked", "the reconciler really ran inside scheduled(), so the proof is not vacuous");
+    // The clerk is handed what the sweep, the concierge AND the reconciler spent: it was offered 10 drafts and could afford fewer.
+    const inserted = (day.one("SELECT COUNT(*) AS n FROM maintainer_queue WHERE kind = 'bookkeeping_note'") as { n: number }).n;
+    assert.ok(inserted > 0 && inserted < 10, `the clerk shed inserts it could no longer pay for (${inserted} of 10 drafts)`);
+    assert.equal(eventLines(lines, "settlement_reconcile_deferred").length, 0, "nothing was deferred");
+    const runs = day.conciergeRuns();
+    assert.equal(runs.length, 1, "the concierge ran (every path writes one concierge_runs row)");
+    assert.notEqual(runs[0].skipped_reason, "budget", "and was not shed for budget");
+  } finally {
+    day.close();
+  }
+});
+
+test("F3 (contested day): two due proposals leave the reconciler no room for a worst-case row: the CONCIERGE keeps first claim, the reconciler defers with one line, and the next day works the row", async () => {
+  const day = await scheduledClerkDay({ due: 2 });
+  try {
+    const first = await day.fire();
+    assert.equal(day.counter.breached(), false);
+    assert.ok(first.spent <= 50, `total ${first.spent} <= 50`);
+    const runs = day.conciergeRuns();
+    assert.equal(runs.length, 1);
+    assert.notEqual(runs[0].skipped_reason, "budget", "the concierge was NOT shed to make room for the reconciler (the old order shed it on exactly this day)");
+    assert.equal(day.state(), "pending", "the reconciler worked no row today");
+    const deferred = eventLines(first.lines, "settlement_reconcile_deferred");
+    assert.equal(deferred.length, 1, "and said so, once");
+    assert.ok(Number(deferred[0].budget_left) < RECONCILE_SELECT_COST + RECONCILE_ROW_WORST_CASE, "because what was left could not pay for one worst-case row");
+
+    // the sweep has tallied both proposals, so the next day is quiet and the deferred row is worked
+    const second = await day.fire();
+    assert.ok(second.spent <= 50);
+    assert.equal(day.state(), "booked", "deferred, not dropped: the next run books it");
+  } finally {
+    day.close();
+  }
+});
+
+test("F3 (concierge engaged): the concierge POSTS its one daily reply and is charged its ACTUAL cost, so the reconciler sees what is really left, defers, and the clerk still gets its minimum", async () => {
+  const day = await scheduledClerkDay({ candidate: true, flagged: 5, clerkDrafts: 10 });
+  try {
+    const { lines, spent } = await day.fire();
+    assert.ok(spent <= 50, `total ${spent} <= 50`);
+    assert.equal(day.counter.breached(), false);
+    const run = day.one("SELECT engaged FROM concierge_runs ORDER BY id DESC LIMIT 1") as { engaged: number };
+    assert.equal(run.engaged, 1, "the concierge really engaged (it spent its real cost, not a skip)");
+    assert.equal(eventLines(lines, "settlement_reconcile_deferred").length, 1, "what was left after the concierge's real cost could not pay for a worst-case row");
+    assert.equal(day.state(), "pending", "the reconciler waited a day; the concierge kept first claim");
+    assert.equal((day.one("SELECT COUNT(*) AS n FROM maintainer_runs WHERE kind = 'clerk'") as { n: number }).n, 1, "and the clerk still ran");
+  } finally {
+    day.close();
+  }
+});
+
+test("F3: a failure that escapes the reconciler never stops the clerk (it is priced as the whole ceiling and logged)", async () => {
+  const day = await scheduledClerkDay({ dropClaims: true });
+  try {
+    const { lines } = await day.fire();
+    assert.equal(eventLines(lines, "settlement_reconcile_failed").length, 1, "the escape is logged");
+    assert.equal(eventLines(lines, "scheduled_wake_failed").length, 0, "and did not reach the wake's own backstop");
+    assert.equal((day.one("SELECT COUNT(*) AS n FROM maintainer_runs WHERE kind = 'clerk'") as { n: number }).n, 1, "the clerk ran");
+  } finally {
+    day.close();
+  }
+});
+
+test("F3: the reconciler's budget is what is LEFT after the sweep, the concierge's actual cost and the clerk's reserved minimum; too little means none, exactly one line", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: bothRpcs(true) });
+  try {
+    const seat = await pendingRegistration(d1);
+    assert.equal((await seat.send()).status, 502);
+    const need = RECONCILE_SELECT_COST + RECONCILE_ROW_WORST_CASE; // 19: the select plus one worst-case row
+    // INVOCATION_SUBREQUEST_BUDGET 50 - FINALISE_RESERVE 2 - reserved = left
+    const tooLittle = await captureLog(() => runReconciler(testEnv(d1), 50 - 2 - (need - 1)));
+    assert.equal(tooLittle.value.examined, 0, "one short of a worst-case row: none worked");
+    assert.equal(tooLittle.value.actualCost, 0, "and nothing spent, not even the select");
+    assert.equal(eventLines(tooLittle.lines, "settlement_reconcile_deferred").length, 1);
+    assert.equal(oneClaim(d1).state, "pending");
+
+    const justEnough = await runReconciler(testEnv(d1), 50 - 2 - need);
+    assert.equal(justEnough.examined, 1, "exactly enough for one worst-case row: it works one");
+    assert.equal(justEnough.booked, 1);
+    assert.ok(justEnough.actualCost <= need, `it never spent more than it was handed (${justEnough.actualCost} <= ${need})`);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F3: the standing ceiling is also capped by what is left today: with room for one worst-case row only, a second (cheap) row is shed, not started", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: bothRpcs(false) });
+  try {
+    // two claims that EXPIRE (cheap: lease, two RPC reads, one terminal write); the standing ceiling (26) alone would let both run
+    const one = await pendingRegistration(d1, { handle: "cheap-one", validBefore: "1000" });
+    const two = await pendingRegistration(d1, { handle: "cheap-two", validBefore: "1000" });
+    assert.equal((await one.send()).status, 502);
+    assert.equal((await two.send()).status, 502);
+    const need = RECONCILE_SELECT_COST + RECONCILE_ROW_WORST_CASE;
+    const { value: out, lines } = await captureLog(() => runReconciler(testEnv(d1), 50 - 2 - need));
+    assert.equal(out.examined, 1, "only what was left: one row");
+    assert.equal(out.resolved, 1);
+    assert.equal(eventLines(lines, "settlement_reconcile_shed").length, 1);
+    assert.equal(count(d1, "settlement_claims WHERE state = 'pending'"), 1, "the second waits");
+    const plenty = await runReconciler(testEnv(d1), 0);
+    assert.equal(plenty.examined, 1, "with the whole budget free the standing ceiling applies");
+  } finally {
+    stub.restore();
+    d1.close();
   }
 });
 

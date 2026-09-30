@@ -15,9 +15,13 @@
 // earlier route. A secret-mode registration it never books past settled_unbooked (B5/B6b): its
 // secret leaves only in the payer's own 201, so the row waits for that re-send.
 //
-// BUDGET. scheduled() shares ONE 50-subrequest invocation with the governance sweep and the
-// wake (src/maintainer/budget.ts), and a subrequest is any D1 statement or outbound fetch. The
-// reconciler works at most RECONCILE_BATCH_ROWS rows, oldest attempt first. It MEASURES what each row
+// BUDGET. scheduled() shares ONE 50-subrequest invocation with the governance sweep, the concierge and
+// the clerk (src/maintainer/budget.ts), and a subrequest is any D1 statement or outbound fetch. The
+// order is sweep -> concierge -> reconciler -> clerk (hub ruling F3, 2026-09-30): the concierge keeps first
+// claim on a tight day, and the reconciler, a daily backstop that can wait, is handed only what is left after
+// the sweep, the concierge's ACTUAL cost and the clerk's reserved minimum; with too little for one worst-case
+// row it works none and logs `settlement_reconcile_deferred`. The reconciler works at most
+// RECONCILE_BATCH_ROWS rows, oldest attempt first. It MEASURES what each row
 // really spends (every D1 statement through a metered DB, every RPC and /settle fetch as the attempt
 // reports them), starts a row only if the row's WORST case still fits under
 // RECONCILE_SUBREQUEST_CEILING, and returns the measured total so the wake sheds against it. One
@@ -41,9 +45,9 @@ export const RECONCILE_BATCH_ROWS = 2;
 export const RECONCILE_SELECT_COST = 1;
 // One row's worst case (see the itemisation above). A row is started only if this still fits.
 export const RECONCILE_ROW_WORST_CASE = 18;
-// The most the reconciler may spend in one invocation (measured, not priced). With the sweep's 3
-// this leaves priorCost <= 29 for the wake, inside canAffordConcierge's 32; it lets a cheap first row
-// (a failing or expired one) be followed by a second.
+// The most the reconciler may spend in one invocation (measured, not priced), however much is left: it lets a cheap
+// first row (a failing or expired one) be followed by a second. On a given day it is also capped by what is LEFT after
+// the sweep, the concierge's actual cost and the clerk's minimum (runReconciler's `reservedCost`, hub ruling F3).
 export const RECONCILE_SUBREQUEST_CEILING = 26;
 
 export interface ReconcileResult {
@@ -109,12 +113,18 @@ async function finishBooking(env: Env, row: ClaimRow): Promise<boolean> {
   }
 }
 
-export async function runReconciler(env: Env, priorCost = 0): Promise<ReconcileResult> {
-  // Shed, loudly and before any work, if even one row's worst case would not fit.
-  if (priorCost + RECONCILE_SELECT_COST + RECONCILE_ROW_WORST_CASE + FINALISE_RESERVE > INVOCATION_SUBREQUEST_BUDGET) {
-    console.log(JSON.stringify({ level: "error", event: "settlement_reconcile_shed", prior_cost: priorCost, reason: "no subrequest budget left for a row" }));
+// `reservedCost` is everything the invocation has already spent or has reserved for work that ranks ahead of this one: the
+// governance sweep, the concierge's actual cost and the clerk's fixed minimum (scheduled(), hub ruling F3). The reconciler is
+// handed only what is left of the 50 after that and FINALISE_RESERVE; if that cannot pay for the select and one worst-case
+// row it works NONE this run and writes one `settlement_reconcile_deferred` line, and the rows wait a day.
+export async function runReconciler(env: Env, reservedCost = 0): Promise<ReconcileResult> {
+  const left = INVOCATION_SUBREQUEST_BUDGET - reservedCost - FINALISE_RESERVE;
+  if (left < RECONCILE_SELECT_COST + RECONCILE_ROW_WORST_CASE) {
+    console.log(JSON.stringify({ level: "warn", event: "settlement_reconcile_deferred", reserved_cost: reservedCost, budget_left: left, needed: RECONCILE_SELECT_COST + RECONCILE_ROW_WORST_CASE, reason: "no subrequest budget left for one worst-case row; unresolved payments wait for the next run" }));
     return NOTHING;
   }
+  // Never more than the standing ceiling, and never more than is left today.
+  const ceiling = Math.min(RECONCILE_SUBREQUEST_CEILING, left);
   const now = Date.now();
   // Oldest attempt first (acquiring a lease moves updated_at, so a row that keeps failing goes to the
   // back rather than starving the rest), skipping rows another holder is working and (F1) rows whose
@@ -127,7 +137,7 @@ export async function runReconciler(env: Env, priorCost = 0): Promise<ReconcileR
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };
   for (const due of results) {
-    if (out.actualCost + RECONCILE_ROW_WORST_CASE > RECONCILE_SUBREQUEST_CEILING) {
+    if (out.actualCost + RECONCILE_ROW_WORST_CASE > ceiling) {
       console.log(JSON.stringify({ level: "warn", event: "settlement_reconcile_shed", remaining_rows: results.length - out.examined, reason: "the next row's worst case would pass the ceiling; it waits for the next run" }));
       break;
     }
