@@ -125,3 +125,78 @@ test("C1: the bound also covers the patron door, and a normal answer is not dist
     d1.close();
   }
 });
+
+// ---------- L1 ----------
+
+const BOUNTY = 1200;
+const REVIEWER_WALLET = "0x" + "0a".repeat(20);
+
+async function payFixture(d1: LocalD1) {
+  const funderId = insertCitizen(d1);
+  const reviewerId = insertCitizen(d1);
+  const pin = await declareTestWallet(d1, reviewerId, REVIEWER_WALLET);
+  const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: BOUNTY });
+  const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+  const funder = d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(funderId) as never;
+  const pay = () =>
+    handlePayListing(
+      new Request(`https://example.test/api/listing/${listingId}/pay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(REVIEWER_WALLET, atomicFromCents(BOUNTY)) },
+        body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+      }),
+      testEnv(d1),
+      funder,
+      listingId,
+    );
+  const listing = () => ({ ...(d1.raw.prepare("SELECT status, paying_since, paying_wallet_row_id, paying_wallet_row_hash FROM listings WHERE id = ?").get(listingId) as Record<string, unknown>) });
+  return { pay, listing };
+}
+
+test("L1: a claim INSERT that THROWS after the pay-listing reservation releases the reservation and says plainly that nothing was sent to /settle", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const fx = await payFixture(d1);
+    d1.raw.exec("CREATE TRIGGER no_claims BEFORE INSERT ON settlement_claims BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    const { value: res, lines } = await captureLog(() => fx.pay());
+    assert.equal(res.status, 503, JSON.stringify(await res.clone().json()));
+    const body = (await json(res)) as { error: string; code?: string };
+    assert.equal(body.code, "settlement_claim_unavailable");
+    assert.match(body.error, /nothing was sent to the facilitator's \/settle/i);
+    assert.match(body.error, /nothing was charged/i);
+    assert.doesNotMatch(body.error, /may have moved/i, "the old answer claimed the money may have moved; no /settle was sent");
+    assert.deepEqual(fx.listing(), { status: "open", paying_since: null, paying_wallet_row_id: null, paying_wallet_row_hash: null }, "the reservation was released, not stranded in paying");
+    assert.equal(count(d1, "settlement_claims"), 0);
+    assert.equal(stub.calls.settle, 0, "no /settle was sent");
+    assert.equal(eventLines(lines, "settlement_claim_not_taken").length, 1, "one loud log line names the failure");
+
+    // and the funder can simply try again once the database is healthy
+    d1.raw.exec("DROP TRIGGER no_claims");
+    const again = await fx.pay();
+    assert.equal(again.status, 200, JSON.stringify(await again.clone().json()));
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("L1 (register): the same failure on the registration door is a plain 503 with nothing sent, nothing created, and the header reusable", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const header = registerHeader();
+    const body = { handle: "claim-down", model: "m", public_key: await realPublicKey() };
+    d1.raw.exec("CREATE TRIGGER no_claims BEFORE INSERT ON settlement_claims BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    const res = await callWorker(registerReq(body, header), testEnv(d1));
+    assert.equal(res.status, 503);
+    assert.match(String((await json(res)).error), /nothing was sent to the facilitator's \/settle/i);
+    assert.equal(stub.calls.settle, 0);
+    assert.equal(count(d1, "citizens"), 0);
+    d1.raw.exec("DROP TRIGGER no_claims");
+    assert.equal((await callWorker(registerReq(body, header), testEnv(d1))).status, 201, "the same signed header registers once the database is healthy");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

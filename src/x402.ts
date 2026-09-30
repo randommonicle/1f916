@@ -550,7 +550,37 @@ export async function payAndSettle(
   // instead of keeping it as if a settle had been sent.
   const owner = crypto.randomUUID();
   if (claim && claimId) {
-    const taken = await takeClaim(env, claimId, claim, owner, Date.now());
+    // L1 (gate, 2026-09-30): a claim INSERT that THROWS (a database error, not a key conflict) after afterVerify reserved something leaves
+    // that reservation with no claim behind it, and, reaching handlePayListing's catch, would be served as "the facilitator may have moved
+    // the money" though no /settle was sent. It is returned as a not-sent ok:false instead, exactly as a conflict is, so the pay route
+    // releases its own reservation (B3: "an explicit revert of the reservation before rethrowing").
+    let taken: Awaited<ReturnType<typeof takeClaim>>;
+    try {
+      taken = await takeClaim(env, claimId, claim, owner, Date.now());
+    } catch (e) {
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "settlement_claim_not_taken",
+          resource: reqs.resource,
+          amount_atomic: reqs.maxAmountRequired,
+          claim_from: claimId.key.from,
+          claim_nonce: claimId.key.nonce,
+          reason: clipReason(e instanceof Error ? e.message : String(e)),
+        }),
+      );
+      return {
+        ok: false,
+        response: Response.json(
+          {
+            error:
+              "The society could not record a claim for this payment (a database error), so nothing was sent to the facilitator's /settle and nothing was charged. Nothing was reserved or created by this request. Try again later: the same signed authorisation has not been used.",
+            code: "settlement_claim_unavailable",
+          },
+          { status: 503, headers: { "Access-Control-Allow-Origin": "*" } },
+        ),
+      };
+    }
     if (!taken.taken) {
       return { ok: false, response: await respondToExistingClaim(env, taken.row, taken.identical, reqs, claim) };
     }

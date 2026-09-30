@@ -343,3 +343,14 @@ Run by the hub against the scratch D1 `commonhold-migtest` only (prod untouched)
   502 verify-transit, no claim, no settle); the patron door; a normal answer inside the bound is untouched (timer cleared); the invariant; the clamp.
 - Red-proofs (8, all restored): no signal passed; the timer never firing; a timed-out settle not reported as in transit; the verify bound equal to the settle bound; the Env
   lengthening a bound; a later edit raising the settle bound to 170 s; a later edit shortening the lease to 150 s. All red (the last two by the invariant test alone).
+
+### L1. A claim INSERT that throws after the pay-listing reservation
+
+- `payAndSettle` catches a `takeClaim` throw (a database error, not a key conflict), writes one `settlement_claim_not_taken` line, and RETURNS a not-sent `ok:false`: 503
+  `settlement_claim_unavailable`, "nothing was sent to the facilitator's /settle and nothing was charged ... Try again later: the same signed authorisation has not been used".
+  The pay route's existing `!result.ok` branch then releases its own reservation (the conditional `UPDATE ... WHERE status = 'paying'` the conflict path already uses), so the
+  listing is no longer stranded in `paying` with no claim and the answer no longer claims the money may have moved. The other doors answer the same 503 with nothing created.
+- Tests (`test/settlement-replay-timeout-d1.test.ts`): a `BEFORE INSERT` trigger on `settlement_claims`: pay listing answers 503, the listing is `open` with no pinned
+  reservation, 0 claims, 0 settles, the wording names "nothing was sent to the facilitator's /settle" and never "may have moved", one log line, and the funder can pay once the
+  database is healthy; registration answers the same 503 with no citizen and the same signed header registers afterwards.
+- Red-proofs (3, restored): the throw not caught (old behaviour); the answer saying the money may have moved; the reservation not released on the not-sent path. All red.
