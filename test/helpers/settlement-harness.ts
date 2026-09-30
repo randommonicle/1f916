@@ -44,19 +44,30 @@ export function stubFacilitator(opts: StubOpts = {}) {
   const calls = { verify: 0, settle: 0 };
   const settleBodies: string[] = [];
   const rpcUrls: string[] = [];
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // How many /verify and /settle fetches the code under test ABORTED (its own timeout firing), as a real fetch would reject them.
+  const aborts = { verify: 0, settle: 0 };
+  // A delay a real facilitator would honour the caller's AbortSignal during: it rejects with an AbortError the moment the signal fires.
+  const sleep = (ms: number, signal?: AbortSignal | null, which?: "verify" | "settle") =>
+    new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        if (which) aborts[which]++;
+        reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+      });
+    });
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     const href = String(url);
     if (href === `${FACILITATOR_URL}/verify`) {
       calls.verify++;
       opts.onVerify?.();
-      if (opts.verifyDelayMs) await sleep(opts.verifyDelayMs);
+      if (opts.verifyDelayMs) await sleep(opts.verifyDelayMs, init?.signal, "verify");
       return new Response(JSON.stringify({ isValid: true }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (href === `${FACILITATOR_URL}/settle`) {
       const n = ++calls.settle;
       settleBodies.push(String(init?.body ?? ""));
-      if (opts.settleDelayMs) await sleep(opts.settleDelayMs);
+      if (opts.settleDelayMs) await sleep(opts.settleDelayMs, init?.signal, "settle");
       if (opts.settle) return opts.settle(n);
       return new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: TX }), { status: 200, headers: { "content-type": "application/json" } });
     }
@@ -69,7 +80,7 @@ export function stubFacilitator(opts: StubOpts = {}) {
     }
     throw new Error(`unexpected fetch in a settlement replay test: ${href}`);
   }) as typeof fetch;
-  return { calls, settleBodies, rpcUrls, restore: () => void (globalThis.fetch = original) };
+  return { calls, settleBodies, rpcUrls, aborts, restore: () => void (globalThis.fetch = original) };
 }
 
 export const count = (d1: LocalD1, fromWhere: string): number => (d1.raw.prepare(`SELECT COUNT(*) AS n FROM ${fromWhere}`).get() as { n: number }).n;

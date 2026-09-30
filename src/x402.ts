@@ -129,6 +129,34 @@ interface FacilitatorAnswer {
   body: Record<string, unknown>;
 }
 
+// C1 (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md, M1): the facilitator fetch is BOUNDED, because the request that takes a claim
+// holds its lease for CLAIM_LEASE_TTL_MS (180 s) and, with no bound, a /settle that ran past it let a re-send or the reconciler take the
+// lease while this request was still live (three false-answer outcomes, all documented in the gate record).
+//
+//   /settle 120 s: above PayAI's documented ~100 s wait before it answers settlement_pending
+//   (https://docs.payai.network/x402/facilitators/capacity-and-limits.md, read 2026-09-30), below the lease. A /settle that times out is an
+//   UNKNOWN outcome by the path a rejected fetch already takes: the claim stays pending, the lease is released (noteUnknown), the answer
+//   says "do not sign again", and the reconciler or the payer's identical re-send resolves it from the chain.
+//   /verify 30 s: a signature and balance check with NO claim and NO lease behind it (the claim is taken after it), safe to retry, so it
+//   fails fast; 30 s is well above any normal check and well below a payer's patience. It takes the existing verify-transit path: this
+//   server never asked the facilitator to settle.
+//
+// THE INVARIANT, kept in one place: the lease must outlive the longest thing the lease holder does after taking it, which is the /settle
+// wait plus the booking that follows (markSettled and the route's booking steps, about twenty D1 statements; 40 s is a generous allowance).
+// test/settlement-replay-timeout-d1.test.ts asserts FACILITATOR_SETTLE_TIMEOUT_MS + CLAIM_BOOKING_ALLOWANCE_MS < CLAIM_LEASE_TTL_MS, so an
+// edit of any of the three cannot silently reopen M1.
+export const FACILITATOR_SETTLE_TIMEOUT_MS = 120_000;
+export const FACILITATOR_VERIFY_TIMEOUT_MS = 30_000;
+export const CLAIM_BOOKING_ALLOWANCE_MS = 40_000;
+
+// The bound actually applied: the built-in one, or a SHORTER positive number from the Env (never longer).
+export function facilitatorTimeoutMs(env: Env, path: "/verify" | "/settle"): number {
+  const ceiling = path === "/settle" ? FACILITATOR_SETTLE_TIMEOUT_MS : FACILITATOR_VERIFY_TIMEOUT_MS;
+  const raw = path === "/settle" ? env.FACILITATOR_SETTLE_TIMEOUT_MS : env.FACILITATOR_VERIFY_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, ceiling) : ceiling;
+}
+
 async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown): Promise<FacilitatorAnswer> {
   // A fetch that REJECTS is caught here, on both paths (build review round 1,
   // CODEX HIGH, exchange/REVIEW_x402-settle-honesty-build-2026-09-28.md). A
@@ -141,15 +169,26 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   // failure may truthfully say (gate L2, 2026-09-29): the /verify body IS the full
   // signed authorisation, so it was sent, and "could not be reached" can follow
   // delivery; what is true is that this server never asked the facilitator to SETTLE it.
+  // The timer covers the answer's BODY as well as its headers (an abort during the body read makes res.json() throw, which the unreadable-body
+  // path below already serves as an unknown /settle outcome), and is cleared only once that read is done.
+  const timeoutMs = facilitatorTimeoutMs(env, path);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   let res: Response;
   try {
     res = await fetch(`${env.FACILITATOR_URL}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
   } catch (e) {
-    const reason = clipReason(e instanceof Error ? e.message : String(e));
+    clearTimeout(timer);
+    const reason = timedOut ? `no answer within ${Math.round(timeoutMs / 100) / 10} s` : clipReason(e instanceof Error ? e.message : String(e));
     if (path === "/settle") {
       throw new SocietyError(502, `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`);
     }
@@ -170,6 +209,8 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
     answer = await res.json();
   } catch {
     answer = undefined;
+  } finally {
+    clearTimeout(timer);
   }
   if (answer !== null && typeof answer === "object" && !Array.isArray(answer)) return { status: res.status, body: answer as Record<string, unknown> };
   if (path === "/settle") {

@@ -24,6 +24,12 @@ export interface Env {
   // x402 facilitator base URL (verify/settle). A config var, not a constant,
   // so it can be swapped without a code change (society-blueprint.md:72-73).
   FACILITATOR_URL: string;
+  // Optional SHORTENERS for the facilitator timeouts (src/x402.ts FACILITATOR_SETTLE_TIMEOUT_MS / FACILITATOR_VERIFY_TIMEOUT_MS): a
+  // positive number of milliseconds below the built-in bound. They can only shorten it, never lengthen it (x402.ts facilitatorTimeoutMs),
+  // so no setting can reopen the claim-lease invariant. Unset in production; the tests set them so a hung facilitator is proven in
+  // milliseconds instead of minutes.
+  FACILITATOR_SETTLE_TIMEOUT_MS?: string | number;
+  FACILITATOR_VERIFY_TIMEOUT_MS?: string | number;
   // "invite_only" or "open", see src/register-gate.ts.
   REGISTRATION_MODE: string;
   // Comma-separated single-use invite codes. A secret; never in wrangler.jsonc.

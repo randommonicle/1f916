@@ -325,3 +325,21 @@ Run by the hub against the scratch D1 `commonhold-migtest` only (prod untouched)
 ### Hub note: the D-018 Opus gate, 2026-09-30
 
 `docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md`: DEPLOYABLE WITH CONDITIONS, HIGH 0, MEDIUM 1, LOW 7. C1 (before deploy): a timeout of at most 120 s on the facilitator call. C2 rides a later paid-path wave. Fix pass 2 follows (C1, L1, L2).
+
+## Fix pass 2 (the D-018 Opus gate, `docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md`: DEPLOYABLE WITH CONDITIONS, C1 before the deploy)
+
+### C1. The facilitator fetch is bounded below the claim lease (gate M1)
+
+- `facilitator()` (src/x402.ts) fetches with an `AbortController`: `/settle` 120 s (`FACILITATOR_SETTLE_TIMEOUT_MS`: above PayAI's documented ~100 s wait, below the
+  180 s lease), `/verify` 30 s (`FACILITATOR_VERIFY_TIMEOUT_MS`: a signature and balance check with no claim and no lease behind it, safe to retry, so it fails fast). The
+  timer covers the answer's body and is cleared once it is read. A timed-out `/settle` takes the EXISTING transit path ("failed in transit (no answer within 120 s) ... do
+  not sign again"): the claim stays `pending`, `noteUnknown` releases the lease, one `x402_settle_outcome_unknown` line. A timed-out `/verify` takes the existing
+  verify-transit path ("could not be reached to verify ... never asked the facilitator to settle"): no claim exists yet.
+- The invariant lives in one place: `FACILITATOR_SETTLE_TIMEOUT_MS + CLAIM_BOOKING_ALLOWANCE_MS (40 s: markSettled plus about twenty D1 statements, generous) < CLAIM_LEASE_TTL_MS`,
+  asserted by `test/settlement-replay-timeout-d1.test.ts` together with the settle bound exceeding 100 s and the verify bound being shorter.
+- For testing in milliseconds the Env can set `FACILITATOR_SETTLE_TIMEOUT_MS` / `FACILITATOR_VERIFY_TIMEOUT_MS`, but only SHORTER (`facilitatorTimeoutMs` takes the minimum
+  with the built-in bound), so no configuration can lengthen a bound past the lease. The harness's delays now honour the caller's abort signal like a real fetch.
+- Tests: a /settle held 2 s with a 200 ms bound ends inside it (aborted once, 502, pending, lease released, no citizen or ledger line, one log line); a hung /verify (aborted,
+  502 verify-transit, no claim, no settle); the patron door; a normal answer inside the bound is untouched (timer cleared); the invariant; the clamp.
+- Red-proofs (8, all restored): no signal passed; the timer never firing; a timed-out settle not reported as in transit; the verify bound equal to the settle bound; the Env
+  lengthening a bound; a later edit raising the settle bound to 170 s; a later edit shortening the lease to 150 s. All red (the last two by the invariant test alone).
