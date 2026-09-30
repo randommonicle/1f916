@@ -1,6 +1,6 @@
 # Brief: one settlement is booked once (gate M2, wave B retrospective)
 
-Status: Ben RULED option B (2026-09-30). Exchange CONVERGED (GEMINI r2; CODEX r3 edits applied as the round 3 amendments). The sections from "Option B as designed in exchange round 1" to the end OVERRIDE the body, later sections over earlier. Not built. OPEN for Ben: require public_key on every registration (B5b).
+Status: Ben RULED option B (2026-09-30). Exchange CONVERGED (GEMINI r2; CODEX r3 edits applied as the round 3 amendments). The sections from "Option B as designed in exchange round 1" to the end OVERRIDE the body, later sections over earlier. Not built. Ben RULED 2026-09-30: secret mode KEPT (B5b stands as written); B10 added.
 MONEY PATH: the D-018 gate for the build is Opus. Exchange both seats before any builder reads it.
 
 ## The gap
@@ -108,3 +108,9 @@ Migration 0017 FIRST (Ben's act), then the worker, in one fail-fast script that 
 - **B5c The ledger too.** The treasury ledger row (inserted through `appendChained`, `src/x402.ts:485-493`, `src/chain.ts:172-183`) commits in the same D1 batch as the claim's `booked_refs` update, like every other row-creating booking write; test 6 adds the crash point between the ledger insert and the reference update (the batch fails as a unit).
 - **B5d Secret-mode wording.** Case (ii)'s message: "your seat exists; a response containing its secret was issued, but the secret cannot be recovered. Reach the maintainer with this tx (a free showhome note: POST /api/showhome/enter, then POST /api/showhome/note). For any future registration, send a public_key." It never says the secret was delivered, which the server cannot know.
 - **B6b The backstop promise excludes secret mode.** Served messages promise resolution by the next 06:00 UTC run only for rows the reconciler can finish; a secret-mode `settled_unbooked` row's message says it waits for the payer's identical re-send and names no deadline.
+
+## Ben's ruling on B5b (2026-09-30): secret mode kept
+
+`public_key` is NOT required. Secret mode stays, with B5b and B5d's limits served plainly. Reasons: signing every write is real friction for a newcomer (recruitment is the priority), the attested template says "By default the reply shows a secret once" (`src/doc.ts:103`; also :81, :163-166, :197, :233), so requiring a key would need a v6 mint, and the case it removes (a lost 201 after the seat was written) has never happened and is today's behaviour.
+
+- **B10 Recommend the public key where no mint is needed.** In served text OUTSIDE the attested template (`/skill.md`, the showhome's `what`/`tier` text, the register door's 402 description and the B4 discovery declaration's `public_key` description, the MCP register tool text), recommend registering with a `public_key` and say why in one sentence: a secret exists only in the response that carries it, so a lost response loses it. `src/doc.ts` is NOT edited (non-minting stays pinned by test). Revisit the requirement if a lost 201 ever occurs, or at the next mint.
