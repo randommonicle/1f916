@@ -197,10 +197,10 @@ committed content. "RED" means the named test(s) failed; all were restored byte-
 - B10, D-073, test 13: the advice losing its reason; removed from each of /skill.md, the 402 description, the discovery declaration, the three showhome
   texts, the MCP refusal, the route table; the skill version not bumped; the secret-lost pointer naming a nonexistent route (L-109); a word added inside
   the attested template (mints: test 13 red); the lobby note losing its pause. All red.
-- Deploy script (15 mutations of the script itself): no fetch, `-ExpectedCommit` not mandatory, dry run not exiting, a column dropped, the
+- Deploy script (16 mutations of the script itself; the d1 read path carries no stderr redirect, on the advisor's catch that merging it would hand a wrangler notice to ConvertFrom-Json): no fetch, `-ExpectedCommit` not mandatory, dry run not exiting, a column dropped, the
   already-applied guard removed, a `$cols`/`$COLS` clash, a drive-reference trap, a non-ASCII character, no version-id check, a poll marker that is not
   served, the gate's outputSchema trap reintroduced, deploy before migration, the absent-marker probe removed, the branch check removed, stderr merged
-  under Stop. All red.
+  on the deploy under Stop, stderr merged on the d1 read. All red.
 
 Not red-proofed, and why: (1) the `metered` DB facade's unwrapping of statements inside `batch` is proven only by the equality of its count with the
 counter's (17 = 17) on LocalD1; its behaviour against real D1's host statement objects cannot be exercised locally (see OPEN FOR HUB 1).
@@ -228,3 +228,12 @@ does not exist in `ROUTES` is unreachable by it, and the router has none that to
 12. **B10 scope**: the route-table entry for `/api/register` (served at `/api/surface` and `/llms.txt`) also carries the advice; `/skill.md` is 1.0.3, so
     the ClawHub/MCP-Registry kits staged from 1.0.2 need re-staging after the deploy.
 13. **A replay is now answered before `/verify`** on all four doors (consult-first), which also spares the facilitator's credits.
+14. **Priority on a tight day (budget).** The reconciler runs right after the sweep and BEFORE the concierge, so it can shed the concierge: before this wave a
+    2-due-proposal day left the concierge 21 + 16 + 2 = 39 (it ran); now 21 + one worst reconcile row 17 = 38 and `canAffordConcierge(38)` is 38 + 16 + 2 = 56 > 50
+    (shed). The existing comment in `index.ts` gives the concierge "first claim" on a tight day; the brief calls the reconciler a backstop that can wait. The
+    measured proof (48 of 50) is correct for the order built. Alternative, NOT built because it changes a measured proof and the priority is the hub's call:
+    run the reconciler between the concierge and the clerk using `concierge.actualCost`; on that day the reconciler sheds and waits 24 hours.
+15. (nit) `respondToExistingClaim`'s pending branch answers "another attempt is in progress" when `acquireLease` returns null because the row went terminal between
+    the read and the lease; the payer's next identical re-send meets consult-first and gets the terminal answer.
+16. `register()` in `society.ts` is now uncalled by any route (register-gate books through `finishRegistration`); it stays exported for the tests that create
+    fixtures with it, and the offender scan (`register-gate.test.ts`) still holds. Dead code to retire in a later wave.

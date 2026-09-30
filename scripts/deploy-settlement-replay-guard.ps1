@@ -47,10 +47,10 @@ function Read-D1Json($lines) {
 }
 # Strict read: a failed or empty query STOPS; nothing reasons from a bad read (an empty result must never read as "absent").
 function Invoke-D1Read($sql) {
-  $ErrorActionPreference = "Continue"
-  $raw = (npx wrangler d1 execute commonhold --remote --json --command $sql 2>&1)
+  # stdout only, no stderr redirect (the proven pattern of scripts/deploy-wallet-pin.ps1): merging stderr would wrap any wrangler
+  # notice in an error record and hand it to ConvertFrom-Json. The exit code is read after.
+  $raw = (npx wrangler d1 execute commonhold --remote --json --command $sql)
   $code = $LASTEXITCODE
-  $ErrorActionPreference = "Stop"
   if ($code -ne 0) { Stop-Here "wrangler d1 execute failed (exit $code) for: $sql" }
   $parsed = Read-D1Json $raw
   if ($null -eq $parsed -or @($parsed).Count -lt 1 -or $null -eq $parsed[0].results) { Stop-Here "wrangler d1 returned no results object for: $sql" }
