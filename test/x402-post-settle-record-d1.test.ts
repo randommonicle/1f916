@@ -36,7 +36,7 @@ const BOUNTY_CENTS = 1000;
 // The hub's words (brief F7), typed here rather than imported, so a change to the
 // served wording fails these tests instead of silently passing them.
 const hubUnrecorded = (dollars: string, tx: string) =>
-  `Your $${dollars} payment settled (tx ${tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand: GET /api/official names how to reach it.`;
+  `Your $${dollars} payment settled (tx ${tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter, then POST /api/showhome/note.`;
 
 function testEnv(d1: LocalD1): Env {
   return { DB: d1.DB, TREASURY_ADDRESS, FACILITATOR_URL, REGISTRATION_MODE: "open" } as unknown as Env;
