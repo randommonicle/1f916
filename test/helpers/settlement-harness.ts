@@ -30,11 +30,20 @@ export interface StubOpts {
   verifyDelayMs?: number;
   settleDelayMs?: number;
   onVerify?: () => void;
+  // Base RPC answers for the reconciler's authorizationState reads: called once per RPC fetch with the
+  // URL and its 0-based index; return null to make that RPC fail (a rejected fetch). Unset: any RPC fetch throws.
+  rpc?: (url: string, n: number) => Response | null | Promise<Response | null>;
+}
+
+// An eth_call answer for authorizationState: used (1) or unused (0).
+export function authStateAnswer(used: boolean): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x" + (used ? "1" : "0").padStart(64, "0") }), { status: 200, headers: { "content-type": "application/json" } });
 }
 export function stubFacilitator(opts: StubOpts = {}) {
   const original = globalThis.fetch;
   const calls = { verify: 0, settle: 0 };
   const settleBodies: string[] = [];
+  const rpcUrls: string[] = [];
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     const href = String(url);
@@ -51,9 +60,16 @@ export function stubFacilitator(opts: StubOpts = {}) {
       if (opts.settle) return opts.settle(n);
       return new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: TX }), { status: 200, headers: { "content-type": "application/json" } });
     }
-    throw new Error(`unexpected fetch in settlement-replay-routes-d1.test.ts: ${href}`);
+    if (opts.rpc) {
+      const n = rpcUrls.length;
+      rpcUrls.push(href);
+      const answer = await opts.rpc(href, n);
+      if (answer === null) throw new Error("rpc unreachable");
+      return answer;
+    }
+    throw new Error(`unexpected fetch in a settlement replay test: ${href}`);
   }) as typeof fetch;
-  return { calls, settleBodies, restore: () => void (globalThis.fetch = original) };
+  return { calls, settleBodies, rpcUrls, restore: () => void (globalThis.fetch = original) };
 }
 
 export const count = (d1: LocalD1, fromWhere: string): number => (d1.raw.prepare(`SELECT COUNT(*) AS n FROM ${fromWhere}`).get() as { n: number }).n;

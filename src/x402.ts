@@ -13,6 +13,7 @@
 
 import { appendChained, appendChainedStmt, type ChainRow } from "./chain.ts";
 import { type Env, SocietyError } from "./society.ts";
+import { readAuthorizationState } from "./settlement-chain.ts";
 import {
   acquireLease,
   claimAnswer,
@@ -21,6 +22,7 @@ import {
   claimResponse,
   getClaim,
   keyOfRow,
+  markExpired,
   markRefused,
   markSettled,
   noteUnknown,
@@ -606,7 +608,86 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
     }
     return claimResponse(claimAnswer((await getClaim(env, keyOfRow(row))) ?? row, true, reqs));
   }
-  return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: row.state === "pending" && (row.leased_until ?? 0) > Date.now() }));
+  if (row.state === "pending") {
+    // B6: the payer's identical re-send may take the lease and run ONE attempt: the chain
+    // is asked (two RPCs must agree) and, if the authorisation moved money or may still
+    // move it, the stored body is re-POSTed to /settle, as PayAI's own documentation
+    // prescribes for learning an outcome. It never asks the payer to sign again.
+    const owner = crypto.randomUUID();
+    const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
+    if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+    try {
+      const out = await attemptPending(env, leased, owner);
+      if (out.kind === "settled") {
+        const done = await claim.finish(out.row);
+        if (done) return done;
+      }
+      const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
+      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail } : {}));
+    } finally {
+      await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
+    }
+  }
+  return claimResponse(claimAnswer(row, true, reqs));
+}
+
+// B6, one attempt on a `pending` claim by a holder of its lease. Order matters and "the chain
+// decides": (1) read authorizationState(from, nonce) at a two-RPC quorum, no quorum means no
+// transition; (2) UNUSED after validBefore, plus a margin, is `expired` (the authorisation can
+// no longer move money), never on the clock alone; (3) otherwise, when the authorisation was
+// used or can still be used, re-POST the stored body and classify the answer exactly as the
+// first /settle was: settled books it, a recorded refusal (rule 7) refuses it, anything else
+// leaves it pending. A refusal is not honoured against a spent authorisation: the chain says
+// the money moved, so the answers contradict and the row waits for a person.
+//
+// EXPIRY_MARGIN: `expired` invites a second signature, so it must never be premature. A
+// transfer broadcast just before validBefore can be mined a little after it in wall-clock
+// terms and an RPC can trail the chain head; the margin covers both (it is the authorisation
+// window itself, PAYMENT_MAX_TIMEOUT_SECONDS).
+export const RECONCILE_EXPIRY_MARGIN_SECONDS = PAYMENT_MAX_TIMEOUT_SECONDS;
+
+// `fetches` counts the outbound fetches the attempt made (RPC reads and /settle), for the reconciler's meter.
+export type AttemptOutcome = ({ kind: "settled"; row: ClaimRow } | { kind: "expired" } | { kind: "refused" } | { kind: "unchanged"; detail: string }) & { fetches: number };
+
+export async function attemptPending(env: Env, row: ClaimRow, owner: string): Promise<AttemptOutcome> {
+  if (row.state !== "pending" || row.rpc_body == null) return { kind: "unchanged", detail: "the claim is no longer pending", fetches: 0 };
+  const key = keyOfRow(row);
+  const nowMs = Date.now();
+  const chain = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce);
+  if (chain.used === null) return { kind: "unchanged", detail: `The chain could not settle the question (${chain.reason}); nothing was changed.`, fetches: chain.fetches };
+  if (chain.used === false && nowMs / 1000 > row.valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS) {
+    await markExpired(env, key, nowMs);
+    return { kind: "expired", fetches: chain.fetches };
+  }
+  if (chain.used === false && nowMs / 1000 > row.valid_before) {
+    return { kind: "unchanged", detail: "The authorisation is past its validBefore and unused so far; the society waits out a margin before calling it expired.", fetches: chain.fetches };
+  }
+
+  const body = JSON.parse(row.rpc_body) as { paymentRequirements: PaymentRequirements };
+  let settled: Awaited<ReturnType<typeof settleOrThrow>>;
+  try {
+    settled = await settleOrThrow(env, body, body.paymentRequirements, key);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    await quietly("note_unknown", () => noteUnknown(env, key, reason, owner, Date.now()));
+    return { kind: "unchanged", detail: reason, fetches: chain.fetches + 1 };
+  }
+  const fetches = chain.fetches + 1;
+  if (settled.verdict.kind === "refused") {
+    if (chain.used === true) {
+      return { kind: "unchanged", detail: "The chain shows this authorisation spent, but the facilitator reports a refusal. The answers contradict; the claim is left pending for a person to decide.", fetches };
+    }
+    await markRefused(env, key, settled.verdict.error, Date.now());
+    return { kind: "refused", fetches };
+  }
+  const { tx, payer } = settled.verdict;
+  if (!(await markSettled(env, key, tx, payer, Date.now()))) {
+    // Another worker moved it first: carry on from the row as it now stands.
+    const moved = await getClaim(env, key);
+    return moved && moved.state === "settled_unbooked" ? { kind: "settled", row: moved, fetches } : { kind: "unchanged", detail: "another worker moved the claim", fetches };
+  }
+  // The row as markSettled left it (no re-read: a pending row has recorded no booking yet).
+  return { kind: "settled", row: { ...row, state: "settled_unbooked", tx, payer, verdict_reason: null }, fetches };
 }
 
 // B4, consult-first: a request whose X-PAYMENT already has a claim is answered from the
@@ -695,21 +776,30 @@ export async function recordSettledPayment(
 ): Promise<{ prev_hash: string; hash: string }> {
   try {
     if (!claim) return await appendChained(env.DB, "ledger", row);
-    await runBookingStep(
+    // The hash this call's own statement carries (the last attempt's, if the head moved and
+    // the step was rebuilt): when the batch recorded it, that IS the row's receipt, with no
+    // read-back (the reconciler's subrequest budget is priced on it).
+    let built = null as { prev_hash: string; hash: string } | null;
+    const { applied } = await runBookingStep(
       env,
       claim.key,
       {
         ref: "ledger_id",
         final: claim.final,
         chain: "ledger",
-        statements: async (gate) => [(await appendChainedStmt(env.DB, "ledger", row, gate)).stmt],
+        statements: async (gate) => {
+          const b = await appendChainedStmt(env.DB, "ledger", row, gate);
+          built = { prev_hash: b.prev_hash, hash: b.hash };
+          return [b.stmt];
+        },
       },
       Date.now(),
     );
+    if (applied && built) return built;
+    // Not applied: another writer already recorded the line (take theirs), or the claim is not
+    // settled_unbooked (nothing was written), which is a failure to book, never a silent success.
     const now = await getClaim(env, claim.key);
     const ledgerId = now ? refsOf(now).ledger_id : undefined;
-    // Not recorded after the step: the claim was not settled_unbooked (nothing was
-    // written), which is a failure to book, never a silent success.
     if (ledgerId == null) throw new Error("the claim is not settled_unbooked: no treasury line was recorded for it");
     return await ledgerReceipt(env, ledgerId);
   } catch (e) {
@@ -795,6 +885,11 @@ export async function handlePatron(request: Request, env: Env): Promise<Response
   const result = await payAndSettle(env, request, reqs, undefined, claim);
   if (!result.ok) return result.response;
   return finishUnderOwnLease(env, result, () => finishPatron(env, result.claim as ClaimRow, result.settlement));
+}
+
+// The reconciler's entry point for a settled patron claim (src/settlement-reconcile.ts).
+export async function finishPatronBooking(env: Env, row: ClaimRow): Promise<void> {
+  await finishPatron(env, row, null);
 }
 
 // The patron door's whole paid act: one treasury line. Reads the claim, writes the line

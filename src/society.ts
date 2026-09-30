@@ -2117,12 +2117,17 @@ const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // this exact read rather than duplicating the RPC-calling logic -- the same
 // anti-duplication call the x402.ts header comment makes about
 // payAndSettle. No behaviour change: same function, same fallback list.
+// The Base RPC fallback list, in the order tried: a single RPC has been observed answering null
+// under Workers' rate-limited egress IPs in production, so one public RPC is not a dependable
+// dependency. Shared by the treasury's balanceOf read below and the settlement reconciler's
+// authorizationState read (src/settlement-chain.ts), so the two cannot drift.
+export function baseRpcUrls(env: Env): string[] {
+  return [env.BASE_RPC_URL || "https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"];
+}
+
 export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
-  // Fallback list, tried in order: a single RPC has been observed answering
-  // null under Workers' rate-limited egress IPs in production, so one public
-  // RPC is not a dependable dependency. First success wins; all fail → null,
-  // and the payload says so honestly.
-  const rpcs = [env.BASE_RPC_URL || "https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"];
+  // First success wins; all fail → null, and the payload says so honestly.
+  const rpcs = baseRpcUrls(env);
   // balanceOf(address) selector 0x70a08231, address left-padded to 32 bytes.
   const data = "0x70a08231000000000000000000000000" + env.TREASURY_ADDRESS.replace(/^0x/, "").toLowerCase();
   for (const rpc of rpcs) {

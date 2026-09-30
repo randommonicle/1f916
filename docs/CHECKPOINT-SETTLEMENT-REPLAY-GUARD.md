@@ -88,3 +88,34 @@ second citizen.
 - Served text: listing create's "failed to save" and pay listing's "recording it failed" messages now carry the B6a backstop sentence
   (the pointer literals that `post-payment-pointer.test.ts` counts are unchanged).
 - Test harness split out to `test/helpers/settlement-harness.ts`; listing tests in `test/settlement-replay-listings-d1.test.ts`.
+
+### 4. The reconciler in the 06:00 handler (B6, B6a, B6b, B7); tests 7a-g, 8, 8b, 11, 14, the budget proof
+
+- `src/settlement-chain.ts`: `readAuthorizationState` (USDC `authorizationState(from, nonce)`, selector `0xe94a0102`, the first TWO
+  distinct RPCs of the shared list must answer and agree; fewer or disagreeing is no answer). `society.ts` gains `baseRpcUrls`, shared
+  with the treasury balance read so the two lists cannot drift.
+- `src/x402.ts`: `attemptPending` (chain decides -> `expired` only after validBefore PLUS `RECONCILE_EXPIRY_MARGIN_SECONDS`; otherwise
+  re-POST the stored body, byte-identical, and classify as the first settle was). The payer's identical re-send on a `pending` claim
+  takes the lease and runs one attempt itself (B6 "may also").
+- `src/settlement-reconcile.ts`: `runReconciler`, a fixed batch of `RECONCILE_BATCH_ROWS = 2`, oldest ATTEMPT first, each row leased,
+  every row's failure one log line (the claim's public identity and the reason, never the body), a failing row never stops the rest.
+  `src/index.ts`: runs after the governance sweep on the 06:00 (clerk) cron only, and adds what it spent to `priorCost`.
+- **Budget (B6a), measured not guessed.** A metered DB (every statement, a batch counting each of its statements) plus the fetch counts
+  the attempt reports give the real spend; a row starts only if its worst case (`RECONCILE_ROW_WORST_CASE = 18`: the measured 16 plus one
+  chain-head retry) still fits under `RECONCILE_SUBREQUEST_CEILING = 26`. The proof counts the real subrequests through `scheduled()`:
+  the worst row alone is 17 with its select (12 D1, 5 fetches; the metered total equals it exactly); `scheduled()` with that row, two due
+  proposals and the clerk wake is 48 of 50. With the sweep's 3 the wake sees priorCost <= 29, inside `canAffordConcierge`'s 32.
+- OPEN FOR HUB (deviation from B6, the expiry margin): `expired` invites a second signature, so it must never be premature. The brief says
+  "unused and `now > valid_before`". I require `now > valid_before + 300 s` (the authorisation window): a transfer broadcast just before
+  validBefore can be mined a little after it in wall-clock terms and an RPC can trail the head. Inside the margin the row waits (7f).
+- OPEN FOR HUB (B6 reading): when the chain says the authorisation is SPENT and /settle answers a rule-7 refusal, the two contradict; the
+  row is left `pending` for a person, never refused (a refusal would invite a second signature for money that moved) (7e).
+- OPEN FOR HUB (fairness): "rows worked oldest first" is read as oldest ATTEMPT first (`updated_at`, which a lease acquisition moves), so a
+  row that keeps failing goes to the back instead of starving the batch (14). Creation order would let two permanently failing rows block
+  every later one forever.
+- OPEN FOR HUB: a reconciler-finished registration in `invite_only` mode (legacy, off in production) does not mark the invite code redeemed
+  (the reconciler has no code). Noted, not built: the door has been open since 2026-08.
+- Listing reservations: the reconciler does NOT release a `listing_pay` reservation when its claim goes `expired` or `refused` (the pay
+  route's own rule-7 branch still does, in the request). An operator-held `paying` listing is the existing recovery surface and
+  `scripts/pay-listing.mjs` reconciles it; an automatic release could race that script. A `listing_pay` claim the reconciler books is
+  booked exactly as the request would have (payment row, paid flip), gated on the listing still being `paying`.

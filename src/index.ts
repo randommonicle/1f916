@@ -38,6 +38,7 @@ import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
 import { runConciergeWake, conciergeRunsPage } from "./maintainer/concierge.ts";
 import { estimateSweepCost } from "./maintainer/budget.ts";
+import { runReconciler, RECONCILE_SUBREQUEST_CEILING } from "./settlement-reconcile.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
 import { handleOpenTopic, listTopics, topicsDoorNote } from "./topics.ts";
@@ -569,6 +570,20 @@ export default {
     }
 
     const wake = classifyCron(controller.cron);
+
+    // The settlement reconciler (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md B6, B6a): the daily backstop
+    // for claims whose paid act the request path could not finish, on the 06:00 UTC run only (the
+    // Sunday 07:00 judgment wake keeps its whole budget). It spends at most
+    // RECONCILE_SUBREQUEST_CEILING of the shared 50, and what it spent is added to priorCost so the
+    // wake sheds against it. A throw that escapes it is priced as the whole ceiling.
+    if (wake === "clerk") {
+      try {
+        priorCost += (await runReconciler(env, priorCost)).actualCost;
+      } catch (e) {
+        priorCost += RECONCILE_SUBREQUEST_CEILING;
+        console.log(JSON.stringify({ level: "error", event: "settlement_reconcile_failed", cron: controller.cron, message: String(e) }));
+      }
+    }
     try {
       // The engagement concierge (docs/DESIGN-CONCIERGE.md §4.1) runs FIRST
       // on the clerk cadence, before the clerk's own drafting pass -- its

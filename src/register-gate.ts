@@ -284,10 +284,10 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
   // The ledger line first, through recordSettledPayment (x402.ts, F7): if the append
   // fails, the payer is told the payment settled and not to sign again, one
   // payment_settled_unrecorded line names it, and no citizen is created.
-  let ledgerId = refs.ledger_id;
-  if (ledgerId == null) {
+  let sealed: { prev_hash: string; hash: string };
+  if (refs.ledger_id == null) {
     const now = Date.now();
-    await recordSettledPayment(
+    sealed = await recordSettledPayment(
       env,
       "registration",
       { payer, tx },
@@ -300,14 +300,15 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
       },
       { key, final: false },
     );
-    ledgerId = refsOf((await getClaim(env, key)) as ClaimRow).ledger_id as number;
+  } else {
+    sealed = await ledgerReceipt(env, refs.ledger_id);
   }
-  const sealed = await ledgerReceipt(env, ledgerId);
 
   let citizenId: number | undefined;
   let body: Record<string, unknown>;
   try {
-    refs = refsOf((await getClaim(env, key)) as ClaimRow);
+    // `refs` is the claim as this finisher received it (under its lease); every step below is
+    // gated on the claim itself, so a step another worker recorded meanwhile writes nothing.
     citizenId = refs.citizen_id;
     let secret: string | undefined;
     if (citizenId == null) {
@@ -361,7 +362,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
       const fp = await publicKeyFingerprint(publicKey);
       const now = Date.now();
       const cid = citizenId;
-      await runBookingStep(
+      const step = await runBookingStep(
         env,
         key,
         {
@@ -374,8 +375,10 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
         },
         now,
       );
-      refs = refsOf((await getClaim(env, key)) as ClaimRow);
-      if (refs.key_event_id == null) throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
+      // Not applied: another worker recorded it (fine) or the claim is not settled_unbooked (not fine).
+      if (!step.applied && refsOf((await getClaim(env, key)) as ClaimRow).key_event_id == null) {
+        throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
+      }
     }
     body = registrationResponseBody(citizenId, intent.handle, publicKey, secret ?? "");
   } catch (e) {

@@ -458,10 +458,11 @@ async function finishListingCreate(
   const payer = row.payer ?? "unknown";
   const tx = row.tx ?? "";
 
-  let ledgerId = refsOf(row).ledger_id;
-  if (ledgerId == null) {
+  const recordedLedgerId = refsOf(row).ledger_id;
+  let sealed: { prev_hash: string; hash: string };
+  if (recordedLedgerId == null) {
     const now = Date.now();
-    await recordSettledPayment(
+    sealed = await recordSettledPayment(
       env,
       "listing_fee",
       { payer, tx },
@@ -474,11 +475,11 @@ async function finishListingCreate(
       },
       { key, final: false },
     );
-    ledgerId = refsOf((await getClaim(env, key)) as ClaimRow).ledger_id as number;
+  } else {
+    sealed = await ledgerReceipt(env, recordedLedgerId);
   }
-  const sealed = await ledgerReceipt(env, ledgerId);
 
-  let listingId = refsOf((await getClaim(env, key)) as ClaimRow).listing_id;
+  let listingId = refsOf(row).listing_id;
   if (listingId == null) {
     try {
       const now = Date.now();
