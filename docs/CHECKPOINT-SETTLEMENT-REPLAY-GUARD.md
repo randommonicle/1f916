@@ -317,3 +317,11 @@ The hub ruled on the list above (RULED marks inline). Accepted as named limits, 
 ## Fix pass report
 
 F1-F4 done on this branch; items 1, 3, 4, 5, 7, 9, 10, 11, 12, 13, 15, 16 recorded as RULED: accepted; item 8 stands (F4 makes the text say so).
+
+### Hub note: the scratch-D1 rehearsal (OPEN FOR HUB 1), 2026-09-30
+
+Run by the hub against the scratch D1 `commonhold-migtest` only (prod untouched); full record in the project root `HANDOVER.md`, Addendum 78 section 9. (a) A `wrangler dev --remote` probe worker, namespaced tables dropped after: inside ONE managed `env.DB.batch`, a gated-out INSERT then the record statement gave `[0,0]` and recorded nothing; INSERT -> UPDATE (`changes() = 1`) -> `json_set(refs, '$.row_id', last_insert_rowid())` gave `[1,1,1]` and recorded the INSERTed id (41), not the stale id (40) nor the updated row (7); a replay after `booked` gave `[0,0]`. (b) `migrations/0017_settlement_claims.sql` applied twice (the second a no-op); catalog showed every column, the four-part primary key and `idx_settlement_claims_open`; on real D1 the CHECKs refused a terminal row carrying `rpc_body`, invalid `booked_refs` JSON and an unknown state, and the key refused a duplicate (SQLITE_CONSTRAINT_PRIMARYKEY). Probe rows deleted.
+
+### Hub note: the D-018 Opus gate, 2026-09-30
+
+`docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md`: DEPLOYABLE WITH CONDITIONS, HIGH 0, MEDIUM 1, LOW 7. C1 (before deploy): a timeout of at most 120 s on the facilitator call. C2 rides a later paid-path wave. Fix pass 2 follows (C1, L1, L2).
