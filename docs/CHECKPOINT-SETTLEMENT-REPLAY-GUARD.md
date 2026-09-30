@@ -361,3 +361,10 @@ Run by the hub against the scratch D1 `commonhold-migtest` only (prod untouched)
   call. A loser that meets the pending claim with no live lease would now re-check the chain (unused, authorisation still valid) and re-POST `/settle`: a second settle, a second
   booking. Red-proof: `takeClaim` inserting a NULL lease (the gate's mutant G1) now turns THIS test red (alone, run on its own file); before, it stayed green and only the two
   primitive tests noticed.
+
+### C2 marker (not built; the next paid-path wave)
+
+- `DEFERRED-STALE-CLAIM-ANSWER` planted at the two places the gate's C2 names: `src/register-gate.ts` at the return that can hand back a `secret` that was never stored (a
+  finisher with a stale `settled_unbooked` snapshot whose citizen step was gated out by another finisher still returns its own fresh secret; fix: a secret only when THIS call's
+  step reported `applied: true`, otherwise answer from the claim), and `src/x402.ts` at the `markSettled` call whose `false` is ignored (answer from the claim's state, log loudly
+  if it is refused or expired for money that settled). C1 removes the usual way in (a `/settle` outliving its lease); it does not remove the race, so this stays owed.

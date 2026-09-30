@@ -643,6 +643,9 @@ export async function payAndSettle(
   let row: ClaimRow | null = null;
   if (claimId) {
     try {
+      // DEFERRED-STALE-CLAIM-ANSWER (gate C2, the next paid-path wave): markSettled's `false` (another worker moved the claim first) is ignored
+      // here and the request finishes on whatever row it reads back. Answer from that row's state instead, and log the contradiction loudly if
+      // it is `refused` or `expired` for money that just settled. See also src/register-gate.ts (the return that can carry a secret).
       await markSettled(env, claimId.key, settled.verdict.tx, settled.verdict.payer, Date.now());
       row = await getClaim(env, claimId.key);
       if (!row) throw new Error("the claim row is missing after settlement");

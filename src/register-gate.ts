@@ -396,6 +396,13 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
         throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
       }
     }
+    // DEFERRED-STALE-CLAIM-ANSWER (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md, C2; the next paid-path wave): THIS return can hand back a
+    // `secret` that was never stored. `secret` is this call's own, but the citizen step's `applied` is discarded above, so when a finisher that
+    // holds a STALE `settled_unbooked` snapshot runs while another finisher already created the citizen under a lapsed lease (C1 bounds the
+    // /settle wait below the lease, which removes the usual way in, not the race itself), the step is gated out, refs are re-read, `citizenId` is
+    // set by the OTHER call, and this line returns a fresh secret whose hash is not `citizens.secret_hash`. The fix: return a `secret` ONLY when
+    // this call's own step reported `applied: true`; otherwise answer from the claim (as a replay would). The same wave should make payAndSettle
+    // answer from the claim's state when markSettled returns false (x402.ts, the markSettled call) and log loudly if that state is refused or expired.
     body = registrationResponseBody(citizenId, intent.handle, publicKey, secret ?? "");
   } catch (e) {
     // F1: the citizen write met a handle another seat now holds (citizens.handle is UNIQUE). No retry can ever book it, so the reason
