@@ -196,7 +196,13 @@ export async function appendChained(
   // function (identity_events, ledger, ballots as called directly;
   // payouts' own equivalent exhaustion, in payouts.ts, is fixed alongside
   // this one since it does not route through appendChained).
-  throw new SocietyError(503, `chain head for ${table} moved four times running; giving up rather than forking it. The write was never committed -- retrying may succeed.`);
+  throw chainHeadMovedError(table);
+}
+
+// The one wording for "the head moved four times running", shared by appendChained
+// and settlement-claims.ts's booking step so the two cannot drift.
+export function chainHeadMovedError(table: ChainedTable): SocietyError {
+  return new SocietyError(503, `chain head for ${table} moved four times running; giving up rather than forking it. The write was never committed -- retrying may succeed.`);
 }
 
 // A caller-supplied guard for appendChainedStmt: a boolean subquery body
