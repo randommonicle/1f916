@@ -1,7 +1,7 @@
 # Brief: one settlement is booked once (gate M2, wave B retrospective)
 
-Status: DRAFT, 2026-09-30, for Ben's ruling (option A or B below). Not built. MONEY PATH: the D-018
-gate for the build is Opus.
+Status: HUB DRAFT, 2026-09-30, NOT yet exchanged, for Ben's ruling (option A or B below). Not built.
+MONEY PATH: the D-018 gate for the build is Opus. Exchange both seats before any builder reads it.
 
 ## The gap
 
@@ -40,9 +40,15 @@ narrows but does not close the window. The match is on a substring of free text.
 A table `settlement_claims(network, asset, from_addr, nonce, route, created_at, PRIMARY KEY(network,
 asset, from_addr, nonce))`. In `afterVerify`, BEFORE `/settle`, INSERT the signed authorisation's
 `(from, nonce)`; a UNIQUE conflict refuses the request with no settle attempt (a replay costs the
-facilitator nothing and moves no money). A settle that later fails or is refused leaves the claim in
-place, so the same signed header cannot be tried twice; the payer signs a fresh authorisation (a new
-nonce), which is how x402 works anyway. Migration 0017 (additive), Ben's act; deploy order: migration
+facilitator nothing and moves no money). **Open design point (must be settled before build).** The claim cannot simply stay put on every outcome.
+On an UNKNOWN outcome (transit failure, 5xx, `settlement_pending`) the money may have moved: telling the
+payer to sign a fresh authorisation is the double payment wave B's F7 closed, and re-sending the SAME
+payload is exactly what PayAI's reconciliation path expects, which a bare claim would refuse. So the claim
+needs a state (`pending`, `settled`, `refused`): `refused` (a recorded refusal) releases it like the
+listing reservation does; `pending` is reconciled by OUR server re-POSTing the exact stored payload to
+`/settle` (never by a new signature), and only a `settled` answer books; `settled` is final and refuses
+every replay. This changes the migration's shape (a state column and the stored payload), so it is
+decided here, not in the build. Migration 0017 (additive), Ben's act; deploy order: migration
 first, then worker (L-046, one fail-fast script).
 
 ## Recommendation
