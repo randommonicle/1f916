@@ -258,3 +258,19 @@ The hub ruled on the list above (RULED marks inline). Accepted as named limits, 
   not recognised; log written on every recognition (caught by the stale-copy test: a worker that read the claim before the reason was recorded must not log
   again); an identical re-send re-attempting (needs BOTH the `respondToExistingClaim` check and the finisher's defence removed: each layer alone stays green);
   the answer inviting a re-send; naming no handle; losing the showhome instruction (two tests red); the claim-answer path not serving it. All red.
+
+### F2. The reconciler releases a pay-listing reservation (item 6; supersedes the commit-4 note that it would not)
+
+- `markExpired` / `markRefused` take the claim row as `release`; for a `listing_pay` claim the terminal UPDATE and ONE conditional listing UPDATE run as one D1 batch
+  (`terminate`, `listingReleaseStatement` in `src/settlement-claims.ts`): `status = 'paying'`, `paid_submission_id IS NULL`, the reservation's pinned wallet row
+  (id and hash) equal to the claim's pin, `paying_since <= claim.created_at` (the reservation is taken before the claim in the same request, so a LATER reservation by
+  another payer is never released), and `changes() = 1` (only the worker that actually moved the claim releases). `attemptPending` passes the row on `expired` and on a
+  recorded rule-7 `refused`; nothing else ever releases: not `pending`, not an unknown answer, not a spent authorisation (that books), not an unreadable chain.
+  The pay route's own request-path refusal still releases through its own `!result.ok` branch and passes no row.
+- Tests (`test/settlement-replay-fixes-d1.test.ts`): expired -> open; refused -> open; chain spent with an unknown answer or a refusal, RPCs disagreeing, no quorum ->
+  claim pending and listing still paying; a spent authorisation books (paid); a listing already paid, withdrawn, re-reserved later, or reserved under another pin is
+  untouched while the claim still expires; the release and the claim update are one batch (a trigger refusing the release leaves the claim pending, and the next run does
+  both); a worker that lost the race (claim already terminal) releases nothing even if the listing is `paying` under the same pin.
+- Red-proofs (8, all restored): the terminal update releasing nothing; the reconciler passing no row on expired; on refused; release without `status = 'paying'`; without the
+  pinned-row conditions; without the `paying_since` condition; without `changes() = 1`; the release as a separate statement. All red. Not independently provable:
+  `paid_submission_id IS NULL` (a `paying` listing with a paid submission cannot be made by any route; it is defence in depth behind `status = 'paying'`).

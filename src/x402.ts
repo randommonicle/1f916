@@ -687,7 +687,7 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
   const chain = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce);
   if (chain.used === null) return { kind: "unchanged", detail: `The chain could not settle the question (${chain.reason}); nothing was changed.`, fetches: chain.fetches };
   if (chain.used === false && nowMs / 1000 > row.valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS) {
-    await markExpired(env, key, nowMs);
+    await markExpired(env, key, nowMs, row);
     return { kind: "expired", fetches: chain.fetches };
   }
   if (chain.used === false && nowMs / 1000 > row.valid_before) {
@@ -708,7 +708,7 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
     if (chain.used === true) {
       return { kind: "unchanged", detail: "The chain shows this authorisation spent, but the facilitator reports a refusal. The answers contradict; the claim is left pending for a person to decide.", fetches };
     }
-    await markRefused(env, key, settled.verdict.error, Date.now());
+    await markRefused(env, key, settled.verdict.error, Date.now(), row);
     return { kind: "refused", fetches };
   }
   const { tx, payer } = settled.verdict;

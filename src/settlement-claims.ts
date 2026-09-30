@@ -240,24 +240,56 @@ export async function markSettled(env: Env, key: ClaimKey, tx: string, payer: st
   return r.meta.changes === 1;
 }
 
-// pending -> refused (classifier rule 7 only): terminal, the authorisation body is cleared.
-export async function markRefused(env: Env, key: ClaimKey, reason: string, now: number): Promise<boolean> {
-  const r = await env.DB.prepare(
-    `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
-  )
-    .bind(reason, now, ...keyArgs(key))
-    .run();
-  return r.meta.changes === 1;
+// F2 (hub ruling, 2026-09-30): when the reconciler moves a listing_pay claim to a terminal state that proves no money moved
+// (expired: the chain shows the authorisation unused after validBefore; refused: a recorded rule-7 refusal), the listing's
+// reservation goes back to open IN THE SAME BATCH as the claim's terminal update. The release is one conditional UPDATE:
+//   - changes() = 1 ties it to THIS batch's claim update, so a worker that lost the race to move the claim releases nothing;
+//   - status = 'paying' and paid_submission_id IS NULL: a listing already paid (or withdrawn, or expired) is never touched;
+//   - the pinned wallet row the reservation recorded (paying_wallet_row_id/hash) must be this claim's pin, and paying_since
+//     must not be later than the claim's own creation: the reservation is taken before the claim in the same request, so a
+//     LATER reservation (another payer, after a person released it) has a later paying_since and is never released.
+// Never used on pending, on an unknown outcome, or when the chain says the authorisation was spent.
+export function listingReleaseStatement(env: Env, row: ClaimRow): D1PreparedStatement | null {
+  if (row.route !== "listing_pay") return null;
+  const i = intentOf(row) as { listing_id: number; wallet_row_id: number; wallet_row_hash: string };
+  return env.DB.prepare(
+    `UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL
+     WHERE id = ? AND status = 'paying' AND paid_submission_id IS NULL AND paying_wallet_row_id = ? AND paying_wallet_row_hash = ?
+       AND paying_since IS NOT NULL AND paying_since <= ? AND changes() = 1`,
+  ).bind(i.listing_id, i.wallet_row_id, i.wallet_row_hash, row.created_at);
 }
 
-// pending -> expired: the chain proved the authorisation unused AFTER valid_before.
-export async function markExpired(env: Env, key: ClaimKey, now: number): Promise<boolean> {
-  const r = await env.DB.prepare(
-    `UPDATE settlement_claims SET state = 'expired', rpc_body = NULL, verdict_reason = 'authorisation expired unused (on-chain authorizationState is unused after validBefore)', lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
-  )
-    .bind(now, ...keyArgs(key))
-    .run();
-  return r.meta.changes === 1;
+// Runs the claim's terminal UPDATE, with the listing release (a pay-listing claim passed as `release`) as the second statement of
+// the same batch. Returns whether THIS call moved the claim.
+async function terminate(env: Env, claimUpdate: D1PreparedStatement, release?: ClaimRow): Promise<boolean> {
+  const stmt = release ? listingReleaseStatement(env, release) : null;
+  if (!stmt) return (await claimUpdate.run()).meta.changes === 1;
+  const out = await env.DB.batch([claimUpdate, stmt]);
+  return (out[0] as { meta: { changes: number } }).meta.changes === 1;
+}
+
+// pending -> refused (classifier rule 7 only): terminal, the authorisation body is cleared. Pass `release` (the claim row) from the
+// reconciler and the re-send so a listing_pay reservation is released in the same batch (F2); the pay route's own request path
+// releases its reservation itself and passes nothing.
+export async function markRefused(env: Env, key: ClaimKey, reason: string, now: number, release?: ClaimRow): Promise<boolean> {
+  return terminate(
+    env,
+    env.DB.prepare(
+      `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
+    ).bind(reason, now, ...keyArgs(key)),
+    release,
+  );
+}
+
+// pending -> expired: the chain proved the authorisation unused AFTER valid_before (plus the margin). See markRefused for `release`.
+export async function markExpired(env: Env, key: ClaimKey, now: number, release?: ClaimRow): Promise<boolean> {
+  return terminate(
+    env,
+    env.DB.prepare(
+      `UPDATE settlement_claims SET state = 'expired', rpc_body = NULL, verdict_reason = 'authorisation expired unused (on-chain authorizationState is unused after validBefore)', lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
+    ).bind(now, ...keyArgs(key)),
+    release,
+  );
 }
 
 // An unknown outcome leaves the row pending; this records the last thing the

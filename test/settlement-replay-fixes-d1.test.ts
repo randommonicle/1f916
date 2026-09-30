@@ -12,9 +12,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { insertCitizen } from "./helpers/local-d1.ts";
+import { insertListing, insertSubmission } from "./helpers/local-d1.ts";
+import { declareTestWallet } from "./helpers/wallet-pin.ts";
+import { atomicFromCents } from "./helpers/x402-payload.ts";
+import { handlePayListing } from "../src/listings.ts";
+import { claimKeyFromPayload, markExpired, getClaim } from "../src/settlement-claims.ts";
 import {
   TEST_PAYER,
   TX,
+  authStateAnswer,
   callWorker,
   captureLog,
   count,
@@ -22,6 +28,7 @@ import {
   eventLines,
   json,
   oneClaim,
+  paymentHeaderFor,
   realPublicKey,
   registerHeader,
   registerReq,
@@ -158,6 +165,174 @@ test("F1: the log line is written once even when two workers meet the same lost 
     assert.equal(eventLines(lines, "registration_handle_taken_after_payment").length, 0, "but the reason was already recorded, so no second log line");
   } finally {
     fx.stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- F2: the reconciler releases a pay-listing reservation with the claim's terminal update ----------
+
+const BOUNTY = 1200;
+const REVIEWER_WALLET = "0x" + "0a".repeat(20);
+const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
+const pendingAnswer = () => new Response(JSON.stringify({ success: false, errorReason: "settlement_pending" }), { status: 200, headers: { "content-type": "application/json" } });
+const refusedAnswer = () => new Response(JSON.stringify({ success: false, errorReason: "insufficient_funds" }), { status: 200, headers: { "content-type": "application/json" } });
+
+// A listing mid-payment whose /settle answered "pending": the pay route keeps the reservation and the claim is pending.
+async function payingListing(d1: LocalD1, validBefore?: string) {
+  const funderId = insertCitizen(d1);
+  const reviewerId = insertCitizen(d1);
+  const pin = await declareTestWallet(d1, reviewerId, REVIEWER_WALLET);
+  const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: BOUNTY });
+  const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+  const funder = d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(funderId) as never;
+  const header = paymentHeaderFor(REVIEWER_WALLET, atomicFromCents(BOUNTY), validBefore ? { validBefore } : {});
+  const res = await handlePayListing(
+    new Request(`https://example.test/api/listing/${listingId}/pay`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-PAYMENT": header },
+      body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+    }),
+    testEnv(d1),
+    funder,
+    listingId,
+  );
+  assert.equal(res.status, 502, "an unknown outcome keeps the reservation");
+  const listing = () => ({ ...(d1.raw.prepare("SELECT status, paying_since, paying_wallet_row_id, paying_wallet_row_hash, paid_submission_id FROM listings WHERE id = ?").get(listingId) as Record<string, unknown>) });
+  return { header, listingId, pin, listing };
+}
+const nonceOf = (header: string) => claimKeyFromPayload(JSON.parse(atob(header)), REQS).key.nonce;
+const OPEN = { status: "open", paying_since: null, paying_wallet_row_id: null, paying_wallet_row_hash: null, paid_submission_id: null };
+
+test("F2: a pay-listing claim that EXPIRES (chain unused, past validBefore + margin) releases the reservation back to open", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+  try {
+    const fx = await payingListing(d1, "1000");
+    assert.equal(fx.listing().status, "paying");
+    assert.equal(oneClaim(d1).state, "pending");
+    const out = await runReconciler(testEnv(d1));
+    assert.equal(out.resolved, 1);
+    assert.equal(oneClaim(d1).state, "expired");
+    assert.deepEqual(fx.listing(), OPEN, "the listing is open again and carries no reservation");
+    assert.equal(count(d1, "listing_payments"), 0);
+    assert.equal(stub.calls.settle, 1, "an unused, expired authorisation is never re-POSTed");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F2: a pay-listing claim that is REFUSED (a recorded rule-7 answer) releases the reservation back to open", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: () => authStateAnswer(false) });
+  try {
+    const fx = await payingListing(d1);
+    const out = await runReconciler(testEnv(d1));
+    assert.equal(out.resolved, 1);
+    assert.equal(oneClaim(d1).state, "refused");
+    assert.deepEqual(fx.listing(), OPEN);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F2: never released while pending, on an unknown answer, when the chain says SPENT, or when the chain cannot be read", async () => {
+  for (const scenario of ["spent-unknown", "spent-refusal", "rpcs-disagree", "no-quorum"] as const) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({
+      settle: (n) => (n === 1 ? pendingAnswer() : scenario === "spent-refusal" ? refusedAnswer() : new Response("{}", { status: 500 })),
+      rpc: (_u, n) => (scenario === "rpcs-disagree" ? authStateAnswer(n === 0) : scenario === "no-quorum" ? (n % 4 === 0 ? authStateAnswer(false) : null) : authStateAnswer(true)),
+    });
+    try {
+      const fx = await payingListing(d1, "1000");
+      const before = fx.listing();
+      await runReconciler(testEnv(d1));
+      assert.equal(oneClaim(d1).state, "pending", `${scenario}: the claim waits`);
+      assert.deepEqual(fx.listing(), before, `${scenario}: the reservation is untouched`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("F2: a spent authorisation is BOOKED, not released (the reservation becomes a payment)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: () => authStateAnswer(true) });
+  try {
+    const fx = await payingListing(d1, "1000");
+    const out = await runReconciler(testEnv(d1));
+    assert.equal(out.booked, 1);
+    assert.equal(fx.listing().status, "paid");
+    assert.equal(count(d1, "listing_payments"), 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F2: a listing already paid, withdrawn, re-reserved later, or reserved under another pinned wallet row, is never touched", async () => {
+  for (const scenario of ["paid", "re-reserved", "withdrawn", "other-pin"] as const) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+    try {
+      const fx = await payingListing(d1, "1000");
+      const claim = oneClaim(d1) as unknown as { created_at: number };
+      if (scenario === "paid") d1.raw.prepare("UPDATE listings SET status = 'paid', paid_submission_id = 1, paid_tx = '0xother', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ?").run(fx.listingId);
+      if (scenario === "re-reserved") d1.raw.prepare("UPDATE listings SET paying_since = ? WHERE id = ?").run(claim.created_at + 60_000, fx.listingId);
+      if (scenario === "withdrawn") d1.raw.prepare("UPDATE listings SET status = 'withdrawn' WHERE id = ?").run(fx.listingId);
+      // reserved again under a DIFFERENT pinned wallet row (the payee changed wallet; another payer's reservation)
+      if (scenario === "other-pin") d1.raw.prepare("UPDATE listings SET paying_wallet_row_id = paying_wallet_row_id + 1000 WHERE id = ?").run(fx.listingId);
+      const before = fx.listing();
+      await runReconciler(testEnv(d1));
+      assert.equal(oneClaim(d1).state, "expired", `${scenario}: the claim itself still expires`);
+      assert.deepEqual(fx.listing(), before, `${scenario}: the listing is exactly as it was`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("F2: the release and the claim's terminal update are ONE batch: if the release cannot be written, the claim does not expire", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+  try {
+    const fx = await payingListing(d1, "1000");
+    d1.raw.exec("CREATE TRIGGER no_release BEFORE UPDATE ON listings WHEN NEW.status = 'open' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    const { value: out, lines } = await captureLog(() => runReconciler(testEnv(d1)));
+    assert.equal(out.failed, 1, "the row failed loudly");
+    assert.equal(eventLines(lines, "settlement_reconcile_row_failed").length, 1);
+    assert.equal(oneClaim(d1).state, "pending", "the claim did not move without its release");
+    assert.equal(fx.listing().status, "paying");
+    d1.raw.exec("DROP TRIGGER no_release");
+    assert.equal((await runReconciler(testEnv(d1))).resolved, 1, "and the next run does both");
+    assert.deepEqual(fx.listing(), OPEN);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F2: a worker that LOST the race to move the claim releases nothing (the release is tied to this batch's claim update by changes() = 1)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+  try {
+    const fx = await payingListing(d1, "1000");
+    const row = (await getClaim(testEnv(d1), { network: "base", asset: REQS.asset.toLowerCase(), from: TEST_PAYER, nonce: nonceOf(fx.header) })) as ClaimRow;
+    const key = { network: row.network, asset: row.asset, from: row.from_addr, nonce: row.nonce };
+    assert.equal(await markExpired(testEnv(d1), key, Date.now(), row), true);
+    assert.deepEqual(fx.listing(), OPEN);
+    // a person puts the listing back under the same pinned reservation, earlier than the claim: a stale second worker must not undo it
+    d1.raw
+      .prepare("UPDATE listings SET status = 'paying', paying_since = ?, paying_wallet_row_id = ?, paying_wallet_row_hash = ? WHERE id = ?")
+      .run(row.created_at - 1, fx.pin.id, fx.pin.hash, fx.listingId);
+    const before = fx.listing();
+    assert.equal(await markExpired(testEnv(d1), key, Date.now(), row), false, "the claim was already terminal");
+    assert.deepEqual(fx.listing(), before, "the second worker released nothing");
+  } finally {
+    stub.restore();
     d1.close();
   }
 });
