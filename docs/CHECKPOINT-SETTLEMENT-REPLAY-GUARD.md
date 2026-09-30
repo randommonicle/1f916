@@ -40,7 +40,7 @@ second citizen.
   NOTHING, taker holds the lease), lease, conditional transitions, `runBookingStep`, B4/B9 answers.
 - `src/chain.ts`: `chainHeadMovedError(table)`, the one wording of the four-times-moved 503, now shared.
 - `test/settlement-claims-d1.test.ts`: 11 tests on the primitives.
-- Red-proofs: recorded below once run (see "Red-proof log").
+- Red-proofs: see "Red-proof log" below.
 
 ### 2. Register and patron wired (B3, B4/B4a, B5/B5a-d); tests 1, 1b, 2, 3, 5, 6a-c, 9, 12
 
@@ -147,3 +147,84 @@ second citizen.
   skill is now 1.0.3, so the staged `SKILL.md` needs re-staging from the live text after this deploys.
 - L-109: a test follows the secret-lost answer's pointer (POST /api/showhome/enter, then /note) through the real router.
 - Test 13: the template hash is `fa11788d...` (v5), asserted here and by `test/topics-d1.test.ts` 9.
+
+### 7. The deploy script (written, parsed, never run)
+
+- `scripts/deploy-settlement-replay-guard.ps1`: `git fetch`; `-ExpectedCommit` (mandatory) must equal `main`, `origin/main` and HEAD, on branch
+  `main`, clean tree; its own gates (npm test, typecheck); the live non-minting baseline (v5, template hash, every chain `ok:true`) and the
+  PROOF that the new code is absent (`pilot PAUSED` not yet on GET /), so the later poll means something; stops if `settlement_claims` already
+  exists unless `-MigrationAlreadyApplied` (which is itself an assertion the table exists); applies `migrations/0017_*.sql` to the REMOTE D1
+  FIRST; reads `pragma_table_info('settlement_claims')` (19 columns in order, the four-column primary key), the table's SQL for the B7 CHECK,
+  the open-claims index and the row count; `npx wrangler deploy` with the version id captured (none = stop); polls GET / for the new marker;
+  re-checks attest; 7 public GETs and one UNPAID register probe (a 402 carrying the public_key advice; it writes nothing). `-DryRun` does the
+  fetch, the level check, the gates and the live reads and exits before any remote write.
+- Avoids the gate's L6 traps: reusable (no gate on a literal the wave itself makes true), fetches, pins the commit, captures the version id,
+  and a poll target proved absent-before. Avoids the PowerShell traps (`$COLS`/`$cols`, array `-notmatch`, one-element returns wrapped in `@()`,
+  `"${var}:"` for `$V5_HASH:`, ErrorDetails, no stderr merge under Stop): the first parse of my own draft caught a `$V5_HASH:` drive reference.
+- `test/settlement-replay-deploy-script.test.ts` proves it without running it (parse via PowerShell's own parser: 0 errors; ASCII; trap scans; step
+  order; one migration apply and one deploy; column list equals the migration's and schema.sql's; the poll and probe markers are really served).
+
+## Red-proof log
+
+Method: `scratchpad/mut.mjs` applies one mutation to an in-memory copy of ONE file, runs the named test file(s), then rewrites the file from the
+in-memory original (never `git checkout`) and confirms the bytes match. Mutations ran only after the work was committed or while the tree held only
+committed content. "RED" means the named test(s) failed; all were restored byte-identical.
+
+- Claim primitives (`settlement-claims-d1`): no fold on `from` / `nonce` (2 red each); INSERT replaces instead of conflicting; `sameRequest` ignores
+  intent; lease ignores a live lease; `markSettled` not state-conditional; step gate without the ref check; step gate without the state check; step
+  not a batch (statements run singly); no chain-head retry; final step leaves state alone; schema without the B7 CHECK. 12 of 12 red.
+- Tests 1, 2, 3, 5, 9 (`x402.ts`): no consult-first; conflict ignored (no claim guard: test 3 red; test 1 is still held by consult-first, a second
+  layer); divergent read as identical; `settled_unbooked` never finished by the re-send; a failed request keeping its lease; claim taken BEFORE
+  afterVerify; treasury line written without the claim. All red.
+- Tests 6a, 6c, 5, 1, 12 (`register-gate.ts`, `settlement-claims.ts`): a resume re-writing the treasury line (no skip AND no claim gate), a resume
+  re-creating the citizen (same), key_registered step skipped, `deliver` ignored, register without consult-first; the key ignoring the nonce (test 12);
+  the taker holding no lease. All red. (Single-layer mutations of the skip alone stay green because the claim gate is a second layer: that is why the
+  two-layer mutations are the proof.)
+- Test 10 (`listings.ts`, `settlement-claims.ts`): pay listing takes no claim; a conflict no longer releases the reservation; no consult-first; the payment
+  INSERT not gated on the listing still paying; a resumed pay booking with no skip and no gate; a resumed listing booking likewise; the claim reference
+  ignoring `changes()`. All red.
+- Tests 7a-7h, 8, 8b, 11, 14, the budget proofs, the cron rule (`x402.ts`, `settlement-reconcile.ts`, `settlement-claims.ts`, `register-gate.ts`, `index.ts`):
+  re-POST not byte-identical; expiry on the clock alone; no expiry margin; no quorum required; unused+valid never re-POSTed; a refusal honoured against a
+  spent authorisation; the re-send never attempting; the re-send ignoring a live lease; the reconciler selecting leased rows; a failing row stopping the
+  next; creation order instead of attempt order; no fixed batch; the wake not charged for the reconciler; no ceiling; `acquireLease` ignoring a live lease;
+  a pending answer leaking the stored body; the reconciler booking a secret-mode registration; the reconciler also running on the judgment cron;
+  `scheduled()` not charging priorCost. All red. THE FIRST RUN FOUND THREE GAPS and I closed them with new tests before calling these red-proofed:
+  7b (added 7h: spent-but-past-validBefore is booked, not expired), the fairness mutation (test 14 now has four rows and asserts the failing row is not
+  retried ahead of the waiting ones), the ceiling mutation (new test: a second worst-case row is shed).
+- Classifier, test 4 (`x402.ts`): settlement_pending compared exactly; duplicate_settlement not a non-verdict; both removed; the tail without "do not sign
+  again"; rule 3's own copy; the unreadable-body message; the /verify wording restored (and the transit message without "may still have been
+  delivered"); rule 7 not marking the claim refused. 9 of 9 red.
+- B10, D-073, test 13: the advice losing its reason; removed from each of /skill.md, the 402 description, the discovery declaration, the three showhome
+  texts, the MCP refusal, the route table; the skill version not bumped; the secret-lost pointer naming a nonexistent route (L-109); a word added inside
+  the attested template (mints: test 13 red); the lobby note losing its pause. All red.
+- Deploy script (15 mutations of the script itself): no fetch, `-ExpectedCommit` not mandatory, dry run not exiting, a column dropped, the
+  already-applied guard removed, a `$cols`/`$COLS` clash, a drive-reference trap, a non-ASCII character, no version-id check, a poll marker that is not
+  served, the gate's outputSchema trap reintroduced, deploy before migration, the absent-marker probe removed, the branch check removed, stderr merged
+  under Stop. All red.
+
+Not red-proofed, and why: (1) the `metered` DB facade's unwrapping of statements inside `batch` is proven only by the equality of its count with the
+counter's (17 = 17) on LocalD1; its behaviour against real D1's host statement objects cannot be exercised locally (see OPEN FOR HUB 1).
+(2) The `rpc_body`-in-every-response walk (test 11) covers the public GET routes in the route table and the four paid doors' replay answers; a route that
+does not exist in `ROUTES` is unreachable by it, and the router has none that touches the table.
+
+## OPEN FOR HUB (collected)
+
+1. **Real D1 is unproven for four things**: `last_insert_rowid()`, `changes()` and `json_set` inside one D1 batch (the claim's reference update), and the
+   `metered` facade over D1's host statement objects. Local SQLite and real D1 are the same engine, and governance already relies on `changes() = 1`
+   in a batch on prod, but only a scratch-D1 rehearsal (L-016) proves it. Suggest: rehearse migration 0017 and one register claim on the scratch D1 before
+   the deploy.
+2. **A handle lost to a race after payment** leaves the claim `settled_unbooked` forever (B2: "No other transitions"); the reconciler retries daily and logs.
+3. **Expiry margin** (deviation): `expired` needs `now > valid_before + 300 s`, not `now > valid_before`.
+4. **Chain spent + facilitator refusal** contradict: the row stays `pending` for a person (never refused).
+5. **Fairness reading**: "oldest first" is oldest ATTEMPT (`updated_at`), so a row that keeps failing cannot starve the batch.
+6. **The reconciler does not release a `listing_pay` reservation** on `expired`/`refused`; a person (or `pay-listing.mjs`) does.
+7. **Invite-only mode**: a reconciler-finished registration does not mark the invite code redeemed (legacy mode, off in production).
+8. **Pay listing's own re-send** cannot finish a claim: the reservation answers first (the reconciler is the finisher, per B5).
+9. **B1 deviation**: one extra column, `payer`; and B7 is also a table CHECK.
+10. **Hub-worded served messages changed** (F8a registration failures, listing create/pay "failed to save/recording failed") to carry B6a/B6b; the older
+    tests that type them literally were updated.
+11. **Behaviour tightening**: a paid request whose authorisation lacks a 20-byte `from`, a 32-byte `nonce` or a decimal `validBefore` is refused 400
+    before `/verify` (every real x402 client sends them).
+12. **B10 scope**: the route-table entry for `/api/register` (served at `/api/surface` and `/llms.txt`) also carries the advice; `/skill.md` is 1.0.3, so
+    the ClawHub/MCP-Registry kits staged from 1.0.2 need re-staging after the deploy.
+13. **A replay is now answered before `/verify`** on all four doors (consult-first), which also spares the facilitator's credits.
