@@ -119,3 +119,17 @@ second citizen.
   route's own rule-7 branch still does, in the request). An operator-held `paying` listing is the existing recovery surface and
   `scripts/pay-listing.mjs` reconciles it; an automatic release could race that script. A `listing_pay` claim the reconciler books is
   booked exactly as the request would have (payment row, paid flip), gated on the listing still being `paying`.
+
+### 5. The classifier (B8: L1, L3), L2's wording, test 4
+
+- `classifySettle` compares `duplicate_settlement` and `settlement_pending` after `trim()` and case-folding, at ANY status, as unknown
+  (rule 5; `duplicate_settlement` is a second branch of it, worded as its own non-verdict). Rule 7 carries the same exclusions so a
+  refusal never depends on the rules above it.
+- `SETTLE_UNKNOWN_TAIL` now ends "; do not sign again." and every unknown message uses it, including rule 3 (which had its own copy)
+  and the unreadable-/settle-body throw.
+- L2: the three `/verify` messages no longer say "nothing that could settle was sent"; they say "This server never asked the facilitator
+  to settle this payment", and the transit message adds that the request may still have been delivered (`NEVER_ASKED_TO_SETTLE`).
+- The hub-worded strings the older tests type literally (`x402.test.ts`, `x402-settle-route-d1.test.ts`) are updated to the new words.
+- `test/settlement-replay-classifier-d1.test.ts`: L1/L2/L3 units plus test 4, sixteen classifier outcomes each through the real register
+  route to their claim state (rule 4 -> booked; rule 7 -> refused; rules 1-3, 5, 6, 8, transit, unreadable -> pending; 200
+  duplicate_settlement and " Settlement_Pending " -> pending), each unknown answer ending "do not sign again".

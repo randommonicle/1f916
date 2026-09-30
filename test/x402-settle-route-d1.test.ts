@@ -292,8 +292,8 @@ test("B2 on the patron and listing-create doors: a settlement_pending /settle is
 
 // ---------- B3: the /verify answer, through the routes ----------
 
-const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.`;
-const hubVerifyFailed = (status: number, reason: string) => `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent. Try again later.`;
+const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). This server never asked the facilitator to settle this payment.`;
+const hubVerifyFailed = (status: number, reason: string) => `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). This server never asked the facilitator to settle this payment. Try again later.`;
 
 test("B3 on the register route: a 403 from /verify answers 402 naming 403 and the reason, a 503 answers 502, an invalid 200 keeps its old 402 -- and none of them reaches /settle or writes anything", async () => {
   const cases: { label: string; verify: Answer; status: number; error: string }[] = [
@@ -357,7 +357,7 @@ test("B3 on the pay route: a 403 or a 503 from /verify never reserves the listin
 const TRANSIT = "fetch failed: other side closed";
 // The hub's words, typed here rather than imported.
 const hubSettleTransit = (reason: string) => `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`;
-const hubVerifyTransit = (reason: string) => `The payment facilitator could not be reached to verify this payment (${reason}). No money moved: nothing that could settle was sent. Try again later.`;
+const hubVerifyTransit = (reason: string) => `The payment facilitator could not be reached to verify this payment (${reason}); the request may still have been delivered. This server never asked the facilitator to settle this payment. Try again later.`;
 
 function listingCreateRequest(): Request {
   const bounty = 1000;

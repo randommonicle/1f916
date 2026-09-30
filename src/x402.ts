@@ -135,8 +135,10 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   // 502, which settleOrThrow logs as x402_settle_outcome_unknown and which
   // handlePayListing answers with settlement_unconfirmed, keeping its
   // reservation. It used to escape as the runtime's own error, which the router
-  // served as a generic 500 on register, patron and listing create. Before
-  // /verify answers, nothing that could settle has been sent.
+  // served as a generic 500 on register, patron and listing create. What a /verify
+  // failure may truthfully say (gate L2, 2026-09-29): the /verify body IS the full
+  // signed authorisation, so it was sent, and "could not be reached" can follow
+  // delivery; what is true is that this server never asked the facilitator to SETTLE it.
   let res: Response;
   try {
     res = await fetch(`${env.FACILITATOR_URL}${path}`, {
@@ -149,7 +151,7 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
     if (path === "/settle") {
       throw new SocietyError(502, `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`);
     }
-    throw new SocietyError(502, `The payment facilitator could not be reached to verify this payment (${reason}). No money moved: nothing that could settle was sent. Try again later.`);
+    throw new SocietyError(502, `The payment facilitator could not be reached to verify this payment (${reason}); the request may still have been delivered. ${NEVER_ASKED_TO_SETTLE} Try again later.`);
   }
   // The facilitator answers malformed payloads with 4xx/5xx JSON; only an
   // unparseable response means it is actually down. The wording is
@@ -169,7 +171,7 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   }
   if (answer !== null && typeof answer === "object" && !Array.isArray(answer)) return { status: res.status, body: answer as Record<string, unknown> };
   if (path === "/settle") {
-    throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). The settle request was sent; whether the money moved is unknown until the chain is checked.`);
+    throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). ${SETTLE_UNKNOWN_TAIL}`);
   }
   throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`);
 }
@@ -257,7 +259,17 @@ export function assertPayloadMatchesRequirements(paymentPayload: unknown, reqs: 
 export const SETTLEMENT_PENDING = "settlement_pending";
 const FACILITATOR_REASON_MAX = 200;
 export const clipReason = (v: unknown) => (typeof v === "string" ? v : String(v)).slice(0, FACILITATOR_REASON_MAX);
-const SETTLE_UNKNOWN_TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked.";
+// Every unknown-outcome message ends with this (gate L3, B8): on register, patron and listing create there
+// is no reservation to stop a second signature, so the message is the caller's only guard, and the
+// facilitator's own quoted errorReason (up to 200 characters, F5) can say anything, "retry" included.
+const SETTLE_UNKNOWN_TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked; do not sign again.";
+// What every /verify failure may truthfully say (gate L2): the /verify request carries the whole signed
+// authorisation, so the old claim that nothing which could settle had been sent was false. This server never asked the
+// facilitator to settle it.
+const NEVER_ASKED_TO_SETTLE = "This server never asked the facilitator to settle this payment.";
+export const DUPLICATE_SETTLEMENT = "duplicate_settlement";
+// A reason compared the way B8 says: trimmed and case-folded, so " Settlement_Pending " is not a refusal.
+const foldReason = (v: unknown): string | null => (typeof v === "string" ? v.trim().toLowerCase() : null);
 // How an unknown-outcome message quotes the answer's errorReason: exactly as
 // given, never interpreted (build review round 1, F5). A message states the
 // status and this, then why the outcome is unknown, and nothing the answer did
@@ -287,7 +299,7 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
   }
   // 3. No boolean `success` (L-089; wording unchanged).
   if (typeof body.success !== "boolean") {
-    return { kind: "unknown", rule: 3, message: "The facilitator's answer to /settle was not a settlement result (no boolean success). The settle request was sent; whether the money moved is unknown until the chain is checked." };
+    return { kind: "unknown", rule: 3, message: `The facilitator's answer to /settle was not a settlement result (no boolean success). ${SETTLE_UNKNOWN_TAIL}` };
   }
   // 4. `success: true` settles on a 2xx status only.
   if (body.success === true) {
@@ -297,15 +309,28 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
     return { kind: "unknown", rule: 4, message: `The facilitator answered /settle with HTTP ${status} and success: true (${givenReason(body.errorReason)}). A success on a status other than 2xx is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}` };
   }
   const reason = body.errorReason;
+  const folded = foldReason(reason);
   // 5. settlement_pending: "It is not a verdict." On EVM `transaction` carries
-  //    the broadcast hash when the transaction was already broadcast.
-  if (reason === SETTLEMENT_PENDING) {
+  //    the broadcast hash when the transaction was already broadcast. Compared after
+  //    trim() and case-folding, at ANY status (gate L1, B8): " Settlement_Pending " and
+  //    a 400 carrying it are the same non-verdict, never a refusal.
+  if (folded === SETTLEMENT_PENDING) {
     const tx = typeof body.transaction === "string" && body.transaction.length > 0 ? body.transaction : undefined;
     return {
       kind: "unknown",
       rule: 5,
       message: `The facilitator has not yet settled this payment (settlement_pending): it may still land on-chain.${tx ? ` It reports the broadcast transaction ${tx}.` : ""} Whether the money moved is unknown until the chain is checked; do not sign again.`,
       ...(tx ? { broadcastTx: tx } : {}),
+    };
+  }
+  // 5b. duplicate_settlement: PayAI documents it only at 409 ("already in flight or has a replay
+  //     marker", rule 2), and never as a failure verdict; at any other status it is the same
+  //     non-verdict. Read as unknown, as rule 5 reads a pending answer, never as a refusal (L1, B8).
+  if (folded === DUPLICATE_SETTLEMENT) {
+    return {
+      kind: "unknown",
+      rule: 5,
+      message: `The facilitator answered /settle with HTTP ${status} and the reason duplicate_settlement: a settlement for this payment is already in flight or recorded, and that is not a settlement verdict. ${SETTLE_UNKNOWN_TAIL}`,
     };
   }
   // 6. A failure with no usable reason cannot be classified: errorReason absent,
@@ -321,7 +346,9 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
     body.success === false &&
     typeof reason === "string" &&
     reason.trim().length > 0 &&
-    ((status === 200 && reason !== SETTLEMENT_PENDING) || status === 400 || status === 401 || status === 403)
+    folded !== SETTLEMENT_PENDING &&
+    folded !== DUPLICATE_SETTLEMENT &&
+    (status === 200 || status === 400 || status === 401 || status === 403)
   ) {
     const shownReason = clipReason(reason);
     return { kind: "refused", rule: 7, status, reason: shownReason, error: `The facilitator reports that this settlement failed (HTTP ${status}, reason: ${shownReason}). By its account no money moved.` };
@@ -332,9 +359,10 @@ export function classifySettle(status: number, body: Record<string, unknown>): S
 
 // ---------- B3: classifying the /verify answer (docs/BRIEF-X402-SETTLE-HONESTY.md) ----------
 //
-// Pure, like classifySettle. When /verify answers, nothing that could settle
-// has been sent, so every refusal and failure here truthfully says no money
-// moved; what the status adds is whose answer it is. Before this wave any
+// Pure, like classifySettle. When /verify answers, this server has not asked the
+// facilitator to settle anything, and every refusal and failure here says exactly
+// that (gate L2: the /verify body is the full signed authorisation, so "nothing that
+// could settle was sent" was false); what the status adds is whose answer it is. Before this wave any
 // answer without `isValid: true` was served as 402 "payment invalid", which
 // misnamed a facilitator that refused service (4xx) or failed (5xx) as a fault
 // in the payer's signature. `/settle` is never called after rules 1, 3, 4 or 5.
@@ -364,12 +392,12 @@ export function classifyVerify(status: number, body: Record<string, unknown>): V
   }
   const reason = verifyReason(body);
   if (status >= 400 && status <= 499) { // verify: rule 4, the facilitator refused
-    return { kind: "refused", rule: 4, error: `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.` };
+    return { kind: "refused", rule: 4, error: `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). ${NEVER_ASKED_TO_SETTLE}` };
   }
   // Rule 5: a 5xx. The brief names only 2xx, 4xx and 5xx; any other final
   // status (1xx, 3xx) takes this same path, filled conservatively: it is no
-  // reason to settle, and nothing that could settle was sent.
-  return { kind: "failed", rule: 5, message: `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent. Try again later.` };
+  // reason to settle, and this server has asked it to settle nothing.
+  return { kind: "failed", rule: 5, message: `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). ${NEVER_ASKED_TO_SETTLE} Try again later.` };
 }
 
 // The /settle leg. Returns a settled or refused verdict with the body it came
