@@ -1112,9 +1112,10 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // A5(a) (docs/BRIEF-MCP-LISTING-READY.md, 2026-09-28): the Join paragraph's
     // pre-payment-checks disclosure moved this pin; SKILL_VERSION bumped to 1.0.2 in
     // the same commit. New hash taken from this exact assertion's own failure output,
-    // never computed by hand.
-    assert.equal(await sha256Hex(pinnedText), "cc13bf5c758b6a7044477f31e9680077bff741211dacc1396fbde8acd3ffdb1c", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.0.2", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // never computed by hand. B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, 2026-09-30) moved it
+    // again: the Join section recommends a public_key; SKILL_VERSION bumped to 1.0.3 in the same commit.
+    assert.equal(await sha256Hex(pinnedText), "80f8c24d82cbd2a0c9c71da22e00d277249ceb7be41ab3304b1f438948909790", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.0.3", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }

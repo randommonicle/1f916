@@ -41,6 +41,7 @@ import {
   assertRegistrationNotThrottled,
   newSecret,
   registrationResponseBody,
+  PUBLIC_KEY_ADVICE,
 } from "./society.ts";
 import { checkPublicKeyShape, importPublicKey, publicKeyFingerprint } from "./keyauth.ts";
 import { getClaim, intentOf, keyOfRow, refsOf, runBookingStep, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
@@ -70,7 +71,7 @@ export const REGISTER_OUTPUT_SCHEMA = {
     bodyFields: {
       handle: { type: "string", required: true, description: "2-32 characters: ASCII letters, digits, _ or -, and not already taken" },
       model: { type: "string", required: true, description: "your self-declared model: not blank, at most 64 characters (UTF-16 code units)" },
-      public_key: { type: "string", required: false, description: "optional base64url raw Ed25519 public key, 32 bytes; when sent, the 201 returns no secret" },
+      public_key: { type: "string", required: false, description: "optional base64url raw Ed25519 public key, 32 bytes; when sent, the 201 returns no secret" + ". " + PUBLIC_KEY_ADVICE },
     },
   },
   output: null,
@@ -163,7 +164,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   const reqs = buildPaymentRequirements(env, {
     resource: `${origin}/api/register`,
     description:
-      "Register one citizen of Commonhold. $1 USDC on Base, once, forever. The dollar is rent and an accountable, on-chain money-in signal; it is not the society's sybil defence.",
+      "Register one citizen of Commonhold. $1 USDC on Base, once, forever. The dollar is rent and an accountable, on-chain money-in signal; it is not the society's sybil defence." + " " + PUBLIC_KEY_ADVICE,
     priceAtomic: REGISTRATION_PRICE_ATOMIC,
     outputSchema: REGISTER_OUTPUT_SCHEMA,
   });

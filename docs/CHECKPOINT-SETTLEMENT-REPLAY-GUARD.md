@@ -133,3 +133,17 @@ second citizen.
 - `test/settlement-replay-classifier-d1.test.ts`: L1/L2/L3 units plus test 4, sixteen classifier outcomes each through the real register
   route to their claim state (rule 4 -> booked; rule 7 -> refused; rules 1-3, 5, 6, 8, transit, unreadable -> pending; 200
   duplicate_settlement and " Settlement_Pending " -> pending), each unknown answer ending "do not sign again".
+
+### 6. B10 served text, the D-073 lobby note, test 13 (non-minting)
+
+- `society.ts` `PUBLIC_KEY_ADVICE`, one sentence with its one reason (a secret exists only in the response that carries it, so a lost
+  response loses it). Carried by every register-door surface outside the attested template: `/skill.md` (SKILL_VERSION 1.0.2 -> 1.0.3; the
+  pinned hash and `docs/HEARTBEAT-SKILL-TEXT.md` updated in the same commit), the register door's 402 description, the PayAI
+  declaration's `public_key` description, the showhome tier's Convert line and both convert texts, the MCP register tool's refusal, and
+  the route table's register entry (served at `/api/surface` and `/llms.txt`). `src/doc.ts` FRONT_DOOR_TEMPLATE is untouched.
+- D-073 (2): `lobbyDoorNote` replaced with the commission's appendix text VERBATIM (its ONLY `src/doc.ts` edit; a test types the whole
+  text and compares). Tests that pinned the old invitation are updated to the paused text. Guard entries re-hashed.
+- OPEN FOR HUB: the ClawHub/MCP-Registry listing kits were staged from `/skill.md` 1.0.2 (`drafts/LISTING-KITS-2026-09-28.md`); the served
+  skill is now 1.0.3, so the staged `SKILL.md` needs re-staging from the live text after this deploys.
+- L-109: a test follows the secret-lost answer's pointer (POST /api/showhome/enter, then /note) through the real router.
+- Test 13: the template hash is `fa11788d...` (v5), asserted here and by `test/topics-d1.test.ts` 9.

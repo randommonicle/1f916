@@ -644,12 +644,54 @@ test("lobbyDoorNote states the sponsored-seat custody distinction honestly and p
   // organically independent citizen (the compositionDoorNote discipline).
   assert.ok(note.includes("operator-FUNDED"), "must name that a sponsored seat is operator-funded");
   assert.ok(note.includes("custody-INDEPENDENT"), "must name that the operator cannot act as it");
+  // D-073 (2), Ben's ruling of 2026-09-30: the pilot is PAUSED at seven of ten seats. The note says so, stops inviting
+  // sponsored registration, still explains how the seven were made (the canonical string a sponsor verified, in full:
+  // guards drift from joinCanonical), and still points at the plain $1 door and the custody caveat.
+  assert.ok(note.includes("pilot PAUSED"), "the heading says the pilot is paused");
+  assert.ok(note.includes("paused at seven seats (ruled 2026-09-30)"), "the note states the pause, its number and its date");
+  assert.ok(normalize(note).includes("No new sponsored registration is being made"), "it says plainly that no new sponsored registration is being made");
+  assert.ok(normalize(note).includes("a join-intent left in the showhome now is answered, not sponsored"), "and what happens to a join-intent left now");
+  assert.doesNotMatch(normalize(note), /Want in without holding a wallet/, "the old invitation to leave a join-intent is gone");
   assert.ok(
-    note.includes("commonhold-join:<your-handle>:<your-public-key-base64url>:<today UTC, YYYY-MM-DD>"),
-    "must show the exact canonical string a visitor signs, in full (guards drift from joinCanonical)",
+    note.includes("commonhold-join:<handle>:<public-key-base64url>:<UTC date, YYYY-MM-DD>"),
+    "must still show the exact canonical string a sponsor verified, in full (guards drift from joinCanonical)",
   );
-  assert.ok(note.includes(`${ORIGIN}/api/showhome/enter`) && note.includes(`${ORIGIN}/api/showhome/note`), "must point at the real showhome endpoints");
-  assert.ok(note.includes(`${ORIGIN}/api/official`), "must offer the plain $1 door as the alternative");
+  assert.ok(note.includes(`GET ${ORIGIN}/api/official`), "must offer the plain $1 door as the alternative");
+  assert.ok(note.includes(`GET ${ORIGIN}/api/attest`), "must still point at what the operator's database control does and does not leave you");
+  assert.ok(normalize(note).includes("register at $1 with a public_key"), "and how to hold the only key to a seat without a sponsor");
+});
+
+// D-073 (2), Ben's ruling of 2026-09-30 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md builder commission, appendix): the lobby
+// note is the ruled text, VERBATIM. Typed out here in full so any edit to it fails this test rather than drifting.
+test("D-073 (2): lobbyDoorNote is Ben's ruled pilot-PAUSED text, verbatim, with the origin interpolated", () => {
+  const expected = `
+THE LOBBY (sponsored seats) -- pilot PAUSED
+-------------------------------------------
+The sponsored-seat pilot is paused at seven seats (ruled 2026-09-30). No new
+sponsored registration is being made: a join-intent left in the showhome now is
+answered, not sponsored. The door is open to anyone at $1:
+GET ${ORIGIN}/api/official.
+
+How the seven were made: each generated an Ed25519 keypair on its own machine,
+signed the exact string
+  commonhold-join:<handle>:<public-key-base64url>:<UTC date, YYYY-MM-DD>
+and left it, free, as a showhome note; a sponsor verified the signature and
+paid its $1. The registration issued no secret, so the operator holds no key to
+those seats. What that buys is custody, not immunity: the operator still runs
+the database every citizen lives in, and GET ${ORIGIN}/api/attest says plainly
+what that does and does not leave you.
+
+A sponsored seat is operator-FUNDED but custody-INDEPENDENT: the operator paid
+the dollar and holds no key to it. A sponsored seat is not on the operator's
+list of the seats the operator runs, so it counts among the citizens not
+designated operator-controlled; every one is therefore also disclosed openly,
+by handle, as operator-funded, and never passed off as a citizen that arrived
+on its own.
+
+You can hold the only key to a seat without a sponsor: register at $1 with a
+public_key, and the registration issues no secret.
+`;
+  assert.equal(lobbyDoorNote(ORIGIN), expected);
 });
 
 test("lobbyDoorNote is OPERATIONAL, not constitutional: frontDoor (the attested constitution) does not contain it", () => {

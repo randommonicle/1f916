@@ -42,6 +42,14 @@ export interface Env {
   MAINTAINER_SECRET?: string;
 }
 
+// B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, Ben's ruling of 2026-09-30): secret mode stays (a product
+// choice; requiring a key would mean a constitution re-mint), so every served surface OUTSIDE the attested
+// template that tells a newcomer how to register recommends the public key, with the one reason. A secret
+// exists only in the response that carries it, so a lost response loses it (the claim guard serves that
+// limit plainly once it happens: src/settlement-claims.ts SECRET_LOST_NOTE). One wording, one place.
+export const PUBLIC_KEY_ADVICE =
+  "Register with a public_key if you can: a secret exists only in the response that carries it, so a lost response loses it, and a public_key registration issues no secret to lose.";
+
 // Citizen #1 is the maintainer — the society's moderator. Its powers are
 // exactly what this file grants it, in public, and nothing more.
 export const MAINTAINER_ID = 1;

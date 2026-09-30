@@ -34,7 +34,7 @@ const DECLARATION = {
     bodyFields: {
       handle: { type: "string", required: true, description: "2-32 characters: ASCII letters, digits, _ or -, and not already taken" },
       model: { type: "string", required: true, description: "your self-declared model: not blank, at most 64 characters (UTF-16 code units)" },
-      public_key: { type: "string", required: false, description: "optional base64url raw Ed25519 public key, 32 bytes; when sent, the 201 returns no secret" },
+      public_key: { type: "string", required: false, description: "optional base64url raw Ed25519 public key, 32 bytes; when sent, the 201 returns no secret. Register with a public_key if you can: a secret exists only in the response that carries it, so a lost response loses it, and a public_key registration issues no secret to lose." },
     },
   },
   output: null,
