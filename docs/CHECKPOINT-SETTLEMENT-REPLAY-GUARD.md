@@ -354,3 +354,10 @@ Run by the hub against the scratch D1 `commonhold-migtest` only (prod untouched)
   reservation, 0 claims, 0 settles, the wording names "nothing was sent to the facilitator's /settle" and never "may have moved", one log line, and the funder can pay once the
   database is healthy; registration answers the same 503 with no citizen and the same signed header registers afterwards.
 - Red-proofs (3, restored): the throw not caught (old behaviour); the answer saying the money may have moved; the reservation not released on the not-sent path. All red.
+
+### L2. Routes test 3 proves the lease (gate G1)
+
+- `test/settlement-replay-routes-d1.test.ts` test 3 now carries the chain stub the gate describes (`rpc: () => authStateAnswer(false)`) and asserts the loser made no RPC
+  call. A loser that meets the pending claim with no live lease would now re-check the chain (unused, authorisation still valid) and re-POST `/settle`: a second settle, a second
+  booking. Red-proof: `takeClaim` inserting a NULL lease (the gate's mutant G1) now turns THIS test red (alone, run on its own file); before, it stayed green and only the two
+  primitive tests noticed.

@@ -31,6 +31,7 @@ import {
   registerReq,
   stubFacilitator,
   testEnv,
+  authStateAnswer,
 } from "./helpers/settlement-harness.ts";
 import { freshNonce } from "./helpers/x402-payload.ts";
 
@@ -133,7 +134,11 @@ test("2. a divergent request reusing one (from, nonce): 409, no /settle. A secon
 
 test("3. two concurrent requests with one header: exactly one reaches /settle, one citizen, one ledger line", async () => {
   const d1 = createLocalD1();
-  const stub = stubFacilitator({ verifyDelayMs: 15, settleDelayMs: 40 });
+  // L2 (gate, 2026-09-30): the chain stub is what makes this test prove the LEASE. A loser that meets the pending claim with NO live lease
+  // would re-check the chain (unused, authorisation still valid) and re-POST /settle, a second settle and a second booking; with a live lease
+  // it is told the outcome is in flight and asks nobody. Without any RPC stub the loser's chain read simply failed, so "exactly one reaches
+  // /settle" held even when the taker held no lease (mutant G1 of the gate record: takeClaim inserting leased_until = NULL stayed green).
+  const stub = stubFacilitator({ verifyDelayMs: 15, settleDelayMs: 40, rpc: () => authStateAnswer(false) });
   try {
     const header = registerHeader();
     const body = { handle: "raced", model: "m" };
@@ -144,6 +149,7 @@ test("3. two concurrent requests with one header: exactly one reaches /settle, o
     const loser = a.status === 201 ? b : a;
     assert.equal(loser.status, 502, "the other is told the outcome is in flight, not refused as a stranger");
     assert.match(String((await json(loser)).error), /do not sign again/i);
+    assert.equal(stub.rpcUrls.length, 0, "and, holding no lease, the loser did not even re-check the chain");
     assert.equal(count(d1, "citizens"), 1);
     assert.equal(count(d1, "ledger"), 1);
     assert.equal(oneClaim(d1).state, "booked");
