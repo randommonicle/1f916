@@ -68,6 +68,11 @@ export const PAYMENT_AUTHORIZATION_MALFORMED = "payment_authorization_malformed"
 export const SETTLEMENT_CLAIM_CONFLICT = "settlement_claim_conflict";
 export const SETTLEMENT_ALREADY_BOOKED = "settlement_already_booked";
 export const SETTLEMENT_UNRESOLVED = "settlement_unresolved";
+// F1 (hub ruling, 2026-09-30): a registration whose handle was taken by a DIFFERENT seat between settlement and the
+// citizen write can never be booked by any retry. The claim stays settled_unbooked (B2 has no other transition) and
+// carries this permanent reason; the reconciler skips such rows and every answer for one says so plainly.
+export const CLAIM_HANDLE_TAKEN = "handle_taken";
+export const REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT = "registration_handle_taken_after_payment";
 
 // ---------- identity ----------
 
@@ -266,6 +271,19 @@ export async function noteUnknown(env: Env, key: ClaimKey, reason: string, owner
     .run();
 }
 
+// settled_unbooked -> (same state, permanent reason): the citizen write met a handle another seat now holds. True only for
+// the call that FIRST recorded the reason, so the one log line is written once. Clears the lease.
+export async function markHandleTaken(env: Env, key: ClaimKey, now: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND verdict_reason IS NULL`,
+  )
+    .bind(CLAIM_HANDLE_TAKEN, now, ...keyArgs(key))
+    .run();
+  return r.meta.changes === 1;
+}
+
+export const isHandleTaken = (row: Pick<ClaimRow, "state" | "verdict_reason">): boolean => row.state === "settled_unbooked" && row.verdict_reason === CLAIM_HANDLE_TAKEN;
+
 // ---------- booking: one step, one batch ----------
 
 export interface BookingStep {
@@ -354,6 +372,14 @@ const txPart = (row: ClaimRow) => (row.tx ? ` (tx ${row.tx})` : "");
 export const RECONCILE_BACKSTOP =
   "The society re-checks every unresolved payment once a day, at its 06:00 UTC run, so this resolves by the next one at the latest; repeating this identical request re-checks it sooner.";
 
+// F1: what a payer is told when the handle was lost after payment. It names the tx and the handle, says the payment
+// settled, says plainly that re-sending cannot book it and is not needed, and invites no new signature: the way out
+// is the maintainer, by a free showhome note.
+export function handleTakenMessage(row: Pick<ClaimRow, "intent_json" | "tx" | "route">): string {
+  const i = JSON.parse(row.intent_json) as { handle?: unknown };
+  return `Your $1.00 payment settled (tx ${row.tx ?? "unknown"}), but the handle "${String(i.handle)}" was taken by another seat before this registration could be written, so no seat was created for you. Re-sending this request cannot book it and is not needed. Do not sign again: this payment has already moved. Reach the maintainer with this tx by a free showhome note: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
+}
+
 export function claimIsSecretRegistration(row: ClaimRow): boolean {
   return row.route === "register" && intentOf(row).public_key == null;
 }
@@ -409,6 +435,7 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
         },
       };
     case "settled_unbooked":
+      if (isHandleTaken(row)) return { status: 409, body: { error: handleTakenMessage(row), code: REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT } };
       return {
         status: 500,
         body: {

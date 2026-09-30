@@ -32,7 +32,7 @@ import { attemptPending, finishPatronBooking, clipReason } from "./x402.ts";
 import { finishRegistration } from "./register-gate.ts";
 import { finishListingCreateBooking, finishPayListingBooking } from "./listings.ts";
 import { INVOCATION_SUBREQUEST_BUDGET, FINALISE_RESERVE } from "./maintainer/budget.ts";
-import { acquireLease, keyOfRow, releaseLease, type ClaimRow } from "./settlement-claims.ts";
+import { acquireLease, keyOfRow, releaseLease, CLAIM_HANDLE_TAKEN, type ClaimRow } from "./settlement-claims.ts";
 import type { Env } from "./society.ts";
 
 // At most this many rows are worked in one run (a fixed batch).
@@ -117,11 +117,12 @@ export async function runReconciler(env: Env, priorCost = 0): Promise<ReconcileR
   }
   const now = Date.now();
   // Oldest attempt first (acquiring a lease moves updated_at, so a row that keeps failing goes to the
-  // back rather than starving the rest), skipping rows another holder is working.
+  // back rather than starving the rest), skipping rows another holder is working and (F1) rows whose
+  // handle another seat took after payment, which no retry can ever book.
   const { results } = await env.DB.prepare(
-    `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?) ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
+    `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?) AND (verdict_reason IS NULL OR verdict_reason <> ?) ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
   )
-    .bind(now, RECONCILE_BATCH_ROWS)
+    .bind(now, CLAIM_HANDLE_TAKEN, RECONCILE_BATCH_ROWS)
     .all<ClaimRow>();
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };

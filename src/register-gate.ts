@@ -44,7 +44,19 @@ import {
   PUBLIC_KEY_ADVICE,
 } from "./society.ts";
 import { checkPublicKeyShape, importPublicKey, publicKeyFingerprint } from "./keyauth.ts";
-import { getClaim, intentOf, keyOfRow, refsOf, runBookingStep, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
+import {
+  getClaim,
+  intentOf,
+  keyOfRow,
+  refsOf,
+  runBookingStep,
+  isHandleTaken,
+  markHandleTaken,
+  handleTakenMessage,
+  RECONCILE_BACKSTOP,
+  REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT,
+  type ClaimRow,
+} from "./settlement-claims.ts";
 
 const REGISTRATION_PRICE_ATOMIC = "1000000"; // $1.00, USDC has 6 decimals -- independent of x402.ts's patron price
 // Exported (heartbeat-inbox wave, step (b)): /skill.md renders its stated price from this
@@ -273,6 +285,8 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
   const intent = intentOf(row) as { handle: string; model: string; public_key: string | null };
   const publicKey = typeof intent.public_key === "string" ? intent.public_key : null;
   const secretMode = publicKey === null;
+  // F1: a claim whose handle another seat took after payment can never be booked; it is answered, never re-attempted.
+  if (isHandleTaken(row)) throw new SocietyError(409, handleTakenMessage(row), REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT);
   if (secretMode && !opts.deliver) return { done: false, reason: "awaiting_identical_resend" };
 
   assertValidHandle(intent.handle);
@@ -383,6 +397,27 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
     }
     body = registrationResponseBody(citizenId, intent.handle, publicKey, secret ?? "");
   } catch (e) {
+    // F1: the citizen write met a handle another seat now holds (citizens.handle is UNIQUE). No retry can ever book it, so the reason
+    // is recorded on the claim (the reconciler skips such rows), ONE log line is written when it is first recorded, and the answer
+    // says what happened instead of inviting a re-send that cannot succeed.
+    if (citizenId == null && String(e instanceof Error ? e.message : e).includes("citizens.handle")) {
+      if (await markHandleTaken(env, key, Date.now())) {
+        console.log(
+          JSON.stringify({
+            level: "error",
+            event: "registration_handle_taken_after_payment",
+            payer,
+            tx,
+            amount_cents: REGISTRATION_PRICE_CENTS,
+            handle_attempted: String(intent.handle ?? ""),
+            ledger_receipt: sealed.hash,
+            claim_from: row.from_addr,
+            claim_nonce: row.nonce,
+          }),
+        );
+      }
+      throw new SocietyError(409, handleTakenMessage(row), REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT);
+    }
     // Structured, not just thrown: the maintainer's wake reads logs, not
     // whichever payer's client happened to be watching the response.
     console.log(

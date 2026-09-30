@@ -209,31 +209,48 @@ does not exist in `ROUTES` is unreachable by it, and the router has none that to
 
 ## OPEN FOR HUB (collected)
 
-1. **Real D1 is unproven for four things**: `last_insert_rowid()`, `changes()` and `json_set` inside one D1 batch (the claim's reference update), and the
+1. RULED: accepted. **Real D1 is unproven for four things**: `last_insert_rowid()`, `changes()` and `json_set` inside one D1 batch (the claim's reference update), and the
    `metered` facade over D1's host statement objects. Local SQLite and real D1 are the same engine, and governance already relies on `changes() = 1`
    in a batch on prod, but only a scratch-D1 rehearsal (L-016) proves it. Suggest: rehearse migration 0017 and one register claim on the scratch D1 before
    the deploy.
-2. **A handle lost to a race after payment** leaves the claim `settled_unbooked` forever (B2: "No other transitions"); the reconciler retries daily and logs.
-3. **Expiry margin** (deviation): `expired` needs `now > valid_before + 300 s`, not `now > valid_before`.
-4. **Chain spent + facilitator refusal** contradict: the row stays `pending` for a person (never refused).
-5. **Fairness reading**: "oldest first" is oldest ATTEMPT (`updated_at`), so a row that keeps failing cannot starve the batch.
-6. **The reconciler does not release a `listing_pay` reservation** on `expired`/`refused`; a person (or `pay-listing.mjs`) does.
-7. **Invite-only mode**: a reconciler-finished registration does not mark the invite code redeemed (legacy mode, off in production).
-8. **Pay listing's own re-send** cannot finish a claim: the reservation answers first (the reconciler is the finisher, per B5).
-9. **B1 deviation**: one extra column, `payer`; and B7 is also a table CHECK.
-10. **Hub-worded served messages changed** (F8a registration failures, listing create/pay "failed to save/recording failed") to carry B6a/B6b; the older
+2. RULED: fix (F1, below). **A handle lost to a race after payment** leaves the claim `settled_unbooked` forever (B2: "No other transitions"); the reconciler retries daily and logs.
+3. RULED: accepted. **Expiry margin** (deviation): `expired` needs `now > valid_before + 300 s`, not `now > valid_before`.
+4. RULED: accepted. **Chain spent + facilitator refusal** contradict: the row stays `pending` for a person (never refused).
+5. RULED: accepted. **Fairness reading**: "oldest first" is oldest ATTEMPT (`updated_at`), so a row that keeps failing cannot starve the batch.
+6. RULED: fix (F2, below). **The reconciler does not release a `listing_pay` reservation** on `expired`/`refused`; a person (or `pay-listing.mjs`) does.
+7. RULED: accepted. **Invite-only mode**: a reconciler-finished registration does not mark the invite code redeemed (legacy mode, off in production).
+8. RULED: stands as a named limit; F4 makes the served text say so (no repeat clause on listing_pay). **Pay listing's own re-send** cannot finish a claim: the reservation answers first (the reconciler is the finisher, per B5).
+9. RULED: accepted. **B1 deviation**: one extra column, `payer`; and B7 is also a table CHECK.
+10. RULED: accepted. **Hub-worded served messages changed** (F8a registration failures, listing create/pay "failed to save/recording failed") to carry B6a/B6b; the older
     tests that type them literally were updated.
-11. **Behaviour tightening**: a paid request whose authorisation lacks a 20-byte `from`, a 32-byte `nonce` or a decimal `validBefore` is refused 400
+11. RULED: accepted. **Behaviour tightening**: a paid request whose authorisation lacks a 20-byte `from`, a 32-byte `nonce` or a decimal `validBefore` is refused 400
     before `/verify` (every real x402 client sends them).
-12. **B10 scope**: the route-table entry for `/api/register` (served at `/api/surface` and `/llms.txt`) also carries the advice; `/skill.md` is 1.0.3, so
+12. RULED: accepted. **B10 scope**: the route-table entry for `/api/register` (served at `/api/surface` and `/llms.txt`) also carries the advice; `/skill.md` is 1.0.3, so
     the ClawHub/MCP-Registry kits staged from 1.0.2 need re-staging after the deploy.
-13. **A replay is now answered before `/verify`** on all four doors (consult-first), which also spares the facilitator's credits.
-14. **Priority on a tight day (budget).** The reconciler runs right after the sweep and BEFORE the concierge, so it can shed the concierge: before this wave a
+13. RULED: accepted. **A replay is now answered before `/verify`** on all four doors (consult-first), which also spares the facilitator's credits.
+14. RULED: fix (F3, below). **Priority on a tight day (budget).** The reconciler runs right after the sweep and BEFORE the concierge, so it can shed the concierge: before this wave a
     2-due-proposal day left the concierge 21 + 16 + 2 = 39 (it ran); now 21 + one worst reconcile row 17 = 38 and `canAffordConcierge(38)` is 38 + 16 + 2 = 56 > 50
     (shed). The existing comment in `index.ts` gives the concierge "first claim" on a tight day; the brief calls the reconciler a backstop that can wait. The
     measured proof (48 of 50) is correct for the order built. Alternative, NOT built because it changes a measured proof and the priority is the hub's call:
     run the reconciler between the concierge and the clerk using `concierge.actualCost`; on that day the reconciler sheds and waits 24 hours.
-15. (nit) `respondToExistingClaim`'s pending branch answers "another attempt is in progress" when `acquireLease` returns null because the row went terminal between
+15. RULED: accepted. (nit) `respondToExistingClaim`'s pending branch answers "another attempt is in progress" when `acquireLease` returns null because the row went terminal between
     the read and the lease; the payer's next identical re-send meets consult-first and gets the terminal answer.
-16. `register()` in `society.ts` is now uncalled by any route (register-gate books through `finishRegistration`); it stays exported for the tests that create
+16. RULED: accepted. `register()` in `society.ts` is now uncalled by any route (register-gate books through `finishRegistration`); it stays exported for the tests that create
     fixtures with it, and the offender scan (`register-gate.test.ts`) still holds. Dead code to retire in a later wave.
+
+## Fix pass (hub rulings of 2026-09-30)
+
+The hub ruled on the list above (RULED marks inline). Accepted as named limits, no code change: 1 (the hub rehearses on a scratch D1), 3, 4, 5, 7 (dormant), 9, 10, 11,
+12 (the hub re-stages the listing kits), 13, 15, 16. Fixes F1-F4 follow, one commit each.
+
+### F1. A handle lost to another seat AFTER payment (item 2)
+
+- The finisher recognises the citizen write's UNIQUE failure on `citizens.handle` (only possible when this claim has not yet created its citizen), records
+  `verdict_reason = 'handle_taken'` on the claim (state stays `settled_unbooked`, per B2 no new transition), writes ONE `registration_handle_taken_after_payment`
+  log line when the reason is first recorded (the generic `registration_paid_but_failed` line is not also written), and answers 409
+  `registration_handle_taken_after_payment`: the payment settled, the tx, the handle, taken by another seat before this registration could be written, re-sending
+  cannot book it and is not needed, do not sign again, reach the maintainer with the tx by a free showhome note (POST /api/showhome/enter, then /note).
+- The reconciler's SELECT excludes rows with that reason (no daily budget spent on them). `respondToExistingClaim` answers an identical re-send (consult-first or at
+  the INSERT) from the claim, never re-attempting, even if the handle is free again; `finishRegistration` refuses such a row too (defence in depth).
+- Tests (`test/settlement-replay-fixes-d1.test.ts`): the wording; the recorded reason, one log line, no generic line; the reconciler skips it; an identical re-send
+  gets the same answer with no citizen created and no second log line; both modes; following the showhome instruction through the real router (L-109).

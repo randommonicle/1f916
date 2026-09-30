@@ -21,6 +21,7 @@ import {
   claimKeyFromPayload,
   claimResponse,
   getClaim,
+  isHandleTaken,
   keyOfRow,
   markExpired,
   markRefused,
@@ -624,6 +625,8 @@ async function quietly(step: string, fn: () => Promise<unknown>): Promise<void> 
 // lease (B5); a live lease held by another worker is named, not raced.
 async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolean, reqs: PaymentRequirements, claim: PaidClaim): Promise<Response> {
   if (!identical) return claimResponse(claimAnswer(row, false, reqs));
+  // F1: a registration whose handle was taken after payment is answered, never re-attempted (no retry can book it).
+  if (isHandleTaken(row)) return claimResponse(claimAnswer(row, true, reqs));
   if (row.state === "settled_unbooked") {
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
