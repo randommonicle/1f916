@@ -285,6 +285,22 @@ test("7g. the payer's identical re-send on a pending claim runs ONE attempt itse
   }
 });
 
+test("7h. chain says USED although validBefore passed long ago: NOT expired; the money moved before it lapsed, so the stored body is re-POSTed and booked (the chain decides, not the clock)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: bothRpcs(true) });
+  try {
+    const seat = await pendingRegistration(d1, { validBefore: "1000" });
+    assert.equal((await seat.send()).status, 502);
+    const out = await runReconciler(testEnv(d1));
+    assert.equal(out.booked, 1);
+    assert.equal(oneClaim(d1).state, "booked", "a spent authorisation past its validBefore is booked, never called expired");
+    assert.equal(count(d1, "citizens"), 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 // ---------- 8. the lease ----------
 
 test("8. a live lease blocks a second worker; an expired lease does not; a re-send meets a live lease with 'in progress'", async () => {
@@ -407,41 +423,66 @@ test("11. rpc_body is NULL on every terminal row and appears in NO route's respo
 
 test("14. a failing row never stops the rows after it: one log line per failure, a fixed batch of RECONCILE_BATCH_ROWS, and the failing row goes to the back", async () => {
   const d1 = createLocalD1();
-  const stub = stubFacilitator({ settle: (n) => (n <= 3 ? pendingAnswer() : settledAnswer()), rpc: (_url, n) => authStateAnswer(n >= 0) });
+  const stub = stubFacilitator({ settle: (n) => (n <= 4 ? pendingAnswer() : settledAnswer()), rpc: bothRpcs(true) });
   try {
-    // Three claims, oldest attempt first: A (settled, but its booking can never succeed), B (pending; the chain says used, so it re-POSTs and books), C (pending, beyond this run's batch).
-    const a = await pendingRegistration(d1, { handle: "row-a", validBefore: "1000" });
-    const b = await pendingRegistration(d1, { handle: "row-b", validBefore: "1000" });
+    // Four claims, oldest attempt first: A (settled, but its booking can never succeed), B (pending; the chain says used, so it re-POSTs and
+    // books), C and D (pending, beyond the first run's batch of two).
+    const a = await pendingRegistration(d1, { handle: "row-a" });
+    const b = await pendingRegistration(d1, { handle: "row-b" });
     const c = await pendingRegistration(d1, { handle: "row-c" });
-    for (const seat of [a, b, c]) assert.equal((await seat.send()).status, 502);
-    const byHeader = (h: string) => claimKeyFromPayload(JSON.parse(atob(h)), REQS).key.nonce;
-    d1.raw.prepare("UPDATE settlement_claims SET updated_at = 1000 WHERE nonce = ?").run(byHeader(a.header));
-    d1.raw.prepare("UPDATE settlement_claims SET updated_at = 2000 WHERE nonce = ?").run(byHeader(b.header));
-    d1.raw.prepare("UPDATE settlement_claims SET updated_at = 3000 WHERE nonce = ?").run(byHeader(c.header));
-    assert.equal(count(d1, "settlement_claims"), 3);
-    // A is already settled_unbooked and its booking can never succeed (the citizen insert is refused).
-    d1.raw.prepare("UPDATE settlement_claims SET state = 'settled_unbooked', tx = ?, payer = ? WHERE nonce = ?").run(TX, TEST_PAYER, byHeader(a.header));
+    const d = await pendingRegistration(d1, { handle: "row-d" });
+    for (const seat of [a, b, c, d]) assert.equal((await seat.send()).status, 502);
+    const nonce = (h: string) => claimKeyFromPayload(JSON.parse(atob(h)), REQS).key.nonce;
+    [a, b, c, d].forEach((seat, i) => d1.raw.prepare("UPDATE settlement_claims SET updated_at = ? WHERE nonce = ?").run(1000 * (i + 1), nonce(seat.header)));
+    assert.equal(count(d1, "settlement_claims"), 4);
+    // A's booking can never succeed: its citizen insert is refused.
+    d1.raw.prepare("UPDATE settlement_claims SET state = 'settled_unbooked', tx = ?, payer = ? WHERE nonce = ?").run(TX, TEST_PAYER, nonce(a.header));
     d1.raw.exec("CREATE TRIGGER no_row_a BEFORE INSERT ON citizens WHEN NEW.handle = 'row-a' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    const stateOf = (h: string) => (d1.raw.prepare("SELECT state FROM settlement_claims WHERE nonce = ?").get(nonce(h)) as { state: string }).state;
 
     assert.equal(RECONCILE_BATCH_ROWS, 2);
     const { value: first, lines } = await captureLog(() => runReconciler(testEnv(d1)));
-    assert.equal(first.examined, 2, "a fixed batch: two rows this run, not three");
+    assert.equal(first.examined, 2, "a fixed batch: two rows this run, not four");
     assert.equal(first.failed, 1, "row A failed");
     const failures = eventLines(lines, "settlement_reconcile_row_failed");
     assert.equal(failures.length, 1, "one log line per row failure");
     assert.equal(failures[0].route, "register");
-    assert.equal(failures[0].claim_nonce, byHeader(a.header));
+    assert.equal(failures[0].claim_nonce, nonce(a.header));
     assert.equal(JSON.stringify(failures[0]).includes("paymentPayload"), false, "the line never carries the body");
-    const rows = d1.raw.prepare("SELECT nonce, state FROM settlement_claims").all() as { nonce: string; state: string }[];
-    const state = (h: string) => rows.find((r) => r.nonce === byHeader(h))?.state;
-    assert.notEqual(state(b.header), "pending", "row B, after the failing row, was still worked");
-    assert.equal(state(c.header), "pending", "row C is beyond this run's batch and untouched");
+    assert.equal(stateOf(b.header), "booked", "row B, after the failing row, was still worked");
+    assert.equal(stateOf(c.header), "pending", "rows C and D are beyond this run's batch and untouched");
+    assert.equal(stateOf(d.header), "pending");
 
-    // Fairness: the failing row A was just attempted, so it is now behind C.
-    const second = await runReconciler(testEnv(d1));
-    const rows2 = d1.raw.prepare("SELECT nonce, state FROM settlement_claims").all() as { nonce: string; state: string }[];
-    assert.notEqual(rows2.find((r) => r.nonce === byHeader(c.header))?.state, "pending", "C is reached on the next run, ahead of the row that keeps failing");
-    assert.ok(second.examined >= 1);
+    // Fairness: A was just attempted, so it is behind C and D. Oldest-by-creation would pick A again (and fail again) ahead of them.
+    const { value: second, lines: secondLines } = await captureLog(() => runReconciler(testEnv(d1)));
+    assert.equal(second.failed, 0, "the row that keeps failing was not retried ahead of the rows that have waited");
+    assert.equal(eventLines(secondLines, "settlement_reconcile_row_failed").length, 0);
+    assert.equal(stateOf(c.header), "booked", "C is reached on the second run");
+    await runReconciler(testEnv(d1));
+    assert.equal(stateOf(d.header), "booked", "and D on the next: nothing starves behind the failing row");
+    assert.equal(stateOf(a.header), "settled_unbooked", "and A is still there for a person");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("budget: a second worst-case row is SHED, not started (the ceiling), and waits for the next run", async () => {
+  const d1 = createLocalD1();
+  // Each row reads the chain through four RPCs (the first two unreachable), the worst case: 17 subrequests with the select.
+  const stub = stubFacilitator({ settle: (n) => (n <= 2 ? pendingAnswer() : settledAnswer()), rpc: (_u, n) => (n % 4 < 2 ? null : authStateAnswer(true)) });
+  try {
+    const one = await pendingRegistration(d1, { handle: "heavy-one" });
+    const two = await pendingRegistration(d1, { handle: "heavy-two" });
+    assert.equal((await one.send()).status, 502);
+    assert.equal((await two.send()).status, 502);
+    const { value: out, lines } = await captureLog(() => runReconciler(testEnv(d1)));
+    assert.equal(out.examined, 1, "the second row's worst case would pass the ceiling");
+    assert.equal(out.booked, 1);
+    assert.ok(out.actualCost <= RECONCILE_SUBREQUEST_CEILING, `${out.actualCost} <= ${RECONCILE_SUBREQUEST_CEILING}`);
+    assert.equal(eventLines(lines, "settlement_reconcile_shed").length, 1, "the shed is loud");
+    assert.equal(count(d1, "settlement_claims WHERE state = 'pending'"), 1, "the shed row is still pending");
+    assert.equal((await runReconciler(testEnv(d1))).booked, 1, "and is booked on the next run");
   } finally {
     stub.restore();
     d1.close();
