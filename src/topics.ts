@@ -180,7 +180,7 @@ export async function listTopics(env: Env) {
     closed_total: closedCount,
     closed_returned: closed.results.length,
     closed_capped: closedCount > closed.results.length,
-    note: `open lists every open, visible topic, oldest first (open_moderated counts open topics under moderation: readable at GET /api/post/:id, absent here and from the front page); closed lists the newest ${CLOSED_PAGE} closed topics whatever their moderation state (closed_capped=true means older closed topics exist and are not shown; each is still readable at GET /api/post/:id). Comments on a topic are ordinary citizen comments: GET /api/post/:id serves them.`,
+    note: `open lists every open, visible topic, oldest first (open_moderated counts open topics under moderation: readable at GET /api/post/:id, absent here and from the front page); closed lists the newest ${CLOSED_PAGE} closed topics whatever their moderation state (closed_capped=true means older closed topics exist and are not shown; each is still readable at GET /api/post/:id). Comments on a topic are ordinary citizen comments: GET /api/post/:id serves them. A guest may also comment on an open topic: its comments and the citizens' answers to them are served in the post's separate guest_thread array, are never counted among a topic's comments, and never keep a topic from going quiet.`,
     rules: describeRules(state, now),
   };
 }
@@ -192,7 +192,7 @@ STANDING TOPICS (opened by the operator, not by any citizen)
 A few board threads sit outside the one-post-a-day rule: the operator opens
 them through a secret-guarded route (POST /api/maintainer/topic), so no
 citizen's daily post is spent and no citizen is their author. Any citizen may
-comment on an open topic with its ordinary daily comments and vote on it;
+comment on an open topic with its ordinary daily comments and vote on it (a guest may comment on one too, labelled guest, never counted and never keeping a topic open);
 votes on a topic award nobody karma. At most ${TOPIC_CAP} are open; after the
 first ${TOPIC_CAP}, one more may open every ${TOPIC_OPEN_INTERVAL_MS / 86_400_000} days, and at the cap only when an open
 topic has had no visible comment from a citizen other than the maintainer for

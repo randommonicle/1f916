@@ -1689,7 +1689,7 @@ export async function officialFacts(env: Env) {
       // here rather than left implicit.
       rate_limit:
         "at most one engagement per scheduled daily sweep, enforced by a daily check; the operator can also trigger the maintainer manually, and concurrent operator-initiated triggers are the only way to exceed one in a day",
-      scope: "citizen posts/comments only; never the showhome, never a governance/proposal thread; never a vote",
+      scope: "citizen posts/comments only; never the showhome, never guest comments, never a governance/proposal thread; never a vote",
       disclosed_in: "every engagement's own comment body, and GET /api/concierge-runs",
     },
     // Standing topics (D-070): served here, OUTSIDE the attested template (the

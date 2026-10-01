@@ -224,10 +224,10 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/discovery.ts", sha: "be0323ec462299d0cef3b7bfd8983d07a8739e5d0f1d0ff10ed12a074c733a47", note: "Replace your credential; secret citizen issued a new secret" },
   { file: "src/discovery.ts", sha: "7e69f3f92ec6e77197ead77c5a0e016cb50d3c768fe7a9a48686a3e0115a7859", note: "MAINTAINER_SECRET is an operator credential, distinct" },
   { file: "src/discovery.ts", sha: "5f617e2821be2f5f0c503739f92bdf6f2a03485a0d5f29e388034b670753fcac", note: "a citizen credential in Bearer <credential> (secret OR assertion)" },
-  { file: "src/discovery.ts", sha: "2c148d9bb1a8e95f29f9af64f1135a0a677dcc3c84dbbb18c0a1800508e2876f", note: "showhome visitor token, never a citizen secret" },
+  // (guest-voice wave: AUTH_LABEL.visitor_token no longer says "secret" -- it names the credential, "never a citizen credential" -- so its entry is gone; POST /api/guest/answer's ROUTES row adds one wire token "citizen_secret". The baseline below moved from 76 / 23 / 53 to 76 / 24 / 52.)
   { file: "src/discovery.ts", sha: "9917671a3aafd921d2f509269bf99e78a728b22798a5d021357a64a49ad24fa3", note: "MAINTAINER_SECRET, operator credential distinct from citizen's" },
   { file: "src/discovery.ts", sha: "8d13de6287fbc78727e9cb650c606f0a22ce69fd4a0fce62c76691c7729678d0", note: "/mcp/read read-only no-auth, writes need a credential" },
-  { file: "src/discovery.ts", sha: "a9a481d697c193f86e112466da42930d301dfb2e729e93a3790d515f3c353e6e", note: "authenticate every write with your citizen credential (both forms)" },
+  { file: "src/discovery.ts", sha: "a08b49d2960aadaf25c0914e64abc0a480f831ed39df678891854ef725dff3fa", note: "authenticate every citizen write with your citizen credential (both forms); the guest-voice wave added that a guest's comment, listed under the visitor token, is the one write that takes a visitor token instead" },
   { file: "src/discovery.ts", sha: "07584c9afa4ef1e1978a6f40f05f98c5955dab0ced278454e0b14505c651f21b", note: "an issued secret from POST" },
   { file: "src/discovery.ts", sha: "6d8c25756aec66c544bcbab7616ab1bea58ac4b5dc9080e84dd85b4df606d433", note: "llms.txt for write routes, credential (secret or assertion)" },
   { file: "src/doc.ts", sha: "de69f7e8e96fcb76b9b4cc6c1712e52a7e16fa72b7ac891edf7f1e609a391c1c", note: "Register (once). invite-gated; reply shows a secret once / or pubkey" },
@@ -248,7 +248,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/mcp.ts", sha: "bbbd572da044852cf6a6b29c9e5960efd9de7fb46ef4628db393eb08608d3b93", note: "read one proposal: ballots roll-call, not secret" },
   { file: "src/mcp.ts", sha: "080faea4f53d44c3552b9a9efc0b7906cf25dac13679e238e8248478b7f89d31", note: "register tool refusal (A5(c), 2026-09-28): mode-aware base text, use HTTP door, optional public_key no secret" },
   { file: "src/mcp.ts", sha: "38c507d5f2358a398f6cda1e4d87f2306af0e3ffa927d7038514c30bacdbbeac", note: "MCP init: authenticate writes with credential (secret or assertion)" },
-  { file: "src/showhome.ts", sha: "f2b9bde96aba1ad26cc67d18004ae7e871ff0f7e147b5af8a8ac5fc36598c76b", note: "visitor token shown once; not a citizen secret" },
+  { file: "src/showhome.ts", sha: "54a83ed789da1f10eb53418173c193bd1936ad5aa8b9fd54e242530a0d15e3c6", note: "visitor token shown once; not a citizen secret; guest-voice wave reworded it (the token now also comments on the board as a guest, writes to no chain), and the continuity sentence follows it" },
   { file: "src/showhome.ts", sha: "5c4e8c2527a40c80e258a64b3a66e06de64405de4df67b105aacc1c254b59c49", note: "showhome/reply: citizen answers with credential (secret or assertion)" },
   { file: "src/society.ts", sha: "18282b506402cb1a7dfc9065a0307085f7a3fe18a08781201476af823897df13", note: "401: present your citizen credential (secret or assertion)" },
   { file: "src/society.ts", sha: "d30fa3d558897d8c46959aca9b714b0aca17fb27df002a75ba51110ca49e0722", note: "SQL: SELECT ... WHERE secret_hash = ? AND public_key IS NULL" },
@@ -264,7 +264,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   // Standing topics (D-070): the officialFacts.topics note and the door note both say the route is
   // secret-guarded (the MAINTAINER_SECRET, an operator credential); neither is a citizen-auth instruction.
   { file: "src/society.ts", sha: "ae7b51c94c1fcef9b7446399edad2c95169e93f54be98ecabd39ba25359e46d3", note: "officialFacts.topics: opened through a secret-guarded route; Rule 7 disclosure; re-reviewed 2026-09-22 for the D-018 gate L2-L4 wording (one row per act, citizen #1, the quiet rule, operator steering), no credential instruction added" },
-  { file: "src/topics.ts", sha: "0af3cabe1647358010db0d451b1ae07f92c98f24c000f2e36a8abfd58575a0fa", note: "topicsDoorNote: STANDING TOPICS, a secret-guarded route (POST /api/maintainer/topic)" },
+  { file: "src/topics.ts", sha: "9b1c541d4d0f13d967851e4eb95506efd10e8a26e28bd29023a1785f32e03aba", note: "topicsDoorNote: STANDING TOPICS, a secret-guarded route (POST /api/maintainer/topic); the guest-voice wave added one parenthesis saying a guest may comment too (the maintainer-secret wording is unchanged)" },
   // x402 settle-honesty wave, B4 (docs/BRIEF-X402-SETTLE-HONESTY.md): the register door's PayAI discovery
   // declaration (REGISTER_OUTPUT_SCHEMA), in the hub's words. It describes the public-key path's 201 (no
   // secret is issued); it is not a secret-only citizen-auth instruction.
@@ -328,8 +328,8 @@ test("secret-literal guard: every 'secret' literal in src/ is a reviewed wire to
   // only when a secret-literal is deliberately added/removed AND the allowlist is
   // updated in the same change, which is the review this guard exists to force.
   assert.equal(total, 76, "secret-literal total drifted from the committed baseline (76)");
-  assert.equal(wire, 23, "exact wire-token count drifted from the committed baseline (23)");
-  assert.equal(prose, 53, "prose-literal count drifted from the committed baseline (53)");
+  assert.equal(wire, 24, "exact wire-token count drifted from the committed baseline (24)");
+  assert.equal(prose, 52, "prose-literal count drifted from the committed baseline (52)");
 });
 
 test("secret-literal guard red-proof: catches a novel secret-only instruction, decodes escapes, exempts only exact wire tokens, and forces review on a changed literal", () => {

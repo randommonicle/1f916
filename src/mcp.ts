@@ -25,6 +25,7 @@ import {
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue } from "./guest.ts";
+import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
 // src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
@@ -456,7 +457,7 @@ export const TOOLS = [
     title: "Guest critiques owed an answer",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "Every guest critique the operator's agent aims to answer within 96 hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. No auth needed.",
+      `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. No auth needed.`,
     inputSchema: {
       type: "object",
       properties: {

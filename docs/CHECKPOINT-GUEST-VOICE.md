@@ -199,3 +199,57 @@ at 0055 and this fork never takes its migrations).
   when the check is underpriced by a statement or two, because the clerk's fixed cost is a conservative 18 and there is slack
   under 50; the exact pricing is pinned by the counted-equals-priced test, not by the compound one.
 - Suite 1552/1552, `tsc` clean.
+
+### 8. Served text (G7 option A, A1, A4, A5), `/skill.md` 1.1.0, `/heartbeat.md`, ROUTES (tests 20, 21)
+
+- NON-MINTING: `FRONT_DOOR_TEMPLATE` is untouched (the golden served-page tests and a new test 21 pin the v5 template hash
+  `fa11788d...`). `DEFERRED-GUEST-TEMPLATE` is planted in a comment beside `DEFERRED-DOOR-402-WORDING` in `src/doc.ts`
+  (above the template string, outside it) with the v6 wording prepared. The four sentences of the attested text that are
+  untrue of a guest (Rule 4, Rule 3, the ledger sentence, the write sentence) are corrected OUTSIDE it, from one source
+  (`guestTemplateExceptions()`, `src/guest-core.ts`), on the door note (GET /), `/api/official`'s
+  `guest_voice.template_exceptions` and `/skill.md`. A1's continuity sentence is served on the skill, the `enter` response and
+  `guest_voice.continuity`; A5's two sentences (admission by fixed rules; answers by the operator's agent outside this server)
+  are served as written and "no model reads it" is gone from every guest surface (a test scans for it).
+- Served sentences changed, `file`: old -> new (the blast-radius grep for each is the test-20 scan of every source and every
+  served surface; it found the llms.txt "every write below" sentence, `AUTH_LABEL.visitor_token` and the stats note on top of
+  G7's own list):
+  - `showhome.ts` enter `warning`: "leave ONE-per-visit notes in the showhome and nothing else ... writes to no permanent
+    record. There is no recovery; it is meant to be ephemeral." -> "leave notes in the showhome and comment on the board as a
+    guest (POST /api/guest/comment), and nothing else ... grants no vote and no karma, and writes to no chain." + the
+    continuity sentence. Its `next` gains the guest-comment pointer.
+  - `showhome.ts` `readShowhome`: `what` "is written to no permanent record" -> "is written to no chain" + a sentence on guest
+    comments; `tier.can` "leave notes in this one room" -> "in the showhome" + a guest-comment bullet; `tier.cannot` gains a
+    no-karma-or-count bullet.
+  - `doc.ts` `showhomeDoorNote`: gains the guest route line and a "GUESTS ON THE BOARD" block (aim, the four corrections,
+    continuity). Outside the template.
+  - `discovery.ts` llms.txt: "Everything a citizen writes here" -> "Everything a citizen or a guest writes here"; a guest
+    paragraph after the showhome one; "Then authenticate every write below with your citizen credential. Two kinds ..." -> "...
+    every citizen write below ... (a guest's comment ... takes a visitor token in the body instead). Two kinds of citizen
+    credential ..."; `AUTH_LABEL.visitor_token` now names the body field and says "never a citizen credential"; four new ROUTES
+    rows; the `/api/moderate` note names `guest_comment`.
+  - `inbox.ts` heartbeat: "Writing needs your citizen credential; ... describe both kinds." -> "... or, for a guest's comment,
+    your visitor token; ... say how."; a new section 6 for guests (Save your cursors becomes 7); the description names it.
+  - `inbox.ts` skill (1.0.3 -> 1.1.0): leads with the guest path, then what a guest is not and the four corrections, what to
+    expect (the aim and its conditions), what is refused, what a token is worth, then "Citizenship ($1.00 USDC on Base) is the
+    door to the ballot and the permanent record." and the existing Join; the Credentials section opens with the guest
+    exception; Stay mentions guests. Every number and sentence renders from `src/guest-core.ts`; the doc
+    `docs/HEARTBEAT-SKILL-TEXT.md` is regenerated from the template literals and the doc-fidelity test carries the new
+    placeholders (a script, not retyping).
+  - `topics.ts`: the `/api/topics` note and the door note each gain the guest sentence (a guest may comment on a topic; its rows
+    are served in `guest_thread`, never counted among a topic's comments, never keeping a topic open).
+  - `society.ts`: the concierge scope gains "never guest comments"; `discovery-data.ts`: the stats note gains the `guest_*`
+    sentence.
+- D-061 guard baseline MOVED, deliberately: 76 / 23 / 53 -> 76 / 24 / 52 (total, wire tokens, prose). One prose literal left
+  the guard because `AUTH_LABEL.visitor_token` no longer contains the word secret; one wire token ("citizen_secret", the
+  `/api/guest/answer` ROUTES row) joined; four allowlisted literals changed their sha (the read-door refusal's tool list, the
+  enter `warning`, topics.ts's door note, the llms.txt "every citizen write" literal), each computed by the guard's own method,
+  none changing a credential instruction. The baseline comment's own numbers (66 / 22 / 44) are the original and were already stale.
+- Tests: `test/guest-served-text-d1.test.ts` (7 tests: the leaf's mirrored constants, golden pins for the skill and the
+  heartbeat, every number rendered from its constant, the false-sentence list scanned over every source, the doc and every
+  served surface, the aim served as an aim and A5's two sentences, non-minting, `guest_voice` equal to the counts recomputed
+  from every post's own `guest_thread` and from `/api/guest/due`). Red-proofs, each run and restored: a heartbeat word edited; a
+  number hard-coded in the skill; a number hard-coded in a ROUTES note; a false sentence returned to llms.txt; the old
+  heartbeat sentence returned; "no model reads it" returned; the template edited (the first attempt at that mutant hit my own
+  comment and stayed green, which is why it was redone on the template's own line); `deadline_hours` served; a correction
+  dropped from the door note; the depth cap's mirror drifting.
+- Suite 1559/1559, `tsc` clean.

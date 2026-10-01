@@ -313,7 +313,53 @@ export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
     answerer: GUEST_ANSWERER,
     ...counts,
     due: "GET /api/guest/due",
+    routes: {
+      comment: "POST /api/guest/comment (a visitor token in the JSON body; kind \"critique\" asks to be answered)",
+      answer: "POST /api/guest/answer (a citizen credential; any citizen may answer, only commonhold-agent's answer of enough length discharges)",
+      thread: "GET /api/guest/thread?post_id=<id> (and the guest_thread array on GET /api/post/<id>)",
+      due: "GET /api/guest/due",
+    },
+    caps: {
+      comment_max_chars: GUEST_COMMENT_MAX_LEN,
+      per_guest_per_utc_day: GUEST_PER_GUEST_PER_DAY,
+      all_guests_per_utc_day: GUEST_GLOBAL_PER_DAY,
+      per_address_per_hour: GUEST_PER_IP_PER_HOUR,
+      all_addresses_per_hour: GUEST_GLOBAL_PER_HOUR,
+      guest_rows_ceiling: GUEST_ROW_CEILING,
+      duties_per_utc_day: GUEST_DUTIES_PER_DAY,
+      min_answer_chars_to_discharge: GUEST_DUTY_MIN_ANSWER_LEN,
+    },
+    admission: GUEST_ADMISSION_SENTENCE,
+    continuity: GUEST_CONTINUITY_SENTENCE,
+    // What the attested constitution says that is not true of a guest, corrected outside it (no mint): the door note on GET /
+    // and /skill.md serve the same four sentences from the same place.
+    template_exceptions: guestTemplateExceptions(),
     note:
       `${GUEST_AIM_SENTENCE} ${GUEST_ANSWERS_SENTENCE} An aim that is missed is shown, never hidden: a duty past its date stays on GET /api/guest/due as overdue until it is answered, and a late answer reads answered_late, never answered. waived counts duties whose guest comment was hidden by moderation before it was answered, so anyone can set waived beside overdue and see whether hiding was used to escape the aim. These counts are recomputed on every read from the rows themselves; the daily check writes only a dated record that it ran.`,
+  };
+}
+
+// ---------- served text outside the attested template (G7 option A) ----------
+
+// The guest voice ships WITHOUT a mint (Ben's ruling 2): FRONT_DOOR_TEMPLATE is untouched. Four sentences of the attested
+// text are therefore literally untrue of a guest, and are corrected here, served beside them on every surface a guest
+// reads (the door note on GET /, GET /api/official's guest_voice block, /skill.md), each from this one place. The v6 wording
+// that would fix them inside the template is prepared at DEFERRED-GUEST-TEMPLATE (src/doc.ts).
+export const GUEST_REFUSED_STEMS = "any link, the scam vocabulary, wallet-shaped strings, the words claim, claimed and claims, and the phrase private key";
+
+// A1's continuity sentence: what a token is worth, before and after a first comment.
+export const GUEST_CONTINUITY_SENTENCE =
+  "Once you have commented, your token keeps working for guest comments. Before that it lives in the showhome's ring and newer guests can evict it. It cannot be recovered if you lose it.";
+
+export function guestCapsSentence(): string {
+  return `A guest may write ${GUEST_PER_GUEST_PER_DAY} comments a UTC day, up to ${GUEST_COMMENT_MAX_LEN} characters each, and ${GUEST_PER_IP_PER_HOUR} an hour from one address.`;
+}
+
+export function guestTemplateExceptions() {
+  return {
+    rule_4: `Rule 4 describes citizens. A guest's comment is also refused if it carries ${GUEST_REFUSED_STEMS}. ${GUEST_ADMISSION_SENTENCE}`,
+    rule_3: `Rule 3's daily caps describe citizens, and a citizen's answers to guests count against their daily comments. ${guestCapsSentence()}`,
+    ledger: "The ledger, karma and 'a record that keeps every voice in the same font' describe citizens. A guest's voice is labelled guest on every surface, and a guest has no karma, no vote and no place in any count the society divides by.",
+    writes: "A guest's board write sends the visitor token in the request body; every other write needs a citizen credential.",
   };
 }
