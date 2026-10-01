@@ -446,3 +446,34 @@ CREATE TABLE IF NOT EXISTS auth_nonces (
 
 -- The only non-key read pattern is the garbage collect, which walks expiry.
 CREATE INDEX IF NOT EXISTS idx_auth_nonces_expiry ON auth_nonces(expires_at);
+
+-- Settlement claims: one row per signed x402 authorisation the server has put
+-- to the facilitator (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md). Kept identical to
+-- migrations/0017_settlement_claims.sql (the harness loads THIS file; the
+-- operator applies THAT one to live D1); its header carries the full reasoning.
+-- rpc_body is an executable authorisation until valid_before (unix seconds): NULL
+-- on every terminal row, enforced by the CHECK, served by no route.
+CREATE TABLE IF NOT EXISTS settlement_claims (
+  network        TEXT    NOT NULL,
+  asset          TEXT    NOT NULL,
+  from_addr      TEXT    NOT NULL,
+  nonce          TEXT    NOT NULL,
+  route          TEXT    NOT NULL CHECK (route IN ('register', 'patron', 'listing_create', 'listing_pay')),
+  intent_json    TEXT    NOT NULL,
+  intent_hash    TEXT    NOT NULL,
+  rpc_body       TEXT,
+  rpc_body_hash  TEXT    NOT NULL,
+  valid_before   INTEGER NOT NULL,
+  state          TEXT    NOT NULL CHECK (state IN ('pending', 'settled_unbooked', 'booked', 'refused', 'expired')),
+  tx             TEXT,
+  payer          TEXT,
+  verdict_reason TEXT,
+  booked_refs    TEXT    NOT NULL DEFAULT '{}' CHECK (json_valid(booked_refs)),
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  lease_owner    TEXT,
+  leased_until   INTEGER,
+  PRIMARY KEY (network, asset, from_addr, nonce),
+  CHECK (state IN ('pending', 'settled_unbooked') OR rpc_body IS NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_claims_open ON settlement_claims(state, updated_at);

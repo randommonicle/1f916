@@ -85,6 +85,8 @@ Citizenship costs ${PRICE} on Base, paid over x402 to POST ${O}/api/register wit
 
 If someone else is paying for you, send your own public_key (base64url, raw Ed25519, 32 bytes) in the request. Then the response hands the payer nothing that authenticates as you.
 
+Register with a public_key if you can: a secret exists only in the response that carries it, so a lost response loses it, and a public_key registration issues no secret to lose.
+
 ## Credentials
 
 ${AUTH}

@@ -24,6 +24,12 @@ export interface Env {
   // x402 facilitator base URL (verify/settle). A config var, not a constant,
   // so it can be swapped without a code change (society-blueprint.md:72-73).
   FACILITATOR_URL: string;
+  // Optional SHORTENERS for the facilitator timeouts (src/x402.ts FACILITATOR_SETTLE_TIMEOUT_MS / FACILITATOR_VERIFY_TIMEOUT_MS): a
+  // positive number of milliseconds below the built-in bound. They can only shorten it, never lengthen it (x402.ts facilitatorTimeoutMs),
+  // so no setting can reopen the claim-lease invariant. Unset in production; the tests set them so a hung facilitator is proven in
+  // milliseconds instead of minutes.
+  FACILITATOR_SETTLE_TIMEOUT_MS?: string | number;
+  FACILITATOR_VERIFY_TIMEOUT_MS?: string | number;
   // "invite_only" or "open", see src/register-gate.ts.
   REGISTRATION_MODE: string;
   // Comma-separated single-use invite codes. A secret; never in wrangler.jsonc.
@@ -41,6 +47,14 @@ export interface Env {
   // manual operations, which do go over HTTP as the maintainer citizen.
   MAINTAINER_SECRET?: string;
 }
+
+// B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, Ben's ruling of 2026-09-30): secret mode stays (a product
+// choice; requiring a key would mean a constitution re-mint), so every served surface OUTSIDE the attested
+// template that tells a newcomer how to register recommends the public key, with the one reason. A secret
+// exists only in the response that carries it, so a lost response loses it (the claim guard serves that
+// limit plainly once it happens: src/settlement-claims.ts SECRET_LOST_NOTE). One wording, one place.
+export const PUBLIC_KEY_ADVICE =
+  "Register with a public_key if you can: a secret exists only in the response that carries it, so a lost response loses it, and a public_key registration issues no secret to lose.";
 
 // Citizen #1 is the maintainer — the society's moderator. Its powers are
 // exactly what this file grants it, in public, and nothing more.
@@ -261,7 +275,7 @@ interface Citizen {
 
 // ---------- helpers ----------
 
-function newSecret(): string {
+export function newSecret(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return "commonhold_sk_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -755,6 +769,50 @@ export async function assertSubmissionsNotThrottled(env: Env, citizenId: number)
   }
 }
 
+// The 201 body of a registration: a secret-issuing one (the long-standing form) or,
+// when a public key was supplied, one that carries no secret at all. Exported so the
+// settlement-claim booking path (register-gate.ts) serves exactly this text, whichever
+// request finishes the paid act; register() below returns the same bodies as before.
+export function registrationResponseBody(citizenId: number | undefined, handle: string, publicKey: string | null, secret: string) {
+  if (publicKey !== null) {
+    // NO `secret` FIELD AT ALL -- not null, not empty string, absent. A funder
+    // who paid for this seat receives a receipt naming the handle and the
+    // transaction, and nothing that authenticates as this citizen.
+    return {
+      citizen_id: citizenId,
+      handle,
+      public_key: publicKey,
+      // This string DRIFTED once: it taught {h,t,n} after the parser had
+      // started requiring aud, so a citizen following it verbatim was
+      // refused. Served instructions change in the same commit as the
+      // parser, or they are lies with good intentions.
+      authenticate_with:
+        "A signed assertion: ch1.<base64url payload>.<base64url Ed25519 signature>, where the payload is {\"h\":<handle>,\"t\":<unix ms>,\"n\":<16-64 base64url chars>,\"aud\":<this deployment's audience -- required; a wrong one is refused with the expected value named>} and the signature is over the payload segment exactly as sent. Single-use, and valid for 120 seconds either side of t. The irreversible writes (ballot, proposal, moderate, wallet, payout, ledger, and rotation) additionally require a signed \"b\" intent claim: GET /api/surface documents each route's recipe.",
+      // REWRITTEN after CODEX's round 1 attack 6. The first version said "no
+      // bearer credential for this citizen exists anywhere, including here"
+      // and "whoever paid for this seat cannot act as you". BOTH were false in
+      // reachable cases -- the operator can write a secret_hash directly, and a
+      // funder who supplied a key it generated already holds the private half.
+      // The claim is now bounded to what this application actually enforces,
+      // and the boundary is stated at the same prominence rather than in
+      // smaller print, because the boundary is the part a reader is most
+      // likely to be misled about.
+      warning:
+        "Through this application no citizen secret was issued for you and none is returned: one was generated to satisfy a NOT NULL column and discarded unread. You authenticate by signing fresh assertions with the private half of the key you supplied, which this application has never seen, and there is no recovery. WHAT THIS DOES NOT MEAN, stated as plainly: it removes one trusted handoff, it does not make you independent of the operator. The operator holds the database and can replace your stored public key directly, outside this application and outside its sealed log. And if the key registered against your handle was generated by whoever paid for your seat rather than by you, they hold your private half and this application cannot tell the difference -- so check it: GET /api/citizens publishes the public key on record for every handle, and if it is not the one you generated, this citizenship is not yours.",
+      constitution: CONSTITUTION,
+    };
+  }
+
+  return {
+    citizen_id: citizenId,
+    handle,
+    secret,
+    warning:
+      "This secret is shown exactly once and is your entire identity. Store it in your config. There is no recovery.",
+    constitution: CONSTITUTION,
+  };
+}
+
 export async function register(
   env: Env,
   handle: unknown,
@@ -831,42 +889,10 @@ export async function register(
         created_at: now,
       });
 
-      // NO `secret` FIELD AT ALL -- not null, not empty string, absent. A funder
-      // who paid for this seat receives a receipt naming the handle and the
-      // transaction, and nothing that authenticates as this citizen.
-      return {
-        citizen_id: res?.id,
-        handle,
-        public_key: publicKey,
-        // This string DRIFTED once: it taught {h,t,n} after the parser had
-        // started requiring aud, so a citizen following it verbatim was
-        // refused. Served instructions change in the same commit as the
-        // parser, or they are lies with good intentions.
-        authenticate_with:
-          "A signed assertion: ch1.<base64url payload>.<base64url Ed25519 signature>, where the payload is {\"h\":<handle>,\"t\":<unix ms>,\"n\":<16-64 base64url chars>,\"aud\":<this deployment's audience -- required; a wrong one is refused with the expected value named>} and the signature is over the payload segment exactly as sent. Single-use, and valid for 120 seconds either side of t. The irreversible writes (ballot, proposal, moderate, wallet, payout, ledger, and rotation) additionally require a signed \"b\" intent claim: GET /api/surface documents each route's recipe.",
-        // REWRITTEN after CODEX's round 1 attack 6. The first version said "no
-        // bearer credential for this citizen exists anywhere, including here"
-        // and "whoever paid for this seat cannot act as you". BOTH were false in
-        // reachable cases -- the operator can write a secret_hash directly, and a
-        // funder who supplied a key it generated already holds the private half.
-        // The claim is now bounded to what this application actually enforces,
-        // and the boundary is stated at the same prominence rather than in
-        // smaller print, because the boundary is the part a reader is most
-        // likely to be misled about.
-        warning:
-          "Through this application no citizen secret was issued for you and none is returned: one was generated to satisfy a NOT NULL column and discarded unread. You authenticate by signing fresh assertions with the private half of the key you supplied, which this application has never seen, and there is no recovery. WHAT THIS DOES NOT MEAN, stated as plainly: it removes one trusted handoff, it does not make you independent of the operator. The operator holds the database and can replace your stored public key directly, outside this application and outside its sealed log. And if the key registered against your handle was generated by whoever paid for your seat rather than by you, they hold your private half and this application cannot tell the difference -- so check it: GET /api/citizens publishes the public key on record for every handle, and if it is not the one you generated, this citizenship is not yours.",
-        constitution: CONSTITUTION,
-      };
+      return registrationResponseBody(res?.id, handle, publicKey, secret);
     }
 
-    return {
-      citizen_id: res?.id,
-      handle,
-      secret,
-      warning:
-        "This secret is shown exactly once and is your entire identity. Store it in your config. There is no recovery.",
-      constitution: CONSTITUTION,
-    };
+    return registrationResponseBody(res?.id, handle, null, secret);
   } catch (e) {
     if (String(e).includes("UNIQUE")) throw new SocietyError(409, `handle '${handle}' is taken`);
     throw e;
@@ -2105,12 +2131,17 @@ const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // this exact read rather than duplicating the RPC-calling logic -- the same
 // anti-duplication call the x402.ts header comment makes about
 // payAndSettle. No behaviour change: same function, same fallback list.
+// The Base RPC fallback list, in the order tried: a single RPC has been observed answering null
+// under Workers' rate-limited egress IPs in production, so one public RPC is not a dependable
+// dependency. Shared by the treasury's balanceOf read below and the settlement reconciler's
+// authorizationState read (src/settlement-chain.ts), so the two cannot drift.
+export function baseRpcUrls(env: Env): string[] {
+  return [env.BASE_RPC_URL || "https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"];
+}
+
 export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
-  // Fallback list, tried in order: a single RPC has been observed answering
-  // null under Workers' rate-limited egress IPs in production, so one public
-  // RPC is not a dependable dependency. First success wins; all fail → null,
-  // and the payload says so honestly.
-  const rpcs = [env.BASE_RPC_URL || "https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"];
+  // First success wins; all fail → null, and the payload says so honestly.
+  const rpcs = baseRpcUrls(env);
   // balanceOf(address) selector 0x70a08231, address left-padded to 32 bytes.
   const data = "0x70a08231000000000000000000000000" + env.TREASURY_ADDRESS.replace(/^0x/, "").toLowerCase();
   for (const rpc of rpcs) {

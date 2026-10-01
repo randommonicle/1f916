@@ -334,7 +334,7 @@ test("B2 classifySettle: every row is decided by the rule the brief names, first
 // answer did not say (a 409 with no reason is not called duplicate_settlement;
 // an intermediary's `error` field is not the facilitator's errorReason).
 test("F6 classifySettle: the unknown-rule messages, exactly, for every way an errorReason can be given", () => {
-  const TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked.";
+  const TAIL = "The settle request was sent; whether the money moved is unknown until the chain is checked; do not sign again.";
   const rows: { status: number; body: Record<string, unknown>; rule: number; message: string }[] = [
     { status: 500, body: { success: false, errorReason: "x" }, rule: 1, message: `The facilitator answered /settle with HTTP 500 (errorReason: x). A 5xx answer is not a settlement verdict. ${TAIL}` },
     { status: 502, body: {}, rule: 1, message: `The facilitator answered /settle with HTTP 502 (no errorReason). A 5xx answer is not a settlement verdict. ${TAIL}` },
@@ -468,15 +468,15 @@ test("F1 through payAndSettle: a /settle fetch that REJECTS is a 502 with the hu
   assert.equal(s.events[0]!.reason, settleTransit);
   const v = await run("/verify");
   assert.ok(v.thrown instanceof SocietyError && v.thrown.status === 502, "a SocietyError 502");
-  assert.equal((v.thrown as SocietyError).message, "The payment facilitator could not be reached to verify this payment (fetch failed: other side closed). No money moved: nothing that could settle was sent. Try again later.");
+  assert.equal((v.thrown as SocietyError).message, "The payment facilitator could not be reached to verify this payment (fetch failed: other side closed); the request may still have been delivered. This server never asked the facilitator to settle this payment. Try again later.");
   assert.equal(v.settles, 0, "/settle is never called after a /verify that failed in transit");
   assert.equal(v.events.length, 0, "no settle-outcome line: nothing was sent that could settle");
 });
 
 // ---------- B3 (docs/BRIEF-X402-SETTLE-HONESTY.md): classifyVerify ----------
 
-const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent.`;
-const hubVerifyFailed = (status: number, reason: string) => `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). No money moved: nothing that could settle was sent. Try again later.`;
+const hubVerifyRefused = (status: number, reason: string) => `The payment facilitator refused to verify this payment (HTTP ${status}, reason: ${reason}). This server never asked the facilitator to settle this payment.`;
+const hubVerifyFailed = (status: number, reason: string) => `The payment facilitator failed to verify this payment (HTTP ${status}, reason: ${reason}). This server never asked the facilitator to settle this payment. Try again later.`;
 
 test("B3 classifyVerify: only a 2xx with isValid:true proceeds; a 2xx without it is the unchanged 402; a 4xx is a refusal and a 5xx a failure, whatever isValid says", () => {
   const rows: { status: number; body: Record<string, unknown>; kind: string; rule: number; text?: string }[] = [

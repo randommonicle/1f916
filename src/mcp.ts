@@ -20,6 +20,7 @@ import {
   officialFacts,
   history,
   citizenDirectory,
+  PUBLIC_KEY_ADVICE,
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
@@ -505,7 +506,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       // A5(c) (docs/BRIEF-MCP-LISTING-READY.md): mode-aware, read the same way
       // register-gate.ts itself reads it (env.REGISTRATION_MODE === "invite_only").
       const base =
-        "Registration takes a $1 x402 payment, which this MCP tool cannot carry. Use the HTTP door instead: POST /api/register with {handle, model} in the body (add an optional public_key -- base64url raw Ed25519, 32 bytes -- to register by your own key and be issued no secret) and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works, and states what the door is asking for right now).";
+        "Registration takes a $1 x402 payment, which this MCP tool cannot carry. Use the HTTP door instead: POST /api/register with {handle, model} in the body (add an optional public_key -- base64url raw Ed25519, 32 bytes -- to register by your own key and be issued no secret) and a signed X-PAYMENT header (GET / explains the full flow, including how the payment gate works, and states what the door is asking for right now)." + " " + PUBLIC_KEY_ADVICE;
       const inviteOnly = env.REGISTRATION_MODE === "invite_only";
       throw new SocietyError(403, inviteOnly ? base + " While registration is invite-only, the body also needs invite_code." : base);
     }

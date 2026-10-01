@@ -23,7 +23,19 @@
 // Every other payTo in this file is the default (the treasury), for the
 // posting fee.
 
-import { buildPaymentRequirements, payAndSettle, recordSettledPayment, encodePaymentResponseHeader, PAYMENT_MAX_TIMEOUT_SECONDS } from "./x402.ts";
+import {
+  buildPaymentRequirements,
+  payAndSettle,
+  recordSettledPayment,
+  encodePaymentResponseHeader,
+  replayForClaim,
+  finishUnderOwnLease,
+  answerFromClaim,
+  ledgerReceipt,
+  PAYMENT_MAX_TIMEOUT_SECONDS,
+  type PaidClaim,
+} from "./x402.ts";
+import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, refsOf, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
@@ -381,79 +393,169 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
     priceAtomic: String(feeCents * 10_000), // cents -> USDC atomic units (6 decimals), same ratio as x402.ts's own PRICE_ATOMIC/PRICE_CENTS
   });
 
+  // The claim (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md): this signed authorisation pays for THIS
+  // listing. The intent is every validated field, so a booking resumed later (by the funder's
+  // identical re-send or by the reconciler) writes exactly what the paid request asked for.
+  const claim: PaidClaim = {
+    route: "listing_create",
+    intent: {
+      funder_citizen_id: citizen.id,
+      funder_handle: citizen.handle,
+      title,
+      description,
+      acceptance_condition: acceptanceCondition,
+      url,
+      bounty_cents: bountyCents,
+      fee_cents: feeCents,
+      expires_at: expiresAt,
+      pledge,
+    },
+    finish: (row, owner) => finishListingCreate(env, row, { origin, ip, settlement: null, owner }),
+  };
+  // B4: a header that already has a claim is answered from it, before /verify.
+  const replay = await replayForClaim(env, request, reqs, claim);
+  if (replay) return replay;
+
   // Step 3: settle. afterVerify re-runs the one thing that can genuinely
   // change between 402-issuance and an irreversible settle -- the
   // citizen's own throttle state, under a concurrent request -- the same
   // free-exit-before-settle shape register-gate.ts uses for handle
-  // availability.
-  const result = await payAndSettle(env, request, reqs, () => assertListingCreateNotThrottled(env, citizen.id, ip));
+  // availability. The claim is taken right after it, before /settle.
+  const result = await payAndSettle(env, request, reqs, () => assertListingCreateNotThrottled(env, citizen.id, ip), claim);
   if (!result.ok) return result.response;
 
   // Step 4: money has moved. From here every path must succeed or fail
   // loudly -- there is no refund path (the fee is non-refundable by design,
-  // §5). Ledger first (cites the title, not an id that doesn't exist yet),
-  // then the listing row itself -- mirroring register-gate.ts's own
-  // ledger-then-risky-write order and its honest paid-but-failed handling.
-  // The ledger line goes through recordSettledPayment (x402.ts, F7): if the
-  // append fails, the funder is told the fee settled and not to sign again, and
-  // the listing row below is never inserted.
-  const sealed = await recordSettledPayment(env, "listing_fee", result, feeCents, {
-    entry_date: new Date(now).toISOString().slice(0, 10),
-    description: `listing posting fee, funder ${citizen.handle} (${result.payer}): "${title}"; tx ${result.tx}`,
-    amount_cents: feeCents,
-    created_at: now,
-  });
+  // §5).
+  return finishUnderOwnLease(env, result, () => finishListingCreate(env, result.claim as ClaimRow, { origin, ip, settlement: result.settlement, owner: result.owner }));
+}
 
-  let listingId: number | undefined;
-  try {
-    const inserted = await env.DB.prepare(
-      "INSERT INTO listings (funder_citizen_id, title, description, url, acceptance_condition, bounty_cents, fee_cents, fee_tx, status, expires_at, created_at, pledge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) RETURNING id",
-    )
-      .bind(citizen.id, title, description, url, acceptanceCondition, bountyCents, feeCents, result.tx, expiresAt, now, pledge)
-      .first<{ id: number }>();
-    listingId = inserted?.id;
-    if (listingId == null) throw new Error("listings insert returned no id");
-  } catch (e) {
-    console.log(
-      JSON.stringify({
-        level: "error",
-        event: "listing_paid_but_failed",
-        payer: result.payer,
-        tx: result.tx,
+// The listing fee's whole paid act, booked from its claim: ledger first (cites the title, not
+// an id that doesn't exist yet), then the listing row itself -- mirroring register-gate.ts's own
+// ledger-then-risky-write order and its honest paid-but-failed handling. Each write is one batch
+// with the claim update that records it, and is skipped if the claim already records it, so the
+// original request, the funder's identical re-send and the reconciler all run this same code.
+// The ledger line goes through recordSettledPayment (x402.ts, F7): if the append fails, the
+// funder is told the fee settled and not to sign again, and the listing row below is never inserted.
+async function finishListingCreate(
+  env: Env,
+  row: ClaimRow,
+  opts: { origin: string; ip: string | null; settlement: Record<string, unknown> | null; owner: string },
+): Promise<Response> {
+  const i = intentOf(row) as {
+    funder_citizen_id: number;
+    funder_handle: string;
+    title: string;
+    description: string;
+    acceptance_condition: string;
+    url: string | null;
+    bounty_cents: number;
+    fee_cents: number;
+    expires_at: number;
+    pledge: string | null;
+  };
+  const key = keyOfRow(row);
+  const feeCents = i.fee_cents;
+  const payer = row.payer ?? "unknown";
+  const tx = row.tx ?? "";
+
+  const recordedLedgerId = refsOf(row).ledger_id;
+  let sealed: { prev_hash: string; hash: string };
+  if (recordedLedgerId == null) {
+    const now = Date.now();
+    const recorded = await recordSettledPayment(
+      env,
+      "listing_fee",
+      { payer, tx },
+      feeCents,
+      {
+        entry_date: new Date(now).toISOString().slice(0, 10),
+        description: `listing posting fee, funder ${i.funder_handle} (${payer}): "${i.title}"; tx ${tx}`,
         amount_cents: feeCents,
-        title,
-        ledger_receipt: sealed.hash,
-        reason: e instanceof Error ? e.message : String(e),
-      }),
+        created_at: now,
+      },
+      { key, final: false, owner: opts.owner },
     );
-    throw new SocietyError(
-      500,
-      `Your posting fee settled (tx ${result.tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand: GET /api/official names how to reach it. Your payment is already in the books: GET /treasury.`,
-    );
+    // Another holder has the lease and has not written the line yet: nothing here is this call's to answer (R3, gate C2).
+    if (recorded.hash === null) return answerFromClaim(env, key, opts.owner);
+    sealed = recorded;
+  } else {
+    sealed = await ledgerReceipt(env, recordedLedgerId);
   }
 
-  // The daily/IP throttle record is bookkeeping, not authoritative -- a
-  // failure here must never turn an already-successful, already-paid
-  // listing creation into a 500. Best-effort, logged loudly if it fails.
-  try {
-    await recordListingCreateAttempt(env, citizen.id, ip);
-  } catch (e) {
-    console.log(JSON.stringify({ level: "error", event: "listing_throttle_record_failed", listing_id: listingId, reason: e instanceof Error ? e.message : String(e) }));
+  let listingId = refsOf(row).listing_id;
+  if (listingId == null) {
+    let listingStep: { applied: boolean };
+    try {
+      const now = Date.now();
+      listingStep = await runBookingStep(
+        env,
+        key,
+        {
+          ref: "listing_id",
+          final: true,
+          statements: async (gate) => [
+            env.DB.prepare(
+              `INSERT INTO listings (funder_citizen_id, title, description, url, acceptance_condition, bounty_cents, fee_cents, fee_tx, status, expires_at, created_at, pledge)
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ? WHERE EXISTS (${gate.sql})`,
+            ).bind(i.funder_citizen_id, i.title, i.description, i.url, i.acceptance_condition, i.bounty_cents, feeCents, tx, i.expires_at, now, i.pledge, ...gate.args),
+          ],
+        },
+        opts.owner,
+        now,
+      );
+      const after = (await getClaim(env, key)) as ClaimRow;
+      listingId = refsOf(after).listing_id;
+      // Another owner holds a live lease and is still booking: the answer is the claim's, not an error (R1/R3).
+      if (listingId == null && !listingStep.applied && leaseHeldByAnother(after, opts.owner, Date.now())) return answerFromClaim(env, key, opts.owner);
+      if (listingId == null) throw new Error("the claim is not settled_unbooked: no listing was recorded for it");
+    } catch (e) {
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "listing_paid_but_failed",
+          payer,
+          tx,
+          amount_cents: feeCents,
+          title: i.title,
+          ledger_receipt: sealed.hash,
+          reason: e instanceof Error ? e.message : String(e),
+        }),
+      );
+      throw new SocietyError(
+        500,
+        `Your posting fee settled (tx ${tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand. ${reconcileTail("listing_create")} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Your payment is already in the books: GET /treasury.`,
+      );
+    }
+    // R3 (gate C2): the listing row IS this route's last write. When this call's own step did not apply (another holder recorded the listing), the
+    // answer comes from the claim and this call writes nothing more, the funder's throttle record included.
+    if (!listingStep.applied) return answerFromClaim(env, key, opts.owner);
+    // The daily/IP throttle record is bookkeeping, not authoritative -- a
+    // failure here must never turn an already-successful, already-paid
+    // listing creation into a 500. Best-effort, logged loudly if it fails.
+    try {
+      await recordListingCreateAttempt(env, i.funder_citizen_id, opts.ip);
+    } catch (e) {
+      console.log(JSON.stringify({ level: "error", event: "listing_throttle_record_failed", listing_id: listingId, reason: e instanceof Error ? e.message : String(e) }));
+    }
+  } else {
+    // The claim already records the listing (it is booked): nothing for this call to apply, so the answer is the claim's.
+    return answerFromClaim(env, key, opts.owner);
   }
 
-  const paymentResponse = encodePaymentResponseHeader(result.settlement, { route: "listing_fee", tx: result.tx });
+  const paymentResponse = opts.settlement ? encodePaymentResponseHeader(opts.settlement, { route: "listing_fee", tx }) : null;
   return Response.json(
     {
       listing_id: listingId,
-      bounty_cents: bountyCents,
+      bounty_cents: i.bounty_cents,
       fee_cents: feeCents,
-      fee_tx: result.tx,
+      fee_tx: tx,
       status: "open",
-      expires_at: expiresAt,
+      expires_at: i.expires_at,
       receipt: sealed.hash,
       verify: "GET /api/attest",
-      guide: `${origin}/api/listings/guide`,
-      security: `${origin}/api/listings/security`,
+      guide: `${opts.origin}/api/listings/guide`,
+      security: `${opts.origin}/api/listings/security`,
     },
     {
       status: 201,
@@ -701,6 +803,28 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     payTo: reviewerWallet,
   });
 
+  // The claim (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md): this signed authorisation pays THIS
+  // submission's bounty, to this wallet row. The intent carries everything booking needs, so a
+  // booking resumed later (by the reconciler; the listing stays reserved until then, so the
+  // funder's own re-send meets the reservation first) writes exactly what was paid for.
+  const claim: PaidClaim = {
+    route: "listing_pay",
+    intent: {
+      listing_id: listingId,
+      submission_id: submissionId,
+      funder_citizen_id: citizen.id,
+      payee_citizen_id: submission.citizen_id,
+      payee_address: reviewerWallet,
+      amount_cents: listing.bounty_cents,
+      wallet_row_id: pin.walletRowId,
+      wallet_row_hash: pin.walletRowHash,
+    },
+    finish: (row, owner) => finishPayListing(env, row, null, owner),
+  };
+  // B4: a header that already has a claim is answered from it, before /verify.
+  const replay = await replayForClaim(env, request, reqs, claim);
+  if (replay) return replay;
+
   // Step 4: settle. afterVerify RESERVES the listing atomically --
   // 'open' -> 'paying' -- the free exit before an irreversible settle,
   // closing the same window register-gate.ts closes for handle
@@ -770,7 +894,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
       }
       reservedByMe = true;
       reservedAt = at;
-    });
+    }, claim);
   } catch (e) {
     // Finding 3 (outside review 2026-09-17, MEDIUM): facilitator() THROWS on
     // a rejected fetch or a non-JSON body, and that throw used to sail past
@@ -810,12 +934,26 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // never ran (no X-PAYMENT / invalid signature -- payAndSettle returns
     // before afterVerify), reservedByMe is false and we must NOT touch the
     // row: another request may legitimately hold 'paying' and be mid-settle
-    // right now. If we did reserve and settle then failed, release our OWN
-    // lock so the funder can retry. A recorded failure is an answer; a
-    // pending or unreadable one is not (x402.ts): only classifySettle's rule
-    // 7 reaches here, every other outcome was thrown and caught above.
-    if (reservedByMe) {
-      await env.DB.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying'").bind(listingId).run();
+    // right now. If we did reserve and then were refused, release our OWN
+    // lock so the funder can retry. Two refusals reach here: a recorded failure
+    // (classifySettle's rule 7: an answer, not a pending or unreadable one, which
+    // were thrown and caught above) and, since the settlement-claim wave, a CLAIM
+    // CONFLICT -- this signed authorisation already belongs to another request
+    // (B3: the reservation and the claim succeed or fail together). A conflict is
+    // returned, never thrown, so it lands here and cannot strand the listing in
+    // 'paying'; no /settle was sent for it.
+    // R2b (gate C2): `keepReservation` marks an answer given AFTER /settle said settled, when the claim had moved under this request. The money has
+    // moved or may have, and another holder may still be booking it against this reservation (its booking is gated on the listing still being
+    // 'paying'), so releasing here would re-open a listing whose bounty is being paid.
+    // H1 (fix pass 4, CODEX round 2): the release is bound to the reservation INSTANCE this request acquired (its own paying_since and the pinned wallet
+    // row the reserve statement recorded), never to the listing id and 'paying' alone. A claim the reconciler or a re-send refused releases THIS
+    // reservation itself (F2), another payer can then reserve the reopened listing, and a stale request's late release must not clear theirs.
+    if (reservedByMe && !result.keepReservation) {
+      await env.DB.prepare(
+        "UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying' AND paying_since = ? AND paying_wallet_row_id = ? AND paying_wallet_row_hash = ?",
+      )
+        .bind(listingId, reservedAt, pin.walletRowId, pin.walletRowHash)
+        .run();
     }
     return result.response;
   }
@@ -823,61 +961,108 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   // Step 5: money has moved, funder to reviewer -- the society was never
   // party to it, and there is no refund path once it has. The reserve
   // above already guarantees this caller is the SOLE winner (only one
-  // request could ever flip 'open'->'paying' for this listing), so the old
-  // guarded-UPDATE / "wonRace" honesty branch is gone: this is no longer a
-  // race to record, just the one already-decided winner recording
-  // durably. Both writes commit as ONE atomic batch: a batch failure
-  // between them (recording failed AFTER the money already settled) must
-  // never leave a paid listing without its matching listing_payments row,
-  // and must never silently drop the payment record either.
-  const now = Date.now();
-  const insertStmt = env.DB.prepare(
-    "INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at, wallet_row_id, wallet_row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(listingId, submissionId, submission.citizen_id, reviewerWallet, result.payer, listing.bounty_cents, result.tx, now, pin.walletRowId, pin.walletRowHash);
-  const updateStmt = env.DB.prepare(
-    "UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ?",
-  ).bind(submissionId, result.tx, listingId);
+  // request could ever flip 'open'->'paying' for this listing), so this is no
+  // longer a race to record, just the one already-decided winner recording
+  // durably. Both writes commit as ONE atomic batch (with the claim update that
+  // records them): a batch failure between them (recording failed AFTER the money
+  // already settled) must never leave a paid listing without its matching
+  // listing_payments row, and must never silently drop the payment record either.
+  return finishUnderOwnLease(env, result, () => finishPayListing(env, result.claim as ClaimRow, result.settlement, result.owner));
+}
 
-  try {
-    await env.DB.batch([insertStmt, updateStmt]);
-  } catch (e) {
-    console.log(
-      JSON.stringify({
-        level: "error",
-        event: "listing_pay_settled_but_unrecorded",
-        payer: result.payer,
-        tx: result.tx,
-        amount_cents: listing.bounty_cents,
-        listing_id: listingId,
-        submission_id: submissionId,
-        wallet_row_id: pin.walletRowId,
-        wallet_row_hash: pin.walletRowHash,
-        reason: e instanceof Error ? e.message : String(e),
-      }),
-    );
-    // Do NOT release the reservation here: the listing stays 'paying', a
-    // durable tombstone a retry's own reserve (WHERE status='open') always
-    // refuses -- never a double-pay, even though the public payments book
-    // is temporarily incomplete. The maintainer reconciles from the
-    // on-chain tx (result.tx, logged above) by hand.
-    throw new SocietyError(
-      500,
-      `Your payment settled (tx ${result.tx}) but recording it failed. This is logged for the maintainer to see and put right by hand: GET /api/official names how to reach it. Verify your payment independently on Base.`,
-    );
+// The bounty payment's whole paid act, booked from its claim: the listing_payments row and the
+// listing's flip to paid, in ONE batch with the claim update (skipped if the claim already
+// records it), so the request, and the reconciler, run the same code. Gated on the listing still
+// being 'paying': a listing the operator has since released books nothing and the claim stays
+// settled_unbooked, for a person to decide.
+async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<string, unknown> | null, owner: string): Promise<Response> {
+  const i = intentOf(row) as {
+    listing_id: number;
+    submission_id: number;
+    payee_citizen_id: number;
+    payee_address: string;
+    amount_cents: number;
+    wallet_row_id: number;
+    wallet_row_hash: string;
+  };
+  const claimKey = keyOfRow(row);
+  const payer = row.payer ?? "unknown";
+  const tx = row.tx ?? "";
+
+  if (refsOf(row).payment_id == null) {
+    const now = Date.now();
+    let paymentStep: { applied: boolean };
+    try {
+      paymentStep = await runBookingStep(
+        env,
+        claimKey,
+        {
+          ref: "payment_id",
+          final: true,
+          statements: async (gate) => [
+            env.DB.prepare(
+              `INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at, wallet_row_id, wallet_row_hash)
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${gate.sql}) AND EXISTS (SELECT 1 FROM listings WHERE id = ? AND status = 'paying')`,
+            ).bind(i.listing_id, i.submission_id, i.payee_citizen_id, i.payee_address, payer, i.amount_cents, tx, now, i.wallet_row_id, i.wallet_row_hash, ...gate.args, i.listing_id),
+            env.DB.prepare(
+              "UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying' AND changes() = 1",
+            ).bind(i.submission_id, tx, i.listing_id),
+          ],
+        },
+        owner,
+        now,
+      );
+      const after = (await getClaim(env, claimKey)) as ClaimRow;
+      // Another owner holds a live lease and is still booking: the answer is the claim's, not an error (R1/R3).
+      if (refsOf(after).payment_id == null && !paymentStep.applied && leaseHeldByAnother(after, owner, Date.now())) return answerFromClaim(env, claimKey, owner);
+      if (refsOf(after).payment_id == null) {
+        throw new Error("nothing was recorded: the claim is not settled_unbooked or the listing is no longer paying");
+      }
+    } catch (e) {
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "listing_pay_settled_but_unrecorded",
+          payer,
+          tx,
+          amount_cents: i.amount_cents,
+          listing_id: i.listing_id,
+          submission_id: i.submission_id,
+          wallet_row_id: i.wallet_row_id,
+          wallet_row_hash: i.wallet_row_hash,
+          reason: e instanceof Error ? e.message : String(e),
+        }),
+      );
+      // Do NOT release the reservation here: the listing stays 'paying', a
+      // durable tombstone a retry's own reserve (WHERE status='open') always
+      // refuses -- never a double-pay, even though the public payments book
+      // is temporarily incomplete. The claim stays settled_unbooked, and the
+      // reconciler books it from the recorded facts.
+      throw new SocietyError(
+        500,
+        `Your payment settled (tx ${tx}) but recording it failed. This is logged for the maintainer to see and put right by hand. ${RECONCILE_BACKSTOP} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Verify your payment independently on Base.`,
+      );
+    }
+    // R3 (gate C2): the payment row IS this route's last write. When this call's own step did not apply (another holder recorded it), the answer
+    // comes from the claim, never from the values this call read for a step that wrote nothing.
+    if (!paymentStep.applied) return answerFromClaim(env, claimKey, owner);
+  } else {
+    // The claim already records the payment (it is booked): nothing for this call to apply, so the answer is the claim's.
+    return answerFromClaim(env, claimKey, owner);
   }
 
-  const paymentResponse = encodePaymentResponseHeader(result.settlement, { route: "listing_pay", tx: result.tx });
+  const paymentResponse = settlement ? encodePaymentResponseHeader(settlement, { route: "listing_pay", tx }) : null;
   return Response.json(
     {
-      listing_id: listingId,
-      submission_id: submissionId,
-      payee_citizen_id: submission.citizen_id,
-      payee_address: reviewerWallet,
-      payer_address: result.payer,
-      amount_cents: listing.bounty_cents,
-      tx: result.tx,
-      wallet_row_id: pin.walletRowId,
-      wallet_row_hash: pin.walletRowHash,
+      listing_id: i.listing_id,
+      submission_id: i.submission_id,
+      payee_citizen_id: i.payee_citizen_id,
+      payee_address: i.payee_address,
+      payer_address: payer,
+      amount_cents: i.amount_cents,
+      tx,
+      wallet_row_id: i.wallet_row_id,
+      wallet_row_hash: i.wallet_row_hash,
       listing_marked_paid: true,
       note: "Payment settled and this listing is now marked paid to this submission.",
       verify: "GET /api/listings/payments",
@@ -1221,4 +1406,14 @@ export async function listingPaymentsPage(env: Env) {
     wallet_row_note: WALLET_ROW_BOOK_NOTE,
     entries: shaped,
   };
+}
+
+// The reconciler's entry points (src/settlement-attempt.ts). Exported from the END of this
+// file so the policing scans in test/listings-policing.test.ts, which read each function
+// from its signature to the next top-level export, keep reading the route handlers whole.
+export async function finishListingCreateBooking(env: Env, row: ClaimRow, owner: string): Promise<void> {
+  await finishListingCreate(env, row, { origin: "", ip: null, settlement: null, owner });
+}
+export async function finishPayListingBooking(env: Env, row: ClaimRow, owner: string): Promise<void> {
+  await finishPayListing(env, row, null, owner);
 }

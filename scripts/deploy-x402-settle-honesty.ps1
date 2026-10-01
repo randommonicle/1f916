@@ -14,6 +14,12 @@
 # Out-String first. This file is ASCII only: 5.1 reads a BOM-less UTF-8 script as the ANSI code page.
 param([switch]$DryRun)
 $ErrorActionPreference = "Stop"
+# RETIRED 2026-09-30 after its one run (2026-09-29 21:37Z, worker 92b15eaa). The D-018 gate
+# (docs/REVIEW-X402-SETTLE-HONESTY-GATE-2026-09-29.md, C2 and L6) found it cannot serve again: its
+# pre-deploy check stops by design once the register 402 carries outputSchema, which it now does,
+# and it neither fetches before its level check nor pins the commit it ships. The next deploy uses
+# its own wave's script, which should fetch, pin the expected commit, and capture the version id.
+Write-Host '[STOP] RETIRED: this script shipped wave B once and must not be reused (gate C2). Use the next wave''s own deploy script.'; exit 1
 $BASE = "https://commonhold.randommonicle.workers.dev"
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $RIDE_LIMIT_NOTE = "The /settle and /verify classifications cannot be ridden without a real payment: the tests prove them (test/x402.test.ts, test/x402-settle-route-d1.test.ts), and the next real payment's log line is their first ride (an unknown settle outcome logs x402_settle_outcome_unknown, with broadcast_tx when PayAI names one)."

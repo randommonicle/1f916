@@ -15,6 +15,14 @@ export function atomicFromCents(cents: number): string {
   return String(cents * 10_000);
 }
 
+// Every header this helper builds carries its OWN nonce unless a test passes one, because
+// since the settlement-claim wave (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md) a signed
+// authorisation's (from, nonce) is single-use: two payments in one test that shared the
+// old constant zero nonce would be a replay, refused. A test that is ABOUT replay passes
+// the nonce it means to reuse, or reuses the header it built.
+let nonceCounter = 0;
+export const freshNonce = (): string => "0x" + (++nonceCounter).toString(16).padStart(64, "0");
+
 export function paymentHeaderFor(to: string, valueAtomic: string, authorizationOverrides: Record<string, unknown> = {}): string {
   const authorization = {
     from: TEST_PAYER,
@@ -22,7 +30,7 @@ export function paymentHeaderFor(to: string, valueAtomic: string, authorizationO
     value: valueAtomic,
     validAfter: "0",
     validBefore: "9999999999",
-    nonce: "0x" + "00".repeat(32),
+    nonce: freshNonce(),
     ...authorizationOverrides,
   };
   return btoa(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { signature: "0x" + "11".repeat(65), authorization } }));

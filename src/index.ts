@@ -37,7 +37,8 @@ import { classifyCron } from "./maintainer/schedule.ts";
 import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
 import { runConciergeWake, conciergeRunsPage } from "./maintainer/concierge.ts";
-import { estimateSweepCost } from "./maintainer/budget.ts";
+import { estimateSweepCost, CLERK_WAKE_FIXED_COST } from "./maintainer/budget.ts";
+import { runReconciler, RECONCILE_SUBREQUEST_CEILING } from "./settlement-reconcile.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
 import { handleOpenTopic, listTopics, topicsDoorNote } from "./topics.ts";
@@ -569,6 +570,7 @@ export default {
     }
 
     const wake = classifyCron(controller.cron);
+
     try {
       // The engagement concierge (docs/DESIGN-CONCIERGE.md §4.1) runs FIRST
       // on the clerk cadence, before the clerk's own drafting pass -- its
@@ -579,9 +581,25 @@ export default {
       // returned actualCost is threaded into the clerk's priorCost exactly
       // as the sweep's cost already is -- zero change to runClerkWake's own
       // signature or internal budget math.
+      //
+      // The settlement reconciler (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md B6, B6a; hub ruling F3,
+      // 2026-09-30) runs SECOND, between the concierge and the clerk, on the 06:00 UTC run only (the
+      // Sunday 07:00 judgment wake keeps its whole budget). The concierge keeps first claim, as above:
+      // the reconciler is a daily backstop that can wait a day, so it is handed only what is LEFT after
+      // the sweep, the concierge's ACTUAL cost and the clerk's reserved minimum (its fixed cost). If
+      // that cannot pay for one worst-case row it works none and logs that it deferred. What it spent
+      // is added to the clerk's priorCost so the clerk sheds against it. A throw that escapes it is
+      // priced as the whole ceiling.
       if (wake === "clerk") {
         const concierge = await runConciergeWake(env, priorCost);
-        await runClerkWake(env, undefined, priorCost + concierge.actualCost);
+        let reconcileCost = 0;
+        try {
+          reconcileCost = (await runReconciler(env, priorCost + concierge.actualCost + CLERK_WAKE_FIXED_COST)).actualCost;
+        } catch (e) {
+          reconcileCost = RECONCILE_SUBREQUEST_CEILING;
+          console.log(JSON.stringify({ level: "error", event: "settlement_reconcile_failed", cron: controller.cron, message: String(e) }));
+        }
+        await runClerkWake(env, undefined, priorCost + concierge.actualCost + reconcileCost);
       } else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
       // else: an unrecognised cron string. wrangler.jsonc only ever
       // registers the two crons above, so this should not happen -- but a
