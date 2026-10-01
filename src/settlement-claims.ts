@@ -68,6 +68,8 @@ export const PAYMENT_AUTHORIZATION_MALFORMED = "payment_authorization_malformed"
 export const SETTLEMENT_CLAIM_CONFLICT = "settlement_claim_conflict";
 export const SETTLEMENT_ALREADY_BOOKED = "settlement_already_booked";
 export const SETTLEMENT_UNRESOLVED = "settlement_unresolved";
+// R2b (gate C2): the facilitator reported a settlement and the society's own claim for it is refused or expired.
+export const SETTLEMENT_CONTRADICTION = "settlement_contradiction";
 // F1 (hub ruling, 2026-09-30): a registration whose handle was taken by a DIFFERENT seat between settlement and the
 // citizen write can never be booked by any retry. The claim stays settled_unbooked (B2 has no other transition) and
 // carries this permanent reason; the reconciler skips such rows and every answer for one says so plainly.
@@ -227,15 +229,34 @@ export async function releaseLease(env: Env, key: ClaimKey, owner: string): Prom
     .run();
 }
 
+// OWNERSHIP, ENFORCED INSIDE THE WRITE (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md M1; CODEX r1 of
+// exchange/REVIEW_settlement-replay-guard-build-2026-09-30.md). The lease bounds nothing by itself: a holder that is slow (a slow D1, a chain-head
+// retry) can still be mid-write when its lease lapses and another worker takes it, and the transitions below used to check only the claim's state.
+// Every write a lease holder makes therefore carries this condition, bound to (its owner id, now): it passes while THIS owner holds the lease, or
+// while no live lease is held at all (none was ever taken, it was released, or it has lapsed with nobody picking it up: a merely slow holder is
+// never locked out of finishing its own work). It fails only when ANOTHER owner holds an unexpired lease, and then the statement writes nothing.
+// Because the booking gate subquery sits inside the same D1 batch as the row INSERTs and the UPDATE recording them, a holder whose lease was taken
+// writes NOTHING in that batch. Per-step gates already stopped a double booking; this stops the stale holder's ANSWER being built from a write that
+// the new holder, not it, made.
+export const HOLDS_LEASE = "(lease_owner = ? OR lease_owner IS NULL OR leased_until IS NULL OR leased_until <= ?)";
+export const holdsLeaseArgs = (owner: string, now: number): unknown[] => [owner, now];
+
+// The same condition read back in TypeScript, for a finisher whose booking step did not apply: true when ANOTHER owner holds an unexpired lease on the
+// claim, which is the one reason a step on a still-settled_unbooked claim can write nothing besides its own ref already being recorded.
+export const leaseHeldByAnother = (row: Pick<ClaimRow, "lease_owner" | "leased_until"> | null, owner: string, now: number): boolean =>
+  row !== null && row.lease_owner !== null && row.lease_owner !== owner && row.leased_until !== null && row.leased_until > now;
+
 // ---------- transitions (each conditional on the state it leaves) ----------
 
 // pending -> settled_unbooked: the facilitator said settled. False means another
-// worker already moved it; the caller re-reads and carries on from the row.
-export async function markSettled(env: Env, key: ClaimKey, tx: string, payer: string, now: number): Promise<boolean> {
+// worker already moved it (or holds a live lease on it); the caller re-reads and
+// answers from the row. A non-final write that passes RENEWS the lease in the same
+// statement, so a holder that is still working keeps it (R1).
+export async function markSettled(env: Env, key: ClaimKey, tx: string, payer: string, owner: string, now: number): Promise<boolean> {
   const r = await env.DB.prepare(
-    `UPDATE settlement_claims SET state = 'settled_unbooked', tx = ?, payer = ?, verdict_reason = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
+    `UPDATE settlement_claims SET state = 'settled_unbooked', tx = ?, payer = ?, verdict_reason = NULL, lease_owner = ?, leased_until = ?, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}`,
   )
-    .bind(tx, payer, now, ...keyArgs(key))
+    .bind(tx, payer, owner, now + CLAIM_LEASE_TTL_MS, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now))
     .run();
   return r.meta.changes === 1;
 }
@@ -271,30 +292,32 @@ async function terminate(env: Env, claimUpdate: D1PreparedStatement, release?: C
 // pending -> refused (classifier rule 7 only): terminal, the authorisation body is cleared. Pass `release` (the claim row) from the
 // reconciler and the re-send so a listing_pay reservation is released in the same batch (F2); the pay route's own request path
 // releases its reservation itself and passes nothing.
-export async function markRefused(env: Env, key: ClaimKey, reason: string, now: number, release?: ClaimRow): Promise<boolean> {
+export async function markRefused(env: Env, key: ClaimKey, reason: string, owner: string, now: number, release?: ClaimRow): Promise<boolean> {
   return terminate(
     env,
     env.DB.prepare(
-      `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
-    ).bind(reason, now, ...keyArgs(key)),
+      `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}`,
+    ).bind(reason, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now)),
     release,
   );
 }
 
 // pending -> expired: the chain proved the authorisation unused AFTER valid_before (plus the margin). See markRefused for `release`.
-export async function markExpired(env: Env, key: ClaimKey, now: number, release?: ClaimRow): Promise<boolean> {
+export async function markExpired(env: Env, key: ClaimKey, owner: string, now: number, release?: ClaimRow): Promise<boolean> {
   return terminate(
     env,
     env.DB.prepare(
-      `UPDATE settlement_claims SET state = 'expired', rpc_body = NULL, verdict_reason = 'authorisation expired unused (on-chain authorizationState is unused after validBefore)', lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending'`,
-    ).bind(now, ...keyArgs(key)),
+      `UPDATE settlement_claims SET state = 'expired', rpc_body = NULL, verdict_reason = 'authorisation expired unused (on-chain authorizationState is unused after validBefore)', lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}`,
+    ).bind(now, ...keyArgs(key), ...holdsLeaseArgs(owner, now)),
     release,
   );
 }
 
 // An unknown outcome leaves the row pending; this records the last thing the
 // facilitator said (already served once, clipped) and lets go of the lease so an
-// identical re-send can reconcile at once.
+// identical re-send can reconcile at once. STRICT holder-only (fix pass 4, H3, hub ruling): unlike the other holder
+// writes it CLEARS the lease, so it must never run on a claim whose lease is named for someone else, lapsed or not.
+// A holder whose lease was taken and then released by another worker (lease_owner NULL) writes nothing.
 export async function noteUnknown(env: Env, key: ClaimKey, reason: string, owner: string, now: number): Promise<void> {
   await env.DB.prepare(
     `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'pending' AND lease_owner = ?`,
@@ -305,11 +328,11 @@ export async function noteUnknown(env: Env, key: ClaimKey, reason: string, owner
 
 // settled_unbooked -> (same state, permanent reason): the citizen write met a handle another seat now holds. True only for
 // the call that FIRST recorded the reason, so the one log line is written once. Clears the lease.
-export async function markHandleTaken(env: Env, key: ClaimKey, now: number): Promise<boolean> {
+export async function markHandleTaken(env: Env, key: ClaimKey, owner: string, now: number): Promise<boolean> {
   const r = await env.DB.prepare(
-    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND verdict_reason IS NULL`,
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND verdict_reason IS NULL AND ${HOLDS_LEASE}`,
   )
-    .bind(CLAIM_HANDLE_TAKEN, now, ...keyArgs(key))
+    .bind(CLAIM_HANDLE_TAKEN, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now))
     .run();
   return r.meta.changes === 1;
 }
@@ -330,31 +353,34 @@ export interface BookingStep {
   // and tried again (up to four times, as appendChained does).
   chain?: ChainedTable;
   // The row-writing statements for ONE attempt. `gate` is a boolean subquery body,
-  // true only while this claim is settled_unbooked and this step's ref is
-  // unrecorded; every statement that creates a row must be conditional on it
+  // true only while this claim is settled_unbooked, this step's ref is
+  // unrecorded and the calling owner holds the lease (or none is live: R1); every statement that creates a row must be conditional on it
   // (INSERT ... SELECT ... WHERE EXISTS (gate)), and the LAST row-creating
   // statement's row is the one whose id is recorded (last_insert_rowid()).
   statements: (gate: ChainGate) => Promise<D1PreparedStatement[]>;
 }
 
-// Runs one booking step. Returns applied=true when this call's batch recorded the
-// step; false when the gate was already closed (someone else recorded it, or the
-// claim left settled_unbooked), in which case NOTHING was written. A thrown error
-// means the batch failed as a unit: neither the row nor the reference exists.
-export async function runBookingStep(env: Env, key: ClaimKey, step: BookingStep, now: number): Promise<{ applied: boolean }> {
+// Runs one booking step for `owner`, the lease holder. Returns applied=true when this call's batch recorded the
+// step; false when the gate was closed (someone else recorded it, the claim left settled_unbooked, or ANOTHER owner
+// holds a live lease: R1), in which case NOTHING was written. A thrown error means the batch failed as a unit:
+// neither the row nor the reference exists. The gate subquery AND the recording UPDATE both carry the lease-ownership
+// condition (HOLDS_LEASE), so a finisher whose lease was taken by another holder writes nothing in this batch; a
+// non-final step that passes RENEWS the lease in the same statement, a final one clears it with the move to `booked`.
+export async function runBookingStep(env: Env, key: ClaimKey, step: BookingStep, owner: string, now: number): Promise<{ applied: boolean }> {
   const gate: ChainGate = {
-    sql: `SELECT 1 FROM settlement_claims WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND json_extract(booked_refs, '$.${step.ref}') IS NULL`,
-    args: keyArgs(key),
+    sql: `SELECT 1 FROM settlement_claims WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND json_extract(booked_refs, '$.${step.ref}') IS NULL AND ${HOLDS_LEASE}`,
+    args: [...keyArgs(key), ...holdsLeaseArgs(owner, now)],
   };
-  const finalSet = step.final ? ", state = 'booked', rpc_body = NULL, lease_owner = NULL, leased_until = NULL" : "";
+  const finalSet = step.final ? ", state = 'booked', rpc_body = NULL, lease_owner = NULL, leased_until = NULL" : ", lease_owner = ?, leased_until = ?";
+  const finalArgs = step.final ? [] : [owner, now + CLAIM_LEASE_TTL_MS];
   // changes() is the row count of the statement that ran just before this one in
   // the batch: the gated INSERT (or, for pay listing, the listing UPDATE). Zero
   // means that statement was gated out, and the claim is left exactly as it was.
   const record = `UPDATE settlement_claims SET booked_refs = json_set(booked_refs, '$.${step.ref}', last_insert_rowid())${finalSet}, updated_at = ?
-     WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND json_extract(booked_refs, '$.${step.ref}') IS NULL AND changes() = 1`;
+     WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND json_extract(booked_refs, '$.${step.ref}') IS NULL AND changes() = 1 AND ${HOLDS_LEASE}`;
   for (let attempt = 0; attempt < 4; attempt++) {
     const stmts = await step.statements(gate);
-    const batch = [...stmts, env.DB.prepare(record).bind(now, ...keyArgs(key))];
+    const batch = [...stmts, env.DB.prepare(record).bind(...finalArgs, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now))];
     try {
       const out = await env.DB.batch(batch);
       const last = out[out.length - 1] as { meta: { changes: number } };
@@ -453,6 +479,9 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       }
       return { status: 409, body: { error: `This payment${txPart(row)} was already used for ${describeClaim(row)}; nothing was charged again and nothing new was created.`, code: SETTLEMENT_ALREADY_BOOKED } };
     case "refused":
+      // DEFERRED-CONTRADICTION-REPLAY (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-REGATE-2026-10-01.md, LOW-1(a); the next paid-path wave): a claim
+      // that met a settlement_contradiction is left a plain refused/expired row, so a LATER identical replay still gets this 402 with accepts.
+      // Fix: stamp the row in the contradiction branch and serve the contradiction answer here instead.
       return {
         status: 402,
         body: { x402Version: 1, error: row.verdict_reason ?? "The facilitator recorded a refusal of this settlement. By its account no money moved.", accepts: [reqs] },

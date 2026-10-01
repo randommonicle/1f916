@@ -58,9 +58,12 @@ export interface ReconcileResult {
   resolved: number;
   unchanged: number;
   failed: number;
+  // Rows where the facilitator said settled but another holder had already made the claim refused or expired (fix pass 4, H2). attemptPending logged each
+  // one (settlement_contradiction); they are counted here, never as booked or resolved.
+  contradicted: number;
 }
 
-const NOTHING: ReconcileResult = { actualCost: 0, examined: 0, booked: 0, resolved: 0, unchanged: 0, failed: 0 };
+const NOTHING: ReconcileResult = { actualCost: 0, examined: 0, booked: 0, resolved: 0, unchanged: 0, failed: 0, contradicted: 0 };
 
 // An env whose DB counts every statement it is asked to run (a batch counts each of its statements,
 // the conservative reading docs/RECON-CLOUDFLARE-FREE-LIMITS §1.2 and the test harness use).
@@ -97,18 +100,18 @@ function metered(env: Env, meter: { n: number }): Env {
 // Books a settled row through its route. Returns true when the row is now `booked`, false when this
 // caller rightly left it (a secret-mode registration). Throws when the booking failed; the route's
 // finisher has already logged its own failure line.
-async function finishBooking(env: Env, row: ClaimRow): Promise<boolean> {
+async function finishBooking(env: Env, row: ClaimRow, owner: string): Promise<boolean> {
   switch (row.route) {
     case "register":
-      return (await finishRegistration(env, row, { ip: null, inviteCode: null, deliver: false })).done;
+      return (await finishRegistration(env, row, { ip: null, inviteCode: null, deliver: false, owner })).done;
     case "patron":
-      await finishPatronBooking(env, row);
+      await finishPatronBooking(env, row, owner);
       return true;
     case "listing_create":
-      await finishListingCreateBooking(env, row);
+      await finishListingCreateBooking(env, row, owner);
       return true;
     case "listing_pay":
-      await finishPayListingBooking(env, row);
+      await finishPayListingBooking(env, row, owner);
       return true;
   }
 }
@@ -166,12 +169,13 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
           if (attempt.kind === "expired" || attempt.kind === "refused") {
             out.resolved++;
             needsRelease = false;
-          } else out.unchanged++;
+          } else if (attempt.kind === "contradiction") out.contradicted++;
+          else out.unchanged++;
           continue;
         }
         working = attempt.row;
       }
-      if (await finishBooking(rowEnv, working)) {
+      if (await finishBooking(rowEnv, working, owner)) {
         out.booked++;
         needsRelease = false;
       } else out.unchanged++;
