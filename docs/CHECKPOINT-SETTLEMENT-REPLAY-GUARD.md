@@ -368,3 +368,70 @@ Run by the hub against the scratch D1 `commonhold-migtest` only (prod untouched)
   finisher with a stale `settled_unbooked` snapshot whose citizen step was gated out by another finisher still returns its own fresh secret; fix: a secret only when THIS call's
   step reported `applied: true`, otherwise answer from the claim), and `src/x402.ts` at the `markSettled` call whose `false` is ignored (answer from the claim's state, log loudly
   if it is refused or expired for money that settled). C1 removes the usual way in (a `/settle` outliving its lease); it does not remove the race, so this stays owed.
+
+## Fix pass 3 (the lease is enforced inside the write, and a finisher answers from its own step or the claim: gate M1 and C2, builder commission `drafts/BUILDER-COMMISSION-M2-LEASE-2026-10-01.md`)
+
+### What was wrong
+
+C1 bounds `/settle` (120 s) plus a 40 s booking allowance under the 180 s lease, but nothing enforced that a lease holder still held the lease when it wrote. A slow D1 or a chain-head retry could let the lease lapse; a re-send or the reconciler then acquired it and booked while the original finisher was still running. The per-step gates already stopped a double booking. What broke was the ANSWER: the stale register finisher returned its own fresh `secret`, whose hash is not `citizens.secret_hash`, and `payAndSettle` ignored a `false` from `markSettled`.
+
+### R1. Ownership inside every write a holder makes (`src/settlement-claims.ts`)
+
+- `HOLDS_LEASE` = `(lease_owner = ? OR lease_owner IS NULL OR leased_until IS NULL OR leased_until <= ?)`, bound to (owner, now). It passes while THIS owner holds the lease or no live lease is held; it fails only when another owner holds an unexpired one, and then the statement writes nothing.
+- It is on `markSettled`, `markRefused`, `markExpired`, `noteUnknown`, `markHandleTaken`, the booking GATE subquery and the recording UPDATE of `runBookingStep`. The gate sits in the same D1 batch as the row INSERTs and the UPDATE recording them, so a finisher whose lease was taken writes nothing in that batch.
+- A non-final write that passes RENEWS the lease in the same statement (`lease_owner = owner, leased_until = now + CLAIM_LEASE_TTL_MS`): `markSettled`, and a non-final `runBookingStep`. A final or terminal write clears it as before.
+- `owner` is a required parameter with no default everywhere (`markSettled`, `markRefused`, `markExpired`, `markHandleTaken`, `runBookingStep`, `recordSettledPayment`'s claim argument, `PaidClaim.finish`, `finishRegistration`'s opts, `finishPatronBooking`, `finishListingCreateBooking`, `finishPayListingBooking`), threaded from the request path (`result.owner`), the re-send (`respondToExistingClaim`) and the reconciler (`finishBooking`). `npx tsc --noEmit` is the check that none was forgotten.
+- `leaseHeldByAnother(row, owner, now)` is the same condition read back in TypeScript: after a step that did not apply, with its ref still unrecorded, it says whether the lease is what stopped it (another holder is mid-booking: answer from the claim) or something else did (a failure to book: the old error path, unchanged).
+- The recording UPDATE's own condition is a belt: with `changes() = 1` it cannot differ from the gate's inside one atomic batch (red-proof M15 is green by design).
+
+### R2/R3. A finisher answers from its own applied step or from the claim
+
+- Register (`src/register-gate.ts`): a `secret` leaves `finishRegistration` only when THIS call's own FINAL step reported `applied: true` (the citizen step in secret mode, the key_registered step in public-key mode). Otherwise `{ done: false, reason: "claim_moved" }`; the payer's own request turns that into `answerFromClaim` (the booked replay 409, or "booking not finished, do not sign again"), the reconciler counts it unchanged. A null ledger receipt (another holder has the lease and has not written the line) is the same outcome. This removes `DEFERRED-STALE-CLAIM-ANSWER` (both markers).
+- Listing create, pay listing, patron (`src/listings.ts`, `src/x402.ts`): the finisher answers from the claim when its own last step did not apply, and a finisher run on a claim that already records the step answers from the claim too. A stale listing-create finisher writes no second throttle record.
+- `payAndSettle` (`src/x402.ts`): `markSettled` returning false no longer finishes on whatever row it reads. It re-reads the claim and `answerFromMovedClaim` answers: booked or settled_unbooked as a replay would (`respondToExistingClaim`: the booked 409, or the finish a re-send runs, or "not finished, do not sign again" under another holder's live lease); pending under another live lease as the existing unknown-outcome 502; refused or expired for a settle the facilitator called successful logs ONE `level: "error"` `settlement_contradiction` line (payer, tx, claim key, state, resource) and answers 500 `settlement_contradiction`: the money may have moved, do not sign again, logged for the maintainer to check against the chain; it never says nothing was charged.
+- `SettleResult` `ok: false` gains `keepReservation?: true`, set on these answers. `handlePayListing` skips its release when it is set: another holder may still be booking the bounty against that `paying` reservation (its booking is gated on the listing still being `paying`), and releasing would re-open a listing whose bounty is being paid.
+
+### Scope extensions beyond the commission's letter (OPEN FOR HUB)
+
+1. `payAndSettle` also answers from the claim when `markRefused` returns false (a recorded refusal this request read, while another holder moved the claim or holds a live lease). Without it R1 itself would let a stale request tell the payer "refused, sign a fresh one" over a claim another holder may still settle. A throw from `markRefused` keeps the old behaviour (logged, 402).
+2. `attemptPending` reports `unchanged` when `markExpired` or `markRefused` returns false (it used to report `expired`/`refused` regardless).
+3. `noteUnknown`'s condition went from `lease_owner = ?` to the full `HOLDS_LEASE` disjunction, as R1's letter requires. Looser in one corner: if another worker took and released the lease after yours lapsed, your stale note overwrites its `verdict_reason` on a pending row. Low stakes.
+4. The contradiction answer says "logged for the maintainer to check against the chain by hand", not "is being reconciled": no automatic step ever re-examines a `refused` or `expired` claim, so the commission's phrase would be a served promise nothing keeps.
+5. `answerFromClaim` passes no `reqs`: a `refused`/`expired` row would serve `accepts: [undefined]`. Unreachable: a finisher only runs on a claim that has been `settled_unbooked`, which cannot go backward.
+6. R1 and R2/R3 are ONE source commit (`ce3c9e06`): the owner and the `applied` result are threaded through the same call sites, and a split would leave a non-compiling intermediate.
+7. Pre-existing and left alone: `finishBooking` in the reconciler returns true for patron, listing create and pay listing whatever the finisher did, so `out.booked` can count a row a stale attempt wrote nothing for. `reg_log` (the registration throttle's own bookkeeping) is not gated; both a stale and a live register finisher can write it.
+
+### Tests (`test/settlement-replay-lease-d1.test.ts`, real local D1; worker B acts inside the stubbed `/settle`, at function level with explicit lease times, or at a DB seam that runs B immediately before A's first batch)
+
+- T1 (secret and public-key): A's lease taken by B (live, B has written nothing): A's finisher returns `claim_moved`, writes no ledger line, citizen or identity line, the claim records nothing; B books once, B's secret hashes to `citizens.secret_hash`. T1c: A runs AFTER B booked everything: `claim_moved`, never a secret. T1r: the same through the real route with the lease lapsing inside A's booking batch: A answers 409 `settlement_already_booked` with no `secret`.
+- T2: patron, pay listing and listing create, inside `/settle` (B books, or B only marks settled and holds a live lease) and inside A's booking batch: A answers from the claim, the reservation is kept when B is still booking, A's stale finisher writes nothing, B books once; one ledger line, one payment row, one listing, one throttle record.
+- T3a: another holder's live lease on the still-pending claim: A's `markSettled` is refused by the ownership condition alone. T3b (refused and expired): the one `settlement_contradiction` line and an answer without "nothing was charged". T3c: a recorded refusal read while another holder holds the lease answers 502, not 402. T3d: the control, an uncontested refusal still answers 402.
+- T4a/T4b/T4c: renewal (a write at taken_at + 170 s keeps the lease past taken_at + 200 s; a non-final step renews, a final one clears it), and the stale holder, a third owner, and a lapsed-and-unheld lease. One test walks every transition (`markSettled`, `markRefused`, `markExpired`, `noteUnknown`, `markHandleTaken`) through stale holder, holder, and unheld.
+- T5 (secret and public-key): a lease that lapses with nobody taking it does not block its holder: 201, booked, no stuck `pending`.
+- T6: a stale reconciler attempt whose terminal write is refused reports `unchanged`.
+- The existing primitive and finisher tests take an `owner` argument now (signature change only).
+
+### Red-proofs (18 mutants, 17 red and M15 green by design; each applied alone to the committed source, the suite run, the file restored by `git checkout` and compared)
+
+| Mutant | Red |
+|---|---|
+| M1 ownership condition dropped from the booking gate subquery | T1 (both modes), T2 pay listing and listing create (live lease), T4b, T4c |
+| M2 dropped from `markSettled` | T3a, the transitions test |
+| M3 `secret` returned when the final step did not apply | T1c and T1r (both modes) |
+| M4 `markSettled`'s false ignored again | T3b (refused, expired) |
+| M5a renewal dropped from `markSettled` | T4a |
+| M5b renewal dropped from a non-final step | T4b |
+| M6 dropped from `markRefused` | T3c, the transitions test |
+| M7 dropped from `markExpired` | the transitions test |
+| M8 dropped from `noteUnknown` | the transitions test |
+| M9 dropped from `markHandleTaken` | the transitions test |
+| M10 the pay route releases its reservation after a settled answer | T2 pay listing (live lease) |
+| M11 `markRefused`'s false ignored | T3c |
+| M12 patron answers from its own receipt when its step did not apply | T2r patron |
+| M13 pay listing answers from its own values when its step did not apply | T2r pay listing |
+| M14 listing create writes the throttle record and answers 201 when its step did not apply | T2r listing create |
+| M15 dropped from the recording UPDATE only | none (green by design: redundant belt) |
+| M16 `attemptPending` ignores a refused `markExpired` | T6 (expired) |
+| M17 `attemptPending` ignores a refused `markRefused` | T6 (refused) |
+
+R4 held: `src/doc.ts`, `migrations/`, the C1 constants and `test/settlement-replay-timeout-d1.test.ts` are untouched, and no new column was needed (migration 0017 unchanged).
