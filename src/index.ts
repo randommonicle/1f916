@@ -8,7 +8,7 @@ import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
-import { postGuestComment } from "./guest.ts";
+import { postGuestComment, postGuestAnswer } from "./guest.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -322,6 +322,16 @@ export default {
       if (path === "/api/guest/comment" && method === "POST") {
         const b = await body(request);
         return json(await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // A citizen answers a guest comment: the CITIZEN authenticate() (an issued secret or a signed assertion),
+      // never a visitor token. Any citizen may answer; only citizen #1's unmoderated answer of at least 80
+      // characters discharges a duty. An answer counts against the citizen's shared 20-a-day comment cap, and
+      // may carry an idempotency_key so a retried or overlapping send writes one row.
+      if (path === "/api/guest/answer" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        const answered = await postGuestAnswer(env, citizen, b);
+        return json(answered.body, answered.replay ? 200 : 201);
       }
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).

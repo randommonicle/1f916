@@ -71,3 +71,39 @@ at 0055 and this fork never takes its migrations).
   candidate query reading `guest_thread` -> the runtime canary independently.
 - Suite 1509/1509, `tsc` clean. One fix on the way: a comment in guest.ts said "SELECT from visitors" and the existing
   showhome grep-guard (which does not strip comments) read it as a table access; reworded.
+
+### 3. The answer route, the shared cap inside both writes (A10), idempotency (A12, A13), the duty status SQL
+
+- `POST /api/guest/answer` (`src/guest.ts` `postGuestAnswer`, `src/index.ts`): the router authenticates with the CITIZEN
+  `authenticate()` and hands in the resolved citizen; guest.ts never imports it. Any citizen may answer; only citizen #1's
+  unmoderated answer of at least 80 characters discharges. The target must be a guest-authored row (a citizen's answer is not
+  a target: the conversation is always a citizen answering the guest row a guest wrote; OPEN FOR HUB below). An answer is
+  accepted on a closed topic and on a collapsed guest comment, refused on a removed one.
+- `src/guest-core.ts` `dutyRowsSql(now, innerWhere)`: the ONE duty-status expression (answered, answered_late, waived,
+  overdue, open), `now` inlined as a number so a test can inject a clock; the post read, the due list, the official block
+  and the daily check will all embed it.
+- A10: `createComment`'s guarded INSERT (`src/society.ts`) now carries the shared cap as a WHERE predicate (omitted for
+  citizen #1, the template's exemption), converted to numbered parameters; the answer INSERT carries the same predicate;
+  `countCitizenCommentsSince` (one statement, comments plus citizen guest-thread rows) feeds the pre-checks and `me()`, so
+  `comments_remaining` agrees. A parameter bound with no placeholder is a binding-count error on D1, so the day-start value
+  is added only when the predicate is.
+- A12/A13: `idempotency_key` (at most 64 visible ASCII characters). A repeat with the same key, target and exact body answers
+  200 `idempotent_replay:true` with the existing row; any other use of the key is 409 `idempotency_key_reused` with nothing
+  written. A unique-index violation from a concurrent send re-runs the lookup and answers as a replay.
+- Tests: `test/guest-answer-d1.test.ts` (3, 15, 22, 23, A10, A12, A13; 13 tests); `test/showhome-invariants-d1.test.ts`
+  gains `/api/guest/answer` in its citizen-route list (a visitor token must 401 there). Red-proofs, each run and restored:
+  createComment predicate dropped, answer predicate dropped, predicate counting comments only, predicate counting answers
+  only (these two are caught only by the mixed 10+9 race, added when the all-comments races proved unable to tell them
+  apart), pre-check counting comments only, any citizen discharging, no 80-character floor, a moderated answer discharging,
+  the unique-violation retry removed, the unique index dropped, a replay ignoring the target, a replay ignoring the body, the
+  maintainer not exempt, the answer inheriting the ceiling, an answer refused on a closed topic, and the answer route
+  authenticating by visitor token (the invariants test).
+- Lesson recorded for the next builder: the HTTP path hashes the credential with `crypto.subtle`, a real event-loop turn, so
+  two requests started together do not reach their statements in lockstep, and a race test through HTTP can pass while the
+  guard it names is absent (the answer-predicate mutant stayed green until the race called `postGuestAnswer` directly).
+  Race tests here call the function.
+- Suite 1522/1522, `tsc` clean.
+- OPEN FOR HUB: (1) the answer route's target is a guest-authored row only; the brief names `guest_comment_id` and the A8
+  inbox covers "replying to its own guest_thread rows", which reads as a citizen answering guests, so I did not allow a
+  citizen answer as a target. (2) Guest comments refuse a hidden (collapsed or removed) PARENT with 409, while an answer is
+  refused only on a REMOVED target (the brief's words); the two rules differ on purpose, as written.

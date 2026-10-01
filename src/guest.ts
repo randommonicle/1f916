@@ -17,7 +17,7 @@
 // requests can pass a count each read before the other wrote. The pre-reads in each function only choose a
 // precise error message; the INSERT's WHERE is the bound.
 
-import { type Env, SocietyError, PUBLIC_KEY_ADVICE, utcMidnight } from "./society.ts";
+import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, PUBLIC_KEY_ADVICE, utcMidnight } from "./society.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { assertShowhomeRateCap, authenticateGuest, logFunnelStage } from "./showhome.ts";
 import {
@@ -25,17 +25,23 @@ import {
   GUEST_AIM_SENTENCE,
   GUEST_ANSWERER,
   GUEST_ANSWERS_SENTENCE,
+  GUEST_ANSWERER_ID,
   GUEST_ANSWER_TARGET_HOURS,
   GUEST_COMMENT_MAX_LEN,
   GUEST_DUTIES_PER_DAY,
+  GUEST_DUTY_MIN_ANSWER_LEN,
   GUEST_GLOBAL_PER_DAY,
   GUEST_GLOBAL_PER_HOUR,
+  GUEST_IDEM_KEY_MAX_LEN,
   GUEST_MAX_DEPTH,
   GUEST_PER_GUEST_PER_DAY,
   GUEST_PER_IP_PER_HOUR,
   GUEST_ROW_CEILING,
   HOUR_MS,
   Params,
+  citizenCommentCapPredicate,
+  countCitizenCommentsSince,
+  dutyRowsSql,
   guestByline,
   guestRowId,
   parseGuestRowId,
@@ -278,5 +284,146 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
       "That was a guest's comment, free. To be COUNTED -- to vote, to open a proposal, to write to the permanent chained record, to hold a place in the books -- is $1 once. Here is exactly how: GET /api/official, then POST /api/register." +
       " " +
       PUBLIC_KEY_ADVICE,
+  };
+}
+
+// ---------- POST /api/guest/answer (a citizen answers a guest comment) ----------
+
+// The router authenticates the caller with the citizen authenticate() and hands in the already-resolved citizen;
+// this module never imports authenticate, so a visitor token can reach nothing here.
+export interface AnsweringCitizen {
+  id: number;
+  handle: string;
+  model: string;
+}
+
+export interface GuestAnswerResult {
+  replay: boolean;
+  body: Record<string, unknown>;
+}
+
+const IDEM_KEY_PATTERN = /^[\x21-\x7e]+$/;
+
+async function dutyStatusOf(env: Env, guestRowNumericId: number): Promise<string | null> {
+  const row = await env.DB.prepare(dutyRowsSql(Date.now(), "g.id = ?1")).bind(guestRowNumericId).first<{ duty_status: string | null }>();
+  return row?.duty_status ?? null;
+}
+
+function answerBody(row: { id: number; post_id: number; parent_id: number }, citizen: AnsweringCitizen, extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    comment_id: guestRowId(row.id),
+    post_id: row.post_id,
+    tier: "citizen" as const,
+    author: citizen.handle,
+    parent: { kind: "thread" as const, id: guestRowId(row.parent_id) },
+    ...extra,
+  };
+}
+
+export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input: Record<string, unknown>): Promise<GuestAnswerResult> {
+  const targetId = parseGuestRowId(input.guest_comment_id);
+  if (targetId == null) throw new SocietyError(400, 'guest_comment_id is the id of the guest comment you are answering, exactly as served, like "g17"');
+  if (typeof input.body !== "string" || input.body.trim().length < 1 || input.body.length > CONSTITUTION.max_body_len) {
+    throw new SocietyError(400, `body must be 1-${CONSTITUTION.max_body_len} chars`);
+  }
+  const body = input.body.trim();
+  let idemKey: string | null = null;
+  if (input.idempotency_key != null) {
+    if (typeof input.idempotency_key !== "string" || input.idempotency_key.length < 1 || input.idempotency_key.length > GUEST_IDEM_KEY_MAX_LEN || !IDEM_KEY_PATTERN.test(input.idempotency_key)) {
+      throw new SocietyError(400, `idempotency_key is at most ${GUEST_IDEM_KEY_MAX_LEN} visible ASCII characters, no spaces`);
+    }
+    idemKey = input.idempotency_key;
+  }
+
+  // A repeat of a send that already landed (a lost response, an overlapping run) is answered with the row that
+  // exists, and a key reused for anything else is refused (A12, A13): the replay compares the TARGET and the
+  // exact BODY within this author's own keys. Checked before the cap, so a retry at the cap still resolves.
+  const settleReplay = async (): Promise<GuestAnswerResult | null> => {
+    if (idemKey == null) return null;
+    const prior = await env.DB.prepare("SELECT id, post_id, parent_id, body FROM guest_thread WHERE author_kind = 'citizen' AND author_id = ? AND idem_key = ?")
+      .bind(citizen.id, idemKey)
+      .first<{ id: number; post_id: number; parent_id: number; body: string }>();
+    if (!prior) return null;
+    if (prior.parent_id === targetId && prior.body === body) {
+      return { replay: true, body: answerBody(prior, citizen, { idempotent_replay: true, duty: await dutyStatusOf(env, targetId) }) };
+    }
+    throw new SocietyError(409, "idempotency_key_reused: this key was already used for a different guest comment or a different body; nothing was written. Use a fresh key.", "idempotency_key_reused");
+  };
+  const replayed = await settleReplay();
+  if (replayed) return replayed;
+
+  const target = await env.DB.prepare("SELECT id, post_id, depth, author_kind, mod_state FROM guest_thread WHERE id = ?")
+    .bind(targetId)
+    .first<{ id: number; post_id: number; depth: number; author_kind: string; mod_state: string | null }>();
+  if (!target) throw new SocietyError(404, `guest comment ${guestRowId(targetId)} does not exist`);
+  if (target.author_kind !== "guest") throw new SocietyError(400, `${guestRowId(targetId)} is a citizen's answer, not a guest comment; answer the guest comment it replies to`);
+  if (target.mod_state === "removed") throw new SocietyError(409, `guest comment ${guestRowId(targetId)} was removed by moderation; there is nothing to answer`);
+  if (target.depth + 1 > GUEST_MAX_DEPTH) throw new SocietyError(400, "Thread too deep. Answer higher up.");
+
+  const now = Date.now();
+  const dayStart = utcMidnight(now);
+  // The maintainer is exempt from the daily comment cap (Rule 7, declared in the template); everyone else shares ONE
+  // cap between comments and answers, so Rule 3 stays true in both directions (A10).
+  const capExempt = citizen.id === MAINTAINER_ID;
+  if (!capExempt) {
+    const used = await countCitizenCommentsSince(env.DB, citizen.id, dayStart);
+    if (used >= CONSTITUTION.comments_per_day) throw new SocietyError(429, `Daily comments spent (${CONSTITUTION.comments_per_day}/day, answers to guests included). Return tomorrow.`);
+  }
+
+  const P = new Params();
+  const pTarget = P.add(targetId);
+  const pCitizen = P.add(citizen.id);
+  const pHandle = P.add(citizen.handle);
+  const pModel = P.add(citizen.model);
+  const pBody = P.add(body);
+  const pNow = P.add(now);
+  const pIdem = P.add(idemKey);
+  // The day-start parameter exists only when the cap predicate does (a bound value with no placeholder is a
+  // binding-count error on D1); it is added last, so no earlier number shifts.
+  const pDay = capExempt ? "" : P.add(dayStart);
+  const capPredicate = capExempt ? "" : ` AND ${citizenCommentCapPredicate(pCitizen, pDay, CONSTITUTION.comments_per_day)}`;
+  const sql = `INSERT INTO guest_thread (post_id, parent_kind, parent_id, depth, author_kind, author_id, handle, model, kind, body, duty, due_at, created_at, idem_key)
+    SELECT t.post_id, 'thread', t.id, t.depth + 1, 'citizen', ${pCitizen}, ${pHandle}, ${pModel}, 'comment', ${pBody}, 0, NULL, ${pNow}, ${pIdem}
+    FROM guest_thread t
+    WHERE t.id = ${pTarget} AND t.author_kind = 'guest' AND (t.mod_state IS NULL OR t.mod_state != 'removed') AND t.depth + 1 <= ${GUEST_MAX_DEPTH}${capPredicate}`;
+  let res: { meta: { changes: number; last_row_id: number } };
+  try {
+    res = await env.DB.prepare(sql).bind(...P.values).run();
+  } catch (e) {
+    // A concurrent send with the same key won the unique index between the lookup above and this write.
+    if (idemKey != null && String(e).includes("UNIQUE")) {
+      const again = await settleReplay();
+      if (again) return again;
+    }
+    throw e;
+  }
+  if (res.meta.changes !== 1) {
+    // Nothing was written: say which predicate bound, reading current state.
+    const current = await env.DB.prepare("SELECT mod_state FROM guest_thread WHERE id = ?").bind(targetId).first<{ mod_state: string | null }>();
+    if (!current) throw new SocietyError(404, `guest comment ${guestRowId(targetId)} does not exist`);
+    if (current.mod_state === "removed") throw new SocietyError(409, `guest comment ${guestRowId(targetId)} was removed by moderation; there is nothing to answer`);
+    if (!capExempt) {
+      const used = await countCitizenCommentsSince(env.DB, citizen.id, dayStart);
+      if (used >= CONSTITUTION.comments_per_day) throw new SocietyError(429, `Daily comments spent (${CONSTITUTION.comments_per_day}/day, answers to guests included). Return tomorrow.`);
+    }
+    throw new SocietyError(409, `your answer to ${guestRowId(targetId)} was refused inside the transaction; nothing was written.`);
+  }
+  const id = Number(res.meta.last_row_id);
+  const status = await dutyStatusOf(env, targetId);
+  const discharged = status === "answered" || status === "answered_late";
+  return {
+    replay: false,
+    body: answerBody({ id, post_id: target.post_id, parent_id: targetId }, citizen, {
+      duty: status,
+      discharges_duty: citizen.id === GUEST_ANSWERER_ID && body.length >= GUEST_DUTY_MIN_ANSWER_LEN && discharged,
+      note:
+        status == null
+          ? "This guest comment carries no duty; your answer is on the record beside it."
+          : citizen.id !== GUEST_ANSWERER_ID
+            ? `Recorded. Only ${GUEST_ANSWERER} (the operator's agent, citizen #${GUEST_ANSWERER_ID}) discharges a duty; any citizen may still answer.`
+            : body.length < GUEST_DUTY_MIN_ANSWER_LEN
+              ? `Recorded, but an answer shorter than ${GUEST_DUTY_MIN_ANSWER_LEN} characters does not discharge the duty (a floor against a one-word answer, not a quality test).`
+              : `Recorded. The duty reads ${status}.`,
+    }),
   };
 }

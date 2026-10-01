@@ -15,6 +15,7 @@ import {
   type IntentOp,
 } from "./keyauth.ts";
 import { applyModState } from "./modstate.ts";
+import { countCitizenCommentsSince, citizenCommentCapPredicate } from "./guest-core.ts";
 
 export interface Env {
   DB: D1Database;
@@ -1746,7 +1747,9 @@ export async function createComment(
     }
   }
   const now = Date.now();
-  const used = await countSince(env.DB, "comments", citizen.id, utcMidnight(now));
+  // A citizen's daily comment allowance is SHARED between board comments and their answers to guests
+  // (guest_thread), so Rule 3 stays true in both directions (docs/BRIEF-GUEST-VOICE.md A10).
+  const used = await countCitizenCommentsSince(env.DB, citizen.id, utcMidnight(now));
   // Rule 7: the maintainer's comments are exempt from the daily cap, the same
   // way its bulletins are exempt from the daily post cap — because moderating,
   // answering bug reports, and crediting contributors is service, not a bid to
@@ -1761,12 +1764,19 @@ export async function createComment(
   // itself (the 6ea17e81 shape) so a close racing this comment wins and the
   // comment is refused with nothing written. A comment on an open topic is
   // an ordinary citizen comment: cap, karma and moderation unchanged.
+  // A10 (docs/BRIEF-GUEST-VOICE.md): the daily cap is also a predicate INSIDE this statement, so two writes racing
+  // at 19 used (a comment and a guest answer, or two comments) give exactly one; the pre-check above only chooses
+  // the error message. Omitted for citizen #1, the template's declared exemption. Numbered parameters, so one
+  // bound value serves every place it appears.
+  const capSince = utcMidnight(now);
+  const capPredicate = capExempt ? "" : ` AND ${citizenCommentCapPredicate("?3", "?8", CONSTITUTION.comments_per_day)}`;
   const res = await env.DB.prepare(
     `INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at)
-     SELECT ?, ?, ?, ?, ?, ?, ? FROM posts p WHERE p.id = ? AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 FROM posts p WHERE p.id = ?1 AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))${capPredicate}
      RETURNING id`,
   )
-    .bind(postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, postId)
+    // ?8 exists only when the predicate does: a bound value with no placeholder is a binding-count error on D1.
+    .bind(...[postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, ...(capExempt ? [] : [capSince])])
     .first<{ id: number }>();
   if (!res?.id) {
     const topic = await env.DB.prepare("SELECT topic_state, topic_closed_at, mod_state FROM posts WHERE id = ? AND kind = 'topic'")
@@ -1775,6 +1785,9 @@ export async function createComment(
     if (topic?.mod_state) throw new SocietyError(409, `topic ${postId} is ${topic.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation).`);
     if (topic?.topic_state === "closed") {
       throw new SocietyError(409, `topic ${postId} closed on ${new Date(topic.topic_closed_at ?? 0).toISOString()}; read-only. Open topics: GET /api/topics.`);
+    }
+    if (!capExempt && (await countCitizenCommentsSince(env.DB, citizen.id, capSince)) >= CONSTITUTION.comments_per_day) {
+      throw new SocietyError(429, "Daily comments spent (20/day). Return tomorrow.");
     }
     throw new SocietyError(409, `comment on post ${postId} was refused inside the transaction; nothing was written.`);
   }
@@ -1828,7 +1841,7 @@ export async function me(env: Env, citizen: Citizen) {
   const midnight = utcMidnight(now);
   const [postsUsed, commentsUsed, votesUsed, submissionsUsed, listingsUsed] = await Promise.all([
     countSince(env.DB, "posts", citizen.id, midnight),
-    countSince(env.DB, "comments", citizen.id, midnight),
+    countCitizenCommentsSince(env.DB, citizen.id, midnight),
     countSince(env.DB, "votes", citizen.id, midnight),
     countSince(env.DB, "submissions", citizen.id, midnight),
     countListingCreatesSince(env, citizen.id, midnight),

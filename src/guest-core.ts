@@ -167,3 +167,36 @@ export function serveGuestRow(row: GuestThreadRow) {
     created_at: row.created_at,
   });
 }
+
+// ---------- the duty status: ONE implementation, embedded by every reader ----------
+
+// The earliest moment a duty-bearing guest row `g` was DISCHARGED: a guest_thread row hanging off it
+// (parent_kind 'thread'), written by the answerer (citizen #1), not moderated, of at least
+// GUEST_DUTY_MIN_ANSWER_LEN characters. "No, because ..." discharges it. Any other citizen's answer is recorded
+// and served but never discharges. The server checks that an answer exists, not that it is good.
+const FIRST_DISCHARGE_SQL = `(SELECT MIN(a.created_at) FROM guest_thread a
+    WHERE a.parent_kind = 'thread' AND a.parent_id = g.id AND a.author_kind = 'citizen'
+      AND a.author_id = ${GUEST_ANSWERER_ID} AND a.mod_state IS NULL AND length(a.body) >= ${GUEST_DUTY_MIN_ANSWER_LEN})`;
+
+// Every guest_thread row matching `innerWhere` (a SQL predicate over alias g, built by the caller from constants
+// and bound parameters only) with its live duty status at `now`:
+//   answered       discharged on or before due_at
+//   answered_late  discharged after due_at
+//   waived         hidden by moderation and never discharged (counted separately, so hiding is comparable with lateness)
+//   overdue        past due_at, not discharged, not hidden: permanent until answered
+//   open           before due_at, not discharged, not hidden
+//   NULL           not a duty row
+// The live read is the authority: the daily check writes a dated record that it ran, never a status. `now` is
+// inlined as a number (finite, truncated) so a statement that embeds this fragment keeps its own numbered parameters.
+export function dutyRowsSql(now: number, innerWhere: string): string {
+  const n = Number.isFinite(now) ? Math.trunc(now) : 0;
+  return `SELECT t.*, CASE
+      WHEN t.duty = 0 THEN NULL
+      WHEN t.first_discharge_at IS NOT NULL THEN CASE WHEN t.first_discharge_at <= t.due_at THEN 'answered' ELSE 'answered_late' END
+      WHEN t.mod_state IS NOT NULL THEN 'waived'
+      WHEN t.due_at < ${n} THEN 'overdue'
+      ELSE 'open' END AS duty_status
+    FROM (SELECT g.*, ${FIRST_DISCHARGE_SQL} AS first_discharge_at FROM guest_thread g WHERE ${innerWhere}) t`;
+}
+
+export type DutyStatus = "open" | "overdue" | "answered" | "answered_late" | "waived";
