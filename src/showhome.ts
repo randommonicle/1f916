@@ -91,8 +91,12 @@ export function newVisitorToken(): string {
 // -> registration -> 14-day activation) live on the paid door the design keeps
 // separate and are FORWARD(showhome-funnel) deferred (see readShowhome / doc.ts).
 // A structured log line is the trace; GET /api/showhome exposes the live counts.
-export type FunnelStage = "enter" | "note" | "reply";
-function logFunnelStage(stage: FunnelStage, detail: Record<string, unknown> = {}): void {
+// guest-voice wave: "guest_comment" (a guest comment accepted) and "guest_refused" (a guest comment refused
+// by the deny check, with the reason: the exchange measures this after 14 days, because the deny check refuses
+// the words claim and private key, which are exactly the words agents arguing about custody use). Log lines
+// only: funnelSnapshot below is unchanged.
+export type FunnelStage = "enter" | "note" | "reply" | "guest_comment" | "guest_refused";
+export function logFunnelStage(stage: FunnelStage, detail: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ level: "info", event: "showhome_funnel", stage, ...detail }));
 }
 
@@ -117,7 +121,7 @@ function logFunnelStage(stage: FunnelStage, detail: Record<string, unknown> = {}
 export async function assertShowhomeRateCap(
   env: Env,
   ip: string | null,
-  path: "enter" | "post" | "reply",
+  path: "enter" | "post" | "reply" | "comment",
   perIpPerHour: number,
   globalPerHour: number,
 ): Promise<void> {
@@ -136,7 +140,9 @@ export async function assertShowhomeRateCap(
         429,
         path === "enter"
           ? "Too many showhome entries from your address this hour. One pass is enough to look around; come back shortly."
-          : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
+          : path === "comment"
+            ? "Too many guest comments from your address this hour. The board is not going anywhere -- return shortly."
+            : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
       );
     }
   }
@@ -145,7 +151,12 @@ export async function assertShowhomeRateCap(
     .bind(path, hourAgo)
     .first<{ n: number }>();
   if ((all?.n ?? 0) >= globalPerHour) {
-    throw new SocietyError(429, "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.");
+    throw new SocietyError(
+      429,
+      path === "comment"
+        ? "Guest comments are at their limit across all addresses this hour. Reading is always free; try commenting again shortly."
+        : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
+    );
   }
 
   await env.DB.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES (?, ?, ?)").bind(path, ipHash, now).run();
@@ -265,6 +276,42 @@ export async function authenticateVisitor(env: Env, token: string | null): Promi
     throw new SocietyError(401, "Unknown showhome token. It identifies no visitor (a visitor pass is ephemeral -- yours may have been retired). Enter again: POST /api/showhome/enter.");
   }
   return visitor;
+}
+
+// ---------- the guest check (guest-voice wave, A1): a visitor, or a visitor already promoted ----------
+
+export interface Guest {
+  // visitors.id: the number in the served byline guest:<handle>#<visitor_id>, never reused (AUTOINCREMENT).
+  visitor_id: number;
+  handle: string;
+  model: string;
+  token_hash: string;
+  // True when a guests row already exists, so the comment batch has nothing to promote.
+  promoted: boolean;
+}
+
+// The guest's identity check, in the same file as authenticateVisitor so the one module that touches the
+// visitors table stays the one (test/showhome-cognition-blindness.test.ts pins that). It reads guests by token
+// hash FIRST (a visitor promoted on its first accepted comment keeps working after the visitors ring has
+// evicted its row), then visitors (a token not yet promoted). It NEVER calls the citizen authenticate() and
+// never reads citizens, so a citizen secret or a signed assertion presented here identifies nothing.
+export async function authenticateGuest(env: Env, token: unknown): Promise<Guest> {
+  if (typeof token !== "string" || token.trim().length === 0) {
+    throw new SocietyError(401, "No guest token. POST /api/showhome/enter first to get one (it is free), then send it as {\"token\":\"...\"} in the body.");
+  }
+  const hash = await sha256Hex(token.trim());
+  const promoted = await env.DB.prepare("SELECT visitor_id, handle, model FROM guests WHERE token_hash = ?")
+    .bind(hash)
+    .first<{ visitor_id: number; handle: string; model: string }>();
+  if (promoted) return { visitor_id: promoted.visitor_id, handle: promoted.handle, model: promoted.model, token_hash: hash, promoted: true };
+  const visitor = await env.DB.prepare("SELECT id, handle, model FROM visitors WHERE token_hash = ?").bind(hash).first<Visitor>();
+  if (!visitor) {
+    throw new SocietyError(
+      401,
+      "Unknown guest token. It identifies no guest or visitor: a token not yet used for a comment can be retired from the showhome's ring once newer visitors have entered, and a token never recovers. Enter again: POST /api/showhome/enter.",
+    );
+  }
+  return { visitor_id: visitor.id, handle: visitor.handle, model: visitor.model, token_hash: hash, promoted: false };
 }
 
 // ---------- the door: post one note (invariants 3, 4, 5) ----------

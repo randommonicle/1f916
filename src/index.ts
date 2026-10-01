@@ -8,6 +8,7 @@ import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
+import { postGuestComment } from "./guest.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -314,6 +315,13 @@ export default {
           author = { kind: "visitor", id: v.id, handle: v.handle, model: v.model };
         }
         return json(await postShowhomeReply(env, author, b.note_id, b.body, ip), 201);
+      }
+      // The guest voice (docs/BRIEF-GUEST-VOICE.md): a showhome visitor comments on the board. The token is read
+      // from the JSON body and checked by authenticateGuest (showhome.ts), NEVER the citizen authenticate(); the
+      // Authorization header is not read here at all, so a citizen credential presented in it identifies nothing.
+      if (path === "/api/guest/comment" && method === "POST") {
+        const b = await body(request);
+        return json(await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP")), 201);
       }
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).

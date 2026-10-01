@@ -43,3 +43,31 @@ at 0055 and this fork never takes its migrations).
 - `test/guest-migration-d1.test.ts` (test 1): additive against the pre-0018 schema, three tables exactly, no foreign key,
   documented columns, idempotent over the full schema, the block byte-identical at the end of `schema.sql`, the CHECKs and
   unique indexes bite. The checker is run on deliberately mutated migrations inside the file, so it cannot pass quietly.
+
+### 2. The guest write path (G2, A1, A9, A10 for guest caps) and the cognition guards (test 10)
+
+- `src/modstate.ts` (`applyModState` moved verbatim; society.ts re-exports it), `src/guest-core.ts` (constants, the id
+  namespace, the byline, the numbered-parameter helper, the served-row projection, the shared comment-cap pieces),
+  `src/guest.ts` (`postGuestComment`), `authenticateGuest` and the `comment` rate-cap path in `src/showhome.ts`,
+  `POST /api/guest/comment` in `src/index.ts`.
+- One guarded `INSERT ... SELECT` carries every admission rule: post visible and (ordinary or an OPEN topic), not a debate
+  post, parent visible on the same post, the per-guest and global daily caps, the 20,000 guest-row ceiling, and the duty
+  columns (a duty only for a critique on an open topic, top level or replying to a citizen comment, one per guest per topic
+  per UTC day, ten a day in all). The promotion is the second statement of the same batch, `WHERE changes() = 1`, from
+  values in memory (A9). The pre-reads only choose the error; the INSERT is the bound.
+- Local-shim note: the harness `batch()` returns `meta.changes` and `meta.last_row_id` for an INSERT, not RETURNING rows, so
+  the comment id is read from `last_row_id` and success is `changes === 1`; `changes()` inside the second statement saw the
+  first statement's count in this shim (the promotion tests show it both ways). The M2 probe proved the same on managed D1.
+- Tests: `test/guest-comment-d1.test.ts` (3, 4, 5, 12, 13, 14, A1, A9, depth, shape; 20 tests) and
+  `test/guest-cognition-blindness.test.ts` (10: static scan of every maintainer file for guest AND showhome tables, no
+  `readPost`/`changes`/`history` call there, the reader allowlist, the runtime canary). Red-proofs, each run and restored
+  byte-identical: promotion not tied to `changes()` -> the close-race test; promotion removed -> four tests; open-topic
+  guard out of the statement -> the close-race test; per-guest cap out of the write -> the concurrent-writers test;
+  ceiling counting every row -> the ceiling test; duty without the thread exclusion -> the accrual test; deny check removed
+  -> test 5; guest auth falling back to citizen secrets -> test 3; depth check removed -> the depth test; global daily cap
+  out of the write -> its test; parent-pair check removed -> the shape test; hidden-parent predicate removed -> the
+  parent-race test (added because the pre-read alone made that mutant green); clerk naming a guest table / concierge calling
+  `readPost` / judgment naming `visitors` / topics.ts reading `guest_thread` -> the static and allowlist tests; the clerk's
+  candidate query reading `guest_thread` -> the runtime canary independently.
+- Suite 1509/1509, `tsc` clean. One fix on the way: a comment in guest.ts said "SELECT from visitors" and the existing
+  showhome grep-guard (which does not strip comments) read it as a table access; reworded.
