@@ -31,6 +31,7 @@ import {
   registerReq,
   stubFacilitator,
   testEnv,
+  type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
 import { sha256Hex } from "../src/chain.ts";
@@ -214,14 +215,14 @@ async function payFixture(d1: LocalD1) {
   const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: BOUNTY });
   const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
   const funder = await loadCitizen(d1, funderId);
-  const pay = async () => {
+  const pay = async (env: Env = eq(d1)) => {
     const res = await handlePayListing(
       new Request(`https://example.test/api/listing/${listingId}/pay`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(REVIEWER_WALLET, atomicFromCents(BOUNTY)) },
         body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
       }),
-      eq(d1),
+      env,
       funder,
       listingId,
     );
@@ -334,6 +335,126 @@ test("T2 listing create: B holds a live lease and is still booking when A's /set
     assert.equal(count(d1, "listings"), 1, "B books once");
     assert.equal(count(d1, "ledger"), 1);
     assert.equal(count(d1, "reg_log"), 1, "with its one throttle record");
+    assert.equal(oneClaim(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- T1r/T2r: the lease lapses INSIDE A's booking batch (the route, a database seam) ----------
+
+// An Env whose DB runs `hook(n)` immediately BEFORE its nth batch(): worker B acts at exactly the moment A's booking is "delayed past its lease".
+function hookedEnv(d1: LocalD1, hook: (n: number) => Promise<void>): Env {
+  const real = d1.DB;
+  let n = 0;
+  const DB = {
+    prepare: (sql: string) => real.prepare(sql),
+    batch: async (stmts: never[]) => {
+      await hook(++n);
+      return real.batch(stmts);
+    },
+  };
+  return { ...testEnv(d1), DB } as unknown as Env;
+}
+// B (a re-send or the reconciler) takes the lapsed lease and runs `work` with its own plain env, once, before A's first batch.
+function bActsBeforeFirstBatch(d1: LocalD1, work: (row: ClaimRow) => Promise<void>) {
+  return async (n: number) => {
+    if (n !== 1) return;
+    const key = await bTakesTheLease(d1);
+    await work((await getClaim(eq(d1), key)) as ClaimRow);
+  };
+}
+
+for (const mode of ["secret", "public-key"] as const) {
+  test(`T1r (${mode}): A's booking batch is delayed past its lease and B books the whole registration first; A answers from the claim (409), with NO secret, and B's secret is the one stored`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator();
+    try {
+      const publicKey = mode === "public-key" ? await realPublicKey() : null;
+      let bAnswer: Awaited<ReturnType<typeof finishRegistration>> | null = null;
+      const env = hookedEnv(
+        d1,
+        bActsBeforeFirstBatch(d1, async (row) => {
+          bAnswer = await finishRegistration(eq(d1), row, { ip: null, inviteCode: null, deliver: true, owner: "B" });
+        }),
+      );
+      const res = await callWorker(registerReq({ handle: "delayed-seat", model: "m", ...(publicKey ? { public_key: publicKey } : {}) }, registerHeader()), env);
+      assert.equal(res.status, 409, JSON.stringify(await res.clone().json()));
+      const body = await json(res);
+      assert.equal(body.code, "settlement_already_booked", "A answers as an identical replay would");
+      assert.equal(body.secret, undefined, "A's answer carries no secret");
+      assert.ok(bAnswer && (bAnswer as { done: boolean }).done, "B's answer is the registration");
+      assert.equal(count(d1, "citizens"), 1, "exactly one citizen");
+      assert.equal(count(d1, "ledger"), 1, "exactly one ledger row");
+      assert.equal(identityLines(d1, "key_registered"), mode === "public-key" ? 1 : 0, "exactly one identity line (public-key mode)");
+      if (mode === "secret") {
+        const stored = (d1.raw.prepare("SELECT secret_hash FROM citizens").get() as { secret_hash: string }).secret_hash;
+        assert.equal(await sha256Hex(String((bAnswer as unknown as { body: { secret: string } }).body.secret)), stored, "B's secret is the one the database holds");
+      }
+      assert.equal(oneClaim(d1).state, "booked");
+      assert.equal(stub.calls.settle, 1);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+test("T2r patron: A's booking batch is delayed past its lease and B books the line first; A answers from the claim (409), one ledger line", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const env = hookedEnv(d1, bActsBeforeFirstBatch(d1, (row) => finishPatronBooking(eq(d1), row, "B")));
+    const res = await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), env);
+    assert.equal(res.status, 409, JSON.stringify(await res.clone().json()));
+    assert.equal((await json(res)).code, "settlement_already_booked");
+    assert.equal(count(d1, "ledger"), 1);
+    assert.equal(oneClaim(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("T2r pay listing: A's booking batch is delayed past its lease and B books the bounty first; A answers from the claim (409), one payment row, the listing PAID", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const fx = await payFixture(d1);
+    const env = hookedEnv(d1, bActsBeforeFirstBatch(d1, (row) => finishPayListingBooking(eq(d1), row, "B")));
+    const res = await fx.pay(env);
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, "settlement_already_booked");
+    assert.equal(count(d1, "listing_payments"), 1);
+    assert.equal(fx.listing().status, "paid");
+    assert.equal(oneClaim(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("T2r listing create: A's booking batch is delayed past its lease and B books the fee line and the listing first; A answers from the claim (409) and writes no second throttle record", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const funder = await loadCitizen(d1, insertCitizen(d1));
+    const env = hookedEnv(d1, bActsBeforeFirstBatch(d1, (row) => finishListingCreateBooking(eq(d1), row, "B")));
+    const res = await handleCreateListing(
+      new Request("https://example.test/api/listing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(computeListingFeeCents(1000))) },
+        body: JSON.stringify(listingBody(1000)),
+      }),
+      env,
+      funder,
+    );
+    assert.equal(res.status, 409, JSON.stringify(await res.clone().json()));
+    assert.equal((await res.json() as Record<string, any>).code, "settlement_already_booked");
+    assert.equal(count(d1, "listings"), 1);
+    assert.equal(count(d1, "ledger"), 1);
+    assert.equal(count(d1, "reg_log"), 1, "B's throttle record only: A's answer came from the claim, so A wrote none");
     assert.equal(oneClaim(d1).state, "booked");
   } finally {
     stub.restore();
