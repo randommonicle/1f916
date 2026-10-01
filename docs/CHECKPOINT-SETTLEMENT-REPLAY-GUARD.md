@@ -435,3 +435,45 @@ C1 bounds `/settle` (120 s) plus a 40 s booking allowance under the 180 s lease,
 | M17 `attemptPending` ignores a refused `markRefused` | T6 (refused) |
 
 R4 held: `src/doc.ts`, `migrations/`, the C1 constants and `test/settlement-replay-timeout-d1.test.ts` are untouched, and no new column was needed (migration 0017 unchanged).
+
+## Fix pass 4 (CODEX round 2 at `599653c7`: two HIGHs reproduced, hub-verified at source, plus the hub's ruling on `noteUnknown`)
+
+Context: `exchange/REVIEW_settlement-replay-guard-build-2026-09-30.md`, "CODEX round 2".
+
+### H1. A stale refusal released a NEWER payer's reservation (`src/listings.ts`)
+
+- Sequence: A reserves listing L (`paying_since` = A's); A's lease lapses; B takes the claim, marks it refused and (F2) releases A's reservation in the same batch; C reserves L; A's `markRefused` returns false, the re-read state is `refused`, so `payAndSettle` returns the plain `ok:false`; the pay route's own release (`WHERE id = ? AND status = 'paying'`) then cleared C's reservation.
+- The route's one own-reservation release is now bound to the instance this request acquired: `AND paying_since = ? AND paying_wallet_row_id = ? AND paying_wallet_row_hash = ?`, bound to `reservedAt` and the pin the reserve statement recorded (the same columns `listingReleaseStatement` uses). It was the only `status = 'open', paying_since = NULL` release in the route (grep across `src/`: the other is `listingReleaseStatement`, already bound).
+- Test H1: the A/B/C sequence; A's 402 stands, and C's reservation (status `paying`, C's `paying_since`, the pinned wallet row) is intact.
+
+### H2. `attemptPending` discarded a successful settlement (`src/x402.ts`, `src/settlement-reconcile.ts`)
+
+- Sequence: a re-send's (or the reconciler's) attempt A re-POSTs `/settle`; its lease lapses; B makes the claim `refused` or `expired`; A's `/settle` answers success; `markSettled` returns false; the moved state is not `settled_unbooked`, so A returned `unchanged` and the re-send served the terminal row's 402 with fresh `accepts`, logging nothing.
+- When `markSettled` is refused and the re-read claim is `refused` or `expired`, `attemptPending` now logs the ONE `settlement_contradiction` line (payer, tx, claim key, state, resource) and returns a distinct `{ kind: "contradiction", tx, state }`. The log and the answer are shared with `payAndSettle` (`logSettlementContradiction`, `contradictionResponse`), so the two cannot drift.
+- The re-send (`respondToExistingClaim`) answers it as `payAndSettle` does: 500 `settlement_contradiction`, the money may have moved, logged for the maintainer to check against the chain by hand, do not sign again; never a 402 and no `accepts`.
+- The scheduled reconciler counts it in a new `ReconcileResult.contradicted`, never as booked, resolved or unchanged; the log line is the one attemptPending wrote.
+- Tests H2 (patron re-send and reconciler, each with the claim forced `refused` and `expired` between A's lease lapse and its settle success): no 402 or `accepts`, exactly one contradiction line, the claim row as B left it (state, `tx` null, `rpc_body` null), nothing booked.
+
+### H3. `noteUnknown` is strictly holder-only again (`src/settlement-claims.ts`, hub ruling, both seats agree)
+
+- Back to `AND lease_owner = ?`: it CLEARS the lease, so it must not run on a claim whose lease is named for someone else, lapsed or not, and a holder whose lease was taken and then released by another worker (`lease_owner` NULL) writes nothing. The other holder writes keep the "or no live lease" disjunction.
+- The transitions test now also asserts: a lapsed lease named for A is cleared by A and not by C; A's late note after B took and released the lease writes nothing.
+
+### Red-proofs (7 mutants, each applied alone to the committed source, the lease and claims tests run, the file restored by `git checkout` and compared)
+
+| Mutant | Red |
+|---|---|
+| M18 `noteUnknown` back on `HOLDS_LEASE` | the transitions test |
+| M23 `noteUnknown` with no ownership condition | the transitions test |
+| M19 the pay route's release unbound again (id and `paying` only) | H1 |
+| M19b only the `paying_since` binding dropped | H1 |
+| M20 `attemptPending` back to `unchanged` | H2 re-send and reconciler, refused and expired (4) |
+| M21 the re-send does not answer the contradiction | H2 re-send, refused and expired |
+| M22 the reconciler counts a contradiction as unchanged | H2 reconciler, refused and expired |
+
+(The old M8, a tautology on `noteUnknown`'s former shared condition, no longer applies; M23 replaces it.)
+
+### Left alone, for the hub
+
+- The pin columns in H1's release are a belt: A and C would have to reserve in the same millisecond for `paying_since` alone to collide, and no test can tell the pin-only mutant from green. M19b (the `paying_since` binding alone) is red.
+- A contradiction leaves the claim terminal, so no later reconciler pass selects it: the log line is the maintainer's only signal. The mirror case (this attempt read a recorded refusal while B made the claim `settled_unbooked`) still reports `unchanged` and the re-send answers from the claim, which is right.
