@@ -553,6 +553,31 @@ test("T3c: this request read a RECORDED REFUSAL while another holder has a live 
   }
 });
 
+// D-018 re-gate LOW-3 (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-REGATE-2026-10-01.md, the gate's probe P-E, committed as written): T3c is a
+// registration test, so without this the keepReservation on payAndSettle's markRefused-false answer (src/x402.ts) could be deleted with the
+// whole suite green; a pay request that read a refusal while B was mid-attempt would then release its reservation and B's booking would be
+// gated out of a listing no longer 'paying'.
+test("P-E: pay listing, refusal read under another holder's live lease: A answers 502 and KEEPS the reservation", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async () => {
+      await bTakesTheLease(d1);
+      return refusedAnswer();
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay();
+    assert.equal(res.status, 502);
+    assert.equal(res.body.accepts, undefined);
+    assert.equal(fx.listing().status, "paying", "reservation kept while B may still settle");
+    assert.equal(oneClaim(d1).state, "pending");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("T3d: the control: with nobody else involved, a recorded refusal still answers 402 and refuses the claim", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: () => refusedAnswer() });
