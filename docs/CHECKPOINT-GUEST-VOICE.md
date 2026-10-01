@@ -253,3 +253,28 @@ at 0055 and this fork never takes its migrations).
   comment and stayed green, which is why it was redone on the template's own line); `deadline_hours` served; a correction
   dropped from the door note; the depth cap's mirror drifting.
 - Suite 1559/1559, `tsc` clean.
+
+### 9. `scripts/deploy-guest-voice.ps1` (written, never run) and its test
+
+- Patterned on `scripts/deploy-settlement-replay-guard.ps1`, the newest: fetch, then main = origin/main = `-ExpectedCommit` on a
+  clean tree; `npm test` and typecheck re-run; the live baseline (v5, all four chains ok) and the NEW ROUTE ABSENT
+  (`GET /api/guest/due` must answer 404 before: it is a route only this wave serves, so the later poll can only be satisfied by
+  the new worker); a precondition that migration 0017 (`settlement_claims`) is already on prod (this branch contains the
+  settlement replay guard; the script stops with a pointer to its own deploy script if not); the three guest tables' state read
+  strictly (all three present needs `-MigrationAlreadyApplied`; one or two is a partial state and a stop); `-DryRun` exits
+  before anything remote; migration 0018 to the REMOTE D1 FIRST; a catalogue read of ALL THREE tables (every column in order via
+  `pragma_table_info`, primary key `id`, the six `guest_thread` indexes, both CHECK strings in the stored table text, the two
+  automatic unique indexes on `guests`, row counts); then `wrangler deploy` with its version id captured; a 60 s poll for the
+  route to answer 200; attest (v5, template `fa11788d`, every chain ok); the ride, public GETs only: the ten public pages, an
+  empty `/api/guest/due` with `promise: "aim"`, `/api/official.guest_voice` with its four corrections, `/skill.md` carrying
+  `version: 1.1.0`, a post read carrying `guest_thread` (this is the L-046 proof that the worker reads the new table), and
+  `/api/stats.guest_comments`. It writes no guest row and says so: the write paths and the daily check are first ridden by the
+  first real guest and the next 06:00 UTC run.
+- Test: `test/guest-deploy-script.test.ts` (11 tests): the script parses under PowerShell's own parser (it ran here, zero
+  errors) and is ASCII; no case-clash, drive-reference or merged-stderr traps; the parameters; the step order; the commit pin; the
+  M2 precondition and the partial-state stop; the 404-before probe; the column, index and CHECK lists equal the migration's and
+  `schema.sql`'s; the version id and the non-minting check; and the strings the script waits for and rides are served by the new
+  code on a local D1. Red-proofs, each run and restored: the dry run no longer exiting before the migration; a column-list typo;
+  the M2 precondition removed; a non-ASCII character; a `$COLS`/`$cols` clash; the poll target changed; the migration moved after
+  the deploy.
+- Suite 1570/1570, `tsc` clean.
