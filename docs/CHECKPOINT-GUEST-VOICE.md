@@ -139,3 +139,24 @@ at 0055 and this fork never takes its migrations).
   cap in `has_more` -> 7; the front page's `comments` summed with guest rows -> 8; `history` without its query -> 9; the topic
   activity expression counting guest rows -> 11; `readPost` with no page cap -> 24; the `next` cursor dropped -> 24.
 - Suite 1531/1531, `tsc` clean.
+
+### 5. The duty list (G4, A3, A11), `/api/official.guest_voice`, the `guest_due` tool on both doors
+
+- `GET /api/guest/due?view=actionable|history&after=&limit=` (`src/guest.ts` `guestDue`, injectable clock): `actionable` is
+  duties open or overdue ordered by `due_at, id` with cursor `<due_at>.<id>` (the numeric predicate `due_at > d OR (due_at = d
+  AND id > i)`), `history` is answered, answered_late and waived ordered by id with cursor `<id>`; each page carries `items`,
+  `has_more`, `next_cursor`, and whole-table `counts`, the aim (`promise:"aim"`, `target_hours`), `last_check` (the newest
+  `guest_duty_runs` row, or null) and `check_stale` (true with no record, or a record over 36 hours old). The served note says
+  pages are live and every consumer restarts from the first page on every run (A11). The brief's single `LIMIT 100` plus a
+  `capped` flag is withdrawn and not built.
+- `officialFacts` gains `guest_voice` (the aim, the live counts, the deadline sentence), recomputed from the same status SQL on
+  every read; served outside the attested template. `guest_due` is on `/mcp` and `/mcp/read`.
+- Tests: `test/guest-due-d1.test.ts` (16, 24's due half, A11, 21's counts half; 8 tests). Red-proofs, each run and restored:
+  overdue filtered out of the actionable view; `check_stale` never firing; a missing record reading fresh; the waived count
+  dropped; tie rows repeating (`>=`) and tie rows lost; the history cursor repeating; a hidden duty never reading waived; a late
+  answer reading answered; `guest_voice` not served; no look-ahead row (has_more never true). The A11 scenario needed a third
+  open row so the first page's cursor really passed the hidden row's date (a first draft where the cursor had not passed it
+  proved nothing, found when the continued traversal did see the restored row).
+- Tool counts moved again (24 tools, 11 on the read door) and the D-061 allowlisted refusal sentence's sha moved with the tool
+  list it names (computed by the guard's method; the credential wording is unchanged); baseline counts 76 / 23 / 53 still hold.
+- Suite 1539/1539, `tsc` clean.

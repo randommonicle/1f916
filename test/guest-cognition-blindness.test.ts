@@ -63,10 +63,9 @@ test("10 (static): no file under src/maintainer/ names a guest table or a showho
   assert.deepEqual(offenders, [], "D-043: no paid cognition reads visitor or guest content; any mention is a new, unreviewed reader");
 });
 
-test("10 (static, positive control): the same mechanism sees a real mention (guest.ts names its tables; showhome.ts names its own)", () => {
+test("10 (static, positive control): the same mechanism sees a real mention (guest.ts names every guest table; showhome.ts names its own)", () => {
   const guest = code(join(SRC, "guest.ts"));
-  // guest_duty_runs joins this list in the commit that adds the daily check (guest.ts has no reader of it yet).
-  for (const t of ["guest_thread", "guests"]) assert.ok(mentions(guest, t), `guest.ts names ${t}, so a zero elsewhere means something`);
+  for (const t of GUEST_TABLES) assert.ok(mentions(guest, t), `guest.ts names ${t}, so a zero elsewhere means something`);
   const showhome = code(join(SRC, "showhome.ts"));
   assert.ok(mentions(showhome, "visitors"));
 });

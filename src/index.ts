@@ -8,7 +8,7 @@ import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
-import { postGuestComment, postGuestAnswer, guestThreadRoute } from "./guest.ts";
+import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue } from "./guest.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -336,6 +336,9 @@ export default {
       // A post's guest thread, paged (docs/BRIEF-GUEST-VOICE.md A3): public, read-only, no credential.
       if (path === "/api/guest/thread" && method === "GET")
         return json(await guestThreadRoute(env, url.searchParams.get("post_id"), url.searchParams.get("after")));
+      // Every duty with its live status (docs/BRIEF-GUEST-VOICE.md G4, A3, A11): public, read-only, no credential.
+      if (path === "/api/guest/due" && method === "GET")
+        return json(await guestDue(env, url.searchParams.get("view"), url.searchParams.get("after"), url.searchParams.get("limit")));
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
       if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));

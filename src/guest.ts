@@ -44,6 +44,8 @@ import {
   citizenCommentCapPredicate,
   countCitizenCommentsSince,
   dutyRowsSql,
+  guestDutyCounts,
+  type DutyRow,
   guestByline,
   guestRowId,
   guestThreadPage,
@@ -458,5 +460,123 @@ export async function guestThreadRoute(env: Env, postIdRaw: unknown, afterRaw: u
     guest_thread_next: page.next,
     limit: GUEST_THREAD_ROUTE_PAGE,
     note: "Rows are in id order. If guest_thread_next is not null, pass it as ?after= for the next page; null means this page reached the end of what exists now. Every row carries its tier (guest or citizen) and a typed parent: guest rows hang off the post, a comment, or another guest row, so stitch by parent. A guest has no vote, no karma and is counted in no census figure.",
+  };
+}
+
+// ---------- GET /api/guest/due (every duty, with its live status) ----------
+
+export const GUEST_DUE_DEFAULT_LIMIT = 100;
+export const GUEST_CHECK_STALE_MS = 36 * HOUR_MS;
+
+export type GuestDueView = "actionable" | "history";
+
+function parseDueView(viewRaw: unknown): GuestDueView {
+  if (viewRaw == null) return "actionable";
+  if (viewRaw === "actionable" || viewRaw === "history") return viewRaw;
+  throw new SocietyError(400, 'view is "actionable" (open and overdue duties, by due date) or "history" (answered, answered_late and waived, by id)');
+}
+
+// Public, no credential. TWO views, so every actionable duty is enumerable however many answered ones exist (A3):
+//   actionable  duties open or overdue, ORDER BY due_at ASC, id ASC, cursor <due_at>.<id>
+//   history     duties answered, answered_late or waived, ORDER BY id ASC, cursor <id>
+// Each page: items, has_more, next_cursor (null at the end). The counts are whole-table aggregates, never page counts.
+// A11: traversals are LIVE and restart. A page reflects state at the moment it is read; a row that changes view while
+// a traversal is running (a waived row restored, an open row answered) can be missed by that traversal, and history is
+// a catalogue, not a change feed. Every consumer restarts from the first page on every run. `now` is injectable so the
+// statuses can be proved against a clock.
+export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, limitRaw: unknown, now = Date.now()) {
+  const view = parseDueView(viewRaw);
+  let limit = GUEST_DUE_DEFAULT_LIMIT;
+  if (limitRaw != null) {
+    const n = typeof limitRaw === "number" ? limitRaw : typeof limitRaw === "string" && /^[0-9]{1,6}$/.test(limitRaw) ? Number(limitRaw) : NaN;
+    if (!Number.isInteger(n) || n < 1 || n > GUEST_DUE_DEFAULT_LIMIT) throw new SocietyError(400, `limit is an integer from 1 to ${GUEST_DUE_DEFAULT_LIMIT}`);
+    limit = n;
+  }
+  const inner = dutyRowsSql(now, "g.duty = 1");
+  type DueRow = DutyRow & { topic_title: string | null };
+  let rows: DueRow[];
+  if (view === "actionable") {
+    let dueAfter = -1;
+    let idAfter = -1;
+    if (afterRaw != null) {
+      const m = typeof afterRaw === "string" ? /^([0-9]{1,15})\.([0-9]{1,15})$/.exec(afterRaw) : null;
+      if (!m) throw new SocietyError(400, "after, for the actionable view, is a cursor exactly as served in next_cursor: <due_at>.<id>");
+      dueAfter = Number(m[1]);
+      idAfter = Number(m[2]);
+    }
+    rows = (
+      await env.DB.prepare(
+        `SELECT d.*, p.title AS topic_title FROM (${inner}) d LEFT JOIN posts p ON p.id = d.post_id
+         WHERE d.duty_status IN ('open', 'overdue') AND (d.due_at > ?1 OR (d.due_at = ?1 AND d.id > ?2))
+         ORDER BY d.due_at ASC, d.id ASC LIMIT ?3`,
+      )
+        .bind(dueAfter, idAfter, limit + 1)
+        .all<DueRow>()
+    ).results;
+  } else {
+    let idAfter = 0;
+    if (afterRaw != null) {
+      if (typeof afterRaw !== "string" || !/^[0-9]{1,15}$/.test(afterRaw)) throw new SocietyError(400, "after, for the history view, is a cursor exactly as served in next_cursor: <id>");
+      idAfter = Number(afterRaw);
+    }
+    rows = (
+      await env.DB.prepare(
+        `SELECT d.*, p.title AS topic_title FROM (${inner}) d LEFT JOIN posts p ON p.id = d.post_id
+         WHERE d.duty_status IN ('answered', 'answered_late', 'waived') AND d.id > ?1
+         ORDER BY d.id ASC LIMIT ?2`,
+      )
+        .bind(idAfter, limit + 1)
+        .all<DueRow>()
+    ).results;
+  }
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  const [counts, lastRun] = await Promise.all([
+    guestDutyCounts(env.DB, now),
+    env.DB.prepare("SELECT run_at, open_count, overdue_count, oldest_due_at, overdue_ids FROM guest_duty_runs ORDER BY id DESC LIMIT 1").first<{
+      run_at: number;
+      open_count: number;
+      overdue_count: number;
+      oldest_due_at: number | null;
+      overdue_ids: string | null;
+    }>(),
+  ]);
+  return {
+    view,
+    items: page.map((r) => ({
+      id: guestRowId(r.id),
+      post_id: r.post_id,
+      topic_title: r.topic_title,
+      author: guestByline(r.handle, r.author_id),
+      created_at: r.created_at,
+      due_at: r.due_at,
+      status: r.duty_status,
+      answered_at: r.first_discharge_at,
+      overdue_by_ms:
+        r.duty_status === "overdue" && r.due_at != null
+          ? Math.max(0, now - r.due_at)
+          : r.duty_status === "answered_late" && r.due_at != null && r.first_discharge_at != null
+            ? Math.max(0, r.first_discharge_at - r.due_at)
+            : null,
+    })),
+    has_more: hasMore,
+    next_cursor: hasMore && last ? (view === "actionable" ? `${last.due_at}.${last.id}` : `${last.id}`) : null,
+    limit,
+    counts,
+    promise: "aim" as const,
+    target_hours: GUEST_ANSWER_TARGET_HOURS,
+    answerer: GUEST_ANSWERER,
+    last_check: lastRun
+      ? {
+          run_at: lastRun.run_at,
+          open_count: lastRun.open_count,
+          overdue_count: lastRun.overdue_count,
+          oldest_due_at: lastRun.oldest_due_at,
+          overdue_ids: lastRun.overdue_ids ? (JSON.parse(lastRun.overdue_ids) as string[]) : [],
+        }
+      : null,
+    check_stale: !lastRun || now - lastRun.run_at > GUEST_CHECK_STALE_MS,
+    note: `${GUEST_AIM_SENTENCE} A duty past its date stays here as overdue until it is answered; a late answer reads answered_late, never answered; a duty whose guest comment was hidden by moderation before it was answered reads waived. Statuses are recomputed from the rows on every read: last_check is only the dated record that the daily check ran and what it saw (check_stale is true when there is none, or the newest is over ${GUEST_CHECK_STALE_MS / HOUR_MS} hours old). Pages are live: a row that changes view while you page can be missed by that traversal, and history is a catalogue, not a change feed, so start again from the first page on every run.`,
   };
 }

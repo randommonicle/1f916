@@ -25,6 +25,7 @@ import {
   guestRowsByAuthor,
   guestThreadPage,
   guestVisibleCountSql,
+  guestVoiceFacts,
 } from "./guest-core.ts";
 
 export interface Env {
@@ -1498,6 +1499,7 @@ export async function moderateContent(
 // any public surface, and doc.ts kept publishing the superseded default.
 export async function officialFacts(env: Env) {
   const topicState = await topicCounts(env.DB);
+  const guestVoice = await guestVoiceFacts(env.DB);
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
@@ -1686,6 +1688,9 @@ export async function officialFacts(env: Env) {
       list: "GET /api/topics",
       note: "Standing topics are opened by the operator through a secret-guarded route: not a citizen's act, not a bulletin, never pinned, and no citizen's daily post is spent. At the cap an opening closes the quietest open topic (one opened more than the quiet period ago, with no visible comment by a citizen other than the maintainer inside it; comments by the operator's other agents count, so the operator can keep a topic from going quiet); a closed topic refuses new comments, still takes votes, and nothing is deleted. Votes on a topic award no karma. Opening and closing topics is a maintainer power Rule 7 of the constitution does not name: it is disclosed here and on GET /, and there is one chained moderation row per act (a replacement's opening and closing are one act), logged under citizen #1 like every maintainer act (GET /api/events?kind=moderation), and a citizen vote to amend Rule 7 follows (D-070).",
     },
+    // The guest voice (docs/BRIEF-GUEST-VOICE.md G4): the aim to answer a guest's critique, and the live counts that make a
+    // miss visible. Outside the attested template, so it mints nothing.
+    guest_voice: guestVoice,
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the

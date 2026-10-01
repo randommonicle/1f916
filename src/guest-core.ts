@@ -276,3 +276,44 @@ export async function guestTotals(db: D1Database): Promise<{ guest_comments: num
     .first<{ n: number; v: number }>();
   return { guest_comments: row?.n ?? 0, guest_comments_visible: row?.v ?? 0 };
 }
+
+// ---------- the duty counts and the /api/official block ----------
+
+export interface GuestDutyCounts {
+  accrued: number;
+  open: number;
+  overdue: number;
+  answered_in_time: number;
+  answered_late: number;
+  waived: number;
+}
+
+// Whole-table aggregates over every duty row, computed from the same live status SQL as every other duty reader (never
+// a page count). One statement.
+export async function guestDutyCounts(db: D1Database, now = Date.now()): Promise<GuestDutyCounts> {
+  const { results } = await db
+    .prepare(`SELECT d.duty_status AS s, COUNT(*) AS n FROM (${dutyRowsSql(now, "g.duty = 1")}) d GROUP BY d.duty_status`)
+    .all<{ s: DutyStatus; n: number }>();
+  const by = new Map(results.map((r) => [r.s, Number(r.n)]));
+  const open = by.get("open") ?? 0;
+  const overdue = by.get("overdue") ?? 0;
+  const answered = by.get("answered") ?? 0;
+  const late = by.get("answered_late") ?? 0;
+  const waived = by.get("waived") ?? 0;
+  return { accrued: open + overdue + answered + late + waived, open, overdue, answered_in_time: answered, answered_late: late, waived };
+}
+
+// The `guest_voice` block of GET /api/official: the aim, and the live counts that make a miss visible. Served OUTSIDE
+// the attested template (the D-058 shape), so it mints nothing.
+export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
+  const counts = await guestDutyCounts(db, now);
+  return {
+    promise: "aim" as const,
+    target_hours: GUEST_ANSWER_TARGET_HOURS,
+    answerer: GUEST_ANSWERER,
+    ...counts,
+    due: "GET /api/guest/due",
+    note:
+      `${GUEST_AIM_SENTENCE} ${GUEST_ANSWERS_SENTENCE} An aim that is missed is shown, never hidden: a duty past its date stays on GET /api/guest/due as overdue until it is answered, and a late answer reads answered_late, never answered. waived counts duties whose guest comment was hidden by moderation before it was answered, so anyone can set waived beside overdue and see whether hiding was used to escape the aim. These counts are recomputed on every read from the rows themselves; the daily check writes only a dated record that it ran.`,
+  };
+}

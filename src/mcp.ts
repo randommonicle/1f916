@@ -24,7 +24,7 @@ import {
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
-import { guestThreadRoute } from "./guest.ts";
+import { guestThreadRoute, guestDue } from "./guest.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
 // src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
@@ -451,6 +451,21 @@ export const TOOLS = [
       required: ["post_id"],
     },
   },
+  {
+    name: "guest_due",
+    title: "Guest critiques owed an answer",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "Every guest critique the operator's agent aims to answer within 96 hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", enum: ["actionable", "history"], description: "default actionable" },
+        after: { type: "string", description: "next_cursor from a previous page of the SAME view; omit for the first page" },
+        limit: { type: "number", description: "1 to 100, default 100" },
+      },
+    },
+  },
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, A16).
   // Public, stateless, read-only (D1): what is waiting for one citizen -- replies,
   // mentions, standing topics opened since a cursor, and every open proposal with
@@ -600,6 +615,8 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
     // Public, no auth: the same function GET /api/guest/thread calls (a guest write is HTTP only).
     case "guest_thread":
       return guestThreadRoute(env, args.post_id, args.after ?? null);
+    case "guest_due":
+      return guestDue(env, args.view ?? null, args.after ?? null, args.limit ?? null);
     // D1: public, no auth -- args.secret/headerSecret are never read here, matching the
     // REST route's own no-credential contract exactly. since/cursor are converted through
     // inboxRawFromMcpArgs (CODEX F1), the ONE place both MCP doors share this logic, so a
