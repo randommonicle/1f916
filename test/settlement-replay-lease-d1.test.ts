@@ -16,6 +16,7 @@ import {
   TEST_PAYER,
   TREASURY_ADDRESS,
   TX,
+  authStateAnswer,
   callWorker,
   captureLog,
   claimRows,
@@ -36,7 +37,7 @@ import {
 } from "./helpers/settlement-harness.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { finishRegistration } from "../src/register-gate.ts";
-import { finishPatronBooking } from "../src/x402.ts";
+import { attemptPending, finishPatronBooking } from "../src/x402.ts";
 import { finishListingCreateBooking, finishPayListingBooking, handleCreateListing, handlePayListing, computeListingFeeCents } from "../src/listings.ts";
 import {
   acquireLease,
@@ -723,3 +724,30 @@ test("every transition a holder makes (markSettled, markRefused, markExpired, no
     d1.close();
   }
 });
+
+// ---------- T6: the reconciler's attempt, writing under a lease that is no longer its own ----------
+
+for (const kind of ["expired", "refused"] as const) {
+  test(`T6 (${kind}): a stale attempt whose terminal write is refused by the ownership condition reports 'unchanged', never '${kind}', and the claim stays pending for its holder`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => refusedAnswer(), rpc: () => authStateAnswer(false) });
+    try {
+      const payload = payloadFor({ validBefore: kind === "expired" ? "1000" : "9999999999" });
+      const { key, validBefore } = claimKeyFromPayload(payload, REQS);
+      const id = await claimIdentity(key, validBefore, { paymentPayload: payload, paymentRequirements: { resource: "https://example.test/api/patron", payTo: TREASURY_ADDRESS, maxAmountRequired: "1000000" } }, spec);
+      assert.deepEqual(await takeClaim(eq(d1), id, spec, "A", Date.now()), { taken: true });
+      await bTakesTheLease(d1);
+      const row = (await getClaim(eq(d1), key)) as ClaimRow;
+      const out = await attemptPending(eq(d1), row, "A");
+      assert.equal(out.kind, "unchanged", JSON.stringify(out));
+      assert.equal((await getClaim(eq(d1), key))?.state, "pending");
+      assert.equal((await getClaim(eq(d1), key))?.lease_owner, "B");
+      // the holder's own attempt resolves it
+      const mine = await attemptPending(eq(d1), (await getClaim(eq(d1), key)) as ClaimRow, "B");
+      assert.equal(mine.kind, kind);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
