@@ -97,18 +97,18 @@ function metered(env: Env, meter: { n: number }): Env {
 // Books a settled row through its route. Returns true when the row is now `booked`, false when this
 // caller rightly left it (a secret-mode registration). Throws when the booking failed; the route's
 // finisher has already logged its own failure line.
-async function finishBooking(env: Env, row: ClaimRow): Promise<boolean> {
+async function finishBooking(env: Env, row: ClaimRow, owner: string): Promise<boolean> {
   switch (row.route) {
     case "register":
-      return (await finishRegistration(env, row, { ip: null, inviteCode: null, deliver: false })).done;
+      return (await finishRegistration(env, row, { ip: null, inviteCode: null, deliver: false, owner })).done;
     case "patron":
-      await finishPatronBooking(env, row);
+      await finishPatronBooking(env, row, owner);
       return true;
     case "listing_create":
-      await finishListingCreateBooking(env, row);
+      await finishListingCreateBooking(env, row, owner);
       return true;
     case "listing_pay":
-      await finishPayListingBooking(env, row);
+      await finishPayListingBooking(env, row, owner);
       return true;
   }
 }
@@ -171,7 +171,7 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
         }
         working = attempt.row;
       }
-      if (await finishBooking(rowEnv, working)) {
+      if (await finishBooking(rowEnv, working, owner)) {
         out.booked++;
         needsRelease = false;
       } else out.unchanged++;

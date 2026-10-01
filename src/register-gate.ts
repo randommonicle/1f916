@@ -30,6 +30,7 @@ import {
   replayForClaim,
   finishUnderOwnLease,
   ledgerReceipt,
+  answerFromClaim,
   type PaidClaim,
 } from "./x402.ts";
 import { appendChained, appendChainedStmt, sha256Hex } from "./chain.ts";
@@ -51,6 +52,7 @@ import {
   refsOf,
   runBookingStep,
   isHandleTaken,
+  leaseHeldByAnother,
   markHandleTaken,
   handleTakenMessage,
   RECONCILE_BACKSTOP,
@@ -192,7 +194,7 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   const claim: PaidClaim = {
     route: "register",
     intent: { handle: b.handle ?? null, model: b.model ?? null, public_key: b.public_key ?? null },
-    finish: (row) => registrationResponse(env, row, { ip, inviteCode }),
+    finish: (row, owner) => registrationResponse(env, row, { ip, inviteCode, owner }),
   };
 
   // B4, consult-first: a header that already has a claim is answered from the claim
@@ -260,19 +262,25 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   // traceably -- never quietly, because there is no refund path (blueprint
   // section 3: the society does not custody an obligation to a payer).
   const claimRow = result.claim as ClaimRow;
-  return finishUnderOwnLease(env, result, async () => (await registrationResponse(env, claimRow, { ip, inviteCode })) as Response);
+  // R2a (gate C2): a finisher whose own booking step did not apply answers from the claim (registrationResponse returns null for it), exactly as an
+  // identical replay would, and never with a credential this call generated for a step that wrote nothing.
+  return finishUnderOwnLease(env, result, async () => (await registrationResponse(env, claimRow, { ip, inviteCode, owner: result.owner })) ?? (await answerFromClaim(env, keyOfRow(claimRow), result.owner)));
 }
 
 export interface RegistrationFinishOpts {
   ip: string | null;
   inviteCode: string | null;
+  // The lease holder doing the finishing (R1): every booking write below carries it, so a holder whose lease was taken by another writes nothing.
+  owner: string;
   // True when the caller is the payer's own request: the only caller that can hand a
   // secret-mode registration its secret, because a secret exists only in the 201 that
   // carries it (B5b). The reconciler passes false.
   deliver: boolean;
 }
 
-export type RegistrationOutcome = { done: true; body: Record<string, unknown> } | { done: false; reason: "awaiting_identical_resend" };
+// `claim_moved` (R2a/R3, gate C2): this call's own booking write did not apply (another holder recorded the step or holds the lease), so it has no answer of
+// its own: the caller answers from the claim.
+export type RegistrationOutcome = { done: true; body: Record<string, unknown> } | { done: false; reason: "awaiting_identical_resend" | "claim_moved" };
 
 // Finishes a paid registration from its claim (B5): every write is skipped if the
 // claim already records it, and each row-creating write is one batch with the UPDATE
@@ -303,7 +311,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
   let sealed: { prev_hash: string; hash: string };
   if (refs.ledger_id == null) {
     const now = Date.now();
-    sealed = await recordSettledPayment(
+    const recorded = await recordSettledPayment(
       env,
       "registration",
       { payer, tx },
@@ -314,12 +322,18 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
         amount_cents: REGISTRATION_PRICE_CENTS,
         created_at: now,
       },
-      { key, final: false },
+      { key, final: false, owner: opts.owner },
     );
+    // Another holder has the lease and has not written the line yet: nothing here is this call's to answer.
+    if (recorded.hash === null) return { done: false, reason: "claim_moved" };
+    sealed = recorded;
   } else {
     sealed = await ledgerReceipt(env, refs.ledger_id);
   }
 
+  // True only when THIS call's own batch recorded the route's LAST step (the citizen for a secret-mode registration, the key_registered line for a
+  // public-key one). Only then does the call hold an answer of its own; otherwise it answers from the claim (R2a).
+  let finalApplied = false;
   let citizenId: number | undefined;
   let body: Record<string, unknown>;
   try {
@@ -347,7 +361,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
       secret = newSecret();
       const secretHash = await sha256Hex(secret);
       const now = Date.now();
-      await runBookingStep(
+      const citizenStep = await runBookingStep(
         env,
         key,
         {
@@ -359,11 +373,16 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
             ).bind(intent.handle, intent.model.trim(), secretHash, publicKey, now, now, ...gate.args),
           ],
         },
+        opts.owner,
         now,
       );
-      refs = refsOf((await getClaim(env, key)) as ClaimRow);
+      const afterCitizen = (await getClaim(env, key)) as ClaimRow;
+      refs = refsOf(afterCitizen);
       citizenId = refs.citizen_id;
+      // Not applied and no citizen recorded while another owner holds a live lease: that holder is still booking, so the answer is the claim's.
+      if (citizenId == null && !citizenStep.applied && leaseHeldByAnother(afterCitizen, opts.owner, Date.now())) return { done: false, reason: "claim_moved" };
       if (citizenId == null) throw new Error("the claim is not settled_unbooked: no citizen was recorded for it");
+      if (secretMode) finalApplied = citizenStep.applied;
     } else if (secretMode) {
       // A secret-mode citizen exists under this claim but the claim is not booked: the
       // secret cannot be recovered, so nothing here may invent one.
@@ -389,27 +408,30 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
             (await appendChainedStmt(env.DB, "identity_events", { citizen_id: cid, kind: "key_registered", detail: `key sha256:${fp}`, created_at: now }, gate)).stmt,
           ],
         },
+        opts.owner,
         now,
       );
-      // Not applied: another worker recorded it (fine) or the claim is not settled_unbooked (not fine).
-      if (!step.applied && refsOf((await getClaim(env, key)) as ClaimRow).key_event_id == null) {
-        throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
+      finalApplied = step.applied;
+      // Not applied: another worker recorded it (the answer is then the claim's), another owner holds a live lease and is still booking (the same), or the
+      // claim is not settled_unbooked at all (not fine).
+      if (!step.applied) {
+        const after = (await getClaim(env, key)) as ClaimRow;
+        if (refsOf(after).key_event_id == null && !leaseHeldByAnother(after, opts.owner, Date.now())) {
+          throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
+        }
       }
     }
-    // DEFERRED-STALE-CLAIM-ANSWER (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md, C2; the next paid-path wave): THIS return can hand back a
-    // `secret` that was never stored. `secret` is this call's own, but the citizen step's `applied` is discarded above, so when a finisher that
-    // holds a STALE `settled_unbooked` snapshot runs while another finisher already created the citizen under a lapsed lease (C1 bounds the
-    // /settle wait below the lease, which removes the usual way in, not the race itself), the step is gated out, refs are re-read, `citizenId` is
-    // set by the OTHER call, and this line returns a fresh secret whose hash is not `citizens.secret_hash`. The fix: return a `secret` ONLY when
-    // this call's own step reported `applied: true`; otherwise answer from the claim (as a replay would). The same wave should make payAndSettle
-    // answer from the claim's state when markSettled returns false (x402.ts, the markSettled call) and log loudly if that state is refused or expired.
+    // R2a (gate C2, docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md): a `secret` leaves this function ONLY when this call's own final step reported `applied: true`.
+    // A finisher holding a stale `settled_unbooked` snapshot (its lease taken by another holder, or the step already recorded by one) wrote nothing, so the
+    // fresh secret it generated is not the one the database holds. It answers from the claim instead: the caller turns `claim_moved` into the replay answer.
+    if (!finalApplied) return { done: false, reason: "claim_moved" };
     body = registrationResponseBody(citizenId, intent.handle, publicKey, secret ?? "");
   } catch (e) {
     // F1: the citizen write met a handle another seat now holds (citizens.handle is UNIQUE). No retry can ever book it, so the reason
     // is recorded on the claim (the reconciler skips such rows), ONE log line is written when it is first recorded, and the answer
     // says what happened instead of inviting a re-send that cannot succeed.
     if (citizenId == null && String(e instanceof Error ? e.message : e).includes("citizens.handle")) {
-      if (await markHandleTaken(env, key, Date.now())) {
+      if (await markHandleTaken(env, key, opts.owner, Date.now())) {
         console.log(
           JSON.stringify({
             level: "error",
@@ -518,7 +540,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
 
 // The payer's-request face of finishRegistration: the 201 the first request would have
 // served, or null when the registration could not be delivered to this caller.
-async function registrationResponse(env: Env, row: ClaimRow, opts: { ip: string | null; inviteCode: string | null }): Promise<Response | null> {
+async function registrationResponse(env: Env, row: ClaimRow, opts: { ip: string | null; inviteCode: string | null; owner: string }): Promise<Response | null> {
   const out = await finishRegistration(env, row, { ...opts, deliver: true });
   if (!out.done) return null;
   return Response.json(out.body, { status: 201, headers: { "Access-Control-Allow-Origin": "*" } });

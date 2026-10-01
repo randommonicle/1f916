@@ -156,7 +156,7 @@ test("F1: the log line is written once even when two workers meet the same lost 
     const stale = { ...recorded, verdict_reason: null } as ClaimRow;
     const { value, lines } = await captureLog(async () => {
       try {
-        await finishRegistration(testEnv(d1), stale, { ip: null, inviteCode: null, deliver: true });
+        await finishRegistration(testEnv(d1), stale, { ip: null, inviteCode: null, deliver: true, owner: "test-stale-worker" });
         return null;
       } catch (e) {
         return e as { status?: number; code?: string };
@@ -324,14 +324,14 @@ test("F2: a worker that LOST the race to move the claim releases nothing (the re
     const fx = await payingListing(d1, "1000");
     const row = (await getClaim(testEnv(d1), { network: "base", asset: REQS.asset.toLowerCase(), from: TEST_PAYER, nonce: nonceOf(fx.header) })) as ClaimRow;
     const key = { network: row.network, asset: row.asset, from: row.from_addr, nonce: row.nonce };
-    assert.equal(await markExpired(testEnv(d1), key, Date.now(), row), true);
+    assert.equal(await markExpired(testEnv(d1), key, "test-reconciler", Date.now(), row), true);
     assert.deepEqual(fx.listing(), OPEN);
     // a person puts the listing back under the same pinned reservation, earlier than the claim: a stale second worker must not undo it
     d1.raw
       .prepare("UPDATE listings SET status = 'paying', paying_since = ?, paying_wallet_row_id = ?, paying_wallet_row_hash = ? WHERE id = ?")
       .run(row.created_at - 1, fx.pin.id, fx.pin.hash, fx.listingId);
     const before = fx.listing();
-    assert.equal(await markExpired(testEnv(d1), key, Date.now(), row), false, "the claim was already terminal");
+    assert.equal(await markExpired(testEnv(d1), key, "test-reconciler", Date.now(), row), false, "the claim was already terminal");
     assert.deepEqual(fx.listing(), before, "the second worker released nothing");
   } finally {
     stub.restore();

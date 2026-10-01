@@ -135,24 +135,24 @@ test("transitions are conditional on the state they leave; terminal rows hold no
   try {
     const a = await take(d1, SPEC, { nonce: "0x" + "01".repeat(32) });
     assert.ok((await getClaim(env(d1), a.key))?.rpc_body, "a pending row keeps the body it may need to re-POST");
-    assert.equal(await markSettled(env(d1), a.key, "0xTX", "0xPAYER", 2_000), true);
-    assert.equal(await markSettled(env(d1), a.key, "0xTX2", "0xPAYER", 2_001), false, "settled_unbooked cannot be settled again");
-    assert.equal(await markRefused(env(d1), a.key, "no", 2_002), false, "settled_unbooked cannot become refused");
-    assert.equal(await markExpired(env(d1), a.key, 2_003), false);
+    assert.equal(await markSettled(env(d1), a.key, "0xTX", "0xPAYER", "w1", 2_000), true);
+    assert.equal(await markSettled(env(d1), a.key, "0xTX2", "0xPAYER", "w1", 2_001), false, "settled_unbooked cannot be settled again");
+    assert.equal(await markRefused(env(d1), a.key, "no", "w1", 2_002), false, "settled_unbooked cannot become refused");
+    assert.equal(await markExpired(env(d1), a.key, "w1", 2_003), false);
     const settled = await getClaim(env(d1), a.key);
     assert.equal(settled?.state, "settled_unbooked");
     assert.equal(settled?.tx, "0xTX");
     assert.equal(settled?.payer, "0xPAYER");
 
     const b = await take(d1, SPEC, { nonce: "0x" + "02".repeat(32) });
-    assert.equal(await markRefused(env(d1), b.key, "The facilitator reports that this settlement failed", 3_000), true);
+    assert.equal(await markRefused(env(d1), b.key, "The facilitator reports that this settlement failed", "w1", 3_000), true);
     const refused = await getClaim(env(d1), b.key);
     assert.equal(refused?.state, "refused");
     assert.equal(refused?.rpc_body, null, "B7: refused clears the authorisation body");
-    assert.equal(await markExpired(env(d1), b.key, 3_001), false, "a terminal row does not move");
+    assert.equal(await markExpired(env(d1), b.key, "w1", 3_001), false, "a terminal row does not move");
 
     const c = await take(d1, SPEC, { nonce: "0x" + "03".repeat(32) });
-    assert.equal(await markExpired(env(d1), c.key, 4_000), true);
+    assert.equal(await markExpired(env(d1), c.key, "w1", 4_000), true);
     assert.equal((await getClaim(env(d1), c.key))?.rpc_body, null, "B7: expired clears it too");
   } finally {
     d1.close();
@@ -194,17 +194,17 @@ test("a booking step writes its row and records it in ONE batch, once: a repeat 
   try {
     const { key } = await take(d1);
     // Not settled yet: the gate is closed, so the step writes nothing at all.
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), 5_000), { applied: false });
+    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_000), { applied: false });
     assert.equal(ledgerCount(d1), 0, "a pending claim books nothing");
 
-    await markSettled(env(d1), key, "0xTX", "0xPAYER", 2_000);
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), 5_001), { applied: true });
+    await markSettled(env(d1), key, "0xTX", "0xPAYER", "w1", 2_000);
+    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_001), { applied: true });
     assert.equal(ledgerCount(d1), 1);
     const row = await getClaim(env(d1), key);
     assert.equal(refsOf(row!).ledger_id, 1, "the ledger row's id is recorded in the claim");
     assert.equal(row?.state, "settled_unbooked", "a non-final step does not book the act");
 
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), 5_002), { applied: false });
+    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_002), { applied: false });
     assert.equal(ledgerCount(d1), 1, "the same step run again books nothing more");
 
     // The final step moves the claim to booked and clears the body, in the same batch.
@@ -215,13 +215,13 @@ test("a booking step writes its row and records it in ONE batch, once: a repeat 
         d1.DB.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at) SELECT ?, ?, ?, ? WHERE EXISTS (" + gate.sql + ")").bind("2026-09-30", "unchained", 1, 2, ...gate.args) as unknown as D1PreparedStatement,
       ],
     };
-    assert.deepEqual(await runBookingStep(env(d1), key, second, 5_003), { applied: true });
+    assert.deepEqual(await runBookingStep(env(d1), key, second, "w1", 5_003), { applied: true });
     const booked = await getClaim(env(d1), key);
     assert.equal(booked?.state, "booked");
     assert.equal(booked?.rpc_body, null, "B7: booked clears the body");
     assert.equal(booked?.leased_until, null);
     assert.equal(ledgerCount(d1), 2);
-    assert.deepEqual(await runBookingStep(env(d1), key, second, 5_004), { applied: false }, "a booked claim is final: nothing more is ever written");
+    assert.deepEqual(await runBookingStep(env(d1), key, second, "w1", 5_004), { applied: false }, "a booked claim is final: nothing more is ever written");
     assert.equal(ledgerCount(d1), 2);
   } finally {
     d1.close();
@@ -232,24 +232,24 @@ test("a crash inside the step leaves neither the row nor the reference (B5a/B5c)
   const d1 = createLocalD1();
   try {
     const { key } = await take(d1);
-    await markSettled(env(d1), key, "0xTX", "0xPAYER", 2_000);
+    await markSettled(env(d1), key, "0xTX", "0xPAYER", "w1", 2_000);
 
     // (a) the row insert fails
     d1.raw.exec("CREATE TRIGGER crash_ledger BEFORE INSERT ON ledger BEGIN SELECT RAISE(ABORT, 'disk on fire'); END;");
-    await assert.rejects(() => runBookingStep(env(d1), key, ledgerStep(d1, false), 5_000), /disk on fire/);
+    await assert.rejects(() => runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_000), /disk on fire/);
     d1.raw.exec("DROP TRIGGER crash_ledger");
     assert.equal(ledgerCount(d1), 0);
     assert.equal(refsOf((await getClaim(env(d1), key))!).ledger_id, undefined);
 
     // (b) the row insert succeeds and the REFERENCE update fails: the row must not survive either
     d1.raw.exec("CREATE TRIGGER crash_claim BEFORE UPDATE OF booked_refs ON settlement_claims BEGIN SELECT RAISE(ABORT, 'power cut'); END;");
-    await assert.rejects(() => runBookingStep(env(d1), key, ledgerStep(d1, false), 5_001), /power cut/);
+    await assert.rejects(() => runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_001), /power cut/);
     d1.raw.exec("DROP TRIGGER crash_claim");
     assert.equal(ledgerCount(d1), 0, "the created row is rolled back with the failed reference update");
     assert.equal(refsOf((await getClaim(env(d1), key))!).ledger_id, undefined);
 
     // and the step still completes afterwards, once
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), 5_002), { applied: true });
+    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_002), { applied: true });
     assert.equal(ledgerCount(d1), 1);
   } finally {
     d1.close();
@@ -260,7 +260,7 @@ test("a chain-head race inside the step is retried against the new head, not los
   const d1 = createLocalD1();
   try {
     const { key } = await take(d1);
-    await markSettled(env(d1), key, "0xTX", "0xPAYER", 2_000);
+    await markSettled(env(d1), key, "0xTX", "0xPAYER", "w1", 2_000);
     let raced = false;
     const racing = {
       ...ledgerStep(d1, true),
@@ -275,7 +275,7 @@ test("a chain-head race inside the step is retried against the new head, not los
         return [built.stmt];
       },
     };
-    assert.deepEqual(await runBookingStep(env(d1), key, racing, 5_000), { applied: true });
+    assert.deepEqual(await runBookingStep(env(d1), key, racing, "w1", 5_000), { applied: true });
     assert.equal(ledgerCount(d1), 2, "the rival row and ours, chained after it");
     assert.equal((await getClaim(env(d1), key))?.state, "booked");
   } finally {

@@ -178,8 +178,8 @@ test("10c. pay listing: a recording failure is finished exactly once from the cl
 
     // The reconciler's entry point books it from the claim: one payment row, the listing paid, the claim booked.
     const row = await claimOfHeader(d1, header);
-    await finishPayListingBooking(testEnv(d1), row);
-    await finishPayListingBooking(testEnv(d1), (await getClaim(testEnv(d1), keyOfRow(row))) as ClaimRow);
+    await finishPayListingBooking(testEnv(d1), row, "test-reconciler");
+    await finishPayListingBooking(testEnv(d1), (await getClaim(testEnv(d1), keyOfRow(row))) as ClaimRow, "test-reconciler");
     assert.equal(count(d1, "listing_payments"), 1, "booked once, however many times the finisher runs");
     assert.deepEqual(fx.listing(), { status: "paid", paying_since: null, paid_tx: TX });
     const done = oneClaim(d1);
@@ -211,7 +211,7 @@ test("10d. pay listing: the booking is gated on the listing still being paying: 
     dropTrigger(d1, "no_payment_row");
     d1.raw.prepare("UPDATE listings SET status = 'open', paying_since = NULL WHERE id = ?").run(fx.listingId); // a person released it
     const row = await claimOfHeader(d1, header);
-    await assert.rejects(() => finishPayListingBooking(testEnv(d1), row), /recording it failed/);
+    await assert.rejects(() => finishPayListingBooking(testEnv(d1), row, "test-reconciler"), /recording it failed/);
     assert.equal(count(d1, "listing_payments"), 0, "no payment row for a listing that is not paying");
     assert.equal(fx.listing().status, "open", "the listing is not flipped to paid");
     assert.equal(oneClaim(d1).state, "settled_unbooked");
@@ -282,7 +282,7 @@ test("listing create: one claim, one fee line, one listing; a failure after sett
     assert.equal(stub.calls.settle, 1, "the facilitator was asked once through all four requests");
 
     // and the reconciler's entry point is a no-op on a booked claim
-    await finishListingCreateBooking(testEnv(d1), d1.raw.prepare("SELECT * FROM settlement_claims").get() as unknown as ClaimRow);
+    await finishListingCreateBooking(testEnv(d1), d1.raw.prepare("SELECT * FROM settlement_claims").get() as unknown as ClaimRow, "test-reconciler");
     assert.equal(count(d1, "listings"), 1);
     assert.equal(count(d1, "ledger"), 1);
   } finally {
