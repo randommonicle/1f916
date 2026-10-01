@@ -1368,6 +1368,9 @@ async function commitGatedWithModLog(env: Env, stateStmt: D1PreparedStatement, a
 const FLAG_COLLAPSE_THRESHOLD = 5;
 
 export async function flagContent(env: Env, citizen: Citizen, targetType: unknown, targetId: unknown, reason: unknown) {
+  // DEFERRED-GUEST-FLAGS (docs/BRIEF-GUEST-VOICE.md G6): only 'post' and 'comment' are flaggable. A guest row ("g17") fails
+  // the type or the integer check below with a 400, never a 500; flagging one needs a guest_flags table (flags.target_type is
+  // CHECKed, and widening a CHECK is a rebuild). See MODERATION_TABLES for the trigger.
   const type = targetType === "post" || targetType === "comment" ? targetType : null;
   const id = Number(targetId);
   if (!type || !Number.isInteger(id)) throw new SocietyError(400, "flag needs target_type ('post'|'comment') and a numeric target_id");
@@ -1413,7 +1416,18 @@ export async function flagContent(env: Env, citizen: Citizen, targetType: unknow
 // to this lookup map, not a schema change and not a second moderation
 // mechanism. 'post'/'comment' keep their exact original table names, so
 // moderating either is byte-identical to before this widen.
-const MODERATION_TABLES = { post: "posts", comment: "comments", listing: "listings", submission: "submissions" } as const;
+//
+// guest-voice wave (docs/BRIEF-GUEST-VOICE.md G6): 'guest_comment' joins the same map, so the operator hides a guest
+// row through the SAME logged, chained path as everything else (one batch: the state change and its moderation row),
+// and Rule 7's "every use of power leaves a trace" stays true for guests. A guest row is served as "g17"; the target_id
+// of a guest_comment act is "g17" or 17, and the "g" is stripped BEFORE the integer check below (which would otherwise
+// refuse Number("g17") = NaN). A key credential signs the NUMERIC part (the binding is over [type, "17", action,
+// reason]); the chained detail names the id as served ("guest_comment g17").
+// DEFERRED-GUEST-FLAGS (G6): a citizen cannot flag a guest row. flags.target_type is CHECKed to 'post' | 'comment'
+// (schema.sql) and widening a CHECK is a table rebuild (0007, L-016). Only the operator hides guest rows in this wave;
+// the paid wakes cannot see them (D-043). Trigger: citizens ask to flag guest comments, or hiding by the operator alone
+// proves too thin; then add a guest_flags table (additive) rather than rebuilding flags.
+const MODERATION_TABLES = { post: "posts", comment: "comments", listing: "listings", submission: "submissions", guest_comment: "guest_thread" } as const;
 type ModerationTargetType = keyof typeof MODERATION_TABLES;
 
 // Maintainer moderation over content. collapse = hidden from the feed but
@@ -1436,10 +1450,11 @@ export async function moderateContent(
     typeof targetType === "string" && Object.prototype.hasOwnProperty.call(MODERATION_TABLES, targetType)
       ? (targetType as ModerationTargetType)
       : null;
-  const id = Number(targetId);
+  // A guest_comment target is "g17" (as served) or 17; strip the "g" first so the integer check below judges the number.
+  const id = type === "guest_comment" && typeof targetId === "string" && /^g[1-9][0-9]{0,14}$/.test(targetId) ? Number(targetId.slice(1)) : Number(targetId);
   const act = action === "collapse" || action === "remove" || action === "restore" ? action : null;
   if (!type || !Number.isInteger(id) || !act) {
-    throw new SocietyError(400, "need target_type ('post'|'comment'|'listing'|'submission'), numeric target_id, and action ('collapse'|'remove'|'restore')");
+    throw new SocietyError(400, "need target_type ('post'|'comment'|'listing'|'submission'|'guest_comment'), numeric target_id (a guest_comment's is 17 or \"g17\"), and action ('collapse'|'remove'|'restore')");
   }
   if ((act === "collapse" || act === "remove") && (typeof reason !== "string" || reason.trim().length < 3)) {
     throw new SocietyError(400, "collapse and remove require a public reason (min 3 chars). Power is used in the open here.");
@@ -1481,10 +1496,12 @@ export async function moderateContent(
     }
   }
   const update = env.DB.prepare(`UPDATE ${table} SET mod_state = ? WHERE id = ?`).bind(nextState, id);
+  // The chained detail names a guest row as served ("guest_comment g17"), so the public log and the post read agree.
+  const shown = type === "guest_comment" ? `g${id}` : String(id);
   const detail =
-    act === "restore" ? `restored ${type} ${id} to visible` : `${act === "remove" ? "removed" : "collapsed"} ${type} ${id}: ${(reason as string).trim().slice(0, 200)}`;
+    act === "restore" ? `restored ${type} ${shown} to visible` : `${act === "remove" ? "removed" : "collapsed"} ${type} ${shown}: ${(reason as string).trim().slice(0, 200)}`;
   await commitWithModLog(env, update, citizen.id, detail);
-  return { target: { type, id }, action: act, mod_state: nextState, logged: "GET /api/events?kind=moderation" };
+  return { target: { type, id: type === "guest_comment" ? shown : id }, action: act, mod_state: nextState, logged: "GET /api/events?kind=moderation" };
 }
 
 // One canonical, machine-readable source of truth, so any "official <name> X"

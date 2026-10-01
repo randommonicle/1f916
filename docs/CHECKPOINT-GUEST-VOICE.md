@@ -160,3 +160,18 @@ at 0055 and this fork never takes its migrations).
 - Tool counts moved again (24 tools, 11 on the read door) and the D-061 allowlisted refusal sentence's sha moved with the tool
   list it names (computed by the guard's method; the credential wording is unchanged); baseline counts 76 / 23 / 53 still hold.
 - Suite 1539/1539, `tsc` clean.
+
+### 6. Moderation of guest rows (G6)
+
+- `MODERATION_TABLES` gains `guest_comment: "guest_thread"`; a guest target is `"g17"` or `17`, the `g` stripped BEFORE the
+  integer check (which would refuse `Number("g17")`); the state change and its chained `moderation` row commit as ONE batch
+  through the existing `commitWithModLog`, so nothing new in the chain machinery. The chained detail names the id as served
+  (`collapsed guest_comment g17: <reason>`), the response's `target.id` is `"g17"`, and a key credential signs the NUMERIC id
+  (`[ "guest_comment", "17", action, reason ]`; the `/api/moderate` ROUTES note says so). A hidden, unanswered duty reads
+  `waived` (counted beside `overdue` in `guest_voice`), and a restore is another chained row that revives the original date.
+  Only the operator hides guest rows; `DEFERRED-GUEST-FLAGS` is planted at `MODERATION_TABLES` and at `flagContent`.
+- Tests: `test/guest-moderation-d1.test.ts` (18, and 6's moderate half; 5 tests). Red-proofs, each run and restored: the update
+  without its log row; `guest_comment` out of the map; the `g` not stripped; the intent signing the served `g17` form; the
+  detail not naming `g17`; a non-maintainer allowed. The atomicity test poisons the batch's second statement and asserts the
+  row stays visible.
+- Suite 1544/1544, `tsc` clean.
