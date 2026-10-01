@@ -58,9 +58,12 @@ export interface ReconcileResult {
   resolved: number;
   unchanged: number;
   failed: number;
+  // Rows where the facilitator said settled but another holder had already made the claim refused or expired (fix pass 4, H2). attemptPending logged each
+  // one (settlement_contradiction); they are counted here, never as booked or resolved.
+  contradicted: number;
 }
 
-const NOTHING: ReconcileResult = { actualCost: 0, examined: 0, booked: 0, resolved: 0, unchanged: 0, failed: 0 };
+const NOTHING: ReconcileResult = { actualCost: 0, examined: 0, booked: 0, resolved: 0, unchanged: 0, failed: 0, contradicted: 0 };
 
 // An env whose DB counts every statement it is asked to run (a batch counts each of its statements,
 // the conservative reading docs/RECON-CLOUDFLARE-FREE-LIMITS §1.2 and the test harness use).
@@ -166,7 +169,8 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
           if (attempt.kind === "expired" || attempt.kind === "refused") {
             out.resolved++;
             needsRelease = false;
-          } else out.unchanged++;
+          } else if (attempt.kind === "contradiction") out.contradicted++;
+          else out.unchanged++;
           continue;
         }
         working = attempt.row;

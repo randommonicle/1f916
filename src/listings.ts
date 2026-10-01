@@ -945,8 +945,15 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // R2b (gate C2): `keepReservation` marks an answer given AFTER /settle said settled, when the claim had moved under this request. The money has
     // moved or may have, and another holder may still be booking it against this reservation (its booking is gated on the listing still being
     // 'paying'), so releasing here would re-open a listing whose bounty is being paid.
+    // H1 (fix pass 4, CODEX round 2): the release is bound to the reservation INSTANCE this request acquired (its own paying_since and the pinned wallet
+    // row the reserve statement recorded), never to the listing id and 'paying' alone. A claim the reconciler or a re-send refused releases THIS
+    // reservation itself (F2), another payer can then reserve the reopened listing, and a stale request's late release must not clear theirs.
     if (reservedByMe && !result.keepReservation) {
-      await env.DB.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying'").bind(listingId).run();
+      await env.DB.prepare(
+        "UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying' AND paying_since = ? AND paying_wallet_row_id = ? AND paying_wallet_row_hash = ?",
+      )
+        .bind(listingId, reservedAt, pin.walletRowId, pin.walletRowHash)
+        .run();
     }
     return result.response;
   }

@@ -752,6 +752,7 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
     if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
     try {
       const out = await attemptPending(env, leased, owner);
+      if (out.kind === "contradiction") return contradictionResponse(out.tx, out.state);
       if (out.kind === "settled") {
         const done = await claim.finish(out.row, owner);
         if (done) return done;
@@ -774,6 +775,36 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
 //   - refused or expired when /settle said SETTLED (`settled` is given): the two records contradict. The money may have moved and no automatic step
 //     resolves a terminal claim, so this is ONE error-level line for the maintainer and an answer that never says nothing was charged;
 //   - refused or expired when this request itself read a refusal: the ordinary replay answer (the claim and the refusal agree).
+// The ONE place the contradiction is logged and answered (gate C2; fix pass 4 H2): the facilitator reported a settlement, and the society's own
+// claim for the same authorisation is refused or expired. Used by payAndSettle (this request's own /settle) and by attemptPending (a re-send's or the
+// reconciler's re-POST), so the two cannot drift. The money may have moved and no automatic step re-examines a terminal claim: ONE error-level line
+// for the maintainer, and an answer that never invites a second signature and never says nothing was charged.
+function logSettlementContradiction(row: Pick<ClaimRow, "from_addr" | "nonce">, state: string, settled: { tx: string; payer: string }, req: { resource: string; maxAmountRequired: string }): void {
+  console.log(
+    JSON.stringify({
+      level: "error",
+      event: "settlement_contradiction",
+      payer: settled.payer,
+      tx: settled.tx,
+      resource: req.resource,
+      amount_atomic: req.maxAmountRequired,
+      state,
+      claim_from: row.from_addr,
+      claim_nonce: row.nonce,
+    }),
+  );
+}
+
+function contradictionResponse(tx: string, state: string): Response {
+  return claimResponse({
+    status: 500,
+    body: {
+      error: `The facilitator reported this payment settled (tx ${tx}), but the society's own record of the signed authorisation reads "${state}", which contradicts it. The money may have moved: whether it did is not established. Do not sign again. This is logged for the maintainer to check against the chain by hand. ${SHOWHOME_REPORT_POINTER}`,
+      code: SETTLEMENT_CONTRADICTION,
+    },
+  });
+}
+
 async function answerFromMovedClaim(
   env: Env,
   row: ClaimRow,
@@ -782,26 +813,8 @@ async function answerFromMovedClaim(
   settled: { tx: string; payer: string } | null,
 ): Promise<Response> {
   if (settled && (row.state === "refused" || row.state === "expired")) {
-    console.log(
-      JSON.stringify({
-        level: "error",
-        event: "settlement_contradiction",
-        payer: settled.payer,
-        tx: settled.tx,
-        resource: reqs.resource,
-        amount_atomic: reqs.maxAmountRequired,
-        state: row.state,
-        claim_from: row.from_addr,
-        claim_nonce: row.nonce,
-      }),
-    );
-    return claimResponse({
-      status: 500,
-      body: {
-        error: `The facilitator reported this payment settled (tx ${settled.tx}), but the society's own record of the signed authorisation reads "${row.state}", which contradicts it. The money may have moved: whether it did is not established. Do not sign again. This is logged for the maintainer to check against the chain by hand. ${SHOWHOME_REPORT_POINTER}`,
-        code: SETTLEMENT_CONTRADICTION,
-      },
-    });
+    logSettlementContradiction(row, row.state, settled, reqs);
+    return contradictionResponse(settled.tx, row.state);
   }
   if (row.state === "pending") return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
   return respondToExistingClaim(env, row, true, reqs, claim);
@@ -835,7 +848,15 @@ export async function answerFromClaim(env: Env, key: ClaimKey, owner: string): P
 export const RECONCILE_EXPIRY_MARGIN_SECONDS = PAYMENT_MAX_TIMEOUT_SECONDS;
 
 // `fetches` counts the outbound fetches the attempt made (RPC reads and /settle), for the reconciler's meter.
-export type AttemptOutcome = ({ kind: "settled"; row: ClaimRow } | { kind: "expired" } | { kind: "refused" } | { kind: "unchanged"; detail: string }) & { fetches: number };
+// `contradiction` (fix pass 4, H2): the facilitator said settled but another holder had already made the claim `refused` or `expired`. The line is logged
+// by attemptPending; the caller answers with contradictionResponse (a re-send) or counts it separately (the reconciler), never as booked, resolved or a 402.
+export type AttemptOutcome = (
+  | { kind: "settled"; row: ClaimRow }
+  | { kind: "expired" }
+  | { kind: "refused" }
+  | { kind: "unchanged"; detail: string }
+  | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
+) & { fetches: number };
 
 export async function attemptPending(env: Env, row: ClaimRow, owner: string): Promise<AttemptOutcome> {
   if (row.state !== "pending" || row.rpc_body == null) return { kind: "unchanged", detail: "the claim is no longer pending", fetches: 0 };
@@ -872,6 +893,12 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
   if (!(await markSettled(env, key, tx, payer, owner, Date.now()))) {
     // Another worker moved it first: carry on from the row as it now stands.
     const moved = await getClaim(env, key);
+    if (moved && (moved.state === "refused" || moved.state === "expired")) {
+      // H2: this re-POST was answered with a SUCCESS and the claim is already terminal-without-money. Discarding the verdict would let the re-send serve the
+      // terminal row's 402 with fresh accepts, inviting a second signature for money that may have moved, and log nothing.
+      logSettlementContradiction(moved, moved.state, { tx, payer }, body.paymentRequirements);
+      return { kind: "contradiction", tx, state: moved.state, fetches };
+    }
     return moved && moved.state === "settled_unbooked" ? { kind: "settled", row: moved, fetches } : { kind: "unchanged", detail: "another worker moved the claim", fetches };
   }
   // The row as markSettled left it (no re-read: a pending row has recorded no booking yet).

@@ -315,12 +315,14 @@ export async function markExpired(env: Env, key: ClaimKey, owner: string, now: n
 
 // An unknown outcome leaves the row pending; this records the last thing the
 // facilitator said (already served once, clipped) and lets go of the lease so an
-// identical re-send can reconcile at once.
+// identical re-send can reconcile at once. STRICT holder-only (fix pass 4, H3, hub ruling): unlike the other holder
+// writes it CLEARS the lease, so it must never run on a claim whose lease is named for someone else, lapsed or not.
+// A holder whose lease was taken and then released by another worker (lease_owner NULL) writes nothing.
 export async function noteUnknown(env: Env, key: ClaimKey, reason: string, owner: string, now: number): Promise<void> {
   await env.DB.prepare(
-    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}`,
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'pending' AND lease_owner = ?`,
   )
-    .bind(reason.slice(0, 400), now, ...keyArgs(key), ...holdsLeaseArgs(owner, now))
+    .bind(reason.slice(0, 400), now, ...keyArgs(key), owner)
     .run();
 }
 
