@@ -175,3 +175,27 @@ at 0055 and this fork never takes its migrations).
   detail not naming `g17`; a non-maintainer allowed. The atomicity test poisons the batch's second statement and asserts the
   row stays visible.
 - Suite 1544/1544, `tsc` clean.
+
+### 7. The daily check (G4), its budget pricing, and the compound proof
+
+- `runGuestDutyCheck(env, spentSoFar)` (`src/guest.ts`): ONE aggregate SELECT (open or overdue count, overdue count, the
+  earliest `due_at` among them, up to 20 overdue ids oldest first) and ONE INSERT of a dated `guest_duty_runs` row,
+  `GUEST_DUTY_CHECK_COST = 2` (`src/maintainer/budget.ts`, beside the concierge's constants) with `canAffordGuestDutyCheck`
+  (`spent + 2 + FINALISE_RESERVE <= 50`). No model call; never throws (its own try/catch; a throw is logged
+  `guest_duty_check_failed` and priced at the constant); a defer is one `guest_duty_check_deferred` line at cost 0.
+- `src/index.ts`, THREE minimal changes near the reconciler call (the commission allows a minimal edit here): the check runs
+  after the concierge with `priorCost + concierge.actualCost + CLERK_WAKE_FIXED_COST` (the clerk's reserved minimum protected,
+  as for the reconciler), and its `actualCost` is added to what the reconciler (`runReconciler`) and the clerk
+  (`runClerkWake`) are told. `src/maintainer/trigger.ts` is untouched: the manual trigger bypasses `scheduled()`, so cron-only
+  holds by construction (a test pins that it writes no row). `wrangler.jsonc` is untouched and a test pins its crons.
+- Tests: `test/guest-check-d1.test.ts` (7 tests: two counted statements and no fetch, the record's contents, cron-only incl. the
+  manual trigger and the crons, the defer boundary at 46/47, a throw priced at the constant and never stopping the clerk, and the
+  threading into the reconciler's `reserved_cost` and into the clerk's affordable insert count, each derived from a twin
+  database's own concierge cost rather than typed in) and `PROOF GUEST-CHECK` in `test/maintainer-scheduled-budget.test.ts`
+  (sweep + concierge + the check over 25 overdue duties + reconciler + clerk, one invocation, <= 50, and the check's row exists).
+  Red-proofs, each run and restored: priced at 10; not threaded into the reconciler; not threaded into the clerk; also running
+  on the judgment cron; a throw escaping; no defer rule; a third statement; the manual trigger running the check; in the compound
+  proof, the check never running, and the check secretly spending 30 statements. Honest limit: the compound proof stays green
+  when the check is underpriced by a statement or two, because the clerk's fixed cost is a conservative 18 and there is slack
+  under 50; the exact pricing is pinned by the counted-equals-priced test, not by the compound one.
+- Suite 1552/1552, `tsc` clean.

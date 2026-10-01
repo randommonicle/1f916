@@ -19,6 +19,7 @@
 
 import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, PUBLIC_KEY_ADVICE, utcMidnight } from "./society.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
+import { GUEST_DUTY_CHECK_COST, canAffordGuestDutyCheck } from "./maintainer/budget.ts";
 import { assertShowhomeRateCap, authenticateGuest, logFunnelStage } from "./showhome.ts";
 import {
   GUEST_ADMISSION_SENTENCE,
@@ -467,6 +468,8 @@ export async function guestThreadRoute(env: Env, postIdRaw: unknown, afterRaw: u
 
 export const GUEST_DUE_DEFAULT_LIMIT = 100;
 export const GUEST_CHECK_STALE_MS = 36 * HOUR_MS;
+// How many overdue ids one check record carries (the oldest first); the live read has them all.
+export const GUEST_CHECK_OVERDUE_IDS = 20;
 
 export type GuestDueView = "actionable" | "history";
 
@@ -579,4 +582,52 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
     check_stale: !lastRun || now - lastRun.run_at > GUEST_CHECK_STALE_MS,
     note: `${GUEST_AIM_SENTENCE} A duty past its date stays here as overdue until it is answered; a late answer reads answered_late, never answered; a duty whose guest comment was hidden by moderation before it was answered reads waived. Statuses are recomputed from the rows on every read: last_check is only the dated record that the daily check ran and what it saw (check_stale is true when there is none, or the newest is over ${GUEST_CHECK_STALE_MS / HOUR_MS} hours old). Pages are live: a row that changes view while you page can be missed by that traversal, and history is a catalogue, not a change feed, so start again from the first page on every run.`,
   };
+}
+
+// ---------- the daily check (G4) ----------
+
+export interface GuestDutyCheckResult {
+  // Subrequests this check spent: GUEST_DUTY_CHECK_COST when it ran (and when it threw, priced at the constant, because
+  // the true spend of a failure is unknown), 0 when it deferred. scheduled() adds it to what the reconciler and the clerk
+  // are told has been spent.
+  actualCost: number;
+  ran: boolean;
+  deferred: boolean;
+}
+
+// A deterministic check on the 06:00 clerk cron only (no cron change): ONE aggregate SELECT (how many duties are open
+// or overdue, how many overdue, the earliest date among them, up to 20 overdue ids) and ONE INSERT of a dated
+// guest_duty_runs row, so exactly GUEST_DUTY_CHECK_COST (2) subrequests. No model call. It NEVER throws (its own
+// try/catch; a throw is priced at the constant and logged), so it cannot stop the reconciler or the clerk behind it.
+// The LIVE read (GET /api/guest/due) is the authority for every status: this row is a dated record that the check ran and
+// what it saw, so a missing day is a visible gap. It is not tamper-evident (like concierge_runs, not chained).
+//
+// Defer rule: scheduled() hands in everything already spent in this invocation plus the clerk's reserved minimum
+// (CLERK_WAKE_FIXED_COST), exactly as the reconciler is. If the check's two statements and the finalise reserve do not
+// fit inside the invocation budget, it skips, logs guest_duty_check_deferred, and costs nothing: a missed day is a gap in
+// the run table, which GET /api/guest/due shows as check_stale after 36 hours.
+export async function runGuestDutyCheck(env: Env, spentSoFar: number, now = Date.now()): Promise<GuestDutyCheckResult> {
+  if (!canAffordGuestDutyCheck(spentSoFar)) {
+    console.log(JSON.stringify({ level: "warn", event: "guest_duty_check_deferred", spent_so_far: spentSoFar, cost: GUEST_DUTY_CHECK_COST }));
+    return { actualCost: 0, ran: false, deferred: true };
+  }
+  try {
+    const inner = dutyRowsSql(now, "g.duty = 1");
+    const seen = await env.DB.prepare(
+      `SELECT COALESCE(SUM(CASE WHEN d.duty_status IN ('open', 'overdue') THEN 1 ELSE 0 END), 0) AS open_count,
+              COALESCE(SUM(CASE WHEN d.duty_status = 'overdue' THEN 1 ELSE 0 END), 0) AS overdue_count,
+              MIN(CASE WHEN d.duty_status IN ('open', 'overdue') THEN d.due_at END) AS oldest_due_at,
+              (SELECT json_group_array('g' || x.id) FROM (
+                 SELECT d2.id FROM (${inner}) d2 WHERE d2.duty_status = 'overdue' ORDER BY d2.due_at ASC, d2.id ASC LIMIT ${GUEST_CHECK_OVERDUE_IDS}) x) AS overdue_ids
+       FROM (${inner}) d`,
+    ).first<{ open_count: number; overdue_count: number; oldest_due_at: number | null; overdue_ids: string | null }>();
+    const overdueIds = seen?.overdue_ids && seen.overdue_ids !== "[]" ? seen.overdue_ids : null;
+    await env.DB.prepare("INSERT INTO guest_duty_runs (run_at, open_count, overdue_count, oldest_due_at, overdue_ids) VALUES (?, ?, ?, ?, ?)")
+      .bind(now, Number(seen?.open_count ?? 0), Number(seen?.overdue_count ?? 0), seen?.oldest_due_at ?? null, overdueIds)
+      .run();
+    return { actualCost: GUEST_DUTY_CHECK_COST, ran: true, deferred: false };
+  } catch (e) {
+    console.log(JSON.stringify({ level: "error", event: "guest_duty_check_failed", message: String(e) }));
+    return { actualCost: GUEST_DUTY_CHECK_COST, ran: false, deferred: false };
+  }
 }

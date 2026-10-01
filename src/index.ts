@@ -8,7 +8,7 @@ import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
-import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue } from "./guest.ts";
+import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -616,14 +616,19 @@ export default {
       // priced as the whole ceiling.
       if (wake === "clerk") {
         const concierge = await runConciergeWake(env, priorCost);
+        // The guest-voice daily check (docs/BRIEF-GUEST-VOICE.md G4): two statements, no model call, never throws.
+        // It sits AFTER the concierge (which keeps first claim) and BEFORE the reconciler, and is handed what has been
+        // spent plus the clerk's reserved minimum, as the reconciler is; it defers with one log line if two statements
+        // and the finalise reserve do not fit. What it spent is added to what the reconciler and the clerk are told.
+        const guestCheck = await runGuestDutyCheck(env, priorCost + concierge.actualCost + CLERK_WAKE_FIXED_COST);
         let reconcileCost = 0;
         try {
-          reconcileCost = (await runReconciler(env, priorCost + concierge.actualCost + CLERK_WAKE_FIXED_COST)).actualCost;
+          reconcileCost = (await runReconciler(env, priorCost + concierge.actualCost + guestCheck.actualCost + CLERK_WAKE_FIXED_COST)).actualCost;
         } catch (e) {
           reconcileCost = RECONCILE_SUBREQUEST_CEILING;
           console.log(JSON.stringify({ level: "error", event: "settlement_reconcile_failed", cron: controller.cron, message: String(e) }));
         }
-        await runClerkWake(env, undefined, priorCost + concierge.actualCost + reconcileCost);
+        await runClerkWake(env, undefined, priorCost + concierge.actualCost + guestCheck.actualCost + reconcileCost);
       } else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
       // else: an unrecognised cron string. wrangler.jsonc only ever
       // registers the two crons above, so this should not happen -- but a
