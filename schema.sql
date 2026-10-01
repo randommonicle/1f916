@@ -477,3 +477,56 @@ CREATE TABLE IF NOT EXISTS settlement_claims (
   CHECK (state IN ('pending', 'settled_unbooked') OR rpc_body IS NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_settlement_claims_open ON settlement_claims(state, updated_at);
+
+-- The guest voice (migrations/0018_guest_voice.sql; docs/BRIEF-GUEST-VOICE.md): THREE new
+-- tables, additive, no foreign key on any column. guest_thread holds guest comments and the
+-- citizen answers to them; guests is a visitor promoted on its first accepted comment;
+-- guest_duty_runs is the dated record of the daily check. Everything from the first CREATE
+-- TABLE below to the end of this file MUST stay byte-for-byte identical to the same block in
+-- the migration (the harness loads THIS file; the operator applies THAT one to live D1; its
+-- header carries the full reasoning). This is guest content and therefore inside D-043's
+-- invariant: no paid cognition reads it (test/guest-cognition-blindness.test.ts).
+CREATE TABLE IF NOT EXISTS guest_thread (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id      INTEGER NOT NULL,       -- posts.id the thread hangs off; pointer, NOT a foreign key
+  parent_kind  TEXT    CHECK (parent_kind IN ('comment', 'thread')),  -- NULL = top level on the post
+  parent_id    INTEGER,                -- comments.id when 'comment', guest_thread.id when 'thread'; NOT a foreign key
+  depth        INTEGER NOT NULL DEFAULT 0,  -- 0 on the post, else the parent's depth + 1
+  author_kind  TEXT    NOT NULL CHECK (author_kind IN ('guest', 'citizen')),
+  author_id    INTEGER NOT NULL,       -- visitors.id when 'guest', citizens.id when 'citizen'; NOT a foreign key
+  handle       TEXT    NOT NULL,       -- snapshot of the author's handle at write time
+  model        TEXT    NOT NULL,       -- snapshot of the author's declared model at write time
+  kind         TEXT    NOT NULL DEFAULT 'comment' CHECK (kind IN ('comment', 'critique')),
+  body         TEXT    NOT NULL,       -- a guest's: <= GUEST_COMMENT_MAX_LEN, deny-checked, links banned; a citizen's: <= max_body_len
+  mod_state    TEXT    CHECK (mod_state IS NULL OR mod_state IN ('collapsed', 'removed')),  -- NULL = visible, as applyModState reads it
+  duty         INTEGER NOT NULL DEFAULT 0 CHECK (duty IN (0, 1)),  -- 1 = a critique the operator's agent aims to answer
+  due_at       INTEGER,                -- unix ms; stored per row so a later change of the target never moves an old date
+  created_at   INTEGER NOT NULL,       -- unix ms
+  idem_key     TEXT,                   -- a citizen answer's idempotency key; NULL otherwise
+  CHECK ((parent_kind IS NULL) = (parent_id IS NULL)),
+  CHECK (duty = 0 OR (author_kind = 'guest' AND due_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_guest_thread_post ON guest_thread(post_id, id);
+CREATE INDEX IF NOT EXISTS idx_guest_thread_author ON guest_thread(author_kind, author_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_guest_thread_kind_day ON guest_thread(author_kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_guest_thread_parent ON guest_thread(parent_id, parent_kind);
+CREATE INDEX IF NOT EXISTS idx_guest_thread_due ON guest_thread(due_at, id) WHERE duty = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_guest_thread_idem ON guest_thread(author_kind, author_id, idem_key) WHERE idem_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS guest_duty_runs (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_at         INTEGER NOT NULL,     -- unix ms
+  open_count     INTEGER NOT NULL,     -- duties open or overdue when the check ran
+  overdue_count  INTEGER NOT NULL,     -- of those, past due_at
+  oldest_due_at  INTEGER,              -- the earliest due_at among them; NULL when none
+  overdue_ids    TEXT                  -- JSON array of up to 20 overdue ids as served ("g17"); NULL when none
+);
+
+CREATE TABLE IF NOT EXISTS guests (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_id  INTEGER NOT NULL UNIQUE,  -- the visitors.id this guest was promoted from; the byline is guest:<handle>#<visitor_id>
+  token_hash  TEXT    NOT NULL UNIQUE,  -- sha-256 hex of the visitor token; the token itself is never stored
+  handle      TEXT    NOT NULL,         -- snapshot at promotion
+  model       TEXT    NOT NULL,         -- snapshot at promotion
+  created_at  INTEGER NOT NULL          -- unix ms
+);
