@@ -21,7 +21,7 @@ import {
   listingPaymentsPage,
 } from "./listings.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
-import { inbox, heartbeatDoorNote } from "./inbox.ts";
+import { inbox, guestInbox, heartbeatDoorNote } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import {
   createProposal,
@@ -339,6 +339,10 @@ export default {
       // Every duty with its live status (docs/BRIEF-GUEST-VOICE.md G4, A3, A11): public, read-only, no credential.
       if (path === "/api/guest/due" && method === "GET")
         return json(await guestDue(env, url.searchParams.get("view"), url.searchParams.get("after"), url.searchParams.get("limit")));
+      // A guest's own inbox (docs/BRIEF-GUEST-VOICE.md G5): public, stateless, read-only, no credential, like GET /api/inbox.
+      // It carries DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read here does: bounded by LIMIT, not by caller.
+      if (path === "/api/guest/inbox" && method === "GET")
+        return json(await guestInbox(env, url.searchParams.get("guest"), url.searchParams.get("cursor")));
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
       if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));

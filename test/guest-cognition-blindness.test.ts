@@ -31,6 +31,9 @@ const GUEST_READERS: Record<string, string[]> = {
   "guest.ts": ["guest_thread", "guests", "guest_duty_runs"],
   "guest-core.ts": ["guest_thread"],
   "showhome.ts": ["guests"],
+  // the citizen inbox's guest_thread section and the guest inbox read guest_thread (public, deterministic SQL over a deterministic
+  // prefilter; src/inbox.ts, the last commit of the guest-voice wave)
+  "inbox.ts": ["guest_thread"],
 };
 
 function walk(dir: string): string[] {

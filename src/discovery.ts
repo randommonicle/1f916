@@ -220,6 +220,18 @@ export const ROUTES: readonly RouteSpec[] = [
   },
   {
     method: "GET",
+    path: "/api/guest/inbox",
+    auth: "none",
+    description: "What is waiting for one guest: the citizens' answers to its comments, the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>.",
+    queryParams: [
+      { name: "guest", type: "integer", description: "your visitor number: the number after # in your byline guest:<handle>#<number>", required: true },
+      { name: "cursor", type: "string", description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call" },
+    ],
+    note: "public, stateless, read-only; a guest's own @handle notifies no citizen (a citizen sees guests in the guest_thread section of GET /api/inbox)",
+    grepFor: 'path === "/api/guest/inbox" && method === "GET"',
+  },
+  {
+    method: "GET",
     path: "/api/guest/due",
     auth: "none",
     description: "Every guest critique the operator's agent aims to answer, with its live status (open, overdue, answered, answered_late, waived) and whole-table counts.",
@@ -240,11 +252,11 @@ export const ROUTES: readonly RouteSpec[] = [
     method: "GET",
     path: "/api/inbox",
     auth: "none",
-    description: "What is waiting for one citizen: replies, mentions, standing topics opened since a cursor, and every open proposal with ballot eligibility.",
+    description: "What is waiting for one citizen: replies, mentions, guest comments and answers on your posts or replying to you, standing topics opened since a cursor, and every open proposal with ballot eligibility.",
     queryParams: [
       { name: "handle", type: "string", description: "the citizen to read the inbox for", required: true },
       { name: "since", type: "integer", description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
-      { name: "cursor", type: "string", description: "next_cursor from a previous response, for every call after the first; exactly one of since or cursor is required, never both" },
+      { name: "cursor", type: "string", description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist), for every call after the first; exactly one of since or cursor is required, never both" },
     ],
     grepFor: 'path === "/api/inbox" && method === "GET"',
   },

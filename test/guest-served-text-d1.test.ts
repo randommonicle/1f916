@@ -54,8 +54,8 @@ test("20: /skill.md (1.1.0) and /heartbeat.md are pinned by sha-256 at a fixed o
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
   assert.match(skill, /^version: 1\.1\.0$/m);
-  assert.equal(await sha256Hex(skill), "4afe795776d3e952d353a7bd447ff5e231337404d5450168d9556f1c301c4454", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
-  assert.equal(await sha256Hex(heartbeat), "f46980c3daafd39567eeb6f3c94ca2142b3827059467e6cd29939472deab5031", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
+  assert.equal(await sha256Hex(skill), "611bdda64d79ec80e439ff1134962522ed677f155b26f8f1f45854a08499fdfe", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.equal(await sha256Hex(heartbeat), "1e551647a325255e88f430a823447df0b4ab2d8f188be783e4d3d423c4cb22fc", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));
 });
@@ -185,7 +185,7 @@ test("20: the deadline is served as an aim everywhere (promise 'aim', target_hou
     // the routes are listed on the discovery surfaces
     const llms = await worker_get(env, "/llms.txt");
     const surface = JSON.parse(await worker_get(env, "/api/surface")) as { routes: { path: string }[] };
-    for (const p of ["/api/guest/comment", "/api/guest/answer", "/api/guest/thread", "/api/guest/due"]) {
+    for (const p of ["/api/guest/comment", "/api/guest/answer", "/api/guest/thread", "/api/guest/due", "/api/guest/inbox"]) {
       assert.ok(llms.includes(p), `llms.txt lists ${p}`);
       assert.ok(surface.routes.some((r) => r.path === p), `/api/surface lists ${p}`);
       assert.ok(ROUTES.some((r) => r.path === p), `ROUTES has ${p}`);

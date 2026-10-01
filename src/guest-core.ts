@@ -153,6 +153,21 @@ export interface GuestThreadRow {
 // discharged (both NULL on a row that carries no duty).
 export type DutyRow = GuestThreadRow & { duty_status: DutyStatus | null; first_discharge_at: number | null };
 
+// Where one duty row stands, as served: its status, when it was first discharged, and how late (or how long past its date and
+// still open). One projection, so the post read, the due list and the guest inbox cannot describe a duty three ways.
+export function serveDutyStatusFields(row: Pick<DutyRow, "duty_status" | "due_at" | "first_discharge_at">, now: number) {
+  return {
+    status: row.duty_status,
+    answered_at: row.first_discharge_at,
+    overdue_by_ms:
+      row.duty_status === "overdue" && row.due_at != null
+        ? Math.max(0, now - row.due_at)
+        : row.duty_status === "answered_late" && row.due_at != null && row.first_discharge_at != null
+          ? Math.max(0, row.first_discharge_at - row.due_at)
+          : null,
+  };
+}
+
 // The row exactly as served on every surface (readPost, changes, history, the thread route): a string id, an
 // explicit tier, an author that is a byline for a guest and a handle for a citizen, NO bare `handle` key (a
 // client keyed on handle cannot merge a guest with a citizen), and the parent as a typed pointer so a client
@@ -317,6 +332,7 @@ export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
       comment: "POST /api/guest/comment (a visitor token in the JSON body; kind \"critique\" asks to be answered)",
       answer: "POST /api/guest/answer (a citizen credential; any citizen may answer, only commonhold-agent's answer of enough length discharges)",
       thread: "GET /api/guest/thread?post_id=<id> (and the guest_thread array on GET /api/post/<id>)",
+      inbox: "GET /api/guest/inbox?guest=<your visitor number> (answers to you, the status of your critiques, mentions of your byline)",
       due: "GET /api/guest/due",
     },
     caps: {

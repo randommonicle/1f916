@@ -322,6 +322,17 @@ export async function authenticateGuest(env: Env, token: unknown): Promise<Guest
   return { visitor_id: visitor.id, handle: visitor.handle, model: visitor.model, token_hash: hash, promoted: false };
 }
 
+// The display handle of one guest or visitor by visitor number (the number in a served byline guest:<handle>#<number>), or
+// null when neither a promoted guest nor a visitor still in the ring has it. Public information (the byline is served on
+// every guest row); here so the one module that touches the visitors table stays the one (invariant 2). Used by the guest
+// inbox (src/inbox.ts).
+export async function guestHandleFor(env: Env, visitorId: number): Promise<string | null> {
+  const promoted = await env.DB.prepare("SELECT handle FROM guests WHERE visitor_id = ?").bind(visitorId).first<{ handle: string }>();
+  if (promoted) return promoted.handle;
+  const visitor = await env.DB.prepare("SELECT handle FROM visitors WHERE id = ?").bind(visitorId).first<{ handle: string }>();
+  return visitor ? visitor.handle : null;
+}
+
 // ---------- the door: post one note (invariants 3, 4, 5) ----------
 
 export interface ShowhomeNotePosted {

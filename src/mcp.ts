@@ -23,7 +23,7 @@ import {
   PUBLIC_KEY_ADVICE,
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
-import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
+import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue } from "./guest.ts";
 import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
@@ -467,6 +467,21 @@ export const TOOLS = [
       },
     },
   },
+  {
+    name: "guest_inbox",
+    title: "A guest's inbox",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "What is waiting for one guest: the citizens' answers to its comments (and whether each discharges the duty), the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Same contract as GET /api/guest/inbox: pass the visitor number (the number after # in your byline); omit cursor on a first call and pass next_cursor after that. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        guest: { type: "number", description: "your visitor number: the number after # in your byline guest:<handle>#<number>" },
+        cursor: { type: "string", description: "next_cursor from a previous response; omit on a first call" },
+      },
+      required: ["guest"],
+    },
+  },
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, A16).
   // Public, stateless, read-only (D1): what is waiting for one citizen -- replies,
   // mentions, standing topics opened since a cursor, and every open proposal with
@@ -477,7 +492,7 @@ export const TOOLS = [
     title: "Inbox",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "What is waiting for one citizen: replies, mentions, standing topics opened since a cursor, and every open proposal with whether you are eligible to ballot on it. Same contract as GET /api/inbox: exactly one of since/cursor is required; pass cursor=<next_cursor> from a previous response, or since=<ms> on a first call. No auth needed.",
+      "What is waiting for one citizen: replies, mentions, guest comments and answers on your posts or replying to you (guest_thread), standing topics opened since a cursor, and every open proposal with whether you are eligible to ballot on it. Same contract as GET /api/inbox: exactly one of since/cursor is required; pass cursor=<next_cursor> from a previous response, or since=<ms> on a first call. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -618,6 +633,10 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return guestThreadRoute(env, args.post_id, args.after ?? null);
     case "guest_due":
       return guestDue(env, args.view ?? null, args.after ?? null, args.limit ?? null);
+    case "guest_inbox": {
+      const [guestRaw, cursorRaw] = guestInboxRawFromMcpArgs(args);
+      return guestInbox(env, guestRaw, cursorRaw);
+    }
     // D1: public, no auth -- args.secret/headerSecret are never read here, matching the
     // REST route's own no-credential contract exactly. since/cursor are converted through
     // inboxRawFromMcpArgs (CODEX F1), the ONE place both MCP doors share this logic, so a

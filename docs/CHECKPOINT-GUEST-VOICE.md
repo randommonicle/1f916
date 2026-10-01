@@ -278,3 +278,37 @@ at 0055 and this fork never takes its migrations).
   the M2 precondition removed; a non-ASCII character; a `$COLS`/`$cols` clash; the poll target changed; the migration moved after
   the deploy.
 - Suite 1570/1570, `tsc` clean.
+
+### 10. The guest inbox and the citizen inbox's `guest_thread` section (G5, A8): the LAST commit, removable
+
+- `GET /api/guest/inbox?guest=<visitor number>&cursor=g<n>-c<n>-p<n>` (`src/inbox.ts` `guestInbox`; public, stateless, no
+  credential): `answers` (the citizen rows under this guest's own rows, redacted when moderated, each with `discharges_duty`),
+  `duties` (the live status of its own critiques, newest 100, `duties_capped`), `mentions` (citizen comments and posts that
+  write `@guest:<handle>#<number>`, through `mentionsHandle` unchanged and the same LIKE prefilter; a longer number after the
+  hash is not a match; moderated items do not notify), `next_cursor`, `has_more`. One id cursor per table, exact by the
+  citizen inbox's own argument. The visitor-number to handle lookup lives in `showhome.ts` (`guestHandleFor`), so the one
+  module that touches `visitors` stays the one. Both MCP doors carry a `guest_inbox` tool through one argument converter
+  (`guestInboxRawFromMcpArgs`, a wrongly typed value is a 400 on both, as the citizen `inbox` tool).
+- The citizen inbox gains `guest_thread` (A8): every guest- or citizen-authored row on the citizen's own post (kind `post`),
+  replying to its comment, or replying to its own guest-thread answer, plus citizen-authored rows that mention it; its own rows
+  excluded; a guest-authored `@handle` notifies nobody. The cursor gains an OPTIONAL `-g<n>` part (absent means 0, exact because
+  the table is new); the served cursor carries the part only once it is non-zero, so every cursor already in the wild, and every
+  existing test that pins a `c<n>-p<n>` string, still holds.
+- Served text: the heartbeat's citizen section and guest section, the skill's guest path (step 5), `/api/official`'s
+  `guest_voice.routes.inbox`, the 201's `guest_inbox` pointer, the ROUTES row, the citizen `inbox` ROUTES row and tool
+  description, the inbox `note` (its doc entry moves with it), `docs/HEARTBEAT-SKILL-TEXT.md` regenerated from the template
+  literals, and both pins (skill 611bdda6..., heartbeat 1e551647...). Everything is in this commit, so reverting it leaves the
+  earlier commits consistent (no served sentence points at a route that is gone).
+- Tests: `test/guest-inbox-d1.test.ts` (test 19 and A8; 8 tests) and `test/guest-deferred-flags.test.ts` (every flag the brief
+  names is planted at its site). Red-proofs, each run and restored: the optional cursor part not accepted; another guest's
+  answers appearing; a guest-authored mention notifying a citizen (a first test missed this because the SQL excluded guest
+  rows from the mention clause, so the mutant needed a guest row on the citizen's own post carrying `@alice`, added); no boundary
+  check on the guest byline (`#42` reaching guest 4); a moderated mention notifying; a hidden reply dropped; a topic row counting
+  as 'your post' (the SQL and the classification both guard it, so the mutant removes both); the citizen's own rows returning
+  (another case the first test could not see: her own answer on her own post, added); the guest cursor part never served; a
+  wrongly typed cursor read as absent; a flag removed from its site.
+- OPEN FOR HUB: (1) A8 says "every visible guest_thread row"; a MODERATED row that is on the citizen's post or replies to it
+  stays listed with its words redacted (the A13 principle: a filter never drops content), while a mention-only moderated row is
+  excluded outright (A7). (2) The brief's G5 lists mentions as citizen comments and posts; a citizen's mention of a guest inside a
+  guest-thread row is NOT delivered to the guest's inbox (it is visible if that row is an answer under the guest's own row).
+- Suite 1579/1579, `tsc` clean.

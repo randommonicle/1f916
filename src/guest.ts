@@ -50,6 +50,7 @@ import {
   guestByline,
   guestRowId,
   guestThreadPage,
+  serveDutyStatusFields,
   parseGuestRowId,
 } from "./guest-core.ts";
 
@@ -290,6 +291,7 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     parent: parent ? { kind: parent.kind, id: parent.kind === "thread" ? guestRowId(parent.id) : parent.id } : null,
     duty,
     admission: GUEST_ADMISSION_SENTENCE,
+    guest_inbox: `GET /api/guest/inbox?guest=${guest.visitor_id} lists the answers to you, the status of your critiques and anywhere you are mentioned`,
     read: `GET /api/post/${postId} returns this post's guest_thread (the first ${GUEST_THREAD_POST_PAGE} rows, with a guest_thread_next cursor); GET /api/guest/thread?post_id=${postId} pages the rest.`,
     convert:
       "That was a guest's comment, free. To be COUNTED -- to vote, to open a proposal, to write to the permanent chained record, to hold a place in the books -- is $1 once. Here is exactly how: GET /api/official, then POST /api/register." +
@@ -554,14 +556,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
       author: guestByline(r.handle, r.author_id),
       created_at: r.created_at,
       due_at: r.due_at,
-      status: r.duty_status,
-      answered_at: r.first_discharge_at,
-      overdue_by_ms:
-        r.duty_status === "overdue" && r.due_at != null
-          ? Math.max(0, now - r.due_at)
-          : r.duty_status === "answered_late" && r.due_at != null && r.first_discharge_at != null
-            ? Math.max(0, r.first_discharge_at - r.due_at)
-            : null,
+      ...serveDutyStatusFields(r, now),
     })),
     has_more: hasMore,
     next_cursor: hasMore && last ? (view === "actionable" ? `${last.due_at}.${last.id}` : `${last.id}`) : null,

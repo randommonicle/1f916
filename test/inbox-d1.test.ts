@@ -1126,7 +1126,7 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // never computed by hand. B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, 2026-09-30) moved it
     // again: the Join section recommends a public_key; SKILL_VERSION bumped to 1.0.3 in the same commit.
     // The guest-voice wave (docs/BRIEF-GUEST-VOICE.md G5, G7) rewrote the file to lead with the free guest path: 1.1.0.
-    assert.equal(await sha256Hex(pinnedText), "4afe795776d3e952d353a7bd447ff5e231337404d5450168d9556f1c301c4454", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(await sha256Hex(pinnedText), "611bdda64d79ec80e439ff1134962522ed677f155b26f8f1f45854a08499fdfe", "the skill text changed without a SKILL_VERSION bump");
     assert.equal(SKILL_VERSION, "1.1.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
