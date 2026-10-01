@@ -816,6 +816,10 @@ async function answerFromMovedClaim(
     logSettlementContradiction(row, row.state, settled, reqs);
     return contradictionResponse(settled.tx, row.state);
   }
+  // DEFERRED-DROPPED-SETTLE-TX (re-gate LOW-1(b) and LOW-2, the next paid-path wave): a settle that succeeded while another holder holds a live
+  // lease on the still-pending claim reaches the line below with its tx neither logged nor served; and a booking step gated out while its ref
+  // is unrecorded and the claim is still settled_unbooked is answered as a booking failure. Fix: log one line with the tx and claim key here,
+  // and answer such a step from the claim (sites listed in the re-gate record).
   if (row.state === "pending") return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
   return respondToExistingClaim(env, row, true, reqs, claim);
 }

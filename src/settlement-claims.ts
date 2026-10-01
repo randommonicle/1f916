@@ -479,6 +479,9 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       }
       return { status: 409, body: { error: `This payment${txPart(row)} was already used for ${describeClaim(row)}; nothing was charged again and nothing new was created.`, code: SETTLEMENT_ALREADY_BOOKED } };
     case "refused":
+      // DEFERRED-CONTRADICTION-REPLAY (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-REGATE-2026-10-01.md, LOW-1(a); the next paid-path wave): a claim
+      // that met a settlement_contradiction is left a plain refused/expired row, so a LATER identical replay still gets this 402 with accepts.
+      // Fix: stamp the row in the contradiction branch and serve the contradiction answer here instead.
       return {
         status: 402,
         body: { x402Version: 1, error: row.verdict_reason ?? "The facilitator recorded a refusal of this settlement. By its account no money moved.", accepts: [reqs] },
