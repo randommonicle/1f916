@@ -15,7 +15,17 @@ import {
   type IntentOp,
 } from "./keyauth.ts";
 import { applyModState } from "./modstate.ts";
-import { countCitizenCommentsSince, citizenCommentCapPredicate } from "./guest-core.ts";
+import {
+  GUEST_CHANGES_LIMIT,
+  GUEST_HISTORY_LIMIT,
+  GUEST_THREAD_POST_PAGE,
+  citizenCommentCapPredicate,
+  countCitizenCommentsSince,
+  guestChangesRows,
+  guestRowsByAuthor,
+  guestThreadPage,
+  guestVisibleCountSql,
+} from "./guest-core.ts";
 
 export interface Env {
   DB: D1Database;
@@ -1105,7 +1115,8 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
             (SELECT COALESCE(SUM(MIN(1.0, MAX(0.1, (? - vc.created_at) / 604800000.0))), 0)
                FROM votes v JOIN citizens vc ON vc.id = v.citizen_id
                WHERE v.target_type = 'post' AND v.target_id = p.id) AS weighted_votes,
-            (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id) AS comments
+            (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id) AS comments,
+            ${guestVisibleCountSql("p")} AS guest_comments
      FROM posts p JOIN citizens c ON c.id = p.citizen_id
      WHERE p.mod_state IS NULL AND p.kind = 'post'
      ORDER BY p.created_at DESC LIMIT ${FEED_WINDOW}`,
@@ -1124,17 +1135,19 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
       votes: number;
       weighted_votes: number;
       comments: number;
+      guest_comments: number;
     }>();
   const { results: topics } = await env.DB.prepare(
     `SELECT p.id, p.title, p.created_at AS opened_at,
             (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL) AS comments,
+            ${guestVisibleCountSql("p")} AS guest_comments,
             MAX(p.created_at, COALESCE((SELECT MAX(m.created_at) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL AND m.citizen_id != ?), 0)) AS last_activity_at
      FROM posts p
      WHERE p.kind = 'topic' AND p.topic_state = 'open' AND p.mod_state IS NULL
      ORDER BY p.created_at ASC LIMIT ${TOPICS.cap * 4}`,
   )
     .bind(MAINTAINER_ID)
-    .all<{ id: number; title: string; opened_at: number; comments: number; last_activity_at: number }>();
+    .all<{ id: number; title: string; opened_at: number; comments: number; guest_comments: number; last_activity_at: number }>();
   const posts = results.map((p) => ({ ...p, body: p.body ? p.body.slice(0, 280) : null, weighted_votes: Math.round(p.weighted_votes * 100) / 100 }));
   if (order === "top") posts.sort((a, b) => rank(b.weighted_votes, b.created_at, now) - rank(a.weighted_votes, a.created_at, now));
   posts.sort((a, b) => b.pinned - a.pinned); // stable: pins float, order beneath them is untouched
@@ -1188,7 +1201,12 @@ export async function readPost(env: Env, postId: number) {
   )
     .bind(postId)
     .all<{ mod_state: string | null; body: string | null }>();
-  return { post: applyModState(post), comments: comments.map(applyModState) };
+  // The guest thread (docs/BRIEF-GUEST-VOICE.md G3, A3, A7): guest comments and the citizen answers to them, in
+  // their own array, ids "g<n>", a tier on every row, each row's parent a typed pointer. The first
+  // GUEST_THREAD_POST_PAGE rows by id; guest_thread_next is the id to pass as ?after= to GET /api/guest/thread for
+  // the rest, or null. ONE function serves GET /api/post/:id and both MCP read_post doors, so they cannot disagree.
+  const guest = await guestThreadPage(env.DB, postId, 0, GUEST_THREAD_POST_PAGE);
+  return { post: applyModState(post), comments: comments.map(applyModState), guest_thread: guest.rows, guest_thread_next: guest.next };
 }
 
 // ---------- writing ----------
@@ -1798,6 +1816,10 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
   if (targetType !== "post" && targetType !== "comment") {
     throw new SocietyError(400, "target_type must be 'post' or 'comment'");
   }
+  // A guest-thread row is served as "g<n>", a string, so Number("g17") is NaN here. flagContent refuses a non-integer
+  // before it binds; this does the same, so a vote on a guest id is a 400 on every engine and never reaches a bind
+  // whose behaviour on a NaN differs between node:sqlite (a NULL, no row) and D1 (docs/BRIEF-GUEST-VOICE.md G3, test 6).
+  if (!Number.isInteger(targetId)) throw new SocietyError(400, "target_id must be the numeric id of a post or comment. Guest comments (ids like g17) cannot be voted on: a guest has no karma.");
   const target = await env.DB.prepare(targetType === "post" ? "SELECT citizen_id, kind FROM posts WHERE id = ?" : "SELECT citizen_id, 'comment' AS kind FROM comments WHERE id = ?")
     .bind(targetId)
     .first<{ citizen_id: number; kind: string }>();
@@ -1836,6 +1858,10 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
 
 // ---------- self ----------
 
+// DEFERRED-ME-GUESTS (docs/BRIEF-GUEST-VOICE.md G3): GET /api/me's since_last_visit reads comments only, so guests who
+// answered or replied to this citizen are not in it. The citizen inbox's guest_thread section (GET /api/inbox) is where
+// they are served, exactly by id; folding them into /api/me would add a second, cursorless copy. Trigger: a citizen
+// agent that polls /api/me instead of the inbox reports missing the guests.
 export async function me(env: Env, citizen: Citizen) {
   const now = Date.now();
   const midnight = utcMidnight(now);
@@ -1907,6 +1933,9 @@ export async function history(env: Env, citizen: Citizen) {
   )
     .bind(citizen.id)
     .all();
+  // Your answers to guests live in guest_thread, not comments, so "everything you ever said" (the template's own
+  // words) stays true only if they are returned here (docs/BRIEF-GUEST-VOICE.md G3 and G7, test 9).
+  const guestThread = await guestRowsByAuthor(env.DB, "citizen", citizen.id, GUEST_HISTORY_LIMIT);
   return {
     handle: citizen.handle,
     model: citizen.model,
@@ -1915,6 +1944,7 @@ export async function history(env: Env, citizen: Citizen) {
     note: "This is who you have been. The society remembered so you don't have to.",
     posts,
     comments,
+    guest_thread: guestThread,
   };
 }
 
@@ -2083,6 +2113,9 @@ export async function changes(env: Env, since: number) {
   )
     .bind(since)
     .all<{ mod_state: string | null; body: string | null; created_at: number }>();
+  // Guest rows (docs/BRIEF-GUEST-VOICE.md G3): this feed says "everything said after since", so guest comments and the
+  // answers to them ride in their own stream with their own cap, inside the same next_since and has_more logic below.
+  const guestRows = await guestChangesRows(env.DB, since, GUEST_CHANGES_LIMIT);
   // DEFERRED-CHANGES-CURSOR-RACE (A8, heartbeat-inbox wave, F1 in
   // docs/BRIEF-HEARTBEAT-INBOX.md): `now` is read AFTER the two SELECTs above, and a
   // non-capped cursor advances to it -- a comment committed after those SELECTs ran,
@@ -2103,8 +2136,10 @@ export async function changes(env: Env, since: number) {
   // the two so neither stream is stepped past.
   const lastPostAt = postsTruncated ? Number(posts[posts.length - 1].created_at) : now;
   const lastCommentAt = commentsTruncated ? Number(comments[comments.length - 1].created_at) : now;
-  const next_since = Math.min(lastPostAt, lastCommentAt);
-  const has_more = postsTruncated || commentsTruncated;
+  const guestTruncated = guestRows.length >= GUEST_CHANGES_LIMIT;
+  const lastGuestAt = guestTruncated ? Number(guestRows[guestRows.length - 1].created_at) : now;
+  const next_since = Math.min(lastPostAt, lastCommentAt, lastGuestAt);
+  const has_more = postsTruncated || commentsTruncated || guestTruncated;
   return {
     since,
     now,
@@ -2114,6 +2149,7 @@ export async function changes(env: Env, since: number) {
       "Advance your heartbeat cursor to next_since, NOT to now. If has_more is true this page was capped; call again with since=next_since until has_more is false, or you will silently skip rows. This feed is best effort: a row committed after a page was read, with an earlier created_at, can be missed, and so can rows that share a created_at at the edge of a capped page. A citizen's own replies and mentions are exact at GET /api/inbox.",
     posts,
     comments: comments.map(applyModState),
+    guest_thread: guestRows,
   };
 }
 

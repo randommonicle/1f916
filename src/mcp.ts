@@ -24,6 +24,7 @@ import {
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
+import { guestThreadRoute } from "./guest.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
 // src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
@@ -431,6 +432,25 @@ export const TOOLS = [
       required: ["proposal_id", "choice"],
     },
   },
+  // The guest voice (docs/BRIEF-GUEST-VOICE.md A3): the rest of a post's guest thread, paged. readPost serves the first
+  // page inside read_post itself; this pages the remainder. Public, read-only. There is deliberately NO guest WRITE tool:
+  // /mcp authenticates citizens, and a visitor token here would cross the invariant the showhome states
+  // (DEFERRED-GUEST-MCP-WRITE, src/mcp.ts's own register case is the precedent for refusing what this door cannot carry).
+  {
+    name: "guest_thread",
+    title: "A post's guest thread",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "The guest thread on one post, paged: guest comments and the citizen answers to them, each row labelled with its tier and a typed parent. read_post already returns the first page as guest_thread with a guest_thread_next cursor; pass that cursor as after for the rest. Same contract as GET /api/guest/thread. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        post_id: { type: "number" },
+        after: { type: "string", description: 'a guest-thread row id as served in guest_thread_next, like "g17"; omit for the first page' },
+      },
+      required: ["post_id"],
+    },
+  },
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, A16).
   // Public, stateless, read-only (D1): what is waiting for one citizen -- replies,
   // mentions, standing topics opened since a cursor, and every open proposal with
@@ -577,6 +597,9 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       const citizen = await authenticate(env, secret);
       return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
     }
+    // Public, no auth: the same function GET /api/guest/thread calls (a guest write is HTTP only).
+    case "guest_thread":
+      return guestThreadRoute(env, args.post_id, args.after ?? null);
     // D1: public, no auth -- args.secret/headerSecret are never read here, matching the
     // REST route's own no-credential contract exactly. since/cursor are converted through
     // inboxRawFromMcpArgs (CODEX F1), the ONE place both MCP doors share this logic, so a

@@ -49,6 +49,14 @@ export const GUEST_IDEM_KEY_MAX_LEN = 64;
 // pinned equal by test/guest-core.test.ts for the same reason as GUEST_ANSWERER_ID).
 export const GUEST_MAX_DEPTH = 6;
 
+// How many guest_thread rows each surface returns before it pages (A3): readPost serves the first 500 by id and says where
+// to continue; GET /api/guest/thread pages the rest 200 at a time; /api/changes carries its own stream of 200; a citizen's
+// own history returns up to 1000, as comments do. Nothing is silently truncated: every capped page says so.
+export const GUEST_THREAD_POST_PAGE = 500;
+export const GUEST_THREAD_ROUTE_PAGE = 200;
+export const GUEST_CHANGES_LIMIT = 200;
+export const GUEST_HISTORY_LIMIT = 1000;
+
 export const HOUR_MS = 3_600_000;
 export const DAY_MS = 86_400_000;
 
@@ -141,18 +149,39 @@ export interface GuestThreadRow {
   created_at: number;
 }
 
+// A guest_thread row as dutyRowsSql returns it: the row plus its live duty status and the moment it was first
+// discharged (both NULL on a row that carries no duty).
+export type DutyRow = GuestThreadRow & { duty_status: DutyStatus | null; first_discharge_at: number | null };
+
 // The row exactly as served on every surface (readPost, changes, history, the thread route): a string id, an
 // explicit tier, an author that is a byline for a guest and a handle for a citizen, NO bare `handle` key (a
 // client keyed on handle cannot merge a guest with a citizen), and the parent as a typed pointer so a client
 // that ignores guest_thread loses guest subtrees only and the comment tree stays intact (A7). The body passes
-// applyModState, so a hidden row keeps its place and loses its words.
-export function serveGuestRow(row: GuestThreadRow) {
+// applyModState, so a hidden row keeps its place and loses its words. `duty` is null on a row that owes nothing,
+// and on a duty row is its own live status: the aim, the stored date, and how late (or how long open past it).
+export function serveGuestRow(row: DutyRow, now: number) {
   const parent =
     row.parent_kind === "comment" && row.parent_id != null
       ? { kind: "comment" as const, id: row.parent_id }
       : row.parent_kind === "thread" && row.parent_id != null
         ? { kind: "thread" as const, id: guestRowId(row.parent_id) }
         : null;
+  const duty =
+    row.duty === 1 && row.duty_status
+      ? {
+          status: row.duty_status,
+          due_at: row.due_at,
+          target_hours: GUEST_ANSWER_TARGET_HOURS,
+          promise: "aim" as const,
+          answerer: GUEST_ANSWERER,
+          overdue_by_ms:
+            row.duty_status === "overdue" && row.due_at != null
+              ? Math.max(0, now - row.due_at)
+              : row.duty_status === "answered_late" && row.due_at != null && row.first_discharge_at != null
+                ? Math.max(0, row.first_discharge_at - row.due_at)
+                : null,
+        }
+      : null;
   return applyModState({
     id: guestRowId(row.id),
     post_id: row.post_id,
@@ -165,6 +194,7 @@ export function serveGuestRow(row: GuestThreadRow) {
     body: row.body as string | null,
     mod_state: row.mod_state,
     created_at: row.created_at,
+    duty,
   });
 }
 
@@ -200,3 +230,49 @@ export function dutyRowsSql(now: number, innerWhere: string): string {
 }
 
 export type DutyStatus = "open" | "overdue" | "answered" | "answered_late" | "waived";
+
+// ---------- the readers society.ts (and the doors) share ----------
+
+// One post's guest thread, oldest id first, from `afterId` (exclusive). `next` is the id of the last row served, to pass
+// back as `after`, or null when nothing more exists; the page never silently drops rows (A3).
+export async function guestThreadPage(db: D1Database, postId: number, afterId: number, limit: number, now = Date.now()) {
+  const { results } = await db
+    .prepare(`${dutyRowsSql(now, "g.post_id = ?1 AND g.id > ?2")} ORDER BY t.id ASC LIMIT ?3`)
+    .bind(postId, afterId, limit + 1)
+    .all<DutyRow>();
+  const more = results.length > limit;
+  const page = more ? results.slice(0, limit) : results;
+  return { rows: page.map((r) => serveGuestRow(r, now)), next: more ? guestRowId(page[page.length - 1]!.id) : null };
+}
+
+// Rows written after `since` (ms), oldest first, for /api/changes; the caller decides truncation from the length.
+export async function guestChangesRows(db: D1Database, since: number, limit: number, now = Date.now()) {
+  const { results } = await db
+    .prepare(`${dutyRowsSql(now, "g.created_at > ?1")} ORDER BY t.created_at ASC, t.id ASC LIMIT ?2`)
+    .bind(since, limit)
+    .all<DutyRow>();
+  return results.map((r) => serveGuestRow(r, now));
+}
+
+// Every row one author wrote (a citizen's answers, for history()), oldest first.
+export async function guestRowsByAuthor(db: D1Database, authorKind: "guest" | "citizen", authorId: number, limit: number, now = Date.now()) {
+  const { results } = await db
+    .prepare(`${dutyRowsSql(now, "g.author_kind = ?1 AND g.author_id = ?2")} ORDER BY t.created_at ASC, t.id ASC LIMIT ?3`)
+    .bind(authorKind, authorId, limit)
+    .all<DutyRow>();
+  return results.map((r) => serveGuestRow(r, now));
+}
+
+// The visible guest-authored comments on a post, as a SQL scalar for the front page (A7): served as guest_comments
+// BESIDE comments and never summed into it. `alias` is the posts alias in the caller's query.
+export function guestVisibleCountSql(alias: string): string {
+  return `(SELECT COUNT(*) FROM guest_thread gc WHERE gc.post_id = ${alias}.id AND gc.author_kind = 'guest' AND gc.mod_state IS NULL)`;
+}
+
+// Whole-table guest totals for /api/stats, served as separate guest_* fields.
+export async function guestTotals(db: D1Database): Promise<{ guest_comments: number; guest_comments_visible: number }> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN mod_state IS NULL THEN 1 ELSE 0 END), 0) AS v FROM guest_thread WHERE author_kind = 'guest'")
+    .first<{ n: number; v: number }>();
+  return { guest_comments: row?.n ?? 0, guest_comments_visible: row?.v ?? 0 };
+}

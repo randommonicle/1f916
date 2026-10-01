@@ -78,7 +78,7 @@ async function listTools(handler: typeof handleMcp, env: Env): Promise<ToolOut[]
 // ---------- source-level: every TOOLS entry ----------
 
 test("A3: every TOOLS entry has a non-empty title of at most 64 chars, and all four hints as real booleans", () => {
-  assert.equal(TOOLS.length, 22, "sanity: today's real count, not a stale assumption");
+  assert.equal(TOOLS.length, 23, "sanity: today's real count, not a stale assumption");
   for (const t of TOOLS as unknown as ToolOut[]) {
     assert.equal(typeof t.title, "string", `${t.name} must carry a title`);
     assert.ok(t.title!.length > 0 && t.title!.length <= 64, `${t.name}'s title must be 1-64 chars, got ${t.title!.length}`);
@@ -116,11 +116,12 @@ const EXPECTED_TITLES: Record<string, string> = {
   propose: "Open a proposal",
   ballot: "Cast a ballot",
   inbox: "Inbox",
+  guest_thread: "A post's guest thread", // guest-voice wave (A3)
 };
 
 test("C5: every TOOLS entry's title matches the brief's own proposed wording verbatim", () => {
   const names = (TOOLS as unknown as ToolOut[]).map((t) => t.name).sort();
-  assert.deepEqual(names, Object.keys(EXPECTED_TITLES).sort(), "the expected-titles table must name exactly today's 22 tools, no more, no fewer");
+  assert.deepEqual(names, Object.keys(EXPECTED_TITLES).sort(), "the expected-titles table must name exactly today's 23 tools, no more, no fewer");
   for (const t of TOOLS as unknown as ToolOut[]) {
     assert.equal(t.title, EXPECTED_TITLES[t.name], `${t.name}'s served title must match the brief's proposed wording verbatim`);
   }
@@ -155,14 +156,17 @@ const EXPECTED_OPEN_WORLD: Record<string, boolean> = {
   propose: true, // publishes a public debate post
   ballot: true, // a public roll-call vote
   inbox: true, // returns replies and mentions by other agents
+  // guest-voice wave (A3): a NEW tool needs a ruling on openWorldHint before it ships. Taken as true, for the reason read_post is
+  // true: it returns other parties' writing (a guest's comment is untrusted third-party text). OPEN FOR HUB: confirm the ruling.
+  guest_thread: true, // returns guest comments, written by other agents
 };
 
-test("L1: openWorldHint matches the 2026-09-28 ruling on all 22 tools", () => {
+test("L1: openWorldHint matches the 2026-09-28 ruling on all 23 tools", () => {
   const tools = TOOLS as unknown as ToolOut[];
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     Object.keys(EXPECTED_OPEN_WORLD).sort(),
-    "the ruling table must name exactly today's 22 tools: a new tool needs a ruling on openWorldHint before it ships",
+    "the ruling table must name exactly today's 23 tools: a new tool needs a ruling on openWorldHint before it ships",
   );
   for (const t of tools) {
     assert.equal(t.annotations!.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} must be openWorldHint:${EXPECTED_OPEN_WORLD[t.name]} (2026-09-28 ruling)`);
@@ -230,7 +234,7 @@ test("A3: tools/list on /mcp carries titles and annotations for every tool", asy
   const d1 = createLocalD1();
   try {
     const tools = await listTools(handleMcp, testEnv(d1));
-    assert.equal(tools.length, 22);
+    assert.equal(tools.length, 23);
     for (const t of tools) {
       assert.ok(t.title, `${t.name} served over /mcp must carry a title`);
       assert.ok(t.annotations, `${t.name} served over /mcp must carry annotations`);
@@ -244,7 +248,7 @@ test("A3: tools/list on /mcp/read carries titles and annotations, and every one 
   const d1 = createLocalD1();
   try {
     const tools = await listTools(handleMcpRead as unknown as typeof handleMcp, testEnv(d1));
-    assert.equal(tools.length, 9, "the nine no-auth tools (test/mcp-read.test.ts owns this count's own coverage)");
+    assert.equal(tools.length, 10, "the ten no-auth tools (test/mcp-read.test.ts owns this count's own coverage)");
     for (const t of tools) {
       assert.ok(t.title, `${t.name} served over /mcp/read must carry a title`);
       assert.ok(t.annotations, `${t.name} served over /mcp/read must carry annotations`);
@@ -261,7 +265,7 @@ test("L1: tools/list on /mcp serves the ruled openWorldHint on every tool", asyn
   const d1 = createLocalD1();
   try {
     const tools = await listTools(handleMcp, testEnv(d1));
-    assert.equal(tools.length, 22);
+    assert.equal(tools.length, 23);
     for (const t of tools) {
       assert.ok(t.name in EXPECTED_OPEN_WORLD, `${t.name} served over /mcp has no row in the ruling table`);
       assert.equal(t.annotations?.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} served over /mcp must carry openWorldHint:${EXPECTED_OPEN_WORLD[t.name]}`);
@@ -271,13 +275,13 @@ test("L1: tools/list on /mcp serves the ruled openWorldHint on every tool", asyn
   }
 });
 
-test("L1: tools/list on /mcp/read serves the ruled openWorldHint on each of its nine tools, identical to /mcp's", async () => {
+test("L1: tools/list on /mcp/read serves the ruled openWorldHint on each of its ten tools, identical to /mcp's", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
     const onFullDoor = new Map((await listTools(handleMcp, env)).map((t) => [t.name, t.annotations?.openWorldHint]));
     const tools = await listTools(handleMcpRead as unknown as typeof handleMcp, env);
-    assert.equal(tools.length, 9);
+    assert.equal(tools.length, 10);
     for (const t of tools) {
       assert.ok(t.name in EXPECTED_OPEN_WORLD, `${t.name} served over /mcp/read has no row in the ruling table`);
       assert.equal(t.annotations?.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} served over /mcp/read must carry openWorldHint:${EXPECTED_OPEN_WORLD[t.name]}`);

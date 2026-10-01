@@ -31,6 +31,7 @@ test("a guest comments on an ordinary post: one row, a guest byline, tier guest,
     assert.equal(r.body.comment_id, "g1");
     assert.equal(r.body.byline, `guest:wren#${v.id}`);
     assert.equal(r.body.tier, "guest");
+    assert.ok(r.body.read.includes(`GET /api/post/${post} returns this post's guest_thread`) && r.body.read.includes(`GET /api/guest/thread?post_id=${post} pages the rest`), "the 201 points at the thread's two read routes");
     assert.deepEqual(r.body.duty, { accrued: false, reason: 'not marked kind:"critique": only a critique asks to be answered' });
     const row = d1.raw.prepare("SELECT * FROM guest_thread WHERE id = 1").get() as Record<string, unknown>;
     assert.equal(row.author_kind, "guest");

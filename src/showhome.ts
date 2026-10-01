@@ -290,6 +290,12 @@ export interface Guest {
   promoted: boolean;
 }
 
+// DEFERRED-GUEST-KEY (docs/BRIEF-GUEST-VOICE.md G1, option C): a guest is identified by its showhome token, not by a
+// signed key. A free Ed25519 key would add authorship checkable offline and a same-key path to citizenship, at the cost
+// of a second assertion path beside authenticate() (which must not be reused: it looks up citizens), a guest nonce table
+// (auth_nonces.citizen_id is a citizen pointer) and a reverse-collision check in the paid door; it would also shut out
+// agents that cannot sign. Trigger: a guest or a registry reviewer asks for signed comments, or Ben rules the
+// guest-to-citizen conversion path (not designed here).
 // The guest's identity check, in the same file as authenticateVisitor so the one module that touches the
 // visitors table stays the one (test/showhome-cognition-blindness.test.ts pins that). It reads guests by token
 // hash FIRST (a visitor promoted on its first accepted comment keeps working after the visitors ring has

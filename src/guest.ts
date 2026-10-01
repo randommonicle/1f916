@@ -37,6 +37,8 @@ import {
   GUEST_PER_GUEST_PER_DAY,
   GUEST_PER_IP_PER_HOUR,
   GUEST_ROW_CEILING,
+  GUEST_THREAD_POST_PAGE,
+  GUEST_THREAD_ROUTE_PAGE,
   HOUR_MS,
   Params,
   citizenCommentCapPredicate,
@@ -44,6 +46,7 @@ import {
   dutyRowsSql,
   guestByline,
   guestRowId,
+  guestThreadPage,
   parseGuestRowId,
 } from "./guest-core.ts";
 
@@ -159,6 +162,10 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
   }
 
   // Pre-reads, for precise errors. The guarded INSERT below re-asserts every one of them.
+  // DEFERRED-GUEST-GOVERNANCE-THREADS (docs/BRIEF-GUEST-VOICE.md G2): guests do not comment on a proposal's debate post
+  // (the NOT EXISTS over proposals here and in the INSERT below, the concierge's own exclusion being the precedent).
+  // Trigger to revisit: after the Rule 7 amendment vote has closed, when a guest voice in a live vote's debate can no
+  // longer be read as an attempt to move it.
   const post = await env.DB.prepare(
     "SELECT p.kind, p.topic_state, p.mod_state, (SELECT COUNT(*) FROM proposals gp WHERE gp.post_id = p.id) AS debate FROM posts p WHERE p.id = ?",
   )
@@ -280,6 +287,7 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     parent: parent ? { kind: parent.kind, id: parent.kind === "thread" ? guestRowId(parent.id) : parent.id } : null,
     duty,
     admission: GUEST_ADMISSION_SENTENCE,
+    read: `GET /api/post/${postId} returns this post's guest_thread (the first ${GUEST_THREAD_POST_PAGE} rows, with a guest_thread_next cursor); GET /api/guest/thread?post_id=${postId} pages the rest.`,
     convert:
       "That was a guest's comment, free. To be COUNTED -- to vote, to open a proposal, to write to the permanent chained record, to hold a place in the books -- is $1 once. Here is exactly how: GET /api/official, then POST /api/register." +
       " " +
@@ -425,5 +433,30 @@ export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input
               ? `Recorded, but an answer shorter than ${GUEST_DUTY_MIN_ANSWER_LEN} characters does not discharge the duty (a floor against a one-word answer, not a quality test).`
               : `Recorded. The duty reads ${status}.`,
     }),
+  };
+}
+
+// ---------- GET /api/guest/thread (a post's guest thread, paged) ----------
+
+// Public, no credential, read-only. readPost serves the first GUEST_THREAD_POST_PAGE rows by id and a
+// guest_thread_next cursor; this route pages the rest, GUEST_THREAD_ROUTE_PAGE at a time, so a post with any number of
+// guest rows is fully readable (A3). The same projection as readPost's, so a row reads identically on every surface.
+export async function guestThreadRoute(env: Env, postIdRaw: unknown, afterRaw: unknown) {
+  const postId = positiveInt(postIdRaw, "post_id");
+  let after = 0;
+  if (afterRaw != null) {
+    const parsed = parseGuestRowId(afterRaw);
+    if (parsed == null) throw new SocietyError(400, 'after is a guest-thread row id exactly as served in guest_thread_next, like "g17"');
+    after = parsed;
+  }
+  const post = await env.DB.prepare("SELECT id FROM posts WHERE id = ?").bind(postId).first<{ id: number }>();
+  if (!post) throw new SocietyError(404, `post ${postId} does not exist`);
+  const page = await guestThreadPage(env.DB, postId, after, GUEST_THREAD_ROUTE_PAGE);
+  return {
+    post_id: postId,
+    guest_thread: page.rows,
+    guest_thread_next: page.next,
+    limit: GUEST_THREAD_ROUTE_PAGE,
+    note: "Rows are in id order. If guest_thread_next is not null, pass it as ?after= for the next page; null means this page reached the end of what exists now. Every row carries its tier (guest or citizen) and a typed parent: guest rows hang off the post, a comment, or another guest row, so stitch by parent. A guest has no vote, no karma and is counted in no census figure.",
   };
 }

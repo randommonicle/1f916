@@ -107,3 +107,35 @@ at 0055 and this fork never takes its migrations).
   inbox covers "replying to its own guest_thread rows", which reads as a citizen answering guests, so I did not allow a
   citizen answer as a target. (2) Guest comments refuse a hidden (collapsed or removed) PARENT with 409, while an answer is
   refused only on a REMOVED target (the brief's words); the two rules differ on purpose, as written.
+
+### 4. Labelling and exclusion on every surface (G3, A3, A7), the thread route, the `guest_thread` read tool on both doors
+
+- `readPost` (society.ts) returns `guest_thread` (the first 500 rows by id, each with its live duty status) and
+  `guest_thread_next`; one function, so `GET /api/post/:id`, `/mcp` `read_post` and `/mcp/read` `read_post` cannot disagree.
+  `GET /api/guest/thread?post_id=N&after=g<n>` (200 a page) and a `guest_thread` tool on BOTH MCP doors page the rest.
+  `changes()` carries its own guest stream (cap 200) inside the existing `next_since`/`has_more` logic; `history()` returns
+  the citizen's own guest-thread answers (so the template's "everything you ever said" stays true); the front page's posts
+  and topics gain `guest_comments` (visible guest-authored rows) beside `comments`, never summed; `/api/stats` gains
+  `guest_comments` and `guest_comments_visible`. The brief's "`GET /api/posts` (society.ts:1080)" is the front page's ranked
+  posts query; there is no `/api/posts` route.
+- Served row: `{id:"g17", post_id, tier, author, author_model, kind, depth, parent:{kind,id}|null, body, mod_state,
+  created_at, duty}`; no bare `handle`; `duty` is null on a row that owes nothing, and on a duty row its live status, the
+  stored `due_at`, `target_hours`, `promise:"aim"`, and `overdue_by_ms`.
+- `castVote` now refuses a non-integer `target_id` with a 400 before it binds (a guest id is "g17", so `Number()` is NaN).
+  Local node:sqlite binds NaN as NULL and answers "no row" (404); what D1 does with a NaN bind I did not run and cannot from
+  here, so the guard stands on its own and test 6 asserts the guard's own message, not only a 4xx.
+- Three MCP read tools exist after the inbox commit (`guest_thread` now, `guest_due` and `guest_inbox` later); the tool-count
+  tests (22 -> 23, read door 9 -> 10), `EXPECTED_READ_TOOL_NAMES` and the title table moved. OPEN FOR HUB: the L1 ruling table
+  needs a Ben ruling for every new tool's `openWorldHint`; I set `guest_thread: true` (it returns other agents' untrusted
+  text, as `read_post` does).
+- D-061 guard: the one allowlisted literal that moved is mcp-read.ts's read-door refusal (its tool list now ends
+  `inbox, guest_thread`); the sha was computed by the guard's own method (the old text reproduces the old sha) and the
+  credential wording is unchanged. The baseline counts (76 / 23 / 53) did not move.
+- Flags planted: `DEFERRED-GUEST-GOVERNANCE-THREADS` (guest.ts), `DEFERRED-GUEST-KEY` (showhome.ts
+  `authenticateGuest`), `DEFERRED-ME-GUESTS` (society.ts `me()`), `DEFERRED-GUEST-MCP-WRITE` (mcp.ts, beside the tool).
+- Tests: `test/guest-surfaces-d1.test.ts` (2, 6, 7, 8, 9, 11, 24's thread half, A7). Red-proofs, each run and restored:
+  guest code inserting into `citizens` -> test 2; the integer guard removed -> test 6; a numeric guest id served -> tests 6,
+  A7, 24, 8, 9; `readPost` without its guest query -> A7, 7, 24; `changes` without its stream -> 7; `changes` ignoring the guest
+  cap in `has_more` -> 7; the front page's `comments` summed with guest rows -> 8; `history` without its query -> 9; the topic
+  activity expression counting guest rows -> 11; `readPost` with no page cap -> 24; the `next` cursor dropped -> 24.
+- Suite 1531/1531, `tsc` clean.
