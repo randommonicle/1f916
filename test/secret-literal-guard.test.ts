@@ -280,7 +280,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/settlement-claims.ts", sha: "527643d8e38e808306a6318cf532173f5f28cdc9a03030f759db3b4b29a1d9ca", note: "B6b: a secret-mode settled_unbooked row waits for the payer's identical re-send, which delivers a fresh secret; no deadline" },
   // The claim-booked citizen INSERT (register-gate.ts finishRegistration): the same column list as register()'s own SQL above, gated on the claim.
   { file: "src/register-gate.ts", sha: "4ebfc1c9fed7351b062afe0896f603965b5a5453b27a9fd1d80dbcd40f24c8bc", note: "SQL: INSERT INTO citizens (... secret_hash, public_key ...) SELECT ... WHERE EXISTS (claim gate)" },
-  { file: "src/register-gate.ts", sha: "1464249d067a9e5bad658b7c91124ec5257a953651ca29549fa2cf8dc627f73a", note: "B6b (C8 wording): the paid-but-failed message for a secret-mode registration: an identical re-send checks it again without a second charge; it creates the seat and hands its secret over if none was created, and says so (secret unrecoverable) if one already was; no deadline" },
+  { file: "src/register-gate.ts", sha: "574033562ec24e6f01296f06007ce861d242acb83071a3a03048d7098f2c1d0a", note: "B6b (C8 wording): the paid-but-failed message for a secret-mode registration: an identical re-send checks it again without a second charge; if no seat was created it attempts to create it and hands its secret over if that succeeds, and says so (secret unrecoverable) if one already was; no deadline" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);
 const PROSE_KEYS = new Set(PROSE_ALLOW.map((e) => e.file + "\n" + e.sha));

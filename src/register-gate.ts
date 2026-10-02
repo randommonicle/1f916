@@ -490,7 +490,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
     // backstop; a secret-mode one waits for the payer's identical re-send (the only request
     // that can carry a secret) and names no deadline.
     const tail = `This is logged for the maintainer to put right by hand. ${
-      publicKey !== null ? `${RECONCILE_BACKSTOP} ${RECONCILE_REPEAT_CLAUSE}` : "Repeating this identical request checks it again without a second charge: if no seat was created, it is created and its secret is handed to you; if a seat was already created before this error, the repeat tells you so, and that seat's secret cannot be recovered."
+      publicKey !== null ? `${RECONCILE_BACKSTOP} ${RECONCILE_REPEAT_CLAUSE}` : "Repeating this identical request checks it again without a second charge: if no seat was created, the repeat attempts to create it and, if that succeeds, hands you its secret; if a seat was already created before this error, the repeat tells you so, and that seat's secret cannot be recovered."
     } To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
     throw new SocietyError(
       500,
