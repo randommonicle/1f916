@@ -425,7 +425,12 @@ export interface BookingStep {
 // neither the row nor the reference exists. The gate subquery AND the recording UPDATE both carry the lease-ownership
 // condition (HOLDS_LEASE), so a finisher whose lease was taken by another holder writes nothing in this batch; a
 // non-final step that passes RENEWS the lease in the same statement, a final one clears it with the move to `booked`.
-export async function runBookingStep(env: Env, key: ClaimKey, step: BookingStep, owner: string, now: number): Promise<{ applied: boolean }> {
+//
+// C8 (first-gate L7): when the step applied, `rowId` is the id the row-creating statement reported for itself (D1's `meta.last_row_id` on the LAST statement of the step's
+// own list, the one whose row the claim records via last_insert_rowid()). A finisher whose step created the row it needs to answer with (the secret-mode citizen) takes the id
+// from here instead of re-reading the claim: a read-back that fails AFTER the batch committed must not turn a delivered seat into a booking failure. Absent when the step did not
+// apply, or when the platform reported no usable id (the caller then reads the claim back, as before).
+export async function runBookingStep(env: Env, key: ClaimKey, step: BookingStep, owner: string, now: number): Promise<{ applied: boolean; rowId?: number }> {
   const gate: ChainGate = {
     sql: `SELECT 1 FROM settlement_claims WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND json_extract(booked_refs, '$.${step.ref}') IS NULL AND ${HOLDS_LEASE}`,
     args: [...keyArgs(key), ...holdsLeaseArgs(owner, now)],
@@ -443,7 +448,9 @@ export async function runBookingStep(env: Env, key: ClaimKey, step: BookingStep,
     try {
       const out = await env.DB.batch(batch);
       const last = out[out.length - 1] as { meta: { changes: number } };
-      return { applied: last.meta.changes === 1 };
+      if (last.meta.changes !== 1) return { applied: false };
+      const created = (out[stmts.length - 1] as { meta?: { last_row_id?: unknown } } | undefined)?.meta?.last_row_id;
+      return typeof created === "number" && Number.isSafeInteger(created) && created > 0 ? { applied: true, rowId: created } : { applied: true };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (step.chain && message.includes("UNIQUE") && classifyUniqueViolation(step.chain, message) === "chain_head") continue;
@@ -518,8 +525,10 @@ export function claimIsSecretRegistration(row: ClaimRow): boolean {
   return row.route === "register" && intentOf(row).public_key == null;
 }
 
+// C8: true whether or not the 201 that carried the secret reached the payer. It claims only what the claim row proves (the seat exists; the registration is booked) and what the
+// design guarantees (a secret is generated once, for the response to the request that registers the seat, and is stored only as a hash).
 export const SECRET_LOST_NOTE =
-  "your seat exists; a response containing its secret was issued, but the secret cannot be recovered. Reach the maintainer with this tx (a free showhome note: POST /api/showhome/enter, then POST /api/showhome/note). For any future registration, send a public_key.";
+  "your seat exists; its secret was generated once, for the response to the request that registered it, and cannot be recovered. If that response did not reach you, the secret is lost: reach the maintainer with this tx (a free showhome note: POST /api/showhome/enter, then POST /api/showhome/note). For any future registration, send a public_key.";
 
 // The ONE contradiction answer (C1): the first request to meet the contradiction gets it from x402.ts, and every later identical replay of a stamped refused
 // or expired row gets the same words from claimAnswer. Never `accepts`, never "nothing was charged", never an invitation to sign again.

@@ -667,14 +667,14 @@ test("T4b: a non-final booking step inside the lease renews it (B cannot acquire
   try {
     const key = await take(d1, "A", 1_000);
     assert.equal(await markSettled(eq(d1), key, TX, TEST_PAYER, "A", 1_000), true);
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 1_000 + 170_000), { applied: true });
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 1_000 + 170_000)).applied, true);
     const row = (await getClaim(eq(d1), key)) as ClaimRow;
     assert.equal(row.leased_until, 1_000 + 170_000 + CLAIM_LEASE_TTL_MS, "the step renewed the lease");
     assert.equal(row.lease_owner, "A");
     assert.equal(await acquireLease(eq(d1), key, "B", 1_000 + 200_000), null, "B cannot acquire at taken_at + 200 s");
-    assert.deepEqual(await runBookingStep(eq(d1), key, paymentStep(d1), "B", 1_000 + 200_000), { applied: false }, "and B's step is gated out by the ownership condition");
+    assert.equal((await runBookingStep(eq(d1), key, paymentStep(d1), "B", 1_000 + 200_000)).applied, false, "and B's step is gated out by the ownership condition");
     assert.equal(count(d1, "ledger"), 1, "B wrote nothing");
-    assert.deepEqual(await runBookingStep(eq(d1), key, paymentStep(d1), "A", 1_000 + 201_000), { applied: true }, "A, the holder, finishes");
+    assert.equal((await runBookingStep(eq(d1), key, paymentStep(d1), "A", 1_000 + 201_000)).applied, true, "A, the holder, finishes");
     const booked = (await getClaim(eq(d1), key)) as ClaimRow;
     assert.equal(booked.state, "booked");
     assert.equal(booked.lease_owner, null, "the final step clears the lease");
@@ -692,12 +692,12 @@ test("T4c: the stale holder's booking step AFTER another worker took the lapsed 
     assert.equal(await markSettled(eq(d1), key, TX, TEST_PAYER, "A", 1_000), true);
     // A's lease (renewed to 181_000) lapses; B takes it at 200_000
     assert.equal((await acquireLease(eq(d1), key, "B", 200_000))?.lease_owner, "B");
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 201_000), { applied: false }, "A is no longer the holder");
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "C", 201_000), { applied: false }, "nor is anyone else");
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 201_000)).applied, false, "A is no longer the holder");
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "C", 201_000)).applied, false, "nor is anyone else");
     assert.equal(count(d1, "ledger"), 0);
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "B", 201_000), { applied: true }, "B is");
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "B", 201_000)).applied, true, "B is");
     // B's (renewed) lease lapses and nobody takes it: the old holder is not locked out
-    assert.deepEqual(await runBookingStep(eq(d1), key, paymentStep(d1), "A", 201_000 + CLAIM_LEASE_TTL_MS + 1), { applied: true });
+    assert.equal((await runBookingStep(eq(d1), key, paymentStep(d1), "A", 201_000 + CLAIM_LEASE_TTL_MS + 1)).applied, true);
     assert.equal((await getClaim(eq(d1), key))?.state, "booked");
   } finally {
     d1.close();

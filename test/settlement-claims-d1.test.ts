@@ -194,17 +194,17 @@ test("a booking step writes its row and records it in ONE batch, once: a repeat 
   try {
     const { key } = await take(d1);
     // Not settled yet: the gate is closed, so the step writes nothing at all.
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_000), { applied: false });
+    assert.equal((await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_000)).applied, false);
     assert.equal(ledgerCount(d1), 0, "a pending claim books nothing");
 
     await markSettled(env(d1), key, "0xTX", "0xPAYER", "w1", 2_000);
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_001), { applied: true });
+    assert.equal((await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_001)).applied, true);
     assert.equal(ledgerCount(d1), 1);
     const row = await getClaim(env(d1), key);
     assert.equal(refsOf(row!).ledger_id, 1, "the ledger row's id is recorded in the claim");
     assert.equal(row?.state, "settled_unbooked", "a non-final step does not book the act");
 
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_002), { applied: false });
+    assert.equal((await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_002)).applied, false);
     assert.equal(ledgerCount(d1), 1, "the same step run again books nothing more");
 
     // The final step moves the claim to booked and clears the body, in the same batch.
@@ -215,13 +215,13 @@ test("a booking step writes its row and records it in ONE batch, once: a repeat 
         d1.DB.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at) SELECT ?, ?, ?, ? WHERE EXISTS (" + gate.sql + ")").bind("2026-09-30", "unchained", 1, 2, ...gate.args) as unknown as D1PreparedStatement,
       ],
     };
-    assert.deepEqual(await runBookingStep(env(d1), key, second, "w1", 5_003), { applied: true });
+    assert.equal((await runBookingStep(env(d1), key, second, "w1", 5_003)).applied, true);
     const booked = await getClaim(env(d1), key);
     assert.equal(booked?.state, "booked");
     assert.equal(booked?.rpc_body, null, "B7: booked clears the body");
     assert.equal(booked?.leased_until, null);
     assert.equal(ledgerCount(d1), 2);
-    assert.deepEqual(await runBookingStep(env(d1), key, second, "w1", 5_004), { applied: false }, "a booked claim is final: nothing more is ever written");
+    assert.equal((await runBookingStep(env(d1), key, second, "w1", 5_004)).applied, false, "a booked claim is final: nothing more is ever written");
     assert.equal(ledgerCount(d1), 2);
   } finally {
     d1.close();
@@ -249,7 +249,7 @@ test("a crash inside the step leaves neither the row nor the reference (B5a/B5c)
     assert.equal(refsOf((await getClaim(env(d1), key))!).ledger_id, undefined);
 
     // and the step still completes afterwards, once
-    assert.deepEqual(await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_002), { applied: true });
+    assert.equal((await runBookingStep(env(d1), key, ledgerStep(d1, false), "w1", 5_002)).applied, true);
     assert.equal(ledgerCount(d1), 1);
   } finally {
     d1.close();
@@ -275,7 +275,7 @@ test("a chain-head race inside the step is retried against the new head, not los
         return [built.stmt];
       },
     };
-    assert.deepEqual(await runBookingStep(env(d1), key, racing, "w1", 5_000), { applied: true });
+    assert.equal((await runBookingStep(env(d1), key, racing, "w1", 5_000)).applied, true);
     assert.equal(ledgerCount(d1), 2, "the rival row and ours, chained after it");
     assert.equal((await getClaim(env(d1), key))?.state, "booked");
   } finally {

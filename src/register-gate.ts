@@ -376,14 +376,22 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
         opts.owner,
         now,
       );
-      const afterCitizen = (await getClaim(env, key)) as ClaimRow;
-      refs = refsOf(afterCitizen);
-      citizenId = refs.citizen_id;
-      // Not applied, the claim still settled_unbooked and no citizen recorded: another holder's lease gated this step out (C3, proven from state and ref, not from a
-      // lease read that can have lapsed since), so the answer is the claim's.
-      if (citizenId == null && !citizenStep.applied && stepGatedOutByLease(afterCitizen, "citizen_id")) return { done: false, reason: "claim_moved" };
-      if (citizenId == null) throw new Error("the claim is not settled_unbooked: no citizen was recorded for it");
-      if (secretMode) finalApplied = citizenStep.applied;
+      if (secretMode && citizenStep.applied && citizenStep.rowId !== undefined) {
+        // C8 (first-gate L7): a secret-mode registration's citizen IS its final step, so a batch that applied has committed the citizen AND moved the claim to `booked`. The id
+        // comes from the batch's own result, with NO read-back: a read that fails after the commit used to throw into the catch below, which told a payer whose seat had just
+        // been created that "no credential was delivered", and promised a fresh secret that the (now booked) claim could never hand out.
+        citizenId = citizenStep.rowId;
+        finalApplied = true;
+      } else {
+        const afterCitizen = (await getClaim(env, key)) as ClaimRow;
+        refs = refsOf(afterCitizen);
+        citizenId = refs.citizen_id;
+        // Not applied, the claim still settled_unbooked and no citizen recorded: another holder's lease gated this step out (C3, proven from state and ref, not from a
+        // lease read that can have lapsed since), so the answer is the claim's.
+        if (citizenId == null && !citizenStep.applied && stepGatedOutByLease(afterCitizen, "citizen_id")) return { done: false, reason: "claim_moved" };
+        if (citizenId == null) throw new Error("the claim is not settled_unbooked: no citizen was recorded for it");
+        if (secretMode) finalApplied = citizenStep.applied;
+      }
     } else if (secretMode) {
       // A secret-mode citizen exists under this claim but the claim is not booked: the
       // secret cannot be recovered, so nothing here may invent one.
@@ -482,7 +490,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
     // backstop; a secret-mode one waits for the payer's identical re-send (the only request
     // that can carry a secret) and names no deadline.
     const tail = `This is logged for the maintainer to put right by hand. ${
-      publicKey !== null ? `${RECONCILE_BACKSTOP} ${RECONCILE_REPEAT_CLAUSE}` : "Repeating this identical request re-attempts it without a second charge and, if it completes, hands you a fresh secret."
+      publicKey !== null ? `${RECONCILE_BACKSTOP} ${RECONCILE_REPEAT_CLAUSE}` : "Repeating this identical request checks it again without a second charge: if no seat was created, it is created and its secret is handed to you; if a seat was already created before this error, the repeat tells you so, and that seat's secret cannot be recovered."
     } To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
     throw new SocietyError(
       500,

@@ -36,8 +36,10 @@ import {
   type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
+import { sha256Hex } from "../src/chain.ts";
 import {
   acquireLease,
+  claimAnswer,
   claimIdentity,
   claimKeyFromPayload,
   getClaim,
@@ -46,6 +48,7 @@ import {
   markExpired,
   markListingNotPaying,
   markRefused,
+  runBookingStep,
   stepGatedOutByLease,
   takeClaim,
   KEY_WHERE,
@@ -999,6 +1002,135 @@ test("C6: the expiry path's worst case through the real reconciler stays inside 
     assert.equal(count(d1, "ledger"), 0);
   } finally {
     stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- C8: the two secret-mode messages that could be false after the citizen batch committed (first-gate L7) ----------
+
+// An Env whose reads of the claim table THROW once the nth batch has committed: the read-back after the committed final secret-mode step "fails".
+function readBackThrowsEnv(d1: LocalD1, afterBatch: number): Env {
+  const real = d1.DB;
+  let calls = 0;
+  let armed = false;
+  const DB = {
+    prepare: (sql: string) => {
+      if (armed && /^\s*SELECT \* FROM settlement_claims/i.test(sql)) throw new Error("D1 read failed after the commit (test)");
+      return real.prepare(sql);
+    },
+    batch: async (stmts: never[]) => {
+      const out = await real.batch(stmts);
+      if (++calls === afterBatch) armed = true;
+      return out;
+    },
+  };
+  return { ...testEnv(d1), DB } as unknown as Env;
+}
+// An Env whose nth batch COMMITS and then throws (D1 committed and still reported an error).
+function commitsThenThrowsEnv(d1: LocalD1, nth: number): Env {
+  const real = d1.DB;
+  let calls = 0;
+  const DB = {
+    prepare: (sql: string) => real.prepare(sql),
+    batch: async (stmts: never[]) => {
+      const out = await real.batch(stmts);
+      if (++calls === nth) throw new Error("D1 reported an error after the commit (test)");
+      return out;
+    },
+  };
+  return { ...testEnv(d1), DB } as unknown as Env;
+}
+
+test("C8: a read-back that FAILS after the committed final secret-mode step still yields the 201, with the citizen id from the batch and the stored secret", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const { value: res, lines } = await captureLog(() => callWorker(registerReq({ handle: "c8-seat", model: "m" }, registerHeader()), readBackThrowsEnv(d1, 2))); // batch 1 = ledger, 2 = the citizen
+    const body = await json(res);
+    assert.equal(res.status, 201, JSON.stringify(body));
+    assert.match(String(body.secret), /^commonhold_sk_[0-9a-f]{64}$/);
+    const stored = d1.raw.prepare("SELECT id, secret_hash FROM citizens WHERE handle = 'c8-seat'").get() as { id: number; secret_hash: string };
+    assert.equal(await sha256Hex(String(body.secret)), stored.secret_hash, "the delivered secret is the stored one");
+    assert.equal(body.citizen_id, stored.id, "and the citizen id is the row the batch created (no read-back to learn it)");
+    assert.equal(oneClaim(d1).state, "booked");
+    assert.equal(eventLines(lines, "registration_paid_but_failed").length, 0, "no booking-failure line for a registration that was delivered");
+    assert.equal(stub.calls.settle, 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C8: D1 commits the citizen batch and still throws: the answer does not promise a fresh secret, and the payer's repeat is told exactly what the first answer said it would be told", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const header = registerHeader();
+    const body = { handle: "c8-after-commit", model: "m" };
+    const { value: first, lines } = await captureLog(() => callWorker(registerReq(body, header), commitsThenThrowsEnv(d1, 2)));
+    const firstBody = await json(first);
+    assert.equal(first.status, 500, JSON.stringify(firstBody));
+    const text = String(firstBody.error);
+    assert.equal(eventLines(lines, "registration_paid_but_failed").length, 1);
+    assert.match(text, /No credential was delivered to you/);
+    assert.doesNotMatch(text, /hands you a fresh secret/, "it no longer promises a fresh secret the booked claim cannot give");
+    assert.match(text, /if a seat was already created before this error, the repeat tells you so, and that seat's secret cannot be recovered/);
+    assert.match(text, /Do not sign again/);
+    // the batch DID commit: the seat exists and the claim is booked
+    assert.equal(count(d1, "citizens WHERE handle = 'c8-after-commit'"), 1);
+    assert.equal(oneClaim(d1).state, "booked");
+
+    const repeat = await callWorker(registerReq(body, header), eq(d1));
+    const repeatBody = await json(repeat);
+    assert.equal(repeat.status, 409, JSON.stringify(repeatBody));
+    assert.equal(repeatBody.code, "settlement_already_booked");
+    assert.match(String(repeatBody.error), /Your seat exists|your seat exists/);
+    assert.match(String(repeatBody.error), /cannot be recovered/, "as the first answer said it would");
+    assert.equal(repeatBody.secret, undefined);
+    assert.equal(count(d1, "citizens"), 1, "no second seat");
+    assert.equal(stub.calls.settle, 1, "nothing was charged again");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C8: the booked-claim answer for a secret registration makes no claim about a response having been issued; it says only that the seat exists and its secret cannot be recovered", () => {
+  const row = {
+    state: "booked", route: "register", tx: TX,
+    intent_json: JSON.stringify({ handle: "c8-seat", model: "m", public_key: null }),
+  } as unknown as ClaimRow;
+  const answer = claimAnswer(row, true, {});
+  const text = String((answer.body as { error: string }).error);
+  assert.equal(answer.status, 409);
+  assert.doesNotMatch(text, /was issued|were issued|issued to you|a response containing its secret/i);
+  assert.match(text, /your seat exists; its secret was generated once, for the response to the request that registered it, and cannot be recovered/);
+  assert.match(text, /If that response did not reach you, the secret is lost/);
+  assert.match(text, new RegExp(TX));
+  assert.match(text, /nothing was charged again/);
+});
+
+test("C8: runBookingStep reports the id the row-creating statement reported, only when the step applied", async () => {
+  const d1 = createLocalD1();
+  try {
+    const key = await claimInState(d1, "settled_unbooked");
+    // the claim is leased by "A" (takeClaim); a stale owner's step is gated out and reports no id
+    const step = {
+      ref: "citizen_id" as const,
+      final: false,
+      statements: async (gate: { sql: string; args: readonly unknown[] }) => [
+        d1.DB.prepare("INSERT INTO citizens (handle, model, secret_hash, public_key, karma, created_at, last_seen_at) SELECT 'c8-unit', 'm', 'h', NULL, 0, 1, 1 WHERE EXISTS (" + gate.sql + ")").bind(...gate.args) as unknown as D1PreparedStatement,
+      ],
+    };
+    const stale = await runBookingStep(eq(d1), key, step, "stranger", Date.now());
+    assert.deepEqual(stale, { applied: false }, "gated out by A's live lease: applied false and no row id");
+    assert.equal(count(d1, "citizens"), 0);
+    const mine = await runBookingStep(eq(d1), key, step, "A", Date.now());
+    assert.equal(mine.applied, true);
+    const stored = d1.raw.prepare("SELECT id FROM citizens WHERE handle = 'c8-unit'").get() as { id: number };
+    assert.equal(mine.rowId, stored.id, "the id the batch reported is the row it created, and the one the claim recorded");
+    assert.equal(JSON.parse(((await getClaim(eq(d1), key)) as ClaimRow).booked_refs).citizen_id, stored.id);
+  } finally {
     d1.close();
   }
 });
