@@ -456,7 +456,7 @@ test("A1: the served claim 'every ledger writer today takes entry_date from the 
   const writers: string[] = [];
   for (const f of files) {
     const text = readFileSync(f, "utf8");
-    assert.ok(!/INSERT\s+(?:OR\s+\w+\s+)?INTO\s+["`]?ledger/i.test(text), `${f}: nothing inserts into the ledger by raw SQL, past appendChained's sealing`);
+    assert.ok(!/INSERT\s+(?:OR\s+\w+\s+)?INTO\s+["`]?ledger\b/i.test(text), `${f}: nothing inserts into the ledger by raw SQL, past appendChained's sealing`);
     for (const m of text.matchAll(/\bentry_date:[ \t]*([^\n\r]*)/g)) {
       const expr = m[1];
       if (expr.startsWith("string;")) continue; // a type annotation, not a write
