@@ -113,12 +113,34 @@ export function logFunnelStage(stage: FunnelStage, detail: Record<string, unknow
 //
 // lock-at-the-chokepoint: this ONE module-level function is the only place a
 // showhome write is metered, and it is called before the write on every path.
-// It is a check-then-insert, the same best-effort shape the existing reg_log
-// throttles use (D1 is single-threaded per database, so the race window is
-// small; the accepted codebase behaviour is accept-one-over, D-042). A missing
+// The two COUNT pre-reads choose the refusal's wording; the BOUND is the
+// conditional INSERT below, whose WHERE re-counts both caps inside the one
+// statement, so concurrent requests cannot all pass (guest-voice build review,
+// CODEX r2: the earlier check-then-insert let three concurrent requests from one
+// address through at nine used). A zero-row INSERT re-reads to pick the
+// wording and refuses; nothing is recorded for a refused attempt. A missing
 // IP does NOT bypass the bound: the per-IP check is skipped (no key) but the
 // GLOBAL cap still applies and the attempt is still recorded (ip_hash NULL), so
 // a stripped CF-Connecting-IP cannot mint or post without limit.
+function rateCapError(path: "enter" | "post" | "reply" | "comment", which: "address" | "global"): SocietyError {
+  if (which === "address") {
+    return new SocietyError(
+      429,
+      path === "enter"
+        ? "Too many showhome entries from your address this hour. One pass is enough to look around; come back shortly."
+        : path === "comment"
+          ? "Too many guest comments from your address this hour. The board is not going anywhere -- return shortly."
+          : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
+    );
+  }
+  return new SocietyError(
+    429,
+    path === "comment"
+      ? "Guest comments are at their limit across all addresses this hour. Reading is always free; try commenting again shortly."
+      : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
+  );
+}
+
 export async function assertShowhomeRateCap(
   env: Env,
   ip: string | null,
@@ -136,31 +158,31 @@ export async function assertShowhomeRateCap(
     )
       .bind(path, ipHash, hourAgo)
       .first<{ n: number }>();
-    if ((mine?.n ?? 0) >= perIpPerHour) {
-      throw new SocietyError(
-        429,
-        path === "enter"
-          ? "Too many showhome entries from your address this hour. One pass is enough to look around; come back shortly."
-          : path === "comment"
-            ? "Too many guest comments from your address this hour. The board is not going anywhere -- return shortly."
-            : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
-      );
-    }
+    if ((mine?.n ?? 0) >= perIpPerHour) throw rateCapError(path, "address");
   }
 
   const all = await env.DB.prepare("SELECT COUNT(*) AS n FROM showhome_rate WHERE path = ? AND created_at > ?")
     .bind(path, hourAgo)
     .first<{ n: number }>();
-  if ((all?.n ?? 0) >= globalPerHour) {
-    throw new SocietyError(
-      429,
-      path === "comment"
-        ? "Guest comments are at their limit across all addresses this hour. Reading is always free; try commenting again shortly."
-        : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
-    );
-  }
+  if ((all?.n ?? 0) >= globalPerHour) throw rateCapError(path, "global");
 
-  await env.DB.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES (?, ?, ?)").bind(path, ipHash, now).run();
+  // The reservation IS the cap: ?2 IS NULL skips the per-address count for a missing address; the global count
+  // always applies. Numbered parameters, each bound once.
+  const reserved = await env.DB.prepare(
+    `INSERT INTO showhome_rate (path, ip_hash, created_at)
+       SELECT ?1, ?2, ?3
+       WHERE (?2 IS NULL OR (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND ip_hash = ?2 AND created_at > ?4) < ?5)
+         AND (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND created_at > ?4) < ?6`,
+  )
+    .bind(path, ipHash, now, hourAgo, Math.trunc(perIpPerHour), Math.trunc(globalPerHour))
+    .run();
+  if (reserved.meta.changes !== 1) {
+    // Lost a race to another request: re-read to name the cap that bound.
+    const mineNow = ipHash
+      ? await env.DB.prepare("SELECT COUNT(*) AS n FROM showhome_rate WHERE path = ? AND ip_hash = ? AND created_at > ?").bind(path, ipHash, hourAgo).first<{ n: number }>()
+      : null;
+    throw rateCapError(path, ipHash !== null && (mineNow?.n ?? 0) >= perIpPerHour ? "address" : "global");
+  }
   // Bound the rate log itself: rows older than the window are useless. The
   // per-hour global cap already bounds inserts, so this table is doubly bounded.
   await env.DB.prepare("DELETE FROM showhome_rate WHERE created_at < ?").bind(now - DAY_MS).run();

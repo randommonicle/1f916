@@ -9,8 +9,8 @@ import assert from "node:assert/strict";
 import { createLocalD1, seedCitizens, seedPost, seedTopic, seedDebatePost, seedVisitor, guestEnv, guestComment, call, count, freshIp, type LocalD1 } from "./helpers/guest.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { assertValidHandle, type Env } from "../src/society.ts";
-import { GUEST_COMMENT_MAX_LEN, GUEST_DUTIES_PER_DAY, GUEST_GLOBAL_PER_DAY, GUEST_PER_GUEST_PER_DAY, GUEST_ROW_CEILING, GUEST_ANSWER_TARGET_HOURS, HOUR_MS } from "../src/guest-core.ts";
-import { enterShowhome } from "../src/showhome.ts";
+import { GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR, GUEST_COMMENT_MAX_LEN, GUEST_DUTIES_PER_DAY, GUEST_GLOBAL_PER_DAY, GUEST_PER_GUEST_PER_DAY, GUEST_ROW_CEILING, GUEST_ANSWER_TARGET_HOURS, HOUR_MS } from "../src/guest-core.ts";
+import { enterShowhome, assertShowhomeRateCap } from "../src/showhome.ts";
 
 async function setup() {
   const d1 = createLocalD1();
@@ -540,6 +540,31 @@ test("CODEX r1.2: the global hourly cap on ACCEPTED guest comments sits inside t
     const refusal = ra.status === 429 ? ra : rb;
     assert.match(refusal.body.error, /Guest comments are at their limit across all addresses this hour/);
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND created_at > ?", now - 3_600_000), 60);
+  } finally {
+    d1.close();
+  }
+});
+
+test("CODEX r2: the showhome rate reservation is the cap: three concurrent attempts at nine used from one address give exactly one; at 59 global with no address, exactly one", async () => {
+  // Mutant: restore the unconditional `INSERT INTO showhome_rate ... VALUES (?, ?, ?)` in assertShowhomeRateCap -> all three pass (12 recorded).
+  const { d1, env } = await setup();
+  try {
+    const now = Date.now();
+    const ip = "192.0.2.99";
+    const h = await sha256Hex("showhome:" + ip);
+    const seed = d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('comment', ?, ?)");
+    for (let i = 0; i < GUEST_PER_IP_PER_HOUR - 1; i++) seed.run(h, now);
+    const three = await Promise.allSettled([0, 1, 2].map(() => assertShowhomeRateCap(env, ip, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR)));
+    assert.equal(three.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(three.map((r) => r.status)));
+    for (const r of three) if (r.status === "rejected") assert.match(String((r.reason as Error).message), /Too many guest comments from your address this hour/);
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM showhome_rate WHERE path = 'comment' AND ip_hash = ?", h), GUEST_PER_IP_PER_HOUR);
+    d1.raw.exec("DELETE FROM showhome_rate");
+    const g = d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('comment', ?, ?)");
+    for (let i = 0; i < GUEST_GLOBAL_PER_HOUR - 1; i++) g.run(`other${i}`, now);
+    const nulls = await Promise.allSettled([0, 1, 2].map(() => assertShowhomeRateCap(env, null, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR)));
+    assert.equal(nulls.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(nulls.map((r) => r.status)));
+    for (const r of nulls) if (r.status === "rejected") assert.match(String((r.reason as Error).message), /Guest comments are at their limit across all addresses this hour/);
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM showhome_rate WHERE path = 'comment'"), GUEST_GLOBAL_PER_HOUR);
   } finally {
     d1.close();
   }

@@ -129,9 +129,9 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
   // Cap first (guard-the-spend-paths): it bounds all load and records the attempt, so even a flood of invalid
   // requests consumes budget. A missing address still meets the global hourly cap.
   await assertShowhomeRateCap(env, ip, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR);
-  // That pre-check meters ATTEMPTS and is check-then-insert (accept-one-over under a race, D-042). The global
-  // hourly bound on ACCEPTED comments is also a predicate inside the INSERT below (CODEX build r1.2), so it holds
-  // under concurrency. The per-address hourly cap stays best-effort: guest rows never store an address.
+  // That call meters ATTEMPTS, per address and globally, with the reservation itself conditional (showhome.ts), so
+  // both hourly caps hold under concurrency. The global hourly bound on ACCEPTED comments is also a predicate inside
+  // the INSERT below (CODEX build r1.2).
   // The GUEST token check (showhome.ts authenticateGuest): never the citizen authenticate().
   const guest = await authenticateGuest(env, token);
 
