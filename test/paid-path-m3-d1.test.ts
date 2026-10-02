@@ -18,6 +18,7 @@ import {
   authStateAnswer,
   callWorker,
   captureLog,
+  chainRpc,
   count,
   createLocalD1,
   dropTrigger,
@@ -54,7 +55,8 @@ import {
   type ClaimRow,
   type ClaimSpec,
 } from "../src/settlement-claims.ts";
-import { runReconciler } from "../src/settlement-reconcile.ts";
+import { RECONCILE_ROW_WORST_CASE, RECONCILE_SELECT_COST, runReconciler } from "../src/settlement-reconcile.ts";
+import { RECONCILE_EXPIRY_MARGIN_SECONDS, attemptPending } from "../src/x402.ts";
 import { computeListingFeeCents, handleCreateListing, handlePayListing } from "../src/listings.ts";
 import { SocietyError } from "../src/society.ts";
 
@@ -588,10 +590,10 @@ test("C3: stepGatedOutByLease is true only for a claim still settled_unbooked wi
 type SeedState = "pending" | "settled_unbooked";
 async function seedClaim(
   d1: LocalD1,
-  o: { route: ClaimRoute; intent: Record<string, unknown>; state: SeedState; updatedAt: number; reason?: string | null; resource?: string },
+  o: { route: ClaimRoute; intent: Record<string, unknown>; state: SeedState; updatedAt: number; reason?: string | null; resource?: string; validBefore?: string },
 ): Promise<ClaimKey> {
   const nonce = "0x" + (++nonceSeq).toString(16).padStart(64, "0");
-  const payload = { payload: { authorization: { from: TEST_PAYER, to: "0x1", value: "1000000", validBefore: "9999999999", nonce } } };
+  const payload = { payload: { authorization: { from: TEST_PAYER, to: "0x1", value: "1000000", validBefore: o.validBefore ?? "9999999999", nonce } } };
   const { key, validBefore } = claimKeyFromPayload(payload, REQS);
   const spec: ClaimSpec = { route: o.route, intent: o.intent };
   const rpcBody = { paymentPayload: payload, paymentRequirements: { resource: o.resource ?? "https://example.test/api/patron", payTo: TREASURY_ADDRESS, maxAmountRequired: "1000000" } };
@@ -792,6 +794,211 @@ test("C5: markListingNotPaying records its reason once (only the first call repo
     assert.equal(row.lease_owner, null);
     assert.equal(((await getClaim(eq(d1), pending)) as ClaimRow).verdict_reason, null);
   } finally {
+    d1.close();
+  }
+});
+
+// ---------- C6: `expired` is decided on the chain's clock as well as the Worker's (first-gate L5, A4) ----------
+
+const NOW_S = () => Math.floor(Date.now() / 1000);
+// A pending claim whose authorisation's validBefore is `validBefore` (unix seconds), leased by "R" and ready for attemptPending.
+async function leasedPending(d1: LocalD1, validBefore: number): Promise<{ key: ClaimKey; row: ClaimRow }> {
+  const key = await seedClaim(d1, { route: "patron", intent: { line: "c6" }, state: "pending", updatedAt: 1_000, validBefore: String(validBefore) });
+  const row = await acquireLease(eq(d1), key, "R", Date.now());
+  assert.ok(row, "R holds the lease");
+  return { key, row: row as ClaimRow };
+}
+const methodsOf = (stub: { rpcCalls: { method: string | undefined }[] }) => stub.rpcCalls.map((c) => c.method);
+
+test("C6: an RPC pair whose latest block is not yet past validBefore + margin never yields `expired`, though the wall clock is past; one block later it does", async () => {
+  const margin = RECONCILE_EXPIRY_MARGIN_SECONDS;
+  const V = NOW_S() - 5_000; // the wall clock is far past validBefore + margin
+  for (const blockTime of [V - 10, V, V + 100, V + margin]) {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: chainRpc(false, blockTime) });
+    try {
+      const { key, row } = await leasedPending(d1, V);
+      const out = await attemptPending(eq(d1), row, "R");
+      assert.equal(out.kind, "unchanged", `block time ${blockTime - V} s after validBefore (margin ${margin}): not expired`);
+      assert.match((out as { detail: string }).detail, /chain's own clock has not confirmed it/);
+      assert.equal(((await getClaim(eq(d1), key)) as ClaimRow).state, "pending", "the claim is untouched");
+      assert.equal(stub.calls.settle, 0, "and nothing was re-POSTed: the chain read decides, and it did not decide");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: chainRpc(false, V + margin + 1) });
+  try {
+    const { key, row } = await leasedPending(d1, V);
+    const out = await attemptPending(eq(d1), row, "R");
+    assert.equal(out.kind, "expired", "a block one second past validBefore + margin, unused at both RPCs: expired");
+    assert.equal(((await getClaim(eq(d1), key)) as ClaimRow).state, "expired");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C6: a lagging RPC is skipped, not counted: two others that agree still give `expired`; with only one good RPC it is not expired", async () => {
+  const V = NOW_S() - 5_000;
+  const lagging = (urls: Set<string>) => (url: string) => (urls.has(url) ? V - 50 : NOW_S());
+  for (const [lagCount, expected] of [[1, "expired"], [3, "unchanged"]] as const) {
+    const d1 = createLocalD1();
+    const lagUrls = new Set<string>();
+    const stub = stubFacilitator({
+      settle: () => pendingAnswer(),
+      rpc: (url, n, init) => {
+        // the plain first read (no block calls yet) names the order of the RPCs; the first `lagCount` of them lag in the pinned read
+        if (lagUrls.size < lagCount && !lagUrls.has(url) && n >= 2) lagUrls.add(url);
+        return chainRpc(false, lagging(lagUrls))(url, n, init);
+      },
+    });
+    try {
+      const { row } = await leasedPending(d1, V);
+      const out = await attemptPending(eq(d1), row, "R");
+      assert.equal(out.kind, expected, `${lagCount} lagging RPC(s) of four`);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("C6 (A4): an ordinary poll costs nothing extra: no block is read before validBefore + margin, nor when the chain says USED", async () => {
+  // (a) the wall clock is before validBefore: two eth_calls and nothing else
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: chainRpc(false) });
+    try {
+      const { row } = await leasedPending(d1, NOW_S() + 3_600);
+      const out = await attemptPending(eq(d1), row, "R");
+      assert.equal(out.kind, "unchanged");
+      assert.deepEqual(methodsOf(stub), ["eth_call", "eth_call"], "the quorum read, as before");
+      assert.equal(out.fetches, 3, "two RPC reads and the re-POST: unchanged from before C6");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (b) the wall clock is past, but the chain says the authorisation was USED: that is not an expiry, so no block is read
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: chainRpc(true) });
+    try {
+      const { row } = await leasedPending(d1, NOW_S() - 5_000);
+      await attemptPending(eq(d1), row, "R");
+      assert.deepEqual(methodsOf(stub), ["eth_call", "eth_call"], "a used authorisation costs the same two reads");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("C6: the confirming read is PINNED: each RPC is asked for its latest block, then the eth_call is made at that block's number, not at 'latest'", async () => {
+  const d1 = createLocalD1();
+  const V = NOW_S() - 5_000;
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: chainRpc(false) });
+  try {
+    const { row } = await leasedPending(d1, V);
+    const out = await attemptPending(eq(d1), row, "R");
+    assert.equal(out.kind, "expired");
+    assert.deepEqual(methodsOf(stub), ["eth_call", "eth_call", "eth_getBlockByNumber", "eth_call", "eth_getBlockByNumber", "eth_call"], "plain read, then block + pinned call per RPC");
+    const [first, second, block1, call1, block2, call2] = stub.rpcCalls;
+    assert.equal((first.params as unknown[])[1], "latest", "the plain read is at latest");
+    assert.equal((second.params as unknown[])[1], "latest");
+    assert.deepEqual(block1.params, ["latest", false]);
+    assert.equal((call1.params as unknown[])[1], "0x1000", "the pinned eth_call names the block number the RPC just returned");
+    assert.equal((call2.params as unknown[])[1], "0x1000");
+    assert.equal(block1.url, call1.url, "on the SAME RPC");
+    assert.equal(block2.url, call2.url);
+    assert.notEqual(block1.url, block2.url, "and the two answers come from distinct RPCs");
+    assert.equal(out.fetches, 6, "2 (plain) + 4 (two RPCs x block and call)");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C6: an authorisation spent between the two reads is not expired, and two RPCs that disagree at the pinned block are no answer", async () => {
+  const V = NOW_S() - 5_000;
+  // (a) unused on the plain read, used on the pinned one
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({
+      settle: () => pendingAnswer(),
+      rpc: (url, n, init) => {
+        const body = JSON.parse(String(init?.body)) as { method: string; params: unknown[] };
+        if (body.method === "eth_call") return authStateAnswer(body.params[1] !== "latest");
+        return chainRpc(false)(url, n, init);
+      },
+    });
+    try {
+      const { key, row } = await leasedPending(d1, V);
+      const out = await attemptPending(eq(d1), row, "R");
+      assert.equal(out.kind, "unchanged");
+      assert.match((out as { detail: string }).detail, /spent while the society was confirming/);
+      assert.equal(((await getClaim(eq(d1), key)) as ClaimRow).state, "pending");
+      assert.equal(stub.calls.settle, 0, "the next attempt re-checks it as used; this one does not run a settle past its budget");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (b) the pinned reads disagree
+  {
+    const d1 = createLocalD1();
+    let pinned = 0;
+    const stub = stubFacilitator({
+      settle: () => pendingAnswer(),
+      rpc: (url, n, init) => {
+        const body = JSON.parse(String(init?.body)) as { method: string; params: unknown[] };
+        if (body.method === "eth_call" && body.params[1] !== "latest") return authStateAnswer(pinned++ === 1);
+        if (body.method === "eth_call") return authStateAnswer(false);
+        return chainRpc(false)(url, n, init);
+      },
+    });
+    try {
+      const { row } = await leasedPending(d1, V);
+      const out = await attemptPending(eq(d1), row, "R");
+      assert.equal(out.kind, "unchanged");
+      assert.match((out as { detail: string }).detail, /disagree/);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("C6: the expiry path's worst case through the real reconciler stays inside RECONCILE_ROW_WORST_CASE (two RPCs down in the plain read; in the pinned read one block read fails and one RPC lags)", async () => {
+  const d1 = createLocalD1();
+  const V = NOW_S() - 5_000;
+  const urls: string[] = [];
+  const stub = stubFacilitator({
+    settle: () => pendingAnswer(),
+    rpc: (url, n, init) => {
+      const body = JSON.parse(String(init?.body)) as { method: string; params: unknown[] };
+      if (!urls.includes(url)) urls.push(url);
+      const position = urls.indexOf(url);
+      const plain = body.method === "eth_call" && body.params[1] === "latest";
+      if (plain && position <= 1) return null; // RPCs 1 and 2 are down in the plain read: four fetches to reach two answers
+      if (!plain && position === 0) return null; // RPC 1's block read fails in the pinned read (no eth_call follows)
+      if (!plain && position === 1) return chainRpc(false, V - 1)(url, n, init); // RPC 2 lags
+      return chainRpc(false)(url, n, init);
+    },
+  });
+  try {
+    await seedClaim(d1, { route: "patron", intent: { line: "c6 cost" }, state: "pending", updatedAt: 1_000, validBefore: String(V) });
+    const out = await runReconciler(eq(d1));
+    assert.equal(out.resolved, 1, "expired");
+    assert.equal(stub.rpcCalls.length, 4 + 7, "plain read: 4 fetches; pinned read: 1 (down) + 2 (lagging) + 2 + 2 = 7");
+    assert.equal(out.actualCost, RECONCILE_SELECT_COST + 2 + 11, "the select, the lease and the terminal write, and the eleven RPC fetches");
+    assert.ok(out.actualCost - RECONCILE_SELECT_COST <= RECONCILE_ROW_WORST_CASE, `the row cost ${out.actualCost - RECONCILE_SELECT_COST}, inside the ${RECONCILE_ROW_WORST_CASE} priced worst case`);
+    assert.equal(count(d1, "ledger"), 0);
+  } finally {
+    stub.restore();
     d1.close();
   }
 });

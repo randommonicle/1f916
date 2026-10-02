@@ -31,9 +31,26 @@ export interface StubOpts {
   settleDelayMs?: number;
   onVerify?: () => void;
   // Base RPC answers for the reconciler's authorizationState reads: called once per RPC fetch with the
-  // URL and its 0-based index; return null to make that RPC fail (a rejected fetch). Unset: any RPC fetch throws.
-  rpc?: (url: string, n: number) => Response | null | Promise<Response | null>;
+  // URL, its 0-based index and the request (so a stub can tell eth_call from eth_getBlockByNumber); return null to make that RPC fail
+  // (a rejected fetch). Unset: any RPC fetch throws.
+  //
+  // C6 (paid-path M3): the expiry decision now also reads each RPC's latest block (eth_getBlockByNumber) before its eth_call. A stub written for
+  // eth_call alone (it returns an authorizationState word for EVERY request) is answered for the block read with a block stamped "now", which is past
+  // every test's validBefore, so those tests keep meaning what they meant; a stub that returns an object result for the block read (blockAnswer, chainRpc) is used as is.
+  rpc?: (url: string, n: number, init?: RequestInit) => Response | null | Promise<Response | null>;
 }
+
+// An eth_getBlockByNumber("latest") answer: the block's number and timestamp (unix seconds).
+export function blockAnswer(timestamp: number, number = 0x1000): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { number: "0x" + number.toString(16), timestamp: "0x" + timestamp.toString(16) } }), { status: 200, headers: { "content-type": "application/json" } });
+}
+const rpcMethodOf = (init?: RequestInit): string | undefined => {
+  try {
+    return (JSON.parse(String(init?.body ?? "{}")) as { method?: string }).method;
+  } catch {
+    return undefined;
+  }
+};
 
 // An eth_call answer for authorizationState: used (1) or unused (0).
 export function authStateAnswer(used: boolean): Response {
@@ -44,6 +61,8 @@ export function stubFacilitator(opts: StubOpts = {}) {
   const calls = { verify: 0, settle: 0 };
   const settleBodies: string[] = [];
   const rpcUrls: string[] = [];
+  // Every RPC request the stub answered, with its JSON-RPC method and params.
+  const rpcCalls: { url: string; method: string | undefined; params: unknown[] | undefined }[] = [];
   // How many /verify and /settle fetches the code under test ABORTED (its own timeout firing), as a real fetch would reject them.
   const aborts = { verify: 0, settle: 0 };
   // A delay a real facilitator would honour the caller's AbortSignal during: it rejects with an AbortError the moment the signal fires.
@@ -74,13 +93,19 @@ export function stubFacilitator(opts: StubOpts = {}) {
     if (opts.rpc) {
       const n = rpcUrls.length;
       rpcUrls.push(href);
-      const answer = await opts.rpc(href, n);
+      const method = rpcMethodOf(init);
+      rpcCalls.push({ url: href, method, params: (() => { try { return (JSON.parse(String(init?.body ?? "{}")) as { params?: unknown[] }).params; } catch { return undefined; } })() });
+      const answer = await opts.rpc(href, n, init);
       if (answer === null) throw new Error("rpc unreachable");
+      if (method === "eth_getBlockByNumber") {
+        const text = await answer.clone().text();
+        if (/"result":"0x[0-9a-fA-F]{64}"/.test(text)) return blockAnswer(Math.floor(Date.now() / 1000));
+      }
       return answer;
     }
     throw new Error(`unexpected fetch in a settlement replay test: ${href}`);
   }) as typeof fetch;
-  return { calls, settleBodies, rpcUrls, aborts, restore: () => void (globalThis.fetch = original) };
+  return { calls, settleBodies, rpcUrls, rpcCalls, aborts, restore: () => void (globalThis.fetch = original) };
 }
 
 export const count = (d1: LocalD1, fromWhere: string): number => (d1.raw.prepare(`SELECT COUNT(*) AS n FROM ${fromWhere}`).get() as { n: number }).n;
@@ -133,3 +158,13 @@ export async function json(res: Response): Promise<Record<string, any>> {
   return (await res.json()) as Record<string, any>;
 }
 
+
+// An RPC stub answering BOTH reads the expiry decision makes: eth_call (authorizationState: used or not) and eth_getBlockByNumber (a block stamped `blockTime`, default now).
+// `perUrl` lets a test make single RPCs lag or disagree: it is asked with the RPC's URL and its 0-based position in the list of distinct URLs seen so far.
+export const chainRpc =
+  (used: boolean | ((url: string) => boolean), blockTime: number | ((url: string) => number) = () => Math.floor(Date.now() / 1000)) =>
+  (url: string, _n: number, init?: RequestInit): Response => {
+    const method = rpcMethodOf(init);
+    if (method === "eth_getBlockByNumber") return blockAnswer(typeof blockTime === "function" ? blockTime(url) : blockTime);
+    return authStateAnswer(typeof used === "function" ? used(url) : used);
+  };

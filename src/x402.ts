@@ -898,8 +898,20 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
   const chain = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce);
   if (chain.used === null) return { kind: "unchanged", detail: `The chain could not settle the question (${chain.reason}); nothing was changed.`, fetches: chain.fetches };
   if (chain.used === false && nowMs / 1000 > row.valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS) {
-    if (!(await markExpired(env, key, owner, nowMs, row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches: chain.fetches };
-    return { kind: "expired", fetches: chain.fetches };
+    // C6 (first-gate L5, A4): `expired` invites a second signature, so the Worker's clock alone must never decide it: the chain's own clock must agree. Only on this branch (so an
+    // ordinary poll costs nothing extra) the authorisation is read AGAIN at a quorum of two RPCs, each at its own latest block, and "unused" counts only from a block whose timestamp
+    // is past validBefore + margin (an RPC that trails the chain head answers from an older block and is no answer). It is read again, not trusted from above: the first read
+    // was at a block of unknown time, and an authorisation read as unused there could have been mined since.
+    const proof = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce, { pastTimestamp: row.valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS });
+    const fetches = chain.fetches + proof.fetches;
+    if (proof.used === null) {
+      return { kind: "unchanged", detail: `The wall clock says this authorisation has expired, but the chain's own clock has not confirmed it (${proof.reason}); nothing was changed.`, fetches };
+    }
+    if (proof.used === true) {
+      return { kind: "unchanged", detail: "The authorisation was spent while the society was confirming its expiry; the next attempt re-checks it as used.", fetches };
+    }
+    if (!(await markExpired(env, key, owner, nowMs, row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
+    return { kind: "expired", fetches };
   }
   if (chain.used === false && nowMs / 1000 > row.valid_before) {
     return { kind: "unchanged", detail: "The authorisation is past its validBefore and unused so far; the society waits out a margin before calling it expired.", fetches: chain.fetches };
