@@ -58,10 +58,13 @@ export async function readThread(base, postId) {
 export function answererRows(rows, gid, handle = ANSWERER) {
   return rows.filter((r) => r.parent && r.parent.kind === "thread" && r.parent.id === gid && r.tier === "citizen" && r.author === handle);
 }
-// Characters as SQLite's length() counts them on TEXT (code points), which is what the discharge predicate uses
-// (src/guest-core.ts FIRST_DISCHARGE_SQL), never JS UTF-16 units: an astral character is one, not two.
+// Characters as SQLite's length() counts them on TEXT, which is what the discharge predicate uses
+// (src/guest-core.ts FIRST_DISCHARGE_SQL): code points, never JS UTF-16 units (an astral character is one, not two),
+// and only up to the first U+0000, where SQLite's length() stops. bodyProblems refuses a NUL outright.
 export function charLength(text) {
-  return [...String(text)].length;
+  const s = String(text);
+  const nul = s.indexOf("\u0000");
+  return [...(nul < 0 ? s : s.slice(0, nul))].length;
 }
 export function discharges(row) {
   return row.mod_state == null && typeof row.body === "string" && charLength(row.body) >= MIN_ANSWER_LEN;
@@ -87,7 +90,8 @@ export function bodyProblems(body) {
   if (n < MIN_ANSWER_LEN) p.push(`body is ${n} characters; under ${MIN_ANSWER_LEN} it discharges nothing`);
   if (n > MAX_ANSWER_LEN) p.push(`body is ${n} characters; over ${MAX_ANSWER_LEN}`);
   if (/[–—]/.test(body)) p.push("body carries an en or em dash");
-  if (body.split("\n").some((l) => /^(## \[|\[\[)/.test(l) || FENCE.test(l))) p.push("a body line starts with '## [', '[[' or a fence");
+  if (/[\u0000-\u0008\u000B-\u001F\u007F]/.test(body)) p.push("body carries a control character (NUL included)");
+  if (body.split("\n").some((l) => /^\s*(## \[|\[\[|```|~~~)/.test(l))) p.push("a body line starts with '## [', '[[' or a fence");
   return p;
 }
 
@@ -98,38 +102,54 @@ export function encodeGuestText(text) {
 }
 
 const HEADER = /^## \[(CLAUDE|GEMINI|CODEX) ([^\]]*)\]\s*$/;
-const FENCE = /^\s*(```|~~~)/;
-// Sections by exact header lines, each line tagged with whether it sits inside a fenced block. A header-shaped line
-// INSIDE a fence (a seat quoting another section) or a fence still open at the end makes the file AMBIGUOUS, and an
-// ambiguous file approves nothing: a quotation can never become a section, and a real section can never be hidden.
+// Fences as CommonMark reads them (CODEX scripts r3): an opener is up to three spaces, then three or more of ONE
+// character (backtick or tilde; a backtick opener's info string holds no backtick); the fence closes only on a line
+// of the SAME character, at least as long, with nothing after it. So a four-backtick quotation holding a
+// three-backtick block stays one fence.
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+// Sections by exact header lines, each line tagged with whether it sits inside a fenced block (the fence lines
+// themselves included). A header-shaped line INSIDE a fence (a seat quoting another section) or a fence still open at
+// the end makes the file AMBIGUOUS, and an ambiguous file approves nothing: a quotation can never become a section,
+// and a real section can never be hidden.
 export function parseSections(text) {
   const sections = [];
-  let inFence = false;
+  let fence = null;
   let ambiguous = false;
   for (const line of normaliseBody(text).split("\n")) {
     const m = HEADER.exec(line);
-    if (m && inFence) ambiguous = true;
-    if (m && !inFence) {
+    if (m && fence) ambiguous = true;
+    if (m && !fence) {
       const round = /\bround (\d+)\b/.exec(m[2]);
       sections.push({ handle: m[1], round: round ? Number(round[1]) : null, lines: [] });
       continue;
     }
-    const fence = FENCE.test(line);
-    if (sections.length) sections[sections.length - 1].lines.push({ text: line, fenced: inFence || fence });
-    if (fence) inFence = !inFence;
+    let fenced = fence !== null;
+    if (fence) {
+      const c = FENCE_CLOSE.exec(line);
+      if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
+    } else {
+      const o = FENCE_OPEN.exec(line);
+      if (o && !(o[1][0] === "`" && o[2].includes("`"))) {
+        fence = { ch: o[1][0], len: o[1].length };
+        fenced = true;
+      }
+    }
+    if (sections.length) sections[sections.length - 1].lines.push({ text: line, fenced });
   }
-  if (inFence) ambiguous = true;
+  if (fence) ambiguous = true;
   return Object.assign(sections, { ambiguous });
 }
 
 // A seat's verdict counts only as the protocol writes it, at the END of its section: outside every fence and
-// blockquote, ignoring blank lines and the transport's HTML comments, the last line is that seat's own
-// [[END <SEAT> round N]] with N the header's round, and the line before it is exactly [[CONVERGED]].
+// blockquote, ignoring blank lines and the transport's HTML comments, the last line is exactly that seat's own
+// [[END <SEAT> round N]] with N the header's round, and the line before it is exactly [[CONVERGED]] at column 0
+// (an indented line is code or a quotation, never a verdict; only trailing whitespace is ignored).
 function sectionConverges(section) {
   const ls = section.lines
     .filter((l) => !l.fenced)
-    .map((l) => l.text.trim())
-    .filter((l) => l !== "" && !l.startsWith(">") && !l.startsWith("<!--"));
+    .map((l) => l.text.trimEnd())
+    .filter((l) => l.trim() !== "" && !l.trimStart().startsWith(">") && !l.startsWith("<!--"));
   return section.round != null && ls.length >= 2 && ls[ls.length - 1] === `[[END ${section.handle} round ${section.round}]]` && ls[ls.length - 2] === "[[CONVERGED]]";
 }
 
