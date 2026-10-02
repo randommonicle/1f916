@@ -36,7 +36,7 @@ import { attemptPending, finishPatronBooking, clipReason } from "./x402.ts";
 import { finishRegistration } from "./register-gate.ts";
 import { finishListingCreateBooking, finishPayListingBooking } from "./listings.ts";
 import { INVOCATION_SUBREQUEST_BUDGET, FINALISE_RESERVE } from "./maintainer/budget.ts";
-import { acquireLease, keyOfRow, releaseLease, CLAIM_HANDLE_TAKEN, type ClaimRow } from "./settlement-claims.ts";
+import { acquireLease, intentOf, keyOfRow, markListingNotPaying, releaseLease, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, type ClaimRow } from "./settlement-claims.ts";
 import type { Env } from "./society.ts";
 
 // At most this many rows are worked in one run (a fixed batch).
@@ -130,12 +130,21 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   const ceiling = Math.min(RECONCILE_SUBREQUEST_CEILING, left);
   const now = Date.now();
   // Oldest attempt first (acquiring a lease moves updated_at, so a row that keeps failing goes to the
-  // back rather than starving the rest), skipping rows another holder is working and (F1) rows whose
-  // handle another seat took after payment, which no retry can ever book.
+  // back rather than starving the rest), skipping rows another holder is working and every row this
+  // reconciler can never finish, which would otherwise take one of its two slots every run (C5, first-gate
+  // L4): (F1) a registration whose handle another seat took after payment; a secret-mode registration that is
+  // settled_unbooked, which waits for the payer's identical re-send BY DESIGN (its secret leaves only in the payer's own
+  // 201, register-gate.ts finishRegistration; a PENDING secret-mode row is still worked: it can become settled_unbooked
+  // or expire); and a bounty payment whose listing is no longer 'paying' (given CLAIM_LISTING_NOT_PAYING the first time
+  // it is met, below). The exclusion of marked rows is by the two exact constants: a pending row's verdict_reason is the
+  // facilitator's last words (noteUnknown), which must never exclude it.
   const { results } = await env.DB.prepare(
-    `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?) AND (verdict_reason IS NULL OR verdict_reason <> ?) ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
+    `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?)
+       AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))
+       AND NOT (route = 'register' AND state = 'settled_unbooked' AND json_extract(intent_json, '$.public_key') IS NULL)
+     ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
   )
-    .bind(now, CLAIM_HANDLE_TAKEN, RECONCILE_BATCH_ROWS)
+    .bind(now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, RECONCILE_BATCH_ROWS)
     .all<ClaimRow>();
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };
@@ -174,6 +183,35 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
           continue;
         }
         working = attempt.row;
+      }
+      // C5: a bounty payment whose listing is no longer 'paying' can never be booked (the booking INSERT requires it). The first time the reconciler meets it, it is given a
+      // permanent reason (and one error line for the maintainer), and it is never selected again. One read, priced inside the row's worst case (a listing_pay row needs fewer
+      // statements than the 16-statement registration the budget is itemised on).
+      if (working.route === "listing_pay") {
+        const listingId = Number((intentOf(working) as { listing_id?: unknown }).listing_id);
+        const listing = await rowEnv.DB.prepare("SELECT status FROM listings WHERE id = ?").bind(listingId).first<{ status: string }>();
+        if (listing?.status !== "paying") {
+          const marked = await markListingNotPaying(rowEnv, key, owner, Date.now());
+          if (marked) {
+            console.log(
+              JSON.stringify({
+                level: "error",
+                event: "settlement_listing_not_paying",
+                tx: working.tx,
+                payer: working.payer,
+                listing_id: listingId,
+                listing_status: listing?.status ?? null,
+                claim_from: working.from_addr,
+                claim_nonce: working.nonce,
+                reason: "the listing this bounty payment was made against is no longer 'paying', so it can never be booked against it; the claim is set aside for the maintainer to decide by hand",
+              }),
+            );
+          }
+          // markListingNotPaying clears the lease in the same statement; a call that did not mark (it lost the lease) releases like any other.
+          needsRelease = !marked;
+          out.unchanged++;
+          continue;
+        }
       }
       if (await finishBooking(rowEnv, working, owner)) {
         out.booked++;

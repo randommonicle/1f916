@@ -20,7 +20,9 @@ import {
   captureLog,
   count,
   createLocalD1,
+  dropTrigger,
   eventLines,
+  failInserts,
   json,
   oneClaim,
   patronReq,
@@ -47,6 +49,7 @@ import {
   KEY_WHERE,
   keyArgs,
   type ClaimKey,
+  type ClaimRoute,
   type ClaimRow,
   type ClaimSpec,
 } from "../src/settlement-claims.ts";
@@ -577,4 +580,199 @@ test("C3: stepGatedOutByLease is true only for a claim still settled_unbooked wi
   assert.equal(stepGatedOutByLease({ ...base, booked_refs: '{"ledger_id":7}' }, "ledger_id"), false, "the step's ref is recorded: that is 'take theirs', not a gated-out step");
   assert.equal(stepGatedOutByLease({ ...base, booked_refs: '{"ledger_id":7}' }, "citizen_id"), true, "another step's ref does not matter");
   for (const state of ["pending", "booked", "refused", "expired"] as const) assert.equal(stepGatedOutByLease({ ...base, state } as ClaimRow, "ledger_id"), false, `${state}: not settled_unbooked`);
+});
+
+// ---------- C5: rows the reconciler can never finish must not take its two daily slots (first-gate L4) ----------
+
+type SeedState = "pending" | "settled_unbooked";
+async function seedClaim(
+  d1: LocalD1,
+  o: { route: ClaimRoute; intent: Record<string, unknown>; state: SeedState; updatedAt: number; reason?: string | null; resource?: string },
+): Promise<ClaimKey> {
+  const nonce = "0x" + (++nonceSeq).toString(16).padStart(64, "0");
+  const payload = { payload: { authorization: { from: TEST_PAYER, to: "0x1", value: "1000000", validBefore: "9999999999", nonce } } };
+  const { key, validBefore } = claimKeyFromPayload(payload, REQS);
+  const spec: ClaimSpec = { route: o.route, intent: o.intent };
+  const rpcBody = { paymentPayload: payload, paymentRequirements: { resource: o.resource ?? "https://example.test/api/patron", payTo: TREASURY_ADDRESS, maxAmountRequired: "1000000" } };
+  const id = await claimIdentity(key, validBefore, rpcBody, spec);
+  assert.deepEqual(await takeClaim(eq(d1), id, spec, "seed", Date.now()), { taken: true });
+  d1.raw
+    .prepare(`UPDATE settlement_claims SET state = ?, tx = ?, payer = ?, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE}`)
+    .run(o.state, o.state === "settled_unbooked" ? TX : null, o.state === "settled_unbooked" ? TEST_PAYER : null, o.reason ?? null, o.updatedAt, ...(keyArgs(key) as never[]));
+  return key;
+}
+const claimOfKey = async (d1: LocalD1, key: ClaimKey) => (await getClaim(eq(d1), key)) as ClaimRow;
+const secretSeat = (handle: string) => ({ handle, model: "m", public_key: null });
+
+test("C5: three rows the reconciler can never finish, older than one real row: one run reaches the real row, and the unfinishable ones take no further slot", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const funderId = insertCitizen(d1);
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1200 }); // status 'open': not 'paying'
+    const u1 = await seedClaim(d1, { route: "register", intent: secretSeat("c5-secret-one"), state: "settled_unbooked", updatedAt: 1_000 });
+    const u2 = await seedClaim(d1, { route: "register", intent: secretSeat("c5-secret-two"), state: "settled_unbooked", updatedAt: 2_000 });
+    const u3 = await seedClaim(d1, {
+      route: "listing_pay",
+      intent: { listing_id: listingId, submission_id: 1, funder_citizen_id: funderId, payee_citizen_id: funderId, payee_address: "0x" + "0a".repeat(20), amount_cents: 1200, wallet_row_id: 1, wallet_row_hash: "h" },
+      state: "settled_unbooked",
+      updatedAt: 3_000,
+    });
+    const real = await seedClaim(d1, { route: "patron", intent: { line: "the real row" }, state: "settled_unbooked", updatedAt: 4_000 });
+
+    const { value: first, lines } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal((await claimOfKey(d1, real)).state, "booked", "the real row was reached in ONE run (red under the old SELECT: the two secret-mode rows take both slots)");
+    assert.equal(first.booked, 1);
+    assert.equal(first.examined, 2, "the listing_pay row (its first meeting) and the real row; the two secret-mode rows were not selected at all");
+    assert.equal(count(d1, "ledger"), 1);
+    for (const k of [u1, u2]) {
+      const row = await claimOfKey(d1, k);
+      assert.equal(row.state, "settled_unbooked", "a secret-mode registration waits for its payer's re-send");
+      assert.equal(row.verdict_reason, null, "and is not marked: it is only never selected");
+      assert.equal(row.lease_owner, null, "no lease was taken on it");
+      assert.equal(row.updated_at, k === u1 ? 1_000 : 2_000, "untouched: updated_at did not move");
+    }
+    const marked = await claimOfKey(d1, u3);
+    assert.equal(marked.state, "settled_unbooked", "no new state");
+    assert.equal(marked.verdict_reason, "listing_not_paying");
+    assert.equal(marked.lease_owner, null);
+    const logged = eventLines(lines, "settlement_listing_not_paying");
+    assert.equal(logged.length, 1, "one line, written when the marker was first recorded");
+    assert.equal(logged[0].level, "error");
+    assert.equal(logged[0].tx, TX);
+    assert.equal(logged[0].listing_id, listingId);
+    assert.equal(logged[0].listing_status, "open");
+
+    const { value: second, lines: lines2 } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(second.examined, 0, "nothing is left that the reconciler can work: the marked row is excluded too");
+    assert.equal(eventLines(lines2, "settlement_listing_not_paying").length, 0, "and the line is not written again");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+for (const scenario of ["public-key registration, settled_unbooked", "secret-mode registration, still PENDING", "pending row whose reason is only the facilitator's last words"] as const) {
+  test(`C5 control (${scenario}): not excluded, still worked by the reconciler`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => authStateAnswer(false) });
+    try {
+      let key: ClaimKey;
+      if (scenario.startsWith("public-key")) {
+        key = await seedClaim(d1, { route: "register", intent: { handle: "c5-key-seat", model: "m", public_key: await realPublicKey() }, state: "settled_unbooked", updatedAt: 1_000 });
+      } else if (scenario.startsWith("secret-mode")) {
+        key = await seedClaim(d1, { route: "register", intent: secretSeat("c5-pending-secret"), state: "pending", updatedAt: 1_000, resource: "https://example.test/api/register" });
+      } else {
+        key = await seedClaim(d1, { route: "patron", intent: { line: "words" }, state: "pending", updatedAt: 1_000, reason: "The facilitator has not yet settled this payment (settlement_pending)" });
+      }
+      const out = await runReconciler(eq(d1));
+      assert.equal(out.examined, 1, "the row was selected");
+      assert.equal(out.failed, 0);
+      if (scenario.startsWith("public-key")) {
+        assert.equal(out.booked, 1, "a public-key registration is finished by the reconciler");
+        assert.equal(count(d1, "citizens WHERE handle = 'c5-key-seat'"), 1);
+      } else {
+        assert.equal(out.unchanged, 1, "an unresolved pending row stays pending");
+        assert.equal((await claimOfKey(d1, key)).state, "pending");
+        assert.ok((await claimOfKey(d1, key)).updated_at !== 1_000, "its lease was taken: it was worked");
+      }
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+async function payFixture(d1: LocalD1) {
+  const funderId = insertCitizen(d1);
+  const reviewerId = insertCitizen(d1);
+  const wallet = "0x" + "0a".repeat(20);
+  const pin = await declareTestWallet(d1, reviewerId, wallet);
+  const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1200 });
+  const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+  const header = paymentHeaderFor(wallet, atomicFromCents(1200));
+  const send = async () => {
+    try {
+      const r = await handlePayListing(
+        new Request(`https://example.test/api/listing/${listingId}/pay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-PAYMENT": header },
+          body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+        }),
+        eq(d1),
+        loadCitizen(d1, funderId),
+        listingId,
+      );
+      return { status: r.status, body: (await r.json()) as Record<string, any> };
+    } catch (e) {
+      if (e instanceof SocietyError) return { status: e.status, body: { error: e.message, code: e.code } as Record<string, any> };
+      throw e;
+    }
+  };
+  const listing = () => d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
+  return { send, listing, listingId };
+}
+
+test("C5: a bounty payment whose listing is no longer 'paying' is marked listing_not_paying the first time the reconciler meets it, and every answer for it says so (no reconciler promise, no new signature)", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1);
+  const stub = stubFacilitator({
+    settle: () => {
+      // the operator releases the reservation while A's /settle is in flight; the facilitator settles
+      d1.raw.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ?").run(fx.listingId);
+      return settledAnswer();
+    },
+  });
+  try {
+    const first = await fx.send();
+    assert.equal(first.status, 500, "the booking failed at the pay route (the listing is no longer paying)");
+    const row = oneClaim(d1);
+    assert.equal(row.state, "settled_unbooked");
+    const { value: out, lines } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(out.unchanged, 1);
+    assert.equal(out.failed, 0, "the reconciler did not try (and fail) to book it");
+    assert.equal(eventLines(lines, "settlement_listing_not_paying").length, 1);
+    assert.equal((d1.raw.prepare("SELECT verdict_reason FROM settlement_claims").get() as { verdict_reason: string }).verdict_reason, "listing_not_paying");
+    assert.equal(count(d1, "listing_payments"), 0);
+
+    // the funder's identical replay: answered from the claim, never re-attempted
+    const replay = await fx.send();
+    assert.equal(replay.status, 500, JSON.stringify(replay.body));
+    assert.equal(replay.body.code, "settlement_unresolved");
+    const text = String(replay.body.error);
+    assert.match(text, new RegExp(TX));
+    assert.match(text, /payment settled/);
+    assert.match(text, /no longer awaiting this payment/);
+    assert.match(text, /set it aside/);
+    assert.match(text, /Do not sign again/);
+    assert.doesNotMatch(text, /06:00|one pass a day|re-checks it sooner|can wait more than one day|nothing was charged|sign a fresh one/i, "no promise the reconciler will finish it");
+    assert.equal(stub.calls.settle, 1, "the replay never reached the facilitator");
+    assert.equal(count(d1, "listing_payments"), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C5 control: a bounty payment whose listing is STILL 'paying' is not marked: the reconciler books it", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1);
+  const stub = stubFacilitator();
+  try {
+    failInserts(d1, "c5_fail_payment", "listing_payments", null, "disk I/O error (test)");
+    const first = await fx.send();
+    assert.equal(first.status, 500, "A's booking failed after the settle");
+    assert.equal(fx.listing().status, "paying", "the reservation stands");
+    dropTrigger(d1, "c5_fail_payment");
+    const out = await runReconciler(eq(d1));
+    assert.equal(out.booked, 1);
+    assert.equal(count(d1, "listing_payments"), 1);
+    assert.equal(fx.listing().status, "paid");
+    const row = d1.raw.prepare("SELECT state, verdict_reason FROM settlement_claims").get() as { state: string; verdict_reason: string | null };
+    assert.equal(row.state, "booked");
+    assert.notEqual(row.verdict_reason, "listing_not_paying");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
 });

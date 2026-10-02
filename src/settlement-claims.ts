@@ -75,6 +75,11 @@ export const SETTLEMENT_CONTRADICTION = "settlement_contradiction";
 // carries this permanent reason; the reconciler skips such rows and every answer for one says so plainly.
 export const CLAIM_HANDLE_TAKEN = "handle_taken";
 export const REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT = "registration_handle_taken_after_payment";
+// C5 (drafts/BRIEF-PAID-PATH-M3-2026-10-02.md, first-gate L4): a listing_pay claim that is settled_unbooked while its listing is no longer 'paying' can never be booked (the
+// booking INSERT requires the listing to be 'paying'). The reconciler gives it this permanent reason the first time it meets it and never selects it again, so it stops taking
+// one of the reconciler's two daily slots. The claim stays settled_unbooked (no new state); every answer for it says so plainly.
+export const CLAIM_LISTING_NOT_PAYING = "listing_not_paying";
+
 // C1 (docs: drafts/BRIEF-PAID-PATH-M3-2026-10-02.md, re-gate LOW-1(a), A1): a claim that met a settlement_contradiction (the facilitator reported a settlement
 // for an authorisation whose claim another holder had made refused or expired) is stamped, in verdict_reason, with this prefix, the facilitator's tx, a bar
 // and the original reason (clipped). No new state and no migration: the row stays refused or expired, and every later answer for it reads the marker.
@@ -380,6 +385,19 @@ export async function markHandleTaken(env: Env, key: ClaimKey, owner: string, no
 
 export const isHandleTaken = (row: Pick<ClaimRow, "state" | "verdict_reason">): boolean => row.state === "settled_unbooked" && row.verdict_reason === CLAIM_HANDLE_TAKEN;
 
+// C5: settled_unbooked -> (same state, permanent reason): the reconciler found the listing this bounty payment was made against is no longer 'paying'. True only for the call
+// that FIRST recorded the reason, so its one log line is written once. Same shape as markHandleTaken (holder-only, clears the lease).
+export async function markListingNotPaying(env: Env, key: ClaimKey, owner: string, now: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'settled_unbooked' AND verdict_reason IS NULL AND ${HOLDS_LEASE}`,
+  )
+    .bind(CLAIM_LISTING_NOT_PAYING, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now))
+    .run();
+  return r.meta.changes === 1;
+}
+
+export const isListingNotPaying = (row: Pick<ClaimRow, "state" | "verdict_reason">): boolean => row.state === "settled_unbooked" && row.verdict_reason === CLAIM_LISTING_NOT_PAYING;
+
 // ---------- booking: one step, one batch ----------
 
 export interface BookingStep {
@@ -489,6 +507,13 @@ export function handleTakenMessage(row: Pick<ClaimRow, "intent_json" | "tx" | "r
   return `Your $1.00 payment settled (tx ${row.tx ?? "unknown"}), but the handle "${String(i.handle)}" was taken by another seat before this registration could be written, so no seat was created for you. Re-sending this request cannot book it and is not needed. Do not sign again: this payment has already moved. Reach the maintainer with this tx by a free showhome note: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
 }
 
+// C5: what a funder is told when the reconciler set its bounty payment aside. It never says the reconciler will finish it (it will not) and invites no new signature: the
+// money moved. The way out is the maintainer, by a mention (a pay-listing payer is a citizen).
+export function listingNotPayingMessage(row: Pick<ClaimRow, "intent_json" | "tx" | "route">): string {
+  const i = JSON.parse(row.intent_json) as { listing_id?: unknown; amount_cents?: unknown };
+  return `Your ${money(Number(i.amount_cents ?? 0))} payment settled${txPart(row as ClaimRow)}, but the listing it was paid against (listing ${String(i.listing_id)}) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler has set it aside rather than retry it. Do not sign again: this payment has already moved. It is logged for the maintainer to look at by hand; no resolution time is promised. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment).`;
+}
+
 export function claimIsSecretRegistration(row: ClaimRow): boolean {
   return row.route === "register" && intentOf(row).public_key == null;
 }
@@ -574,6 +599,7 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
     }
     case "settled_unbooked":
       if (isHandleTaken(row)) return { status: 409, body: { error: handleTakenMessage(row), code: REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT } };
+      if (isListingNotPaying(row)) return { status: 500, body: { error: listingNotPayingMessage(row), code: SETTLEMENT_UNRESOLVED } };
       return {
         status: 500,
         body: {
