@@ -10,8 +10,12 @@
 // leaving the machine.
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
 import { treasury, parseLedgerCursor, LEDGER_PAGE, SocietyError, type Env, type LedgerCursor } from "../src/society.ts";
+import { ROUTES } from "../src/discovery.ts";
+import worker from "../src/index.ts";
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async () => new Response("rpc stubbed in test", { status: 500 })) as typeof fetch;
@@ -294,4 +298,174 @@ test("A7: a cursor older than every row answers an empty page, with the whole-le
   } finally {
     d1.close();
   }
+});
+
+// ---------- A5: through the router ----------
+
+const ORIGIN = "https://commonhold.example.invalid";
+const ctx = { waitUntil: () => {}, passThroughOnException: () => {} };
+async function get(env: Env, pathAndQuery: string): Promise<Response> {
+  return (worker.fetch as unknown as (r: Request, e: Env, c: unknown) => Promise<Response>)(new Request(`${ORIGIN}${pathAndQuery}`), env, ctx);
+}
+
+test("A5: both query parameters reach treasury() through the router; a walk by URL is the whole ledger, newest first", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLedger(d1, 250);
+    const env = makeEnv(d1);
+    const r1 = await get(env, "/treasury");
+    assert.equal(r1.status, 200);
+    const p1 = (await r1.json()) as Page;
+    assert.equal(p1.has_more, true);
+    const r2 = await get(env, `/treasury?before_entry_date=${p1.next_before_entry_date}&before_id=${p1.next_before_id}`);
+    assert.equal(r2.status, 200);
+    const p2 = (await r2.json()) as Page;
+    assert.equal(p2.returned, 50, "the cursor reached treasury(): page 2 is the remaining 50, not page 1 again");
+    assert.equal(p2.has_more, false);
+    assert.deepEqual([...p1.entries, ...p2.entries].map((e) => e.id), expectedIds(d1));
+    assert.equal(p2.total_entries, 250);
+  } finally {
+    d1.close();
+  }
+});
+
+test("A5: a valid cursor that matches no row (its id is absent from the table) still pages correctly, as a bound and not a lookup", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLedger(d1, 250);
+    const env = makeEnv(d1);
+    const rows = allRows(d1);
+    const anchor = rows.find((r) => r.id === 100)!;
+    assert.ok(!rows.some((r) => r.id === 9999), "precondition: id 9999 is not in the table");
+    const res = await get(env, `/treasury?before_entry_date=${anchor.entry_date}&before_id=9999`);
+    assert.equal(res.status, 200);
+    const page = (await res.json()) as Page;
+    // Oracle in JS: everything strictly older than the tuple, newest first.
+    const expected = rows
+      .filter((r) => r.entry_date < anchor.entry_date || (r.entry_date === anchor.entry_date && r.id < 9999))
+      .sort((a, b) => (a.entry_date === b.entry_date ? b.id - a.id : a.entry_date < b.entry_date ? 1 : -1))
+      .map((r) => r.id);
+    assert.ok(expected.length > 0 && expected.length < 250, "precondition: the bound cuts the ledger in two");
+    assert.deepEqual(page.entries.map((e) => e.id), expected.slice(0, LEDGER_PAGE));
+    assert.equal(page.total_entries, 250);
+  } finally {
+    d1.close();
+  }
+});
+
+test("A5/T4: a malformed cursor is a 400 through the router, whose body names the shape", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLedger(d1, 3);
+    const env = makeEnv(d1);
+    for (const [query, shape] of [
+      ["before_id=5", /send both or neither/],
+      ["before_entry_date=2026-09-19", /send both or neither/],
+      ["before_entry_date=2026-9-19&before_id=5", /YYYY-MM-DD/],
+      ["before_entry_date=2026-09-19&before_id=0", /positive whole number/],
+      ["before_entry_date=2026-09-19&before_id=-1", /positive whole number/],
+      ["before_entry_date=2026-09-19&before_id=1.5", /positive whole number/],
+      ["before_entry_date=2026-09-19&before_id=9007199254740992", /positive whole number/],
+      ["before_entry_date=&before_id=", /YYYY-MM-DD/],
+    ] as const) {
+      const res = await get(env, `/treasury?${query}`);
+      assert.equal(res.status, 400, `?${query} must be a 400`);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, shape, `?${query}: the 400 names the expected shape`);
+    }
+    const ok = await get(env, "/treasury?before_entry_date=2026-09-19&before_id=5");
+    assert.equal(ok.status, 200, "a well-formed cursor is not refused");
+  } finally {
+    d1.close();
+  }
+});
+
+test("A5: /openapi.json lists both cursor parameters on GET /treasury, optional, in the query", async () => {
+  const d1 = createLocalD1();
+  try {
+    const res = await get(makeEnv(d1), "/openapi.json");
+    assert.equal(res.status, 200);
+    const spec = (await res.json()) as {
+      paths: Record<string, { get?: { parameters?: Array<{ name: string; in: string; required: boolean; schema: { type: string } }> } }>;
+    };
+    const params = spec.paths["/treasury"]?.get?.parameters ?? [];
+    const byName = new Map(params.map((p) => [p.name, p]));
+    for (const [name, type] of [["before_entry_date", "string"], ["before_id", "integer"]] as const) {
+      const p = byName.get(name);
+      assert.ok(p, `/openapi.json lists ${name} on GET /treasury`);
+      assert.equal(p.in, "query");
+      assert.equal(p.required, false, `${name} is optional (a first page needs neither)`);
+      assert.equal(p.schema.type, type);
+    }
+    // And the served route table says the same, so llms.txt and /api/surface cannot differ.
+    const route = ROUTES.find((r) => r.method === "GET" && r.path === "/treasury");
+    assert.deepEqual(route?.queryParams?.map((q) => q.name), ["before_entry_date", "before_id"]);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- A1 / A6 / A11: the served sentences ----------
+
+test("A6: wallet.note no longer says booked_cents rehashes from the entries below; it says it is the sum across all pages and how to check it", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLedger(d1, 5);
+    const page = (await treasury(makeEnv(d1))) as unknown as Page;
+    assert.ok(!page.wallet.note.includes("rehashes from the entries below"), "the false sentence is gone");
+    assert.match(page.wallet.note, /sum of every ledger entry, across all pages/);
+    assert.match(page.wallet.note, /follow the cursor/);
+    assert.match(page.wallet.note, /sum amount_cents to check booked_cents/);
+    assert.match(page.wallet.note, /verify its hash/);
+  } finally {
+    d1.close();
+  }
+});
+
+test("A1/A11: pagination_note says how to walk, that pages are separate reads, and that the aggregates are read afresh per request", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLedger(d1, 5);
+    const page = (await treasury(makeEnv(d1))) as unknown as Page;
+    const note = page.pagination_note;
+    assert.match(note, /before_entry_date=<next_before_entry_date>&before_id=<next_before_id>/, "the walk URL, in the keys the response serves");
+    assert.match(note, /until has_more is false/);
+    assert.match(note, /newest first/);
+    assert.match(note, /Pages are separate reads, not one snapshot/, "A1");
+    assert.match(note, /does not see it and a fresh walk from the first page does/, "A1: a row written mid-walk sorts ahead of the cursor");
+    assert.match(note, /total_entries, booked_cents and census are read afresh on every request, so they can differ between pages/, "A11");
+    assert.match(note, /an equal one does not prove a consistent snapshot/, "A1: equal counts are no proof");
+    assert.match(note, /booked_cents is the sum of the whole ledger/, "the aggregate is page-independent, and the note says so");
+    // Every keyword the note names is a key the response serves.
+    for (const key of ["total_entries", "page_size", "has_more", "booked_cents", "census"]) assert.ok(key in page, `${key} is served`);
+  } finally {
+    d1.close();
+  }
+});
+
+test("A1: the served claim 'every ledger writer today takes entry_date from the server clock' is enforced against the source, not asserted in prose", () => {
+  const files: string[] = [];
+  const walkDir = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walkDir(p);
+      else if (p.endsWith(".ts")) files.push(p);
+    }
+  };
+  walkDir(join(import.meta.dirname, "..", "src"));
+  const writers: string[] = [];
+  for (const f of files) {
+    const text = readFileSync(f, "utf8");
+    assert.ok(!/INSERT INTO ledger/i.test(text), `${f}: nothing inserts into the ledger by raw SQL, past appendChained's sealing`);
+    for (const m of text.matchAll(/\bentry_date:[ \t]*([^\n\r]*)/g)) {
+      const expr = m[1];
+      if (expr.startsWith("string;")) continue; // a type annotation, not a write
+      assert.ok(
+        expr.startsWith("new Date(now).toISOString().slice(0, 10),"),
+        `${f}: an entry_date that is not the server clock (${expr.trim()}) falsifies the pagination_note; either keep it server-dated or rewrite the note's walk semantics (A1)`,
+      );
+      writers.push(f.slice(f.lastIndexOf("src")));
+    }
+  }
+  assert.equal(writers.length, 5, `exactly five ledger writers set entry_date (recordLedger, registration, payout, listing fee, patron), found ${writers.length}: ${writers.join(", ")}`);
 });
