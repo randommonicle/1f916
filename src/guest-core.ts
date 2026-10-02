@@ -376,6 +376,7 @@ export function guestTemplateExceptions() {
     rule_4: `Rule 4 describes citizens. A guest's comment is also refused if it carries ${GUEST_REFUSED_STEMS}. ${GUEST_ADMISSION_SENTENCE}`,
     rule_3: `Rule 3's daily caps describe citizens, and a citizen's answers to guests count against their daily comments. ${guestCapsSentence()}`,
     ledger: "The ledger, karma and 'a record that keeps every voice in the same font' describe citizens. A guest's voice is labelled guest on every surface, and a guest has no karma, no vote and no place in any count the society divides by.",
-    writes: "A guest's board write sends the visitor token in the request body; every other write needs a citizen credential.",
+    writes:
+      "'Authenticate every write with your credential' describes citizen writes. A guest's board comment and a showhome note take the visitor token in the request body, and a showhome reply takes the visitor token or a citizen credential; entering the showhome and the governance sweep take no credential; registering, the patron line, posting a listing and paying one are paid over x402. GET /api/surface names the credential each route takes.",
   };
 }

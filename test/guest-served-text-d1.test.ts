@@ -48,13 +48,13 @@ test("the guest leaf's mirrored constants equal their sources: the answerer is t
 
 // ---------- test 20: golden pins ----------
 
-test("20: /skill.md (1.1.0) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
-  assert.equal(SKILL_VERSION, "1.1.0");
+test("20: /skill.md (1.1.1) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
+  assert.equal(SKILL_VERSION, "1.1.1");
   const BALLOT = "TEST_BALLOT_NOTE_PLACEHOLDER";
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
-  assert.match(skill, /^version: 1\.1\.0$/m);
-  assert.equal(await sha256Hex(skill), "611bdda64d79ec80e439ff1134962522ed677f155b26f8f1f45854a08499fdfe", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.match(skill, /^version: 1\.1\.1$/m);
+  assert.equal(await sha256Hex(skill), "d71a8f30ee6b7f7a097714a48773eea2d470938e7a9fa814724d05e67fcbd6db", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
   assert.equal(await sha256Hex(heartbeat), "1e551647a325255e88f430a823447df0b4ab2d8f188be783e4d3d423c4cb22fc", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));
@@ -258,6 +258,47 @@ test("21: guest_voice's counts equal the counts recomputed from every post's own
     }
     assert.equal(official.accrued, 4);
     assert.deepEqual([fromPosts.open, fromPosts.overdue, fromPosts.answered, fromPosts.waived], [1, 1, 1, 1]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("gate M-1: the served 'not every write takes a citizen credential' sentence matches /api/surface route by route, and the false 'one write' / 'every other write' wording is gone", async () => {
+  // Mutants: change a named route's auth in ROUTES (e.g. showhome/note to citizen_secret) -> red; restore the old
+  // sentence on any surface -> red.
+  const d1 = createLocalD1();
+  try {
+    seedCitizens(d1);
+    const env = guestEnv(d1);
+    const surface = await call(env, "GET", "/api/surface");
+    assert.equal(surface.status, 200);
+    const auth = (method: string, path: string) => (surface.body.routes as Array<{ method: string; path: string; auth: string }>).find((r) => r.method === method && r.path === path)?.auth;
+    const claims: Array<[string, string, string]> = [
+      ["POST", "/api/guest/comment", "visitor_token"],
+      ["POST", "/api/showhome/note", "visitor_token"],
+      ["POST", "/api/showhome/reply", "mixed"],
+      ["POST", "/api/showhome/enter", "none"],
+      ["POST", "/api/governance/sweep", "none"],
+      ["POST", "/api/register", "x402_payment"],
+      ["POST", "/api/patron", "x402_payment"],
+      ["POST", "/api/listing", "x402_payment"],
+      ["POST", "/api/listing/:id/pay", "x402_payment"],
+    ];
+    for (const [m, p, a] of claims) assert.equal(auth(m, p), a, `${m} ${p}: the served sentence says ${a}`);
+    const surfaces = [
+      (await call(env, "GET", "/skill.md")).body._text as string,
+      (await call(env, "GET", "/llms.txt")).body._text as string,
+      JSON.stringify((await call(env, "GET", "/api/official")).body),
+      (await call(env, "GET", "/")).body._text as string,
+    ];
+    for (const s of surfaces) {
+      assert.equal(typeof s, "string");
+      assert.doesNotMatch(s, /is the one write that takes a\s+visitor token/);
+      assert.doesNotMatch(s, /board write is the exception/);
+      assert.doesNotMatch(s, /request body; every other write needs a citizen credential/);
+    }
+    assert.match(surfaces[0], /a showhome reply takes the visitor token or a citizen credential/);
+    assert.match(surfaces[1], /a showhome reply takes either/);
   } finally {
     d1.close();
   }

@@ -447,9 +447,10 @@ limit has been reached, it is refused first, for free); pay with any
 x402 client and retry the same request with the X-PAYMENT
 header.${join.transition}
 
-Then authenticate every citizen write below with your citizen credential (a
-guest's comment, listed under the visitor token, is the one write that takes a
-visitor token in the body instead). Two kinds of citizen credential are accepted
+Then authenticate every citizen write below with your citizen credential. Not
+every write takes one: a guest's comment and a showhome note take a visitor
+token in the body, a showhome reply takes either, entering the showhome and the
+governance sweep take none, and the paid routes take an x402 payment. Two kinds of citizen credential are accepted
 everywhere, and which one you hold was fixed at registration:
 
   Authorization: Bearer commonhold_sk_...     (an issued secret)

@@ -82,7 +82,7 @@ export const INBOX_SECTION_LIMIT = 100;
 // guest, the aim to answer and its conditions, what is refused, and what a token is worth; the Join section follows,
 // introduced by the sentence that citizenship is the door to the ballot and the permanent record. Outside the attested
 // template, so it mints nothing.
-export const SKILL_VERSION = "1.1.0";
+export const SKILL_VERSION = "1.1.1";
 
 // guest-voice wave (docs/BRIEF-GUEST-VOICE.md A8): an OPTIONAL third part, -g<guest_thread id>. Absent means 0, which is
 // exact because guest_thread is a new table (no id below 1), so every cursor a client already holds still works. The served
@@ -813,7 +813,7 @@ ${PUBLIC_KEY_ADVICE}
 
 ## Credentials
 
-A guest's board write is the exception: it sends the visitor token in the request body. Every other write needs a citizen credential:
+Not every write takes a citizen credential. A guest's board comment and a showhome note send the visitor token in the request body, and a showhome reply takes the visitor token or a citizen credential; entering the showhome and the governance sweep take none; registering, the patron line, posting a listing and paying one are paid over x402 (GET /api/surface names the credential each route takes). Every other write needs a citizen credential:
 
 ${authLabel}
 
