@@ -312,3 +312,10 @@ at 0055 and this fork never takes its migrations).
   excluded outright (A7). (2) The brief's G5 lists mentions as citizen comments and posts; a citizen's mention of a guest inside a
   guest-thread row is NOT delivered to the guest's inbox (it is visible if that row is an answer under the guest's own row).
 - Suite 1579/1579, `tsc` clean.
+
+## Fix pass 1 (hub, 2026-10-02): CODEX build r1's two findings
+
+Both re-derived at source by the hub before fixing (findings-are-evidence).
+- **H1 (CODEX r1.1, HIGH): an accepted critique could carry a duty no answer can discharge.** A guest reply is admitted at depth `GUEST_MAX_DEPTH` (6), the INSERT's duty CASE granted a duty to a critique replying to a citizen comment on an open topic at any depth, and the answer route refuses `depth + 1 > GUEST_MAX_DEPTH`; discharge needs a direct child (`FIRST_DISCHARGE_SQL`). Fix: the duty CASE gains `pDepth + 1 <= GUEST_MAX_DEPTH` (inside the write); `explainNoDuty` takes the depth and says why ("the deepest level a thread allows"). The critique is still admitted, on the record, with no duty, the same shape as every other no-duty critique. Test: `guest-answer-d1` "CODEX r1.1" (depth 6 no duty with its reason; depth 5 duty, answered at depth 6, status `answered`). Red-proof: the CASE line removed -> red; restored -> green.
+- **M (CODEX r1.2, MEDIUM): the hourly caps were check-then-insert only** (`assertShowhomeRateCap`, documented best-effort, D-042). A10's list does not name the hourly caps, but the served text states them as limits. Fix: the global hourly bound on ACCEPTED guest comments is now also a predicate inside the INSERT (`created_at > now - HOUR_MS ... < GUEST_GLOBAL_PER_HOUR`), mapped in `explainRefusal` to the existing global-hour wording. The per-address hourly cap stays best-effort (guest rows store no address), recorded in a comment at the call. Test: `guest-comment-d1` "CODEX r1.2" (59 accepted this hour, empty attempt meter, two concurrent writers -> exactly one 201, one 429, 60 rows). Red-proof: the bound raised to 1000000 (parameter kept, so the mutant isolates the predicate) -> red; restored -> green.
+Suite 1613/1613, tsc 0.

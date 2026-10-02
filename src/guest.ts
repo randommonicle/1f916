@@ -73,10 +73,12 @@ async function explainNoDuty(
   postId: number,
   postKind: string,
   parentKind: string | null,
+  depth: number,
   dayStart: number,
 ): Promise<string> {
   if (postKind !== "topic") return "a duty accrues only on an open standing topic; this is an ordinary post, so your critique is on the record but nothing is owed";
   if (parentKind === "thread") return "a duty accrues only on a top-level critique or one replying to a citizen's comment, not on a reply inside a guest thread";
+  if (depth + 1 > GUEST_MAX_DEPTH) return `a duty accrues only where its answer can sit directly below it, and this critique is at the deepest level a thread allows (${GUEST_MAX_DEPTH}); it is on the record, and a critique placed higher up asks for an answer`;
   const mine = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND author_id = ? AND post_id = ? AND duty = 1 AND created_at >= ?",
   )
@@ -110,6 +112,8 @@ async function explainRefusal(env: Env, guestVisitorId: number, postId: number, 
   if ((mine?.n ?? 0) >= GUEST_PER_GUEST_PER_DAY) throw new SocietyError(429, `You have used your ${GUEST_PER_GUEST_PER_DAY} guest comments for today (UTC). Return tomorrow; reading is always free.`);
   const day = await env.DB.prepare("SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND created_at >= ?").bind(dayStart).first<{ n: number }>();
   if ((day?.n ?? 0) >= GUEST_GLOBAL_PER_DAY) throw new SocietyError(429, `All guests together have used today's ${GUEST_GLOBAL_PER_DAY} guest comments (UTC). Return tomorrow; reading is always free.`);
+  const hour = await env.DB.prepare("SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND created_at > ?").bind(Date.now() - HOUR_MS).first<{ n: number }>();
+  if ((hour?.n ?? 0) >= GUEST_GLOBAL_PER_HOUR) throw new SocietyError(429, "Guest comments are at their limit across all addresses this hour. Reading is always free; try commenting again shortly.");
   const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest'").first<{ n: number }>();
   if ((total?.n ?? 0) >= GUEST_ROW_CEILING) {
     throw new SocietyError(
@@ -125,6 +129,9 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
   // Cap first (guard-the-spend-paths): it bounds all load and records the attempt, so even a flood of invalid
   // requests consumes budget. A missing address still meets the global hourly cap.
   await assertShowhomeRateCap(env, ip, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR);
+  // That pre-check meters ATTEMPTS and is check-then-insert (accept-one-over under a race, D-042). The global
+  // hourly bound on ACCEPTED comments is also a predicate inside the INSERT below (CODEX build r1.2), so it holds
+  // under concurrency. The per-address hourly cap stays best-effort: guest rows never store an address.
   // The GUEST token check (showhome.ts authenticateGuest): never the citizen authenticate().
   const guest = await authenticateGuest(env, token);
 
@@ -204,6 +211,7 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
   const pDue = P.add(now + GUEST_ANSWER_TARGET_HOURS * HOUR_MS);
   const pNow = P.add(now);
   const pDay = P.add(dayStart);
+  const pHourAgo = P.add(now - HOUR_MS);
   const parentPredicate =
     parent == null
       ? "1 = 1"
@@ -221,6 +229,7 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     FROM (
       SELECT p.id AS pid,
              CASE WHEN ${pKind} = 'critique' AND p.kind = 'topic' AND ${pParentKind} IS NOT 'thread'
+                       AND ${pDepth} + 1 <= ${GUEST_MAX_DEPTH}
                        AND NOT EXISTS (SELECT 1 FROM guest_thread x WHERE x.author_kind = 'guest' AND x.author_id = ${pVisitor} AND x.post_id = p.id AND x.duty = 1 AND x.created_at >= ${pDay})
                        AND (SELECT COUNT(*) FROM guest_thread y WHERE y.duty = 1 AND y.created_at >= ${pDay}) < ${Math.trunc(GUEST_DUTIES_PER_DAY)}
                   THEN 1 ELSE 0 END AS duty
@@ -231,6 +240,7 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
         AND ${parentPredicate}
         AND (SELECT COUNT(*) FROM guest_thread WHERE author_kind = 'guest' AND author_id = ${pVisitor} AND created_at >= ${pDay}) < ${Math.trunc(GUEST_PER_GUEST_PER_DAY)}
         AND (SELECT COUNT(*) FROM guest_thread WHERE author_kind = 'guest' AND created_at >= ${pDay}) < ${Math.trunc(GUEST_GLOBAL_PER_DAY)}
+        AND (SELECT COUNT(*) FROM guest_thread WHERE author_kind = 'guest' AND created_at > ${pHourAgo}) < ${Math.trunc(GUEST_GLOBAL_PER_HOUR)}
         AND (SELECT COUNT(*) FROM guest_thread WHERE author_kind = 'guest') < ${Math.trunc(GUEST_ROW_CEILING)}
     ) d`;
   const comment = env.DB.prepare(insertSql).bind(...P.values);
@@ -275,7 +285,7 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
           accrued: false as const,
           reason:
             kind === "critique"
-              ? await explainNoDuty(env, guest.visitor_id, postId, post.kind, parent ? parent.kind : null, dayStart)
+              ? await explainNoDuty(env, guest.visitor_id, postId, post.kind, parent ? parent.kind : null, depth, dayStart)
               : 'not marked kind:"critique": only a critique asks to be answered',
         };
 

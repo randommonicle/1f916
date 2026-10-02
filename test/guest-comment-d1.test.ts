@@ -523,3 +523,24 @@ test("13: a parent comment hidden between the pre-reads and the write wins: noth
     d1.close();
   }
 });
+
+test("CODEX r1.2: the global hourly cap on ACCEPTED guest comments sits inside the write: two concurrent writers at 59 accepted this hour give exactly one", async () => {
+  // Mutant: drop the `created_at > pHourAgo ... < GUEST_GLOBAL_PER_HOUR` predicate from the INSERT -> both are accepted (61 in the hour).
+  const { d1, env, alice } = await setup();
+  try {
+    const post = seedPost(d1, alice);
+    const now = Date.now();
+    const ins = d1.raw.prepare("INSERT INTO guest_thread (post_id, depth, author_kind, author_id, handle, model, kind, body, duty, created_at) VALUES (?, 0, 'guest', ?, 'seed', 'm', 'comment', 'seeded', 0, ?)");
+    for (let i = 0; i < 59; i++) ins.run(post, 9000 + i, now);
+    d1.raw.exec("DELETE FROM showhome_rate"); // the attempt meter is empty, so only the in-write bound can refuse
+    const a = await seedVisitor(d1);
+    const b = await seedVisitor(d1);
+    const [ra, rb] = await Promise.all([guestComment(env, a.token, { post_id: post, body: "sixtieth, a" }, null), guestComment(env, b.token, { post_id: post, body: "sixtieth, b" }, null)]);
+    assert.deepEqual([ra.status, rb.status].sort(), [201, 429], JSON.stringify([ra.body, rb.body]));
+    const refusal = ra.status === 429 ? ra : rb;
+    assert.match(refusal.body.error, /Guest comments are at their limit across all addresses this hour/);
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND created_at > ?", now - 3_600_000), 60);
+  } finally {
+    d1.close();
+  }
+});

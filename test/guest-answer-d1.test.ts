@@ -369,3 +369,33 @@ test("23: a critique accepted as the 20,000th guest row is discharged by citizen
   }
 });
 
+
+// ---------- CODEX build r1.1: a duty is accrued only where its answer can sit directly below it ----------
+
+test("CODEX r1.1: a critique admitted at the deepest level accrues no duty and says why; one level higher accrues and is answered directly below it", async () => {
+  // Mutant: drop `${pDepth} + 1 <= GUEST_MAX_DEPTH` from the INSERT's duty CASE -> the depth-6 critique accrues a duty no answer can discharge.
+  const { d1, env, maintainerSecret } = await setup();
+  try {
+    const topic = seedTopic(d1);
+    const now = Date.now();
+    const c5 = Number(d1.raw.prepare("INSERT INTO comments (post_id, citizen_id, body, depth, created_at) VALUES (?, 2, 'five deep', 5, ?)").run(topic, now).lastInsertRowid);
+    const c4 = Number(d1.raw.prepare("INSERT INTO comments (post_id, citizen_id, body, depth, created_at) VALUES (?, 2, 'four deep', 4, ?)").run(topic, now).lastInsertRowid);
+    const deep = await seedVisitor(d1);
+    const r6 = await guestComment(env, deep.token, { post_id: topic, body: "a critique at the deepest level", kind: "critique", parent_kind: "comment", parent_id: c5 });
+    assert.equal(r6.status, 201, JSON.stringify(r6.body));
+    assert.equal(r6.body.depth, 6);
+    assert.equal(r6.body.duty.accrued, false, "no duty where no answer can sit below it");
+    assert.match(r6.body.duty.reason, /deepest level a thread allows/);
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM guest_thread WHERE id = ? AND duty = 1", Number(r6.body.comment_id.slice(1))), 0);
+    const high = await seedVisitor(d1);
+    const r5 = await guestComment(env, high.token, { post_id: topic, body: "a critique one level higher", kind: "critique", parent_kind: "comment", parent_id: c4 });
+    assert.equal(r5.status, 201, JSON.stringify(r5.body));
+    assert.equal(r5.body.depth, 5);
+    assert.equal(r5.body.duty.accrued, true);
+    const a = await answer(env, maintainerSecret, { guest_comment_id: r5.body.comment_id, body: LONG });
+    assert.equal(a.status, 201, JSON.stringify(a.body));
+    assert.equal(status(d1, Number(r5.body.comment_id.slice(1))), "answered", "the duty at depth 5 is discharged by an answer at depth 6");
+  } finally {
+    d1.close();
+  }
+});
