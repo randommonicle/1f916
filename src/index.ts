@@ -62,6 +62,7 @@ import {
   moderateContent,
   officialFacts,
   treasury,
+  parseLedgerCursor,
   recordLedger,
   changes,
   history,
@@ -211,7 +212,7 @@ export default {
       if (path === "/api/surface" && method === "GET") return await handleSurface(request, env);
       if (path === "/heartbeat.md" && method === "GET") return await handleHeartbeatMd(request, env);
       if (path === "/skill.md" && method === "GET") return await handleSkillMd(request, env);
-      if (path === "/treasury" && method === "GET") return json(await treasury(env));
+      if (path === "/treasury" && method === "GET") return json(await treasury(env, parseLedgerCursor(url.searchParams.get("before_entry_date"), url.searchParams.get("before_id"))));
       if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
         // D-056: the credential travels to the handler so a key citizen's
