@@ -20,10 +20,12 @@ import {
   claimIdentity,
   claimKeyFromPayload,
   claimResponse,
+  contradictionAnswer,
   getClaim,
   isHandleTaken,
   keyOfRow,
   leaseHeldByAnother,
+  markContradiction,
   markExpired,
   markRefused,
   markSettled,
@@ -32,7 +34,7 @@ import {
   refsOf,
   releaseLease,
   runBookingStep,
-  SETTLEMENT_CONTRADICTION,
+  SHOWHOME_REPORT_POINTER,
   sameRequest,
   takeClaim,
   type ClaimIdentity,
@@ -795,14 +797,16 @@ function logSettlementContradiction(row: Pick<ClaimRow, "from_addr" | "nonce">, 
   );
 }
 
+// C1: the log line AND the stamp, so the two contradiction branches (this request's own /settle, an attempt's re-POST) cannot drift. The stamp makes every
+// LATER identical replay of the terminal row read the contradiction (claimAnswer) instead of a 402 with fresh accepts. It must never change what THIS caller is
+// told, so a failed stamp is logged by `quietly` and the answer is unchanged.
+async function recordContradiction(env: Env, row: ClaimRow, state: string, settled: { tx: string; payer: string }, req: { resource: string; maxAmountRequired: string }): Promise<void> {
+  logSettlementContradiction(row, state, settled, req);
+  await quietly("mark_contradiction", () => markContradiction(env, keyOfRow(row), settled.tx, Date.now()));
+}
+
 function contradictionResponse(tx: string, state: string): Response {
-  return claimResponse({
-    status: 500,
-    body: {
-      error: `The facilitator reported this payment settled (tx ${tx}), but the society's own record of the signed authorisation reads "${state}", which contradicts it. The money may have moved: whether it did is not established. Do not sign again. This is logged for the maintainer to check against the chain by hand. ${SHOWHOME_REPORT_POINTER}`,
-      code: SETTLEMENT_CONTRADICTION,
-    },
-  });
+  return claimResponse(contradictionAnswer(tx, state));
 }
 
 async function answerFromMovedClaim(
@@ -813,7 +817,7 @@ async function answerFromMovedClaim(
   settled: { tx: string; payer: string } | null,
 ): Promise<Response> {
   if (settled && (row.state === "refused" || row.state === "expired")) {
-    logSettlementContradiction(row, row.state, settled, reqs);
+    await recordContradiction(env, row, row.state, settled, reqs);
     return contradictionResponse(settled.tx, row.state);
   }
   // DEFERRED-DROPPED-SETTLE-TX (re-gate LOW-1(b) and LOW-2, the next paid-path wave): a settle that succeeded while another holder holds a live
@@ -900,7 +904,7 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
     if (moved && (moved.state === "refused" || moved.state === "expired")) {
       // H2: this re-POST was answered with a SUCCESS and the claim is already terminal-without-money. Discarding the verdict would let the re-send serve the
       // terminal row's 402 with fresh accepts, inviting a second signature for money that may have moved, and log nothing.
-      logSettlementContradiction(moved, moved.state, { tx, payer }, body.paymentRequirements);
+      await recordContradiction(env, moved, moved.state, { tx, payer }, body.paymentRequirements);
       return { kind: "contradiction", tx, state: moved.state, fetches };
     }
     return moved && moved.state === "settled_unbooked" ? { kind: "settled", row: moved, fetches } : { kind: "unchanged", detail: "another worker moved the claim", fetches };
@@ -972,10 +976,8 @@ export async function ledgerReceipt(env: Env, ledgerId: number): Promise<{ prev_
 // before the citizen is created, listing creation before the listing row), so
 // neither leaves a half-made record behind; each route's own later
 // paid-but-failed handling is unchanged.
-// How a payer whose money moved, and who is not a citizen, reaches the maintainer (gate M1).
-// One literal: every settled-but-incomplete message of this file interpolates it.
-const SHOWHOME_REPORT_POINTER =
-  "To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
+// SHOWHOME_REPORT_POINTER (how a payer whose money moved, and who is not a citizen, reaches the maintainer, gate M1) lives in settlement-claims.ts,
+// next to the contradiction answer that also serves it; every settled-but-incomplete message of this file interpolates it.
 
 export type SettledPaymentRoute = "registration" | "patron" | "listing_fee";
 

@@ -844,7 +844,7 @@ async function bTerminates(d1: LocalD1, kind: "refused" | "expired") {
 }
 
 for (const kind of ["refused", "expired"] as const) {
-  test(`H2 re-send (${kind}): the re-POST answers SUCCESS after another holder made the claim ${kind}: one contradiction line, a 500 that does not invite a second signature, the claim row unchanged`, async () => {
+  test(`H2 re-send (${kind}): the re-POST answers SUCCESS after another holder made the claim ${kind}: one contradiction line, a 500 that does not invite a second signature, the claim stays ${kind} and is stamped with the contradiction (C1)`, async () => {
     const d1 = createLocalD1();
     const stub = stubFacilitator({
       settle: async (n) => {
@@ -876,8 +876,10 @@ for (const kind of ["refused", "expired"] as const) {
       assert.equal(c[0].tx, TX);
       assert.equal(c[0].payer, TEST_PAYER);
       const row = oneClaim(d1);
-      assert.equal(row.state, kind, "the claim row is as B left it");
-      assert.equal(row.tx, null);
+      assert.equal(row.state, kind, "the claim row is still in the terminal state B left it");
+      // C1 (A1): the contradiction stamped the row: the facilitator's tx, and a verdict_reason marker that keeps B's own reason inside it.
+      assert.equal(row.tx, TX);
+      assert.ok(String((row as { verdict_reason?: string }).verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "stamped with the contradiction marker");
       assert.equal(row.rpc_body, null);
       assert.equal(count(d1, "ledger"), 0, "nothing was booked");
       assert.equal(stub.calls.settle, 2);
@@ -887,7 +889,7 @@ for (const kind of ["refused", "expired"] as const) {
     }
   });
 
-  test(`H2 reconciler (${kind}): the same race inside the scheduled reconciler is counted as contradicted (never booked, resolved or unchanged), logged once, and leaves the claim as B made it`, async () => {
+  test(`H2 reconciler (${kind}): the same race inside the scheduled reconciler is counted as contradicted (never booked, resolved or unchanged), logged once, and leaves the claim ${kind}, now stamped (C1)`, async () => {
     const d1 = createLocalD1();
     const stub = stubFacilitator({
       settle: async (n) => {
@@ -912,7 +914,8 @@ for (const kind of ["refused", "expired"] as const) {
       assert.equal(c[0].tx, TX);
       const row = oneClaim(d1);
       assert.equal(row.state, kind);
-      assert.equal(row.tx, null);
+      assert.equal(row.tx, TX, "C1: stamped with the facilitator's tx");
+      assert.ok(String((row as { verdict_reason?: string }).verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "and the marker");
       assert.equal(count(d1, "ledger"), 0);
     } finally {
       stub.restore();

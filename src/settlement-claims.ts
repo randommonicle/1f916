@@ -75,6 +75,15 @@ export const SETTLEMENT_CONTRADICTION = "settlement_contradiction";
 // carries this permanent reason; the reconciler skips such rows and every answer for one says so plainly.
 export const CLAIM_HANDLE_TAKEN = "handle_taken";
 export const REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT = "registration_handle_taken_after_payment";
+// C1 (docs: drafts/BRIEF-PAID-PATH-M3-2026-10-02.md, re-gate LOW-1(a), A1): a claim that met a settlement_contradiction (the facilitator reported a settlement
+// for an authorisation whose claim another holder had made refused or expired) is stamped, in verdict_reason, with this prefix, the facilitator's tx, a bar
+// and the original reason (clipped). No new state and no migration: the row stays refused or expired, and every later answer for it reads the marker.
+export const CONTRADICTION_MARKER = "settlement_contradiction:";
+const CONTRADICTION_ORIGINAL_CLIP = 300;
+
+// How a payer whose money moved, and who is not a citizen, reaches the maintainer (gate M1). One literal: every settled-but-incomplete message interpolates it.
+export const SHOWHOME_REPORT_POINTER =
+  "To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
 
 // ---------- identity ----------
 
@@ -313,6 +322,30 @@ export async function markExpired(env: Env, key: ClaimKey, owner: string, now: n
   );
 }
 
+// C1: stamps a TERMINAL claim (refused or expired) that met a settlement_contradiction. One conditional UPDATE: it matches only while the row is still in one of
+// those two terminal states (never a pending or settled_unbooked row, whose state this must not touch) and is not already stamped, so the FIRST contradiction's
+// tx is the one kept. It sets `tx` to the facilitator's tx (no CHECK forbids a tx on a terminal row) and keeps the original refusal text inside the marker: that
+// text is the only record of what the facilitator said. No lease condition: a terminal row has no lease. True only for the call that stamped it.
+export async function markContradiction(env: Env, key: ClaimKey, tx: string, now: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE settlement_claims SET tx = ?, verdict_reason = ? || ? || '|' || substr(COALESCE(verdict_reason, ''), 1, ?), updated_at = ?
+     WHERE ${KEY_WHERE} AND state IN ('refused', 'expired') AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`,
+  )
+    .bind(tx, CONTRADICTION_MARKER, tx, CONTRADICTION_ORIGINAL_CLIP, now, ...keyArgs(key), CONTRADICTION_MARKER.length, CONTRADICTION_MARKER)
+    .run();
+  return r.meta.changes === 1;
+}
+
+export const isContradicted = (row: Pick<ClaimRow, "state" | "verdict_reason">): boolean =>
+  (row.state === "refused" || row.state === "expired") && typeof row.verdict_reason === "string" && row.verdict_reason.startsWith(CONTRADICTION_MARKER);
+
+// The tx a stamped row names: the row's own `tx` (the stamp sets it), else the one inside the marker.
+const contradictionTx = (row: Pick<ClaimRow, "tx" | "verdict_reason">): string => {
+  if (row.tx) return row.tx;
+  const inside = (row.verdict_reason ?? "").slice(CONTRADICTION_MARKER.length).split("|")[0];
+  return inside;
+};
+
 // An unknown outcome leaves the row pending; this records the last thing the
 // facilitator said (already served once, clipped) and lets go of the lease so an
 // identical re-send can reconcile at once. STRICT holder-only (fix pass 4, H3, hub ruling): unlike the other holder
@@ -455,6 +488,18 @@ export function claimIsSecretRegistration(row: ClaimRow): boolean {
 export const SECRET_LOST_NOTE =
   "your seat exists; a response containing its secret was issued, but the secret cannot be recovered. Reach the maintainer with this tx (a free showhome note: POST /api/showhome/enter, then POST /api/showhome/note). For any future registration, send a public_key.";
 
+// The ONE contradiction answer (C1): the first request to meet the contradiction gets it from x402.ts, and every later identical replay of a stamped refused
+// or expired row gets the same words from claimAnswer. Never `accepts`, never "nothing was charged", never an invitation to sign again.
+export function contradictionAnswer(tx: string, state: string): ClaimAnswer {
+  return {
+    status: 500,
+    body: {
+      error: `The facilitator reported this payment settled (tx ${tx.length > 0 ? tx : "not reported"}), but the society's own record of the signed authorisation reads "${state}", which contradicts it. The money may have moved: whether it did is not established. Do not sign again. This is logged for the maintainer to check against the chain by hand. ${SHOWHOME_REPORT_POINTER}`,
+      code: SETTLEMENT_CONTRADICTION,
+    },
+  };
+}
+
 // The answer for a request that matched (or collided with) an existing claim and
 // that no route finisher took over. `reqs` is only for the 402 shapes that invite
 // a fresh signature (refused, expired). B9: every answer names the tx when one is
@@ -479,14 +524,14 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       }
       return { status: 409, body: { error: `This payment${txPart(row)} was already used for ${describeClaim(row)}; nothing was charged again and nothing new was created.`, code: SETTLEMENT_ALREADY_BOOKED } };
     case "refused":
-      // DEFERRED-CONTRADICTION-REPLAY (docs/REVIEW-SETTLEMENT-REPLAY-GUARD-REGATE-2026-10-01.md, LOW-1(a); the next paid-path wave): a claim
-      // that met a settlement_contradiction is left a plain refused/expired row, so a LATER identical replay still gets this 402 with accepts.
-      // Fix: stamp the row in the contradiction branch and serve the contradiction answer here instead.
+      // C1: a claim that met a settlement_contradiction is stamped, and its replays are answered with the contradiction, never this 402 with accepts.
+      if (isContradicted(row)) return contradictionAnswer(contradictionTx(row), row.state);
       return {
         status: 402,
         body: { x402Version: 1, error: row.verdict_reason ?? "The facilitator recorded a refusal of this settlement. By its account no money moved.", accepts: [reqs] },
       };
     case "expired":
+      if (isContradicted(row)) return contradictionAnswer(contradictionTx(row), row.state);
       return {
         status: 402,
         body: {
