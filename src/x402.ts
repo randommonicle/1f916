@@ -24,7 +24,6 @@ import {
   getClaim,
   isHandleTaken,
   keyOfRow,
-  leaseHeldByAnother,
   markContradiction,
   markExpired,
   markRefused,
@@ -36,6 +35,7 @@ import {
   runBookingStep,
   SHOWHOME_REPORT_POINTER,
   sameRequest,
+  stepGatedOutByLease,
   takeClaim,
   type ClaimIdentity,
   type ClaimKey,
@@ -1060,9 +1060,10 @@ export async function recordSettledPayment(
     const now = await getClaim(env, claim.key);
     const ledgerId = now ? refsOf(now).ledger_id : undefined;
     if (ledgerId == null) {
-      // The gate is three conditions: settled_unbooked, this ref unrecorded, and this owner holds the lease or none is live. With the line unrecorded, if
-      // another owner holds a live lease it is the third that failed: that holder is still booking. Anything else is a failure to book, never a silent success.
-      if (leaseHeldByAnother(now, claim.owner, Date.now())) return { applied: false, prev_hash: null, hash: null };
+      // The gate is three conditions: settled_unbooked, this ref unrecorded, and this owner holds the lease or none is live. This call's batch did not apply, and
+      // the claim is still settled_unbooked with the line unrecorded: so the lease was the condition that failed, and another holder is booking (C3: proven from state
+      // and ref, never from a lease read that can have lapsed since). Anything else is a failure to book, never a silent success.
+      if (stepGatedOutByLease(now, "ledger_id")) return { applied: false, prev_hash: null, hash: null };
       throw new Error("the claim is not settled_unbooked: no treasury line was recorded for it");
     }
     return { ...(await ledgerReceipt(env, ledgerId)), applied: false };

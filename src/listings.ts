@@ -35,7 +35,7 @@ import {
   PAYMENT_MAX_TIMEOUT_SECONDS,
   type PaidClaim,
 } from "./x402.ts";
-import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, refsOf, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, type ClaimRow } from "./settlement-claims.ts";
+import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, refsOf, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, stepGatedOutByLease, type ClaimRow } from "./settlement-claims.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
@@ -506,8 +506,9 @@ async function finishListingCreate(
       );
       const after = (await getClaim(env, key)) as ClaimRow;
       listingId = refsOf(after).listing_id;
-      // Another owner holds a live lease and is still booking: the answer is the claim's, not an error (R1/R3).
-      if (listingId == null && !listingStep.applied && leaseHeldByAnother(after, opts.owner, Date.now())) return answerFromClaim(env, key, opts.owner);
+      // Not applied, the claim still settled_unbooked and no listing recorded: another holder's lease gated this step out (C3, proven from state and ref, not from a
+      // lease read that can have lapsed since), so the answer is the claim's, not an error (R1/R3).
+      if (listingId == null && !listingStep.applied && stepGatedOutByLease(after, "listing_id")) return answerFromClaim(env, key, opts.owner);
       if (listingId == null) throw new Error("the claim is not settled_unbooked: no listing was recorded for it");
     } catch (e) {
       console.log(
@@ -1013,7 +1014,8 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
         now,
       );
       const after = (await getClaim(env, claimKey)) as ClaimRow;
-      // Another owner holds a live lease and is still booking: the answer is the claim's, not an error (R1/R3).
+      // Pay listing KEEPS the lease read-back (C3 does not apply here): its INSERT also requires listings.status = 'paying', so a gated-out step can mean the listing
+      // moved, not only that another holder's lease gated it. Another owner holding a live lease and still booking: the answer is the claim's, not an error (R1/R3).
       if (refsOf(after).payment_id == null && !paymentStep.applied && leaseHeldByAnother(after, owner, Date.now())) return answerFromClaim(env, claimKey, owner);
       if (refsOf(after).payment_id == null) {
         throw new Error("nothing was recorded: the claim is not settled_unbooked or the listing is no longer paying");

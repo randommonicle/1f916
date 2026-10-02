@@ -255,6 +255,14 @@ export const holdsLeaseArgs = (owner: string, now: number): unknown[] => [owner,
 export const leaseHeldByAnother = (row: Pick<ClaimRow, "lease_owner" | "leased_until"> | null, owner: string, now: number): boolean =>
   row !== null && row.lease_owner !== null && row.lease_owner !== owner && row.leased_until !== null && row.leased_until > now;
 
+// C3 (re-gate LOW-2): the TypeScript read-back above is a RACE for a step whose gate is only state + ref + lease (the ledger line, the citizen, the key_registered line and
+// listing creation): another holder's lease can lapse, or be released, between the batch and the re-read, so `leaseHeldByAnother` then says "nobody holds it" for a step
+// that WAS gated out by that very lease. This does not read the lease at all. Called for a step whose own batch reported `applied: false`: the claim still
+// settled_unbooked with that step's ref still unrecorded PROVES the lease condition failed when the batch ran, because the other two gate conditions (state, ref) held then
+// (a ref is only ever added and the claim only ever moves forward) and still hold now. The caller answers from the claim, whatever the lease reads now. NOT for pay
+// listing, whose INSERT also requires `listings.status = 'paying'`: a gated-out step there can mean the listing moved, so it keeps the lease read-back.
+export const stepGatedOutByLease = (after: ClaimRow | null, ref: RefName): boolean => after !== null && after.state === "settled_unbooked" && refsOf(after)[ref] == null;
+
 // ---------- transitions (each conditional on the state it leaves) ----------
 
 // pending -> settled_unbooked: the facilitator said settled. False means another

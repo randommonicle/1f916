@@ -52,8 +52,8 @@ import {
   refsOf,
   runBookingStep,
   isHandleTaken,
-  leaseHeldByAnother,
   markHandleTaken,
+  stepGatedOutByLease,
   handleTakenMessage,
   RECONCILE_BACKSTOP,
   RECONCILE_REPEAT_CLAUSE,
@@ -379,8 +379,9 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
       const afterCitizen = (await getClaim(env, key)) as ClaimRow;
       refs = refsOf(afterCitizen);
       citizenId = refs.citizen_id;
-      // Not applied and no citizen recorded while another owner holds a live lease: that holder is still booking, so the answer is the claim's.
-      if (citizenId == null && !citizenStep.applied && leaseHeldByAnother(afterCitizen, opts.owner, Date.now())) return { done: false, reason: "claim_moved" };
+      // Not applied, the claim still settled_unbooked and no citizen recorded: another holder's lease gated this step out (C3, proven from state and ref, not from a
+      // lease read that can have lapsed since), so the answer is the claim's.
+      if (citizenId == null && !citizenStep.applied && stepGatedOutByLease(afterCitizen, "citizen_id")) return { done: false, reason: "claim_moved" };
       if (citizenId == null) throw new Error("the claim is not settled_unbooked: no citizen was recorded for it");
       if (secretMode) finalApplied = citizenStep.applied;
     } else if (secretMode) {
@@ -412,11 +413,11 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
         now,
       );
       finalApplied = step.applied;
-      // Not applied: another worker recorded it (the answer is then the claim's), another owner holds a live lease and is still booking (the same), or the
-      // claim is not settled_unbooked at all (not fine).
+      // Not applied: another worker recorded it (the answer is then the claim's), another owner's lease gated it out and that holder is still booking (the same: C3,
+      // proven from state and ref), or the claim is not settled_unbooked at all (not fine).
       if (!step.applied) {
         const after = (await getClaim(env, key)) as ClaimRow;
-        if (refsOf(after).key_event_id == null && !leaseHeldByAnother(after, opts.owner, Date.now())) {
+        if (refsOf(after).key_event_id == null && !stepGatedOutByLease(after, "key_event_id")) {
           throw new Error("the claim is not settled_unbooked: no key_registered line was recorded for it");
         }
       }

@@ -8,6 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { insertCitizen, insertListing, insertSubmission } from "./helpers/local-d1.ts";
+import { declareTestWallet } from "./helpers/wallet-pin.ts";
+import { atomicFromCents } from "./helpers/x402-payload.ts";
 import {
   TEST_PAYER,
   TREASURY_ADDRESS,
@@ -22,8 +25,12 @@ import {
   oneClaim,
   patronReq,
   paymentHeaderFor,
+  realPublicKey,
+  registerHeader,
+  registerReq,
   stubFacilitator,
   testEnv,
+  type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
 import {
@@ -35,6 +42,7 @@ import {
   markContradiction,
   markExpired,
   markRefused,
+  stepGatedOutByLease,
   takeClaim,
   KEY_WHERE,
   keyArgs,
@@ -43,6 +51,8 @@ import {
   type ClaimSpec,
 } from "../src/settlement-claims.ts";
 import { runReconciler } from "../src/settlement-reconcile.ts";
+import { computeListingFeeCents, handleCreateListing, handlePayListing } from "../src/listings.ts";
+import { SocietyError } from "../src/society.ts";
 
 const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
 const settledAnswer = () => new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: TX }), { status: 200, headers: { "content-type": "application/json" } });
@@ -371,4 +381,200 @@ test("C2 control: an ordinary unknown outcome (no verdict in hand) still says th
     stub.restore();
     d1.close();
   }
+});
+
+// ---------- C3: a booking step gated out by another holder's lease is answered from the claim, never as a booking failure ----------
+// The re-gate's probe P-A, per site: A's booking batch is gated out by B's LIVE lease (B took the lapsed lease just before A's batch), and B's lease lapses straight
+// after that batch, so the TypeScript lease read-back A used to rely on says "nobody holds it". A must still answer from the claim ("the booking is not finished, do not
+// sign again"), not as `payment_settled_unrecorded` / `registration_paid_but_failed` / `listing_paid_but_failed`, and the claim must still resume afterwards.
+
+// An Env whose DB.batch runs B's take-over just BEFORE the nth batch and lapses B's lease just AFTER it.
+function windowEnv(d1: LocalD1, n: number): Env {
+  const real = d1.DB;
+  let calls = 0;
+  const DB = {
+    prepare: (sql: string) => real.prepare(sql),
+    batch: async (stmts: never[]) => {
+      const k = ++calls;
+      if (k === n) await bTakesTheLease(d1);
+      const out = await real.batch(stmts);
+      if (k === n) d1.raw.prepare("UPDATE settlement_claims SET leased_until = 1").run();
+      return out;
+    },
+  };
+  return { ...testEnv(d1), DB } as unknown as Env;
+}
+
+function assertAnsweredFromClaim(res: { status: number; body: Record<string, any> }, lines: string[], failureEvent: string, how: string) {
+  assert.equal(res.status, 500, `${how}: ${JSON.stringify(res.body)}`);
+  assert.equal(res.body.code, "settlement_unresolved", `${how}: the answer is the claim's, not a thrown booking failure`);
+  assert.match(String(res.body.error), /Do not sign again/, how);
+  assert.match(String(res.body.error), /booking is not finished/, `${how}: it says the booking is not finished`);
+  assert.doesNotMatch(String(res.body.error), /put right by hand|could not record it in its treasury ledger|did not complete|failed to save|recording it failed/, `${how}: no 'a person must put it right' failure text`);
+  assert.equal(eventLines(lines, failureEvent).length, 0, `${how}: no ${failureEvent} line`);
+}
+
+test("C3 ledger step (patron): A's batch is gated out by B's live lease and B's lease lapses before A's read: A answers from the claim, and a re-send finishes it", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    const { value: res, lines } = await captureLog(async () => {
+      const r = await callWorker(patronReq("rent", header), windowEnv(d1, 1));
+      return { status: r.status, body: await json(r) };
+    });
+    assertAnsweredFromClaim(res, lines, "payment_settled_unrecorded", "patron ledger");
+    assert.equal(count(d1, "ledger"), 0, "A's gated-out batch wrote nothing");
+    assert.equal(oneClaim(d1).state, "settled_unbooked");
+    const again = await callWorker(patronReq("rent", header), eq(d1));
+    assert.equal(again.status, 200, JSON.stringify(await again.clone().json()));
+    assert.equal(count(d1, "ledger"), 1, "the re-send books the line once");
+    assert.equal(oneClaim(d1).state, "booked");
+    assert.equal(stub.calls.settle, 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+for (const mode of ["secret", "public-key"] as const) {
+  test(`C3 citizen step (registration, ${mode}): the same window; A answers from the claim, no registration_paid_but_failed, and a re-send finishes the registration`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator();
+    try {
+      const publicKey = mode === "public-key" ? await realPublicKey() : null;
+      const header = registerHeader();
+      const body = { handle: `c3-${mode}`, model: "m", ...(publicKey ? { public_key: publicKey } : {}) };
+      const { value: res, lines } = await captureLog(async () => {
+        const r = await callWorker(registerReq(body, header), windowEnv(d1, 2)); // batch 1 = the ledger line, batch 2 = the citizen
+        return { status: r.status, body: await json(r) };
+      });
+      assertAnsweredFromClaim(res, lines, "registration_paid_but_failed", `registration ${mode} citizen`);
+      assert.equal(count(d1, "ledger"), 1, "the ledger line A wrote before the window");
+      assert.equal(count(d1, "citizens"), 0, "no citizen");
+      assert.equal(oneClaim(d1).state, "settled_unbooked");
+      const again = await callWorker(registerReq(body, header), eq(d1));
+      assert.equal(again.status, 201, JSON.stringify(await again.clone().json()));
+      assert.equal(count(d1, "citizens"), 1);
+      assert.equal(count(d1, "ledger"), 1);
+      assert.equal(oneClaim(d1).state, "booked");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+test("C3 key step (registration, public-key): the same window on the last step; A answers from the claim and the reconciler books the key line", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const { value: res, lines } = await captureLog(async () => {
+      const r = await callWorker(registerReq({ handle: "c3-key", model: "m", public_key: await realPublicKey() }, registerHeader()), windowEnv(d1, 3)); // 1 ledger, 2 citizen, 3 key
+      return { status: r.status, body: await json(r) };
+    });
+    assertAnsweredFromClaim(res, lines, "registration_paid_but_failed", "registration key");
+    assert.equal(count(d1, "citizens"), 1, "the citizen A booked before the window");
+    assert.equal(count(d1, "identity_events WHERE kind = 'key_registered'"), 0, "no key line");
+    assert.equal(oneClaim(d1).state, "settled_unbooked");
+    const out = await runReconciler(eq(d1));
+    assert.equal(out.booked, 1, "a public-key registration is finished by the reconciler");
+    assert.equal(count(d1, "identity_events WHERE kind = 'key_registered'"), 1);
+    assert.equal(oneClaim(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+const loadCitizen = (d1: LocalD1, id: number) =>
+  d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(id) as { id: number; handle: string; model: string; karma: number; created_at: number; last_seen_at: number };
+const listingBody = (bounty: number) => ({
+  title: "Review my auth middleware",
+  description: "Stuck on token refresh, please review for race conditions",
+  acceptance_condition: "a reviewer identifies at least one real correctness issue or confirms none exist",
+  bounty_cents: bounty,
+  expires_at: Date.now() + 7 * 86_400_000,
+});
+
+test("C3 listing step (listing creation): the same window; A answers from the claim, no listing_paid_but_failed, and the reconciler books the listing", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const funder = loadCitizen(d1, insertCitizen(d1));
+    const header = paymentHeaderFor(TREASURY_ADDRESS, atomicFromCents(computeListingFeeCents(1000)));
+    const { value: res, lines } = await captureLog(async () => {
+      const r = await handleCreateListing(
+        new Request("https://example.test/api/listing", { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": header }, body: JSON.stringify(listingBody(1000)) }),
+        windowEnv(d1, 2), // 1 = the fee line, 2 = the listing
+        funder,
+      );
+      return { status: r.status, body: (await r.json()) as Record<string, any> };
+    });
+    assertAnsweredFromClaim(res, lines, "listing_paid_but_failed", "listing creation");
+    assert.equal(count(d1, "ledger"), 1, "the fee line A wrote before the window");
+    assert.equal(count(d1, "listings"), 0, "no listing");
+    const out = await runReconciler(eq(d1));
+    assert.equal(out.booked, 1);
+    assert.equal(count(d1, "listings"), 1);
+    assert.equal(oneClaim(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C3 control: PAY LISTING keeps the lease read-back: a step gated out because the listing is no longer 'paying' (no other holder) is still the booking-failure path", async () => {
+  const d1 = createLocalD1();
+  const funderId = insertCitizen(d1);
+  const reviewerId = insertCitizen(d1);
+  const wallet = "0x" + "0a".repeat(20);
+  const pin = await declareTestWallet(d1, reviewerId, wallet);
+  const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1200 });
+  const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+  const stub = stubFacilitator({
+    settle: () => {
+      // the operator releases the reservation while A's /settle is in flight: A's own lease is intact, the listing is no longer 'paying'
+      d1.raw.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ?").run(listingId);
+      return settledAnswer();
+    },
+  });
+  try {
+    // The route handler throws the booking failure as a SocietyError (the router turns it into a 500); the answer-from-the-claim path would RETURN a response.
+    const { value: outcome, lines } = await captureLog(async () => {
+      try {
+        const r = await handlePayListing(
+          new Request(`https://example.test/api/listing/${listingId}/pay`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(wallet, atomicFromCents(1200)) },
+            body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+          }),
+          eq(d1),
+          loadCitizen(d1, funderId),
+          listingId,
+        );
+        return { returned: r.status };
+      } catch (e) {
+        return { thrown: e };
+      }
+    });
+    assert.ok("thrown" in outcome, `the pay route still throws its booking failure (got ${JSON.stringify(outcome)})`);
+    assert.ok(outcome.thrown instanceof SocietyError && outcome.thrown.status === 500);
+    assert.match(String((outcome.thrown as SocietyError).message), /recording it failed/, "the pay route's booking-failure answer, unchanged");
+    assert.equal(eventLines(lines, "listing_pay_settled_but_unrecorded").length, 1, "and its one log line");
+    assert.equal(count(d1, "listing_payments"), 0);
+    assert.equal(oneClaim(d1).state, "settled_unbooked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C3: stepGatedOutByLease is true only for a claim still settled_unbooked with that step's ref unrecorded", () => {
+  const base = { state: "settled_unbooked", booked_refs: "{}" } as unknown as ClaimRow;
+  assert.equal(stepGatedOutByLease(base, "ledger_id"), true);
+  assert.equal(stepGatedOutByLease(null, "ledger_id"), false, "no row");
+  assert.equal(stepGatedOutByLease({ ...base, booked_refs: '{"ledger_id":7}' }, "ledger_id"), false, "the step's ref is recorded: that is 'take theirs', not a gated-out step");
+  assert.equal(stepGatedOutByLease({ ...base, booked_refs: '{"ledger_id":7}' }, "citizen_id"), true, "another step's ref does not matter");
+  for (const state of ["pending", "booked", "refused", "expired"] as const) assert.equal(stepGatedOutByLease({ ...base, state } as ClaimRow, "ledger_id"), false, `${state}: not settled_unbooked`);
 });
