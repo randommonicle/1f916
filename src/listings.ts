@@ -485,6 +485,10 @@ async function finishListingCreate(
 
   let listingId = refsOf(row).listing_id;
   if (listingId == null) {
+    // DEFERRED-LATE-LISTING-EXPIRY (first-gate I4, drafts/BRIEF-PAID-PATH-M3-2026-10-02.md "Out of scope"): a booking resumed late (the payer's re-send, or the reconciler days
+    // after the payment) writes the listing with the `expires_at` the funder asked for, which may already have passed or be only hours away: the funder paid a posting fee for a
+    // listing that is born expired or nearly so. What the society owes that funder (a fresh window from booking, a refusal to book, a refund by hand) is a ruling, not a fix: not
+    // decided here. When it is, apply it at this INSERT and add the test that books a claim whose expires_at is past.
     let listingStep: { applied: boolean };
     try {
       const now = Date.now();

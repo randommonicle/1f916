@@ -1134,3 +1134,23 @@ test("C8: runBookingStep reports the id the row-creating statement reported, onl
     d1.close();
   }
 });
+
+test("C6 consequence, pinned: after an expiry row (now 8-9 subrequests, not about 4) the reconciler sheds a second due row for the next run, instead of starting it past the ceiling", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: chainRpc(false) });
+  try {
+    const V = NOW_S() - 5_000;
+    await seedClaim(d1, { route: "patron", intent: { line: "first expiry" }, state: "pending", updatedAt: 1_000, validBefore: String(V) });
+    await seedClaim(d1, { route: "patron", intent: { line: "second expiry" }, state: "pending", updatedAt: 2_000, validBefore: String(V) });
+    const { value: out, lines } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(out.examined, 1, "one row this run");
+    assert.equal(out.resolved, 1, "and it was expired");
+    assert.equal(eventLines(lines, "settlement_reconcile_shed").length, 1, "the second row is shed, loudly, and waits for the next run");
+    assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM settlement_claims WHERE state = 'pending'").get() as { n: number }).n, 1, "the shed row is still pending, untouched");
+    const next = await runReconciler(eq(d1));
+    assert.equal(next.resolved, 1, "the next run expires it");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

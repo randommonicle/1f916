@@ -31,6 +31,12 @@
 // test/settlement-replay-reconcile-d1.test.ts measures through the real scheduled() handler (17 with
 // the select). RECONCILE_ROW_WORST_CASE is that 16 plus 2 for one chain-head collision retry, the
 // house posture (budget.ts FINALISE_RESERVE): a second concurrent collision is an accepted residual.
+//
+// Paid-path M3 (C5, C6) adds two costs, both inside that 18. C6: ONLY the branch that would mark a row `expired` (the chain says unused and the wall clock is past validBefore + the
+// margin) reads the authorisation a second time, at the block each RPC reports as its latest: up to 8 more RPC fetches (a block read and a pinned eth_call per RPC), so an
+// expiry row is at most lease 1 + 4 + 8 + a terminal write of 2 = 15 (test/paid-path-m3-d1.test.ts measures a bad day: 13 for the row, 14 with the select). Its consequence is the ceiling: an expiry row is no
+// longer cheap (typically 8-9 against about 4 before), so after one the loop may shed a second row (9 + 18 > 26) until the next run. C5: a listing_pay row pays one listing read
+// before its booking (about 13 in all, well under the registration's 16).
 
 import { attemptPending, finishPatronBooking, clipReason } from "./x402.ts";
 import { finishRegistration } from "./register-gate.ts";

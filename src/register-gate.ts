@@ -500,6 +500,11 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
     );
   }
 
+  // DEFERRED-INVITE-REDEEM-TWICE (first-gate I3, drafts/BRIEF-PAID-PATH-M3-2026-10-02.md "Out of scope"; invite mode is DORMANT, REGISTRATION_MODE is open): the invite_redeemed
+  // append below is not itself gated on the claim. Today only a call whose OWN final step applied reaches it (a stale finisher returns claim_moved above, which closed the
+  // first gate's interleaving incidentally), and the claim allows one final step, so a second append needs a second final step. If invite mode is ever re-enabled, gate this
+  // append in the same change (for example WHERE NOT EXISTS an invite_redeemed row with this detail), and add the test that runs two finishers.
+  //
   // Only log the invite as redeemed once a citizen genuinely exists to
   // attach it to -- identity_events.citizen_id is NOT NULL (schema.sql).
   //
