@@ -58,8 +58,13 @@ export async function readThread(base, postId) {
 export function answererRows(rows, gid, handle = ANSWERER) {
   return rows.filter((r) => r.parent && r.parent.kind === "thread" && r.parent.id === gid && r.tier === "citizen" && r.author === handle);
 }
+// Characters as SQLite's length() counts them on TEXT (code points), which is what the discharge predicate uses
+// (src/guest-core.ts FIRST_DISCHARGE_SQL), never JS UTF-16 units: an astral character is one, not two.
+export function charLength(text) {
+  return [...String(text)].length;
+}
 export function discharges(row) {
-  return row.mod_state == null && typeof row.body === "string" && row.body.length >= MIN_ANSWER_LEN;
+  return row.mod_state == null && typeof row.body === "string" && charLength(row.body) >= MIN_ANSWER_LEN;
 }
 
 // A12: the key is derived from live state, `duty:g<n>:v<k>`, k = 1 + the answerer's NON-discharging answers on that
@@ -78,10 +83,11 @@ export function normaliseBody(text) {
 // structure (a section header, a marker, a fence), so the answer block cannot be confused with a verdict.
 export function bodyProblems(body) {
   const p = [];
-  if (body.length < MIN_ANSWER_LEN) p.push(`body is ${body.length} characters; under ${MIN_ANSWER_LEN} it discharges nothing`);
-  if (body.length > MAX_ANSWER_LEN) p.push(`body is ${body.length} characters; over ${MAX_ANSWER_LEN}`);
+  const n = charLength(body);
+  if (n < MIN_ANSWER_LEN) p.push(`body is ${n} characters; under ${MIN_ANSWER_LEN} it discharges nothing`);
+  if (n > MAX_ANSWER_LEN) p.push(`body is ${n} characters; over ${MAX_ANSWER_LEN}`);
   if (/[–—]/.test(body)) p.push("body carries an en or em dash");
-  if (body.split("\n").some((l) => /^(## \[|\[\[|```)/.test(l))) p.push("a body line starts with '## [', '[[' or a fence");
+  if (body.split("\n").some((l) => /^(## \[|\[\[)/.test(l) || FENCE.test(l))) p.push("a body line starts with '## [', '[[' or a fence");
   return p;
 }
 
@@ -91,23 +97,40 @@ export function encodeGuestText(text) {
   return JSON.stringify(text == null ? null : String(text));
 }
 
-const HEADER = /^## \[(CLAUDE|GEMINI|CODEX) [^\]]*\]\s*$/;
+const HEADER = /^## \[(CLAUDE|GEMINI|CODEX) ([^\]]*)\]\s*$/;
+const FENCE = /^\s*(```|~~~)/;
+// Sections by exact header lines, each line tagged with whether it sits inside a fenced block. A header-shaped line
+// INSIDE a fence (a seat quoting another section) or a fence still open at the end makes the file AMBIGUOUS, and an
+// ambiguous file approves nothing: a quotation can never become a section, and a real section can never be hidden.
 export function parseSections(text) {
-  const out = [];
+  const sections = [];
+  let inFence = false;
+  let ambiguous = false;
   for (const line of normaliseBody(text).split("\n")) {
     const m = HEADER.exec(line);
-    if (m) out.push({ handle: m[1], lines: [] });
-    else if (out.length) out[out.length - 1].lines.push(line);
+    if (m && inFence) ambiguous = true;
+    if (m && !inFence) {
+      const round = /\bround (\d+)\b/.exec(m[2]);
+      sections.push({ handle: m[1], round: round ? Number(round[1]) : null, lines: [] });
+      continue;
+    }
+    const fence = FENCE.test(line);
+    if (sections.length) sections[sections.length - 1].lines.push({ text: line, fenced: inFence || fence });
+    if (fence) inFence = !inFence;
   }
-  return out;
+  if (inFence) ambiguous = true;
+  return Object.assign(sections, { ambiguous });
 }
 
-// A seat's verdict counts only as the protocol writes it: a line that is exactly [[CONVERGED]], followed (blank
-// lines aside) by that seat's own [[END <SEAT> round N]] line.
+// A seat's verdict counts only as the protocol writes it, at the END of its section: outside every fence and
+// blockquote, ignoring blank lines and the transport's HTML comments, the last line is that seat's own
+// [[END <SEAT> round N]] with N the header's round, and the line before it is exactly [[CONVERGED]].
 function sectionConverges(section) {
-  const ls = section.lines.map((l) => l.trim()).filter((l) => l !== "");
-  const end = new RegExp(`^\\[\\[END ${section.handle} round \\d+\\]\\]$`);
-  return ls.some((l, i) => l === "[[CONVERGED]]" && end.test(ls[i + 1] ?? ""));
+  const ls = section.lines
+    .filter((l) => !l.fenced)
+    .map((l) => l.text.trim())
+    .filter((l) => l !== "" && !l.startsWith(">") && !l.startsWith("<!--"));
+  return section.round != null && ls.length >= 2 && ls[ls.length - 1] === `[[END ${section.handle} round ${section.round}]]` && ls[ls.length - 2] === "[[CONVERGED]]";
 }
 
 // The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target on a
@@ -115,9 +138,10 @@ function sectionConverges(section) {
 // LATEST section comes after that hub section and converges. Returns null when approved, else the reason.
 export function approvalProblem(exchangeText, target, body) {
   const sections = parseSections(exchangeText);
+  if (sections.ambiguous) return "the exchange file is ambiguous (a section header inside a fenced block, or a fence left open); write a fresh exchange";
   const lastHub = sections.map((s) => s.handle).lastIndexOf("CLAUDE");
   if (lastHub < 0) return "no hub section";
-  const hub = sections[lastHub].lines;
+  const hub = sections[lastHub].lines.map((l) => l.text);
   if (!hub.includes(`Target: ${target}`)) return `the last hub section does not name Target: ${target}`;
   const open = hub.indexOf("```answer");
   const close = open < 0 ? -1 : hub.indexOf("```", open + 1);
