@@ -217,7 +217,7 @@ for ($i = 0; $i -lt 12; $i++) {
 if (-not $live) { Stop-Here "deployed (version $versionId), but GET /api/guest/due has not answered 200 after 60 s; check by hand." }
 Say "[deploy] GET /api/guest/due answers 200 (version $versionId)"
 
-# 5. the ride: non-minting and the chains, then the public reads (no write of any kind)
+# 5. the ride: non-minting and the chains, then the public reads, then ONE free write (gate C1, step 5b)
 $attAfter = Read-Attest "after the deploy"
 Assert-Attest $attAfter "after the deploy"
 Say ("[ride] attest: v5 " + $V5_HASH.Substring(0, 8) + " unchanged; every chain ok")
@@ -246,8 +246,22 @@ if ($null -eq $firstId) { Stop-Here "GET /api/front listed no post or topic to r
 $post = Get-Json "$BASE/api/post/$firstId"
 if ($null -eq $post.guest_thread) { Stop-Here "GET /api/post/$firstId carries no guest_thread: the worker is not reading the new table." }
 Say ("[ride] GET /api/post/" + $firstId + " -> 200 and carries guest_thread (the worker reads the new table), guest_thread_next " + $post.guest_thread_next)
+# 5b. gate condition C1: ONE real free write, before anything else uses the worker. POST /api/showhome/enter is the first
+# real-D1 run of the conditional rate reservation (src/showhome.ts assertShowhomeRateCap) that every free write passes
+# through; a 500 here means every showhome write is down. It mints one visitor token (handle "deploy-ride"), which is
+# never printed or kept. Expect 201.
+$enterBody = [System.IO.Path]::GetTempFileName()
+$enterOut = [System.IO.Path]::GetTempFileName()
+try {
+  [System.IO.File]::WriteAllText($enterBody, '{"handle":"deploy-ride","model":"deploy-script"}', (New-Object System.Text.UTF8Encoding($false)))
+  $enterCode = (curl.exe -s --max-time 30 -o $enterOut -w "%{http_code}" -X POST "$BASE/api/showhome/enter" -H "content-type: application/json" --data-binary "@$enterBody")
+} finally {
+  Remove-Item $enterBody, $enterOut -ErrorAction SilentlyContinue
+}
+if ("$enterCode" -ne "201") { Stop-Here ("C1 FAILED: POST /api/showhome/enter answered HTTP $enterCode, not 201. Every free write passes the same rate reservation: ROLL BACK THE WORKER now (npx wrangler rollback), then read the worker log. Migration 0018 can stay (additive; the old worker never reads it).") }
+Say "[ride] C1: POST /api/showhome/enter -> 201 (the conditional rate reservation runs on real D1; the minted token was discarded unread)"
 $stats = Get-Json "$BASE/api/stats"
 if ($null -eq $stats.guest_comments) { Stop-Here "GET /api/stats has no guest_comments field." }
 Say ("[ride] /api/stats guest_comments " + $stats.guest_comments + " (separate from comments " + $stats.comments + ")")
-Say "[note] The write paths (POST /api/guest/comment, POST /api/guest/answer) and the 06:00 UTC daily check are first ridden by the first real guest and the next 06:00 run. After a first guest comment: SELECT COUNT(*) FROM guests shows one promoted guest; after the next 06:00 UTC: SELECT * FROM guest_duty_runs shows the dated record. Do not declare either ridden before then."
-Say "[done] guest voice deployed and ridden (public reads only). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md; then update the operator's session-start ritual with GET /api/guest/due, and re-stage the registry kits from the live /skill.md 1.1.1 (Ben's acts)."
+Say "[note] The write paths (POST /api/guest/comment, POST /api/guest/answer) and the 06:00 UTC daily check are first ridden by the first real guest and the next 06:00 run. Gate condition C2: after the FIRST real guest comment, guest_thread AND guests must each have risen by one (SELECT (SELECT COUNT(*) FROM guest_thread WHERE author_kind = 'guest'), (SELECT COUNT(*) FROM guests)); if guests did not rise, the promotion failed on real D1 (only token continuity is lost); after the next 06:00 UTC: SELECT * FROM guest_duty_runs shows the dated record. Do not declare either ridden before then."
+Say "[done] guest voice deployed and ridden (public reads and the C1 enter). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md; then update the operator's session-start ritual with GET /api/guest/due, and re-stage the registry kits from the live /skill.md 1.1.1 (Ben's acts)."
