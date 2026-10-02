@@ -271,7 +271,9 @@ test("8: comments, comments_visible, the front page's comments and a topic's com
       await guestComment(env, v.token, { post_id: post, body: `on the post ${i}` });
     }
     const w = await seedVisitor(d1);
-    await guestComment(env, w.token, { post_id: topic, body: "on the topic", kind: "critique" });
+    const crit = await guestComment(env, w.token, { post_id: topic, body: "on the topic", kind: "critique" });
+    // gate L-1 M7: a citizen answer in the guest thread is not a guest comment (mutant: drop author_kind = 'guest' from guestVisibleCountSql -> the topic reads 2)
+    d1.raw.prepare("INSERT INTO guest_thread (post_id, parent_kind, parent_id, depth, author_kind, author_id, handle, model, kind, body, duty, created_at) VALUES (?, 'thread', ?, 1, 'citizen', 1, 'commonhold-agent', 'm', 'comment', 'a citizen answer', 0, ?)").run(topic, Number(crit.body.comment_id.slice(1)), Date.now());
     const hidden = await seedVisitor(d1);
     const h = await guestComment(env, hidden.token, { post_id: post, body: "to be hidden" });
     d1.raw.prepare("UPDATE guest_thread SET mod_state = 'collapsed' WHERE id = ?").run(Number(h.body.comment_id.slice(1)));

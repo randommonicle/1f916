@@ -33,6 +33,7 @@ import {
   GUEST_DUTY_MIN_ANSWER_LEN,
   GUEST_GLOBAL_PER_DAY,
   GUEST_GLOBAL_PER_HOUR,
+  GUEST_GLOBAL_ATTEMPTS_PER_HOUR,
   GUEST_IDEM_KEY_MAX_LEN,
   GUEST_MAX_DEPTH,
   GUEST_PER_GUEST_PER_DAY,
@@ -128,7 +129,7 @@ async function explainRefusal(env: Env, guestVisitorId: number, postId: number, 
 export async function postGuestComment(env: Env, token: unknown, input: GuestCommentInput, ip: string | null) {
   // Cap first (guard-the-spend-paths): it bounds all load and records the attempt, so even a flood of invalid
   // requests consumes budget. A missing address still meets the global hourly cap.
-  await assertShowhomeRateCap(env, ip, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR);
+  await assertShowhomeRateCap(env, ip, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_ATTEMPTS_PER_HOUR);
   // That call meters ATTEMPTS, per address and globally, with the reservation itself conditional (showhome.ts), so
   // both hourly caps hold under concurrency. The global hourly bound on ACCEPTED comments is also a predicate inside
   // the INSERT below (CODEX build r1.2).
@@ -434,11 +435,20 @@ export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input
   const id = Number(res.meta.last_row_id);
   const status = await dutyStatusOf(env, targetId);
   const discharged = status === "answered" || status === "answered_late";
+  // True only when THIS row is the answer that discharged the duty: the earliest qualifying answer by the answerer,
+  // counted as the discharge SQL counts (length() in SQLite characters), never an earlier answer's status (gate L-6).
+  const first = discharged
+    ? await env.DB.prepare(
+        "SELECT MIN(a.id) AS id FROM guest_thread a WHERE a.parent_kind = 'thread' AND a.parent_id = ? AND a.author_kind = 'citizen' AND a.author_id = ? AND a.mod_state IS NULL AND length(a.body) >= ?",
+      )
+        .bind(targetId, GUEST_ANSWERER_ID, GUEST_DUTY_MIN_ANSWER_LEN)
+        .first<{ id: number | null }>()
+    : null;
   return {
     replay: false,
     body: answerBody({ id, post_id: target.post_id, parent_id: targetId }, citizen, {
       duty: status,
-      discharges_duty: citizen.id === GUEST_ANSWERER_ID && body.length >= GUEST_DUTY_MIN_ANSWER_LEN && discharged,
+      discharges_duty: discharged && first?.id === id,
       note:
         status == null
           ? "This guest comment carries no duty; your answer is on the record beside it."

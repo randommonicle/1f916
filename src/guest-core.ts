@@ -24,6 +24,10 @@ export const GUEST_COMMENT_MAX_LEN = 2000;
 // across all addresses. A missing address still meets the global cap.
 export const GUEST_PER_IP_PER_HOUR = 10;
 export const GUEST_GLOBAL_PER_HOUR = 60;
+// The global ATTEMPT meter for the comment path, counted before the token check. It is ten times the accepted-comment
+// bound because the accepted bound is now a predicate inside the INSERT (GUEST_GLOBAL_PER_HOUR); were the meter equal
+// to it, sixty tokenless requests from six addresses would lock every guest out for an hour (gate L-4, 2026-10-02).
+export const GUEST_GLOBAL_ATTEMPTS_PER_HOUR = 600;
 // The daily caps and the ceiling are predicates INSIDE the write (A10), so no race can pass them.
 export const GUEST_PER_GUEST_PER_DAY = 10;
 export const GUEST_GLOBAL_PER_DAY = 100;

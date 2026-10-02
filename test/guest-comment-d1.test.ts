@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createLocalD1, seedCitizens, seedPost, seedTopic, seedDebatePost, seedVisitor, guestEnv, guestComment, call, count, freshIp, type LocalD1 } from "./helpers/guest.ts";
 import { sha256Hex } from "../src/chain.ts";
 import { assertValidHandle, type Env } from "../src/society.ts";
-import { GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR, GUEST_COMMENT_MAX_LEN, GUEST_DUTIES_PER_DAY, GUEST_GLOBAL_PER_DAY, GUEST_PER_GUEST_PER_DAY, GUEST_ROW_CEILING, GUEST_ANSWER_TARGET_HOURS, HOUR_MS } from "../src/guest-core.ts";
+import { GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_PER_HOUR, GUEST_GLOBAL_ATTEMPTS_PER_HOUR, GUEST_COMMENT_MAX_LEN, GUEST_DUTIES_PER_DAY, GUEST_GLOBAL_PER_DAY, GUEST_PER_GUEST_PER_DAY, GUEST_ROW_CEILING, GUEST_ANSWER_TARGET_HOURS, HOUR_MS } from "../src/guest-core.ts";
 import { enterShowhome, assertShowhomeRateCap } from "../src/showhome.ts";
 
 async function setup() {
@@ -371,10 +371,10 @@ test("12: the hourly per-address cap binds on the comment path with the comment 
     assert.equal(blocked.status, 429);
     assert.match(blocked.body.error, /Too many guest comments from your address this hour/);
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM guest_thread"), 10);
-    // global hourly cap: seed 60 'comment' attempts in the rate log, then a request with NO address is refused
+    // global hourly ATTEMPT meter (gate L-4: GUEST_GLOBAL_ATTEMPTS_PER_HOUR, not the accepted cap): seed that many 'comment' attempts in the rate log, then a request with NO address is refused
     const now = Date.now();
     d1.raw.exec("DELETE FROM showhome_rate");
-    for (let i = 0; i < 60; i++) d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('comment', ?, ?)").run(`h${i}`, now);
+    for (let i = 0; i < GUEST_GLOBAL_ATTEMPTS_PER_HOUR; i++) d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('comment', ?, ?)").run(`h${i}`, now);
     const v12 = await seedVisitor(d1);
     const noIp = await guestComment(env, v12.token, { post_id: post, body: "no address at all" }, null);
     assert.equal(noIp.status, 429);
@@ -565,6 +565,25 @@ test("CODEX r2: the showhome rate reservation is the cap: three concurrent attem
     assert.equal(nulls.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(nulls.map((r) => r.status)));
     for (const r of nulls) if (r.status === "rejected") assert.match(String((r.reason as Error).message), /Guest comments are at their limit across all addresses this hour/);
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM showhome_rate WHERE path = 'comment'"), GUEST_GLOBAL_PER_HOUR);
+  } finally {
+    d1.close();
+  }
+});
+
+test("gate L-4: sixty tokenless attempts from six addresses do not lock a real guest out of the hour", async () => {
+  // Mutant: meter the comment path's attempts at GUEST_GLOBAL_PER_HOUR again (src/guest.ts) -> the real guest gets 429.
+  const { d1, env, alice } = await setup();
+  try {
+    const post = seedPost(d1, alice);
+    for (let a = 1; a <= 6; a++) {
+      for (let i = 0; i < GUEST_PER_IP_PER_HOUR; i++) {
+        const r = await call(env, "POST", "/api/guest/comment", { post_id: post, body: "no token" }, { "CF-Connecting-IP": `198.51.100.${a}` });
+        assert.ok(r.status >= 400 && r.status < 500 && r.status !== 429, `tokenless attempt ${a}.${i}: ${r.status} ${JSON.stringify(r.body)}`);
+      }
+    }
+    const v = await seedVisitor(d1);
+    const real = await guestComment(env, v.token, { post_id: post, body: "a real guest after the flood" });
+    assert.equal(real.status, 201, JSON.stringify(real.body));
   } finally {
     d1.close();
   }

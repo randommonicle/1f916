@@ -399,3 +399,50 @@ test("CODEX r1.1: a critique admitted at the deepest level accrues no duty and s
     d1.close();
   }
 });
+
+// ---------- gate L-1 pins (M3, M4) and L-6 ----------
+
+test("gate L-1 M4: a GUEST whose visitor number is 1 replying 80+ characters under a critique never discharges it (the discharge needs author_kind citizen)", async () => {
+  // Mutant M4: drop `a.author_kind = 'citizen'` from FIRST_DISCHARGE_SQL -> the guest's reply discharges and the status reads answered.
+  const { d1, env } = await setup();
+  try {
+    const one = await seedVisitor(d1, "visitor-one");
+    assert.equal(one.id, 1, "the first visitor in a fresh database is number 1, the answerer's citizen id");
+    const c = await critique(d1, env);
+    const r = await guestComment(env, one.token, { post_id: c.topic, body: LONG, parent_kind: "thread", parent_id: c.id });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(status(d1, c.num), "open");
+  } finally {
+    d1.close();
+  }
+});
+
+test("gate L-1 M3: a duty answered in time and moderated afterwards stays answered, never waived", async () => {
+  // Mutant M3: evaluate `mod_state IS NOT NULL -> waived` before the discharge -> the status reads waived.
+  const { d1, env, maintainerSecret } = await setup();
+  try {
+    const c = await critique(d1, env);
+    assert.equal((await answer(env, maintainerSecret, { guest_comment_id: c.id, body: LONG })).status, 201);
+    d1.raw.prepare("UPDATE guest_thread SET mod_state = 'collapsed' WHERE id = ?").run(c.num);
+    assert.equal(status(d1, c.num), "answered");
+  } finally {
+    d1.close();
+  }
+});
+
+test("gate L-6: discharges_duty is true only on the answer that discharged the duty, never on a later one", async () => {
+  // Mutant: restore `body.length >= MIN && discharged` -> the second answer also reads true.
+  const { d1, env, maintainerSecret } = await setup();
+  try {
+    const c = await critique(d1, env);
+    const first = await answer(env, maintainerSecret, { guest_comment_id: c.id, body: LONG });
+    assert.equal(first.status, 201);
+    assert.equal(first.body.discharges_duty, true);
+    const second = await answer(env, maintainerSecret, { guest_comment_id: c.id, body: LONG + " A further note." });
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.discharges_duty, false, "an earlier answer discharged it");
+    assert.equal(second.body.duty, "answered");
+  } finally {
+    d1.close();
+  }
+});

@@ -192,6 +192,8 @@ $autoRows = @(Invoke-D1Read "SELECT name FROM sqlite_master WHERE type = 'index'
 if ($autoRows.Count -ne 2) { Stop-Here ("guests carries " + $autoRows.Count + " automatic unique indexes, expected 2 (visitor_id and token_hash).") }
 $countRows = @(Invoke-D1Read "SELECT (SELECT COUNT(*) FROM guest_thread) AS thread_rows, (SELECT COUNT(*) FROM guest_duty_runs) AS run_rows, (SELECT COUNT(*) FROM guests) AS guest_rows")
 if ($countRows.Count -ne 1 -or "$($countRows[0].thread_rows)" -notmatch "^[0-9]+$") { Stop-Here "the guest table count read returned no usable number." }
+# Zero rows, as promised above (gate L-5): the old worker never writes these tables, so a row here means something else did.
+if ([int64]$countRows[0].thread_rows -ne 0 -or [int64]$countRows[0].run_rows -ne 0 -or [int64]$countRows[0].guest_rows -ne 0) { Stop-Here ("the guest tables are not empty before the worker deploy (thread " + $countRows[0].thread_rows + ", runs " + $countRows[0].run_rows + ", guests " + $countRows[0].guest_rows + "); find what wrote them before deploying.") }
 Say ("[d1] catalogue-verified: guest_thread " + $GUEST_THREAD_COLUMN_NAMES.Count + " columns, guest_duty_runs " + $GUEST_RUN_COLUMN_NAMES.Count + ", guests " + $GUEST_COLUMN_NAMES.Count + ", primary key id on each, the " + $GUEST_INDEX_NAMES.Count + " guest_thread indexes, both CHECKs, the two guests unique indexes; rows: thread " + $countRows[0].thread_rows + ", runs " + $countRows[0].run_rows + ", guests " + $countRows[0].guest_rows)
 
 # 4. deploy the worker, capturing its version id (a deploy whose id cannot be read is a stop: it cannot be tied to this commit)
