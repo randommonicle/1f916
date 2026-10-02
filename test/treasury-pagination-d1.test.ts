@@ -1,4 +1,4 @@
-// GET /treasury paging (DEFERRED-TREASURY-PAGINATION, docs/BRIEF-TREASURY-PAGINATION.md,
+// GET /treasury paging (docs/BRIEF-TREASURY-PAGINATION.md,
 // amendments A1-A12), against real node:sqlite through the D1-shaped helper and the
 // committed schema.sql. No mocks of the code under test. Every guard here was red-proofed by
 // a mutant before it was trusted; docs/CHECKPOINT-TREASURY-PAGINATION.md carries the ledger

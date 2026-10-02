@@ -2170,9 +2170,9 @@ export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
 
 // The ledger page: GET /treasury serves at most this many entries per response, newest
 // first, and carries the census contract (total_entries, has_more, a tuple cursor) so a
-// reader can tell a page from the book. docs/BRIEF-TREASURY-PAGINATION.md (the old
-// DEFERRED-TREASURY-PAGINATION marker was here: past 200 rows the oldest dropped out
-// with no flag).
+// reader can tell a page from the book. Brief: docs/BRIEF-TREASURY-PAGINATION.md. This
+// read used to be a bare LIMIT 200, so past 200 rows the oldest dropped out with no flag
+// and any join against it inherited a window, not the book.
 export const LEDGER_PAGE = 200;
 
 // The ledger cursor GET /treasury?before_entry_date=<d>&before_id=<id> carries: the
