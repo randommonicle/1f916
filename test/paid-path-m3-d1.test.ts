@@ -1075,6 +1075,7 @@ test("C8: D1 commits the citizen batch and still throws: the answer does not pro
     assert.match(text, /No credential was delivered to you/);
     assert.doesNotMatch(text, /hands you a fresh secret/, "it no longer promises a fresh secret the booked claim cannot give");
     assert.match(text, /if a seat was already created before this error, the repeat tells you so, and that seat's secret cannot be recovered/);
+    assert.match(text, /if no seat was created, the repeat attempts to create it and, if that succeeds, hands you its secret/, "the hedge: a repeat under a persistent fault cannot promise the seat");
     assert.match(text, /Do not sign again/);
     // the batch DID commit: the seat exists and the claim is booked
     assert.equal(count(d1, "citizens WHERE handle = 'c8-after-commit'"), 1);
