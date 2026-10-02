@@ -504,7 +504,9 @@ export function contradictionAnswer(tx: string, state: string): ClaimAnswer {
 // that no route finisher took over. `reqs` is only for the 402 shapes that invite
 // a fresh signature (refused, expired). B9: every answer names the tx when one is
 // known and invites a second signature ONLY for refused and expired.
-export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string } = {}): ClaimAnswer {
+// `settledTx` (C2): the caller holds a facilitator SUCCESS verdict for this authorisation naming that tx, but could not write it to the claim because another
+// holder holds the still-pending row. The answer then names the tx and says what the caller knows, instead of "this request changed nothing".
+export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string } = {}): ClaimAnswer {
   if (!identical) {
     return {
       status: 409,
@@ -540,16 +542,28 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
           accepts: [reqs],
         },
       };
-    case "pending":
+    case "pending": {
+      const heldClause = opts.leaseHeld ? (row.route === "listing_pay" ? "Another attempt to resolve it is in progress. " : "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. ") : "";
+      const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`;
+      // C2 (re-gate LOW-1(b)): this request holds a success verdict naming the tx. The claim is still pending because another attempt held it when this request
+      // tried to write, so the payer is told what this request KNOWS (the facilitator's account, the tx) and what it does not (that the society has recorded it).
+      if (opts.settledTx) {
+        return {
+          status: 502,
+          body: {
+            error: `The facilitator reported this payment settled (tx ${opts.settledTx}), but this request could not record that: the society's own record of it is still pending, and another attempt held it when this request tried to write. By the facilitator's account this payment has already moved. Do not sign again. ${rest}`,
+            code: SETTLEMENT_UNRESOLVED,
+          },
+        };
+      }
       return {
         status: 502,
         body: {
-          error: `The outcome of this payment is still unknown${txPart(row)}: the settle request was sent and whether the money moved is not yet established. Do not sign again; this request changed nothing. ${
-            opts.leaseHeld ? (row.route === "listing_pay" ? "Another attempt to resolve it is in progress. " : "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. ") : ""
-          }${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`,
+          error: `The outcome of this payment is still unknown${txPart(row)}: the settle request was sent and whether the money moved is not yet established. Do not sign again; this request changed nothing. ${rest}`,
           code: SETTLEMENT_UNRESOLVED,
         },
       };
+    }
     case "settled_unbooked":
       if (isHandleTaken(row)) return { status: 409, body: { error: handleTakenMessage(row), code: REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT } };
       return {

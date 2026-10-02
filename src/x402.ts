@@ -760,7 +760,7 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
         if (done) return done;
       }
       const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
-      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail } : {}));
+      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail, ...(out.settledTx ? { settledTx: out.settledTx } : {}) } : {}));
     } finally {
       await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
     }
@@ -797,6 +797,24 @@ function logSettlementContradiction(row: Pick<ClaimRow, "from_addr" | "nonce">, 
   );
 }
 
+// C2: a facilitator success verdict this call holds could not be written to a claim that is still pending under another holder's lease (answerFromMovedClaim, and
+// attemptPending's re-read). ONE error-level line carries the tx, so a person can still book it if the holder meets C1 or the facilitator's recovery record expires.
+function logSettlementSuccessUnrecorded(row: Pick<ClaimRow, "from_addr" | "nonce" | "state">, settled: { tx: string; payer: string }, req: { resource: string; maxAmountRequired: string }): void {
+  console.log(
+    JSON.stringify({
+      level: "error",
+      event: "settlement_success_unrecorded",
+      tx: settled.tx,
+      payer: settled.payer,
+      resource: req.resource,
+      amount_atomic: req.maxAmountRequired,
+      claim_from: row.from_addr,
+      claim_nonce: row.nonce,
+      state: row.state,
+    }),
+  );
+}
+
 // C1: the log line AND the stamp, so the two contradiction branches (this request's own /settle, an attempt's re-POST) cannot drift. The stamp makes every
 // LATER identical replay of the terminal row read the contradiction (claimAnswer) instead of a 402 with fresh accepts. It must never change what THIS caller is
 // told, so a failed stamp is logged by `quietly` and the answer is unchanged.
@@ -820,11 +838,16 @@ async function answerFromMovedClaim(
     await recordContradiction(env, row, row.state, settled, reqs);
     return contradictionResponse(settled.tx, row.state);
   }
-  // DEFERRED-DROPPED-SETTLE-TX (re-gate LOW-1(b) and LOW-2, the next paid-path wave): a settle that succeeded while another holder holds a live
-  // lease on the still-pending claim reaches the line below with its tx neither logged nor served; and a booking step gated out while its ref
-  // is unrecorded and the claim is still settled_unbooked is answered as a booking failure. Fix: log one line with the tx and claim key here,
-  // and answer such a step from the claim (sites listed in the re-gate record).
-  if (row.state === "pending") return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+  if (row.state === "pending") {
+    // C2 (re-gate LOW-1(b)): this request's /settle said SUCCESS but the claim is pending under another holder, so nothing here records the tx. It is
+    // logged once (the one place a person can still find it) and the answer names it. It is NOT written to the pending row: markSettled is the only writer
+    // of `tx`, and the holder that has the lease will either book (the facilitator's cached success) or meet C1.
+    if (settled) {
+      logSettlementSuccessUnrecorded(row, settled, reqs);
+      return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true, settledTx: settled.tx }));
+    }
+    return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+  }
   return respondToExistingClaim(env, row, true, reqs, claim);
 }
 
@@ -862,7 +885,7 @@ export type AttemptOutcome = (
   | { kind: "settled"; row: ClaimRow }
   | { kind: "expired" }
   | { kind: "refused" }
-  | { kind: "unchanged"; detail: string }
+  | { kind: "unchanged"; detail: string; settledTx?: string }
   | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
 ) & { fetches: number };
 
@@ -907,7 +930,14 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
       await recordContradiction(env, moved, moved.state, { tx, payer }, body.paymentRequirements);
       return { kind: "contradiction", tx, state: moved.state, fetches };
     }
-    return moved && moved.state === "settled_unbooked" ? { kind: "settled", row: moved, fetches } : { kind: "unchanged", detail: "another worker moved the claim", fetches };
+    if (moved && moved.state === "settled_unbooked") return { kind: "settled", row: moved, fetches };
+    if (moved && moved.state === "pending") {
+      // C2 (re-gate LOW-1(b)): the re-POST answered SUCCESS, another holder holds the still-pending claim, and nothing here may write the tx to it. Logged once and
+      // carried in the outcome, so the re-send's answer names it; the reconciler's outcome counts it unchanged, the line already written.
+      logSettlementSuccessUnrecorded(moved, { tx, payer }, body.paymentRequirements);
+      return { kind: "unchanged", detail: "", settledTx: tx, fetches };
+    }
+    return { kind: "unchanged", detail: "another worker moved the claim", fetches };
   }
   // The row as markSettled left it (no re-read: a pending row has recorded no booking yet).
   return { kind: "settled", row: { ...row, state: "settled_unbooked", tx, payer, verdict_reason: null }, fetches };

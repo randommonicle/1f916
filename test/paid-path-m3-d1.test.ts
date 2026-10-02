@@ -257,3 +257,118 @@ test("C1: the stamp lands only on a refused or expired row: never on a pending, 
     d1.close();
   }
 });
+
+// ---------- C2: a success verdict is never dropped silently when the claim is pending under another holder's live lease (re-gate P-D) ----------
+
+function assertSuccessKept(body: Record<string, any>, lines: string[], d1: LocalD1, how: string) {
+  assert.equal(body.code, "settlement_unresolved", how);
+  assert.match(String(body.error), new RegExp(TX), `${how}: the answer names the tx the facilitator reported`);
+  assert.match(String(body.error), /Do not sign again/, `${how}: and says not to sign again`);
+  assert.doesNotMatch(String(body.error), /changed nothing/, `${how}: it no longer says this request changed nothing`);
+  assert.doesNotMatch(String(body.error), /nothing was charged|sign a fresh one/i);
+  const logged = eventLines(lines, "settlement_success_unrecorded");
+  assert.equal(logged.length, 1, `${how}: exactly one settlement_success_unrecorded line`);
+  assert.equal(logged[0].level, "error");
+  assert.equal(logged[0].tx, TX, `${how}: the line carries the tx`);
+  assert.equal(logged[0].payer, TEST_PAYER);
+  assert.match(String(logged[0].resource), /\/api\/patron$/);
+  assert.equal(logged[0].amount_atomic, "1000000");
+  assert.equal(logged[0].state, "pending", "the row's state");
+  assert.equal(logged[0].claim_from, TEST_PAYER);
+  assert.match(String(logged[0].claim_nonce), /^0x[0-9a-f]{64}$/);
+  const row = d1.raw.prepare("SELECT state, tx, lease_owner FROM settlement_claims").get() as { state: string; tx: string | null; lease_owner: string | null };
+  assert.equal(row.state, "pending", `${how}: the claim is untouched`);
+  assert.equal(row.tx, null, `${how}: the tx is NOT written to the pending row (markSettled is its only writer)`);
+  assert.equal(row.lease_owner, "B", `${how}: the other holder keeps its lease`);
+}
+
+test("C2 (P-D, this request's own /settle): the facilitator says settled while B holds a live lease on the pending claim: ONE error line carrying the tx, and an answer that names it", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async () => {
+      await bTakesTheLease(d1);
+      return settledAnswer();
+    },
+  });
+  try {
+    const { value: res, lines } = await captureLog(() => callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1)));
+    assert.equal(res.status, 502);
+    assertSuccessKept(await json(res), lines, d1, "own settle");
+    assert.equal(count(d1, "ledger"), 0, "nothing was booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C2 (the re-send's re-POST): the re-POST answers settled while B holds a live lease on the pending claim: the same line and the same honest answer", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async (n) => {
+      if (n === 1) return pendingAnswer();
+      await bTakesTheLease(d1);
+      return settledAnswer();
+    },
+    rpc: () => authStateAnswer(false),
+  });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    assert.equal((await callWorker(patronReq("rent", header), eq(d1))).status, 502);
+    const { value: res, lines } = await captureLog(() => callWorker(patronReq("rent", header), eq(d1)));
+    assert.equal(res.status, 502);
+    assertSuccessKept(await json(res), lines, d1, "re-send");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C2 (the reconciler's re-POST): the same race inside the scheduled reconciler writes the line once and counts the row unchanged", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async (n) => {
+      if (n === 1) return pendingAnswer();
+      await bTakesTheLease(d1);
+      return settledAnswer();
+    },
+    rpc: () => authStateAnswer(false),
+  });
+  try {
+    assert.equal((await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1))).status, 502);
+    const { value: out, lines } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(out.unchanged, 1);
+    assert.equal(out.booked, 0);
+    assert.equal(out.contradicted, 0);
+    const logged = eventLines(lines, "settlement_success_unrecorded");
+    assert.equal(logged.length, 1, "exactly one line");
+    assert.equal(logged[0].tx, TX);
+    assert.equal(logged[0].state, "pending");
+    const row = d1.raw.prepare("SELECT state, tx FROM settlement_claims").get() as { state: string; tx: string | null };
+    assert.equal(row.state, "pending");
+    assert.equal(row.tx, null);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C2 control: an ordinary unknown outcome (no verdict in hand) still says this request changed nothing and writes no settlement_success_unrecorded line", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer() });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    const { value: res, lines } = await captureLog(async () => {
+      const first = await callWorker(patronReq("rent", header), eq(d1));
+      const replay = await callWorker(patronReq("rent", header), eq(d1));
+      return [first, replay] as const;
+    });
+    for (const r of res) {
+      assert.equal(r.status, 502);
+    }
+    assert.match(String((await json(res[1])).error), /changed nothing/);
+    assert.equal(eventLines(lines, "settlement_success_unrecorded").length, 0, "no success verdict, no success line");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
