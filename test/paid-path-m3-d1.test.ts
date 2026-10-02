@@ -43,6 +43,7 @@ import {
   keyOfRow,
   markContradiction,
   markExpired,
+  markListingNotPaying,
   markRefused,
   stepGatedOutByLease,
   takeClaim,
@@ -773,6 +774,24 @@ test("C5 control: a bounty payment whose listing is STILL 'paying' is not marked
     assert.notEqual(row.verdict_reason, "listing_not_paying");
   } finally {
     stub.restore();
+    d1.close();
+  }
+});
+
+test("C5: markListingNotPaying records its reason once (only the first call reports it, so the line is written once), and only on a settled_unbooked row", async () => {
+  const d1 = createLocalD1();
+  try {
+    const pending = await claimInState(d1, "pending");
+    assert.equal(await markListingNotPaying(eq(d1), pending, "A", Date.now()), false, "a pending claim is never marked: it can still expire or settle");
+    const key = await claimInState(d1, "settled_unbooked");
+    assert.equal(await markListingNotPaying(eq(d1), key, "A", Date.now()), true);
+    assert.equal(await markListingNotPaying(eq(d1), key, "A", Date.now()), false, "already marked");
+    const row = (await getClaim(eq(d1), key)) as ClaimRow;
+    assert.equal(row.verdict_reason, "listing_not_paying");
+    assert.equal(row.state, "settled_unbooked");
+    assert.equal(row.lease_owner, null);
+    assert.equal(((await getClaim(eq(d1), pending)) as ClaimRow).verdict_reason, null);
+  } finally {
     d1.close();
   }
 });
