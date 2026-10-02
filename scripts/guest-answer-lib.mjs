@@ -1,13 +1,13 @@
-// Shared, read-only helpers for the guest-answer loop (docs/BRIEF-GUEST-VOICE.md A6, G4b option A).
+// Shared, read-only helpers for the guest-answer loop (docs/BRIEF-GUEST-VOICE.md A6, A12, A13; G4b option A).
 // No custody file is read here and no request here writes: every fetch is a GET. The draft step
-// (guest-due-draft.mjs) imports only this; the send step (guest-answer-send.mjs) adds the one POST.
-import { createHash } from "node:crypto";
+// (guest-due-draft.mjs) imports only this; the send step (guest-answer-send.mjs) adds the one write.
 
 export const DEFAULT_BASE = "https://commonhold.randommonicle.workers.dev";
 export const ANSWERER = "commonhold-agent";
 export const MIN_ANSWER_LEN = 80; // GUEST_DUTY_MIN_ANSWER_LEN (src/guest-core.ts): a shorter answer discharges nothing
 export const MAX_ANSWER_LEN = 2000;
 export const IDEM_KEY_MAX = 64; // GUEST_IDEM_KEY_MAX_LEN (src/guest-core.ts)
+export const DISCHARGED = new Set(["answered", "answered_late"]);
 
 export async function getJson(url) {
   const r = await fetch(url, { method: "GET", signal: AbortSignal.timeout(30_000) });
@@ -20,21 +20,21 @@ export async function getJson(url) {
   }
 }
 
-// Every actionable duty (open or overdue), all pages, in served order.
-export async function readActionable(base) {
+// Every duty row in one view ("actionable": open and overdue; "history": answered, answered_late, waived), all pages.
+export async function readDue(base, view = "actionable") {
   const items = [];
   let after = null;
   for (let page = 0; page < 100; page++) {
-    const q = new URLSearchParams({ view: "actionable" });
+    const q = new URLSearchParams({ view });
     if (after) q.set("after", after);
     const doc = await getJson(`${base}/api/guest/due?${q}`);
     if (!Array.isArray(doc.items)) throw new Error("/api/guest/due carried no items array");
     items.push(...doc.items);
-    if (!doc.has_more) return { items, doc };
+    if (!doc.has_more) return items;
     if (!doc.next_cursor) throw new Error("/api/guest/due said has_more with no next_cursor");
     after = doc.next_cursor;
   }
-  throw new Error("/api/guest/due did not end within 100 pages");
+  throw new Error(`/api/guest/due (${view}) did not end within 100 pages`);
 }
 
 // Every row of a post's guest thread, all pages.
@@ -53,37 +53,80 @@ export async function readThread(base, postId) {
   throw new Error(`/api/guest/thread for post ${postId} did not end within 1000 pages`);
 }
 
-// The answerer's rows directly under guest row `gid` (the only rows that can discharge it).
-export function answersTo(rows, gid, handle = ANSWERER) {
+// The answerer's rows directly under guest row `gid`, and which of them discharge it (the G4 predicate:
+// not moderated, at least MIN_ANSWER_LEN characters).
+export function answererRows(rows, gid, handle = ANSWERER) {
   return rows.filter((r) => r.parent && r.parent.kind === "thread" && r.parent.id === gid && r.tier === "citizen" && r.author === handle);
+}
+export function discharges(row) {
+  return row.mod_state == null && typeof row.body === "string" && row.body.length >= MIN_ANSWER_LEN;
+}
+
+// A12: the key is derived from live state, `duty:g<n>:v<k>`, k = 1 + the answerer's NON-discharging answers on that
+// row. Two overlapping runs compute the same key, so the server writes one row (a different body is 409
+// idempotency_key_reused); after a non-discharging answer, a fresh answer is still possible.
+export function dutyKey(gid, rows) {
+  const nonDischarging = answererRows(rows, gid).filter((r) => !discharges(r)).length;
+  return `duty:${gid}:v${1 + nonDischarging}`;
 }
 
 export function normaliseBody(text) {
   return String(text).replace(/^﻿/, "").replace(/\r\n/g, "\n").replace(/\n+$/, "");
 }
 
-// Refusals for a body before anything is sent; [] means it may go.
+// Refusals for a body before anything is sent; [] means it may go. A body line may not look like exchange
+// structure (a section header, a marker, a fence), so the answer block cannot be confused with a verdict.
 export function bodyProblems(body) {
   const p = [];
   if (body.length < MIN_ANSWER_LEN) p.push(`body is ${body.length} characters; under ${MIN_ANSWER_LEN} it discharges nothing`);
   if (body.length > MAX_ANSWER_LEN) p.push(`body is ${body.length} characters; over ${MAX_ANSWER_LEN}`);
   if (/[–—]/.test(body)) p.push("body carries an en or em dash");
+  if (body.split("\n").some((l) => /^(## \[|\[\[|```)/.test(l))) p.push("a body line starts with '## [', '[[' or a fence");
   return p;
 }
 
-// Deterministic per (target, body): a retry of the same answer replays; a different body is a different key.
-export function idemKey(gid, body) {
-  return `ga-${gid}-` + createHash("sha256").update(`${gid}\n${body}`).digest("hex").slice(0, 40);
+// Guest text is untrusted: it enters an exchange file only as ONE JSON-encoded line, which cannot start a
+// section header, a marker line or a fence.
+export function encodeGuestText(text) {
+  return JSON.stringify(text == null ? null : String(text));
 }
 
-// The exchange gate: the exact body appears in the file, and AFTER its last appearance both seats wrote a
-// section that says [[CONVERGED]]. Returns null when converged, else the reason.
-export function convergenceProblem(exchangeText, body) {
-  const text = normaliseBody(exchangeText);
-  const at = text.lastIndexOf(body);
-  if (at < 0) return "the exact body does not appear in the exchange file";
-  const sections = text.slice(at + body.length).split(/\n(?=## \[)/).filter((s) => s.startsWith("## ["));
-  const converged = (seat) => sections.some((s) => s.startsWith(`## [${seat} `) && s.includes("[[CONVERGED]]"));
-  const missing = ["GEMINI", "CODEX"].filter((seat) => !converged(seat));
-  return missing.length ? `no [[CONVERGED]] from ${missing.join(" and ")} after the body's last appearance` : null;
+const HEADER = /^## \[(CLAUDE|GEMINI|CODEX) [^\]]*\]\s*$/;
+export function parseSections(text) {
+  const out = [];
+  for (const line of normaliseBody(text).split("\n")) {
+    const m = HEADER.exec(line);
+    if (m) out.push({ handle: m[1], lines: [] });
+    else if (out.length) out[out.length - 1].lines.push(line);
+  }
+  return out;
+}
+
+// A seat's verdict counts only as the protocol writes it: a line that is exactly [[CONVERGED]], followed (blank
+// lines aside) by that seat's own [[END <SEAT> round N]] line.
+function sectionConverges(section) {
+  const ls = section.lines.map((l) => l.trim()).filter((l) => l !== "");
+  const end = new RegExp(`^\\[\\[END ${section.handle} round \\d+\\]\\]$`);
+  return ls.some((l, i) => l === "[[CONVERGED]]" && end.test(ls[i + 1] ?? ""));
+}
+
+// The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target on a
+// line exactly `Target: <gid>` and carries the answer in an ```answer fenced block equal to the body; each seat's
+// LATEST section comes after that hub section and converges. Returns null when approved, else the reason.
+export function approvalProblem(exchangeText, target, body) {
+  const sections = parseSections(exchangeText);
+  const lastHub = sections.map((s) => s.handle).lastIndexOf("CLAUDE");
+  if (lastHub < 0) return "no hub section";
+  const hub = sections[lastHub].lines;
+  if (!hub.includes(`Target: ${target}`)) return `the last hub section does not name Target: ${target}`;
+  const open = hub.indexOf("```answer");
+  const close = open < 0 ? -1 : hub.indexOf("```", open + 1);
+  if (open < 0 || close < 0) return "the last hub section has no closed ```answer block";
+  if (hub.slice(open + 1, close).join("\n") !== body) return "the ```answer block in the last hub section is not exactly the body";
+  for (const seat of ["GEMINI", "CODEX"]) {
+    const last = sections.map((s) => s.handle).lastIndexOf(seat);
+    if (last < lastHub) return `${seat} has not answered since the last hub section`;
+    if (!sectionConverges(sections[last])) return `${seat}'s latest section does not converge`;
+  }
+  return null;
 }
