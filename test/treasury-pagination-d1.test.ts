@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
-import { treasury, parseLedgerCursor, LEDGER_PAGE, SocietyError, type Env, type LedgerCursor } from "../src/society.ts";
+import { treasury, recordLedger, parseLedgerCursor, LEDGER_PAGE, MAINTAINER_ID, SocietyError, type Env, type LedgerCursor } from "../src/society.ts";
 import { ROUTES } from "../src/discovery.ts";
 import worker from "../src/index.ts";
 
@@ -468,4 +468,42 @@ test("A1: the served claim 'every ledger writer today takes entry_date from the 
     }
   }
   assert.equal(writers.length, 5, `exactly five ledger writers set entry_date (recordLedger, registration, payout, listing fee, patron), found ${writers.length}: ${writers.join(", ")}`);
+});
+
+// ---------- T7 / A3: a row written between two pages ----------
+
+test("T7/A3: a row the real writer inserts between page 1 and page 2 sorts ahead of the cursor, so the walk neither sees it nor repeats a row, and page 2's total_entries is page 1's plus one", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLedger(d1, 250); // every fixture row is dated in 2025, before today (UTC)
+    const env = makeEnv(d1);
+    const page1 = (await treasury(env)) as unknown as Page;
+    assert.equal(page1.has_more, true);
+    assert.equal(page1.total_entries, 250);
+    const today = new Date().toISOString().slice(0, 10);
+    assert.ok(page1.entries.every((e) => e.entry_date < today), "precondition: the fixture is dated before today, so a row written now sorts ahead of it");
+
+    // The real writer: recordLedger (the maintainer, citizen 1; a bearer credential, so no signed intent is required),
+    // which seals a row dated today into the treasury chain through appendChained.
+    const written = await recordLedger(env, { id: MAINTAINER_ID } as unknown as Parameters<typeof recordLedger>[1], "walk-time inflow, tx 0xabc", 7, null);
+    assert.ok(written.receipt, "the writer sealed the row");
+    const newRow = allRows(d1).find((r) => r.description === "walk-time inflow, tx 0xabc");
+    assert.ok(newRow, "the row is in the ledger");
+    assert.equal(newRow.entry_date, today);
+
+    const page2 = (await treasury(env, cursorOf(page1))) as unknown as Page;
+    assert.ok(!page2.entries.some((e) => e.id === newRow.id), "page 2 does not contain the row written mid-walk: it sorts ahead of page 1's cursor");
+    const seen = [...page1.entries, ...page2.entries].map((e) => e.id);
+    assert.equal(new Set(seen).size, seen.length, "no row is served twice");
+    assert.equal(seen.length, 250, "the walk saw exactly the 250 rows that existed when it began");
+    assert.equal(page2.total_entries, page1.total_entries + 1, "the changed count signals the growth");
+    assert.equal(page2.booked_cents, page1.booked_cents + 7, "booked_cents is read afresh on every request (A11)");
+
+    // A fresh walk from the first page does see it, first.
+    const fresh = await walk(env);
+    assert.equal(fresh[0].entries[0].id, newRow.id, "a fresh walk starts with the new row");
+    assert.equal(fresh.flatMap((p) => p.entries).length, 251);
+  } finally {
+    d1.close();
+  }
 });
