@@ -92,8 +92,20 @@ test("A6 approval (CODEX guest-answer r1 HIGH): a marker inside an HTML comment 
   assert.match(approvalProblem(hidden, "g7", ANSWER), /ambiguous/);
   const sameLine = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!-- x --> [[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
   assert.match(approvalProblem(sameLine, "g7", ANSWER), /CODEX's latest section does not converge/, "a line touching a comment is never the verdict");
-  const commentThenVerdict = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!--", "scratch note", "-->", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "<!-- seat: CODEX | thread: x -->", ""].join("\n");
+  const commentThenVerdict = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!--", "scratch note", "-->", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "<!-- seat: CODEX | thread: x -->", ""].join("\n");
   assert.equal(approvalProblem(commentThenVerdict, "g7", ANSWER), null, "a closed comment before a real verdict does not block it");
+});
+
+test("A6 approval (CODEX guest-answer r2 HIGH): a marker that is a lazy continuation of a quotation or list item is not a verdict; the verdict needs a blank line before it and only blank lines before END", () => {
+  // Mutants: drop the blank-line-before check -> the lazy-quote and lazy-list cases approve; drop the blank-only-between
+  // check -> the trailing-quote case approves.
+  const lazyQuote = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected.", "", "> Example verdict (quoted):", "[[CONVERGED]]", "", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(lazyQuote, "g7", ANSWER), /CODEX's latest section does not converge/, "CODEX's probe: CommonMark reads the marker as part of the quotation");
+  const lazyList = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. An approval would add:", "- a verdict line:", "[[CONVERGED]]", "", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(lazyList, "g7", ANSWER), /CODEX's latest section does not converge/);
+  const trailingQuote = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected.", "", "[[CONVERGED]]", "> is what I would write if it were fixed.", "", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(trailingQuote, "g7", ANSWER), /CODEX's latest section does not converge/, "only blank lines may sit between the marker and END");
+  assert.equal(approvalProblem(approved("g7", ANSWER), "g7", ANSWER), null, "the positive control still approves");
 });
 
 test("A12 NUL (CODEX scripts r3): SQLite's length() stops at U+0000, so a NUL is refused and counted as SQLite counts it", () => {

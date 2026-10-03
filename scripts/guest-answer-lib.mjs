@@ -173,12 +173,20 @@ export function parseSections(text) {
 // blockquote and every HTML comment (the transport's trailing note included), ignoring blank lines, the last line is
 // exactly that seat's own [[END <SEAT> round N]] with N the header's round, and the line before it is exactly
 // [[CONVERGED]] at column 0 (an indented line is code or a quotation, never a verdict; only trailing whitespace is ignored).
+// The verdict also needs a hard boundary (CODEX guest-answer r2 HIGH): the raw line before [[CONVERGED]] is blank and
+// only blank lines sit between it and END. A blank line ends any blockquote, list item or paragraph, so the marker
+// cannot be a lazy continuation of a quotation (CommonMark 5.1, `> quoted:` then `[[CONVERGED]]` on the next line).
 function sectionConverges(section) {
-  const ls = section.lines
-    .filter((l) => !l.fenced && !l.commented)
-    .map((l) => l.text.trimEnd())
-    .filter((l) => l.trim() !== "" && !l.trimStart().startsWith(">"));
-  return section.round != null && ls.length >= 2 && ls[ls.length - 1] === `[[END ${section.handle} round ${section.round}]]` && ls[ls.length - 2] === "[[CONVERGED]]";
+  const raw = section.lines.map((l) => ({ ...l, t: l.text.trimEnd() }));
+  const sig = raw
+    .map((l, i) => ({ ...l, i }))
+    .filter((l) => !l.fenced && !l.commented && l.t.trim() !== "" && !l.t.trimStart().startsWith(">"));
+  if (section.round == null || sig.length < 2) return false;
+  const end = sig[sig.length - 1];
+  const verdict = sig[sig.length - 2];
+  if (end.t !== `[[END ${section.handle} round ${section.round}]]` || verdict.t !== "[[CONVERGED]]") return false;
+  if (verdict.i === 0 || raw[verdict.i - 1].t !== "") return false;
+  return raw.slice(verdict.i + 1, end.i).every((l) => l.t === "");
 }
 
 // The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target on a
