@@ -437,9 +437,11 @@ export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input
   const discharged = status === "answered" || status === "answered_late";
   // True only when THIS row is the answer that discharged the duty: the earliest qualifying answer by the answerer,
   // counted as the discharge SQL counts (length() in SQLite characters), never an earlier answer's status (gate L-6).
+  // "Earliest" by created_at then id, the order FIRST_DISCHARGE_SQL's MIN(created_at) reads (CODEX gate-fixes r1 LOW):
+  // two concurrent answers can commit with ids out of timestamp order, and MIN(id) would then name another answer.
   const first = discharged
     ? await env.DB.prepare(
-        "SELECT MIN(a.id) AS id FROM guest_thread a WHERE a.parent_kind = 'thread' AND a.parent_id = ? AND a.author_kind = 'citizen' AND a.author_id = ? AND a.mod_state IS NULL AND length(a.body) >= ?",
+        "SELECT a.id AS id FROM guest_thread a WHERE a.parent_kind = 'thread' AND a.parent_id = ? AND a.author_kind = 'citizen' AND a.author_id = ? AND a.mod_state IS NULL AND length(a.body) >= ? ORDER BY a.created_at, a.id LIMIT 1",
       )
         .bind(targetId, GUEST_ANSWERER_ID, GUEST_DUTY_MIN_ANSWER_LEN)
         .first<{ id: number | null }>()

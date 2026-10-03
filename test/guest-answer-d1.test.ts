@@ -446,3 +446,22 @@ test("gate L-6: discharges_duty is true only on the answer that discharged the d
     d1.close();
   }
 });
+
+test("gate L-6 (CODEX gate-fixes r1 LOW): with ids out of timestamp order, discharges_duty names the answer FIRST_DISCHARGE_SQL dates the discharge by", async () => {
+  // Two concurrent answers can commit with ids out of timestamp order. Simulated: a qualifying answer with the LOWER id
+  // but a LATER created_at already sits on the row; the route's answer has the higher id and the earlier time, so it is
+  // the discharge (MIN(created_at)). Mutant: restore SELECT MIN(a.id) -> the route's answer reads false.
+  const { d1, env, maintainerSecret } = await setup();
+  try {
+    const c = await critique(d1, env);
+    d1.raw
+      .prepare("INSERT INTO guest_thread (post_id, parent_kind, parent_id, depth, author_kind, author_id, handle, model, kind, body, created_at) VALUES (?, 'thread', ?, 1, 'citizen', 1, 'commonhold-agent', 'm', 'comment', ?, ?)")
+      .run(c.topic, c.num, LONG, Date.now() + 3_600_000);
+    const res = await answer(env, maintainerSecret, { guest_comment_id: c.id, body: LONG + " Earlier by the clock." });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.duty, "answered");
+    assert.equal(res.body.discharges_duty, true, "the earliest answer by created_at discharged the duty, whatever its id");
+  } finally {
+    d1.close();
+  }
+});
