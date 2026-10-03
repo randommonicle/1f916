@@ -320,6 +320,29 @@ test("C2 (P-D, this request's own /settle): the facilitator says settled while B
   }
 });
 
+test("C2 (CODEX M3-build r1 MEDIUM): a success reported with an EMPTY tx while B holds the lease is still disclosed as a success, the tx named as not reported", async () => {
+  // Mutant: restore the truthiness test `if (opts.settledTx)` -> the answer says the outcome is unknown and that this request changed nothing.
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async () => {
+      await bTakesTheLease(d1);
+      return new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: "" }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  try {
+    const { value: res } = await captureLog(() => callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1)));
+    const body = await json(res);
+    assert.equal(res.status, 502, JSON.stringify(body));
+    assert.match(String(body.error), /reported this payment settled \(tx not reported\)/);
+    assert.match(String(body.error), /Do not sign again/);
+    assert.doesNotMatch(String(body.error), /changed nothing/);
+    assert.equal(count(d1, "ledger"), 0, "nothing was booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("C2 (the re-send's re-POST): the re-POST answers settled while B holds a live lease on the pending claim: the same line and the same honest answer", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({
@@ -1000,6 +1023,55 @@ test("C6: the expiry path's worst case through the real reconciler stays inside 
     assert.equal(out.actualCost, RECONCILE_SELECT_COST + 2 + 11, "the select, the lease and the terminal write, and the eleven RPC fetches");
     assert.ok(out.actualCost - RECONCILE_SELECT_COST <= RECONCILE_ROW_WORST_CASE, `the row cost ${out.actualCost - RECONCILE_SELECT_COST}, inside the ${RECONCILE_ROW_WORST_CASE} priced worst case`);
     assert.equal(count(d1, "ledger"), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("C6 (CODEX M3-build r1 MEDIUM): when the expiry write THROWS after the pinned re-read, the reconciler prices the row at the C6 fetch maximum, never below the fetches it really made", async () => {
+  // Same bad day as above, but markExpired's UPDATE throws: attemptPending cannot report its fetches, and the old substitute (5: 4 RPC + 1 settle)
+  // understated the eleven RPC fetches. Mutant: restore `fetches = 5` -> the priced cost falls below the measured fetches.
+  const d1 = createLocalD1();
+  const V = NOW_S() - 5_000;
+  const urls: string[] = [];
+  const stub = stubFacilitator({
+    settle: () => pendingAnswer(),
+    rpc: (url, n, init) => {
+      const body = JSON.parse(String(init?.body)) as { method: string; params: unknown[] };
+      if (!urls.includes(url)) urls.push(url);
+      const position = urls.indexOf(url);
+      const plain = body.method === "eth_call" && body.params[1] === "latest";
+      if (plain && position <= 1) return null;
+      if (!plain && position === 0) return null;
+      if (!plain && position === 1) return chainRpc(false, V - 1)(url, n, init);
+      return chainRpc(false)(url, n, init);
+    },
+  });
+  const base = eq(d1);
+  let failed = 0;
+  const failingDb = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (sql.includes("SET state = 'expired'")) {
+            const boom: any = { bind: () => boom, run: async () => { failed++; throw new Error("D1_ERROR: injected"); }, first: async () => { failed++; throw new Error("D1_ERROR: injected"); }, all: async () => { failed++; throw new Error("D1_ERROR: injected"); } };
+            return boom;
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    await seedClaim(d1, { route: "patron", intent: { line: "c6 cost" }, state: "pending", updatedAt: 1_000, validBefore: String(V) });
+    const out = await runReconciler({ ...base, DB: failingDb } as unknown as Env);
+    assert.ok(failed >= 1, "the expiry write was attempted and failed");
+    assert.equal(stub.rpcCalls.length, 11, "the same eleven RPC fetches as the bad day above");
+    assert.ok(out.actualCost - RECONCILE_SELECT_COST >= stub.rpcCalls.length + 1, `priced ${out.actualCost - RECONCILE_SELECT_COST} for the row, measured at least ${stub.rpcCalls.length + 1} (the RPC fetches and the lease)`);
+    assert.ok(out.actualCost - RECONCILE_SELECT_COST <= RECONCILE_ROW_WORST_CASE, "and still inside the priced worst case");
   } finally {
     stub.restore();
     d1.close();

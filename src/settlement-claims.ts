@@ -589,11 +589,12 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`;
       // C2 (re-gate LOW-1(b)): this request holds a success verdict naming the tx. The claim is still pending because another attempt held it when this request
       // tried to write, so the payer is told what this request KNOWS (the facilitator's account, the tx) and what it does not (that the society has recorded it).
-      if (opts.settledTx) {
+      // CODEX M3-build r1 MEDIUM: the success is the fact, the tx string is detail; a success reported with an empty tx is still a success.
+      if (opts.settledTx !== undefined) {
         return {
           status: 502,
           body: {
-            error: `The facilitator reported this payment settled (tx ${opts.settledTx}), but this request could not record that: the society's own record of it is still pending, and another attempt held it when this request tried to write. By the facilitator's account this payment has already moved. Do not sign again. ${rest}`,
+            error: `The facilitator reported this payment settled (tx ${opts.settledTx || "not reported"}), but this request could not record that: the society's own record of it is still pending, and another attempt held it when this request tried to write. By the facilitator's account this payment has already moved. Do not sign again. ${rest}`,
             code: SETTLEMENT_UNRESOLVED,
           },
         };

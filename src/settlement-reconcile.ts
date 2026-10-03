@@ -51,6 +51,8 @@ export const RECONCILE_BATCH_ROWS = 2;
 export const RECONCILE_SELECT_COST = 1;
 // One row's worst case (see the itemisation above). A row is started only if this still fits.
 export const RECONCILE_ROW_WORST_CASE = 18;
+// The most fetches one pending attempt can make (C6's expiry branch: 4 plain + 8 pinned RPC); what a row that THREW is priced at.
+export const ATTEMPT_FETCH_WORST_CASE = 12;
 // The most the reconciler may spend in one invocation (measured, not priced), however much is left: it lets a cheap
 // first row (a failing or expired one) be followed by a second. On a given day it is also capped by what is LEFT after
 // the sweep, the concierge's actual cost and the clerk's minimum (runReconciler's `reservedCost`, hub ruling F3).
@@ -249,8 +251,10 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
         }
       }
       // A row that threw mid-attempt may have made fetches it could not report: price the failure at
-      // the row's worst case for fetches (4 RPC + 1 settle), never below what was counted.
-      if (threw && fetches === 0 && due.state === "pending") fetches = 5;
+      // the attempt's worst case for fetches, never below what was counted. Since C6 that is the expiry
+      // branch's 4 plain + 8 pinned RPC fetches = 12 (the settle branch is 4 RPC + 1 settle = 5); CODEX
+      // M3-build r1 MEDIUM: the old 5 understated a row whose expiry write threw after the pinned re-read.
+      if (threw && fetches === 0 && due.state === "pending") fetches = ATTEMPT_FETCH_WORST_CASE;
       out.actualCost += meter.n + fetches;
     }
   }
