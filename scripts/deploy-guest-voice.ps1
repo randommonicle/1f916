@@ -160,7 +160,7 @@ if ($tablesPresent -eq 0 -and $MigrationAlreadyApplied) { Stop-Here "-MigrationA
 Say ("[d1] guest tables present before: " + $tablesPresent + " of 3; settlement_claims present (M2 is on prod)")
 
 if ($DryRun) {
-  Say "[dry-run] would now: apply $migrationPath to the REMOTE D1 (skipped if -MigrationAlreadyApplied); catalogue-verify all three tables (every column in order, the primary key, the six guest_thread indexes, the two CHECKs, zero rows); run npx wrangler deploy and capture its version id; poll GET /api/guest/due until it answers 200; re-check attest (v5, template $($V5_HASH.Substring(0, 8)), every chain ok); ride the public reads (a post read carries guest_thread, /api/official.guest_voice, /skill.md 1.1.1, /api/stats guest fields). Nothing remote was written."
+  Say "[dry-run] would now: apply $migrationPath to the REMOTE D1 (skipped if -MigrationAlreadyApplied); catalogue-verify all three tables (every column in order, the primary key, the six guest_thread indexes, the two CHECKs, zero rows); run npx wrangler deploy and capture its version id; poll GET /api/guest/due until it answers 200; re-check attest (v5, template $($V5_HASH.Substring(0, 8)), every chain ok); ride the public reads (a post read carries guest_thread, /api/official.guest_voice, /skill.md 1.1.2, /api/stats guest fields). Nothing remote was written."
   exit 0
 }
 
@@ -264,4 +264,4 @@ $stats = Get-Json "$BASE/api/stats"
 if ($null -eq $stats.guest_comments) { Stop-Here "GET /api/stats has no guest_comments field." }
 Say ("[ride] /api/stats guest_comments " + $stats.guest_comments + " (separate from comments " + $stats.comments + ")")
 Say "[note] The write paths (POST /api/guest/comment, POST /api/guest/answer) and the 06:00 UTC daily check are first ridden by the first real guest and the next 06:00 run. Gate condition C2: after the FIRST real guest comment, guest_thread AND guests must each have risen by one (SELECT (SELECT COUNT(*) FROM guest_thread WHERE author_kind = 'guest'), (SELECT COUNT(*) FROM guests)); if guests did not rise, the promotion failed on real D1 (only token continuity is lost); after the next 06:00 UTC: SELECT * FROM guest_duty_runs shows the dated record. Do not declare either ridden before then."
-Say "[done] guest voice deployed and ridden (public reads and the C1 enter). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md; then update the operator's session-start ritual with GET /api/guest/due, and re-stage the registry kits from the live /skill.md 1.1.1 (Ben's acts)."
+Say "[done] guest voice deployed and ridden (public reads and the C1 enter). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md; then update the operator's session-start ritual with GET /api/guest/due, and re-stage the registry kits from the live /skill.md 1.1.2 (Ben's acts)."

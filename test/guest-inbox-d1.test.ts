@@ -80,6 +80,24 @@ test("19: a guest's inbox lists the citizens' answers to ITS rows only, with the
   }
 });
 
+test("gate L-6 (CODEX gate-fixes r2 LOW): the guest inbox marks only the answer that discharged the duty, as the POST response does", async () => {
+  // Two qualifying answers by the answerer: POST says [true, false]; the inbox said [true, true] because its SQL never
+  // asked whether an earlier qualifying answer existed. Mutant: drop the NOT EXISTS clause in src/inbox.ts -> red.
+  const { d1, env } = await setup();
+  try {
+    const topic = seedTopic(d1);
+    const a = await guestOn(d1, env, topic, "wren");
+    const r1 = await postGuestAnswer(env, MAINTAINER, { guest_comment_id: a.row, body: LONG });
+    const r2 = await postGuestAnswer(env, MAINTAINER, { guest_comment_id: a.row, body: LONG + " A further note." });
+    assert.deepEqual([r1.body.discharges_duty, r2.body.discharges_duty], [true, false], JSON.stringify([r1.body, r2.body]));
+    const res = await call(env, "GET", `/api/guest/inbox?guest=${a.visitor}`);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.answers.map((r: any) => r.discharges_duty), [true, false], "the inbox agrees with the POST responses");
+  } finally {
+    d1.close();
+  }
+});
+
 test("19: the guest cursor is exact by id: a follow-up call returns only what is new, the cursor never moves backwards, and a page of more than the section limit pages without a gap or a repeat", async () => {
   const { d1, env } = await setup();
   try {

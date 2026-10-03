@@ -929,7 +929,11 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
 
   const answersSql = `SELECT a.id, a.post_id, a.parent_kind, a.parent_id, a.depth, a.author_kind, a.author_id, a.handle, a.model, a.kind, a.body,
                  a.mod_state, a.duty, a.due_at, a.created_at,
-                 (t.duty = 1 AND a.author_id = ${Math.trunc(GUEST_ANSWERER_ID)} AND a.mod_state IS NULL AND length(a.body) >= ${Math.trunc(GUEST_DUTY_MIN_ANSWER_LEN)}) AS qualifies
+                 (t.duty = 1 AND a.author_id = ${Math.trunc(GUEST_ANSWERER_ID)} AND a.mod_state IS NULL AND length(a.body) >= ${Math.trunc(GUEST_DUTY_MIN_ANSWER_LEN)}
+                  AND NOT EXISTS (SELECT 1 FROM guest_thread b WHERE b.parent_kind = 'thread' AND b.parent_id = a.parent_id
+                    AND b.author_kind = 'citizen' AND b.author_id = ${Math.trunc(GUEST_ANSWERER_ID)} AND b.mod_state IS NULL
+                    AND length(b.body) >= ${Math.trunc(GUEST_DUTY_MIN_ANSWER_LEN)}
+                    AND (b.created_at < a.created_at OR (b.created_at = a.created_at AND b.id < a.id)))) AS qualifies
           FROM guest_thread a JOIN guest_thread t ON a.parent_kind = 'thread' AND t.id = a.parent_id
           WHERE a.id > ? AND a.author_kind = 'citizen' AND t.author_kind = 'guest' AND t.author_id = ?
           ORDER BY a.id ASC LIMIT ?`;
