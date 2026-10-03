@@ -998,6 +998,9 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
     const now = Date.now();
     let paymentStep: { applied: boolean };
     try {
+      // DEFERRED-BOOKING-RESERVATION-BINDING (builder flag 1, CODEX M3-build r1 HIGH second half): the INSERT below and the UPDATE after it
+      // check `status = 'paying'` only, not that the reservation is THIS claim's (its paying_since and pin). d4f25eb0 closed the route that
+      // released a reservation under a settled claim; binding the booking to its own reservation is defence in depth, for the D-018 gate.
       paymentStep = await runBookingStep(
         env,
         claimKey,
