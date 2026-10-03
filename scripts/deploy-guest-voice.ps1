@@ -30,7 +30,7 @@ $MIGRATION_GLOB = "migrations/0018_*.sql"
 # The propagation poll waits for THIS route to answer 200 (it is a route only this wave serves), and the pre-deploy probe proves it answers
 # 404 first, so the poll can only be satisfied by the new worker.
 $NEW_CODE_URL = "$BASE/api/guest/due"
-$SKILL_VERSION_LINE = "version: 1.1.1"
+$SKILL_VERSION_LINE = "version: 1.1.2"
 # Every column of the three tables in table order, from migrations/0018_guest_voice.sql. The test test/guest-deploy-script.test.ts compares
 # these lists with the migration and with schema.sql.
 $GUEST_THREAD_COLUMN_NAMES = @("id", "post_id", "parent_kind", "parent_id", "depth", "author_kind", "author_id", "handle", "model", "kind", "body", "mod_state", "duty", "due_at", "created_at", "idem_key")

@@ -48,13 +48,13 @@ test("the guest leaf's mirrored constants equal their sources: the answerer is t
 
 // ---------- test 20: golden pins ----------
 
-test("20: /skill.md (1.1.1) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
-  assert.equal(SKILL_VERSION, "1.1.1");
+test("20: /skill.md (1.1.2) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
+  assert.equal(SKILL_VERSION, "1.1.2");
   const BALLOT = "TEST_BALLOT_NOTE_PLACEHOLDER";
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
-  assert.match(skill, /^version: 1\.1\.1$/m);
-  assert.equal(await sha256Hex(skill), "d71a8f30ee6b7f7a097714a48773eea2d470938e7a9fa814724d05e67fcbd6db", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.match(skill, /^version: 1\.1\.2$/m);
+  assert.equal(await sha256Hex(skill), "b04a5c9a2ee7dd9b3ac7f5169e22fe207faaba7cd627e5ddbfd7874f85330f2a", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
   assert.equal(await sha256Hex(heartbeat), "1e551647a325255e88f430a823447df0b4ab2d8f188be783e4d3d423c4cb22fc", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));
@@ -283,8 +283,25 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
       ["POST", "/api/patron", "x402_payment"],
       ["POST", "/api/listing", "x402_payment"],
       ["POST", "/api/listing/:id/pay", "x402_payment"],
+      ["POST", "/api/maintainer/run", "maintainer_secret"],
+      ["POST", "/api/maintainer/topic", "maintainer_secret"],
     ];
     for (const [m, p, a] of claims) assert.equal(auth(m, p), a, `${m} ${p}: the served sentence says ${a}`);
+    // CODEX gate-fixes r1 MEDIUM: the hand-picked list above missed the maintainer routes and a listing's bearer. So
+    // derive from EVERY write route: anything the sentence does not name must take a citizen credential ("every other
+    // write"). The two MCP doors are transports, not writes: each tool names its own credential, and /mcp/read writes
+    // nothing. Mutants: give any unnamed write route another auth in ROUTES -> red; drop a listing's bearer note -> red.
+    const routes = surface.body.routes as Array<{ method: string; path: string; auth: string; note?: string }>;
+    const named = new Map(claims.map(([m, p, a]) => [`${m} ${p}`, a]));
+    const writes = routes.filter((r) => r.method !== "GET" && r.path !== "/mcp" && r.path !== "/mcp/read");
+    assert.ok(writes.length >= 25, `the write-route census is real (${writes.length})`);
+    for (const r of writes) {
+      const key = `${r.method} ${r.path}`;
+      assert.equal(r.auth, named.get(key) ?? "citizen_secret", `${key}: the served sentence says ${named.get(key) ?? "a citizen credential (every other write)"}`);
+    }
+    for (const p of ["/api/listing", "/api/listing/:id/pay"]) {
+      assert.match(routes.find((r) => r.method === "POST" && r.path === p)?.note ?? "", /bearer required/, `${p}: served as also taking the funder's citizen credential`);
+    }
     const surfaces = [
       (await call(env, "GET", "/skill.md")).body._text as string,
       (await call(env, "GET", "/llms.txt")).body._text as string,
@@ -299,6 +316,10 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
     }
     assert.match(surfaces[0], /a showhome reply takes the visitor token or a citizen credential/);
     assert.match(surfaces[1], /a showhome reply takes either/);
+    assert.match(surfaces[0], /posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret/);
+    assert.match(surfaces[1], /posting or paying a listing takes an x402 payment and the funder's\s+citizen credential, and the two maintainer routes take the operator's\s+maintainer secret/);
+    assert.match(surfaces[2], /posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret/);
+    for (const s of surfaces) assert.doesNotMatch(s, /the paid routes take an x402 payment|the patron line, posting a listing and paying one are paid over x402/, "the incomplete wording is gone");
   } finally {
     d1.close();
   }

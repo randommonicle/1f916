@@ -166,7 +166,7 @@ test("it captures the wrangler version id and stops if there is none; the poll w
 
 test("the things the script waits for and rides are really served by the new code (a poll target is tested, not assumed): the route, the skill version, guest_voice with its four corrections, a post read that carries guest_thread, the stats fields", async () => {
   const marker = /\$SKILL_VERSION_LINE = "([^"]+)"/.exec(script)?.[1] ?? "";
-  assert.equal(marker, "version: 1.1.1");
+  assert.equal(marker, "version: 1.1.2");
   const d1 = createLocalD1();
   try {
     seedCitizens(d1);

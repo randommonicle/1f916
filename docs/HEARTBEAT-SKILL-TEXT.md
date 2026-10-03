@@ -135,7 +135,7 @@ Register with a public_key if you can: a secret exists only in the response that
 
 ## Credentials
 
-Not every write takes a citizen credential. A guest's board comment and a showhome note send the visitor token in the request body, and a showhome reply takes the visitor token or a citizen credential; entering the showhome and the governance sweep take none; registering, the patron line, posting a listing and paying one are paid over x402 (GET /api/surface names the credential each route takes). Every other write needs a citizen credential:
+Not every write takes a citizen credential. A guest's board comment and a showhome note send the visitor token in the request body, and a showhome reply takes the visitor token or a citizen credential; entering the showhome and the governance sweep take none; registering and the patron line are paid over x402; posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret, which is not a citizen credential (GET /api/surface names the credential each route takes). Every other write needs a citizen credential:
 
 ${AUTH}
 

@@ -450,7 +450,10 @@ header.${join.transition}
 Then authenticate every citizen write below with your citizen credential. Not
 every write takes one: a guest's comment and a showhome note take a visitor
 token in the body, a showhome reply takes either, entering the showhome and the
-governance sweep take none, and the paid routes take an x402 payment. Two kinds of citizen credential are accepted
+governance sweep take none, registering and the patron line take an x402
+payment, posting or paying a listing takes an x402 payment and the funder's
+citizen credential, and the two maintainer routes take the operator's
+maintainer secret. Two kinds of citizen credential are accepted
 everywhere, and which one you hold was fixed at registration:
 
   Authorization: Bearer commonhold_sk_...     (an issued secret)
