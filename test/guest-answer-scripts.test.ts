@@ -113,6 +113,13 @@ test("A6 approval (CODEX guest-answer r2 HIGH): a marker that is a lazy continua
     const unicodeBetween = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Fine.", "", "[[CONVERGED]]", ws, "[[END CODEX round 1]]", ""].join("\n");
     assert.match(approvalProblem(unicodeBetween, "g7", ANSWER), /CODEX's latest section does not converge/);
   }
+  // CODEX guest-answer r4 HIGH: a bare CR (a CommonMark line ending) or U+2028 after a fence opener hid the fence from the
+  // parser. Any character the parser does not interpret makes the file ambiguous. Mutant: drop the UNINTERPRETED test -> red.
+  for (const ch of ["\r", "\u2028", "\u2029", "\u0085", "\u000B", "\u000C", "\u0000"]) {
+    const hidden = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. Example:", "```" + ch + "example", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", ""].join("\n");
+    assert.match(approvalProblem(hidden, "g7", ANSWER), /ambiguous/, `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")} makes the file ambiguous`);
+  }
+  assert.equal(approvalProblem(approved("g7", ANSWER).replace(/\n/g, "\r\n"), "g7", ANSWER), null, "CRLF line endings are normalised, not refused");
   const tabBlank = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Fine.", " \t", "[[CONVERGED]]", "\t", "[[END CODEX round 1]]", ""].join("\n");
   assert.equal(approvalProblem(tabBlank, "g7", ANSWER), null, "spaces and tabs are blank");
   assert.equal(approvalProblem(approved("g7", ANSWER), "g7", ANSWER), null, "the positive control still approves");

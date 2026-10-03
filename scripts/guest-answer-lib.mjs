@@ -133,12 +133,18 @@ function commentStep(line, open) {
   }
 }
 
+// Characters this parser does not interpret make the file ambiguous outright (CODEX guest-answer r4 HIGH): a bare CR is a
+// CommonMark line ending that split("\n") misses, and U+2028/U+2029/U+0085 or any other control character can end a
+// line or a regex dot somewhere the parser does not expect. Fail closed rather than chase each one; tab and LF only.
+const UNINTERPRETED = /[\u0000-\u0008\u000B-\u001F\u007F\u0085\u2028\u2029]/;
+
 export function parseSections(text) {
   const sections = [];
   let fence = null;
   let comment = false;
-  let ambiguous = false;
-  for (const line of normaliseBody(text).split("\n")) {
+  const body = normaliseBody(text);
+  let ambiguous = UNINTERPRETED.test(body);
+  for (const line of body.split("\n")) {
     const m = HEADER.exec(line);
     if (m && (fence || comment)) ambiguous = true;
     if (m && !fence && !comment) {
@@ -197,7 +203,7 @@ function sectionConverges(section) {
 // LATEST section comes after that hub section and converges. Returns null when approved, else the reason.
 export function approvalProblem(exchangeText, target, body) {
   const sections = parseSections(exchangeText);
-  if (sections.ambiguous) return "the exchange file is ambiguous (a section header inside a fenced block, or a fence left open); write a fresh exchange";
+  if (sections.ambiguous) return "the exchange file is ambiguous (a section header inside a fence or comment, a fence or comment left open, or a control or line-separator character other than tab and LF); write a fresh exchange";
   const lastHub = sections.map((s) => s.handle).lastIndexOf("CLAUDE");
   if (lastHub < 0) return "no hub section";
   const hub = sections[lastHub].lines.map((l) => l.text);
