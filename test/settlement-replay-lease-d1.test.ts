@@ -624,6 +624,47 @@ test("M3 HIGH: pay listing, A reads a refusal after B settled the claim, and A's
   }
 });
 
+// D-018 gate C2 (3 Oct, probe P1 committed): the commonest input to d4f25eb0's fix, a refusal write that THROWS with nobody else involved.
+// Mutants: let a thrown write fall through to the 402 (`if (!wrote && !threw)`) -> 402 and the listing re-opens; hard-code leaseHeld: true
+// again -> the answer claims an attempt in progress that does not exist.
+test("gate C2: pay listing, a recorded refusal whose write THROWS with nobody else involved: no 402, the reservation kept, and no claim of another attempt", async () => {
+  const d1 = createLocalD1();
+  let armed = true;
+  const stub = stubFacilitator({ settle: () => refusedAnswer() });
+  const base = eq(d1);
+  const failingDb = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (armed && sql.includes("SET state = 'refused'")) {
+            armed = false;
+            const boom: any = { bind: () => boom, run: async () => { throw new Error("D1_ERROR: injected"); }, first: async () => { throw new Error("D1_ERROR: injected"); }, all: async () => { throw new Error("D1_ERROR: injected"); } };
+            return boom;
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay({ ...base, DB: failingDb } as unknown as Env);
+    const row = d1.raw.prepare("SELECT state, lease_owner FROM settlement_claims").get() as { state: string; lease_owner: string | null };
+    assert.equal(armed, false, "the refusal write was attempted and failed");
+    assert.notEqual(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.accepts, undefined);
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: the claim's state is unconfirmed");
+    assert.equal(row.state, "pending");
+    assert.equal(row.lease_owner, null, "this request released its own lease; nobody holds one");
+    assert.doesNotMatch(String(res.body.error), /Another attempt to resolve it is in progress/, "no attempt is in progress, so none is claimed");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("T3d: the control: with nobody else involved, a recorded refusal still answers 402 and refuses the claim", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: () => refusedAnswer() });

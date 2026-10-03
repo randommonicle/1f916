@@ -33,6 +33,7 @@ import {
   reconcileTail,
   refsOf,
   releaseLease,
+  leaseHeldByAnother,
   runBookingStep,
   SHOWHOME_REPORT_POINTER,
   sameRequest,
@@ -657,7 +658,7 @@ export async function payAndSettle(
         const now = await getClaim(env, key);
         if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
         if (now.state !== "refused") {
-          return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null) };
+          return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null, owner) };
         }
       }
     }
@@ -841,6 +842,9 @@ async function answerFromMovedClaim(
   reqs: PaymentRequirements,
   claim: PaidClaim,
   settled: { tx: string; payer: string } | null,
+  // Gate C2 (3 Oct): the refusal branch passes its own owner, so "another attempt is in progress" is said only when ANOTHER holder's lease is live.
+  // After a thrown refusal write this request released its own lease, and nobody may hold one. Other callers keep the old answer.
+  owner?: string,
 ): Promise<Response> {
   if (settled && (row.state === "refused" || row.state === "expired")) {
     await recordContradiction(env, row, row.state, settled, reqs);
@@ -854,7 +858,7 @@ async function answerFromMovedClaim(
       logSettlementSuccessUnrecorded(row, settled, reqs);
       return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true, settledTx: settled.tx }));
     }
-    return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+    return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: owner === undefined ? true : leaseHeldByAnother(row, owner, Date.now()) }));
   }
   return respondToExistingClaim(env, row, true, reqs, claim);
 }
