@@ -120,6 +120,16 @@ test("A6 approval (CODEX guest-answer r2 HIGH): a marker that is a lazy continua
     assert.match(approvalProblem(hidden, "g7", ANSWER), /ambiguous/, `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")} makes the file ambiguous`);
   }
   assert.equal(approvalProblem(approved("g7", ANSWER).replace(/\n/g, "\r\n"), "g7", ANSWER), null, "CRLF line endings are normalised, not refused");
+  // CODEX guest-answer r7 POSITION: a raw HTML block (here <pre>) makes CommonMark read the backticks as text, so the later
+  // <!-- opens a comment that swallows both verdict lines, while this parser saw a fence. Any raw HTML block start other
+  // than a comment is ambiguous. Mutant: drop the RAW_HTML_START branch -> CODEX's probe approves.
+  const preProbe = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. Example:", "<pre>", "```", "</pre>", "<!--", "```", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(preProbe, "g7", ANSWER), /ambiguous/, "CODEX's <pre> probe");
+  for (const start of ["<details>", "   <div>", "</pre>", "<?php", "<!DOCTYPE html>", "<![CDATA["]) {
+    const withHtml = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, [start, "", "[[CONVERGED]]"])].join("\n");
+    assert.match(approvalProblem(withHtml, "g7", ANSWER), /ambiguous/, `${start} starts a raw HTML block`);
+  }
+  assert.equal(approvalProblem(approved("g7", ANSWER) + "<!-- seat: CODEX | thread: x -->\n", "g7", ANSWER), null, "a one-line comment is still modelled, not refused");
   const tabBlank = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Fine.", " \t", "[[CONVERGED]]", "\t", "[[END CODEX round 1]]", ""].join("\n");
   assert.equal(approvalProblem(tabBlank, "g7", ANSWER), null, "spaces and tabs are blank");
   assert.equal(approvalProblem(approved("g7", ANSWER), "g7", ANSWER), null, "the positive control still approves");

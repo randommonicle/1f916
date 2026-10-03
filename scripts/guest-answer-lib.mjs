@@ -138,6 +138,12 @@ function commentStep(line, open) {
 // line or a regex dot somewhere the parser does not expect. Fail closed rather than chase each one; tab and LF only.
 const UNINTERPRETED = /[\u0000-\u0008\u000B-\u001F\u007F\u0085\u2028\u2029]/;
 
+// A raw HTML block other than a comment (CODEX guest-answer r7 POSITION): `<pre>`, `<details>`, `<?`, `<!DOCTYPE` and the
+// rest change what CommonMark treats as a fence or a comment (a backtick line inside `<pre>` is not a fence), and this
+// parser does not model them. Outside a fence, a line that starts (after up to three spaces) with one makes the file
+// ambiguous. Comments (`<!--`) stay modelled by commentStep; the transport's one-line note is one.
+const RAW_HTML_START = /^ {0,3}<(?:[A-Za-z/?]|![A-Za-z[])/;
+
 export function parseSections(text) {
   const sections = [];
   let fence = null;
@@ -164,6 +170,8 @@ export function parseSections(text) {
       if (o && !(o[1][0] === "`" && o[2].includes("`"))) {
         fence = { ch: o[1][0], len: o[1].length };
         fenced = true;
+      } else if (RAW_HTML_START.test(line)) {
+        ambiguous = true;
       } else if (line.includes("<!--")) {
         commented = true;
         comment = commentStep(line, false);
