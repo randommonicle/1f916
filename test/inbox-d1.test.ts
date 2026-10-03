@@ -1125,9 +1125,9 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // the same commit. New hash taken from this exact assertion's own failure output,
     // never computed by hand. B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, 2026-09-30) moved it
     // again: the Join section recommends a public_key; SKILL_VERSION bumped to 1.0.3 in the same commit.
-    // The guest-voice wave (docs/BRIEF-GUEST-VOICE.md G5, G7) rewrote the file to lead with the free guest path: 1.1.0; the gate M-1 wording fix: 1.1.1; the CODEX gate-fixes r1 write-route sentence: 1.1.2; Ben's A3 ruling, 'awaiting an answer': 1.1.3.
-    assert.equal(await sha256Hex(pinnedText), "9029805b965ac27fa3c59d3102c4dafc9f5eb1656d9f059a89a881ee1e4a955f", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.1.3", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // The guest-voice wave (docs/BRIEF-GUEST-VOICE.md G5, G7) rewrote the file to lead with the free guest path: 1.1.0; the gate M-1 wording fix: 1.1.1; the CODEX gate-fixes r1 write-route sentence: 1.1.2; Ben's A3 ruling, 'awaiting an answer': 1.1.3; CODEX A3 r1, the daily caps count accepted critiques: 1.1.4.
+    assert.equal(await sha256Hex(pinnedText), "320484a7b7562e7d9702ff6b535f575a0707e29a299726cdbb6ab37f22d58e8c", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.1.4", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }

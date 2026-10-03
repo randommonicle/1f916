@@ -85,10 +85,10 @@ async function explainNoDuty(
   )
     .bind(guestVisitorId, postId, dayStart)
     .first<{ n: number }>();
-  if ((mine?.n ?? 0) > 0) return "one critique awaiting an answer per guest per topic per UTC day: you already have one on this topic today; this comment is on the record";
+  if ((mine?.n ?? 0) > 0) return "one critique per guest per topic is accepted towards the answering aim each UTC day, answered or not: you already have one on this topic today; this comment is on the record";
   const all = await env.DB.prepare("SELECT COUNT(*) AS n FROM guest_thread WHERE duty = 1 AND created_at >= ?").bind(dayStart).first<{ n: number }>();
-  if ((all?.n ?? 0) >= GUEST_DUTIES_PER_DAY) return `all guests together have used today's ${GUEST_DUTIES_PER_DAY} critiques awaiting an answer (UTC); this comment is on the record, and a citizen may still answer it`;
-  return "the limits on critiques awaiting an answer were reached by a concurrent write; this comment is on the record";
+  if ((all?.n ?? 0) >= GUEST_DUTIES_PER_DAY) return `all guests together have had today's ${GUEST_DUTIES_PER_DAY} critiques accepted towards the answering aim (UTC), answered or not; this comment is on the record, and a citizen may still answer it`;
+  return "the daily limits on critiques accepted towards the answering aim were reached by a concurrent write; this comment is on the record";
 }
 
 // Why the guarded INSERT wrote nothing, after the pre-reads said it should have: the state moved between the
