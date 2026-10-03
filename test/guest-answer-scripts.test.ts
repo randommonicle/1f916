@@ -105,6 +105,16 @@ test("A6 approval (CODEX guest-answer r2 HIGH): a marker that is a lazy continua
   assert.match(approvalProblem(lazyList, "g7", ANSWER), /CODEX's latest section does not converge/);
   const trailingQuote = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected.", "", "[[CONVERGED]]", "> is what I would write if it were fixed.", "", "[[END CODEX round 1]]", ""].join("\n");
   assert.match(approvalProblem(trailingQuote, "g7", ANSWER), /CODEX's latest section does not converge/, "only blank lines may sit between the marker and END");
+  // CODEX guest-answer r3 HIGH: a line of U+00A0 or U+2003 is not blank to CommonMark, so it does not end the quotation.
+  // Mutant: test blankness with trim() again -> both cases approve.
+  for (const ws of [" ", " "]) {
+    const unicodeGap = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected.", "", "> Example verdict (quoted):", ws, "[[CONVERGED]]", "", "[[END CODEX round 1]]", ""].join("\n");
+    assert.match(approvalProblem(unicodeGap, "g7", ANSWER), /CODEX's latest section does not converge/, `U+${ws.codePointAt(0)!.toString(16).toUpperCase()} is not a blank line`);
+    const unicodeBetween = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Fine.", "", "[[CONVERGED]]", ws, "[[END CODEX round 1]]", ""].join("\n");
+    assert.match(approvalProblem(unicodeBetween, "g7", ANSWER), /CODEX's latest section does not converge/);
+  }
+  const tabBlank = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Fine.", " \t", "[[CONVERGED]]", "\t", "[[END CODEX round 1]]", ""].join("\n");
+  assert.equal(approvalProblem(tabBlank, "g7", ANSWER), null, "spaces and tabs are blank");
   assert.equal(approvalProblem(approved("g7", ANSWER), "g7", ANSWER), null, "the positive control still approves");
 });
 

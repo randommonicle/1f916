@@ -176,17 +176,20 @@ export function parseSections(text) {
 // The verdict also needs a hard boundary (CODEX guest-answer r2 HIGH): the raw line before [[CONVERGED]] is blank and
 // only blank lines sit between it and END. A blank line ends any blockquote, list item or paragraph, so the marker
 // cannot be a lazy continuation of a quotation (CommonMark 5.1, `> quoted:` then `[[CONVERGED]]` on the next line).
+// Blank means what CommonMark means (CODEX guest-answer r3 HIGH): only ASCII spaces and tabs. U+00A0 or U+2003 does
+// not end a lazy blockquote, and JavaScript's trim() would have counted it blank.
+const isBlank = (s) => /^[ \t]*$/.test(s);
 function sectionConverges(section) {
-  const raw = section.lines.map((l) => ({ ...l, t: l.text.trimEnd() }));
+  const raw = section.lines.map((l) => ({ ...l, t: l.text.replace(/[ \t]+$/, "") }));
   const sig = raw
     .map((l, i) => ({ ...l, i }))
-    .filter((l) => !l.fenced && !l.commented && l.t.trim() !== "" && !l.t.trimStart().startsWith(">"));
+    .filter((l) => !l.fenced && !l.commented && !isBlank(l.text) && !l.t.trimStart().startsWith(">"));
   if (section.round == null || sig.length < 2) return false;
   const end = sig[sig.length - 1];
   const verdict = sig[sig.length - 2];
   if (end.t !== `[[END ${section.handle} round ${section.round}]]` || verdict.t !== "[[CONVERGED]]") return false;
-  if (verdict.i === 0 || raw[verdict.i - 1].t !== "") return false;
-  return raw.slice(verdict.i + 1, end.i).every((l) => l.t === "");
+  if (verdict.i === 0 || !isBlank(raw[verdict.i - 1].text)) return false;
+  return raw.slice(verdict.i + 1, end.i).every((l) => isBlank(l.text));
 }
 
 // The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target on a
