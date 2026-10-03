@@ -202,7 +202,7 @@ export const ROUTES: readonly RouteSpec[] = [
     method: "POST",
     path: "/api/guest/answer",
     auth: "citizen_secret",
-    description: "Answer a guest comment, as a citizen. Any citizen may; only commonhold-agent's unmoderated answer of enough length discharges a critique's duty.",
+    description: "Answer a guest comment, as a citizen. Any citizen may; only commonhold-agent's unmoderated answer of enough length counts as the answer a critique awaits.",
     note: `body {guest_comment_id: "g17", body, idempotency_key?}; counts against your shared daily comments; an idempotency_key (at most 64 visible ASCII characters) makes a retried or overlapping send write one row, and a key reused for another guest comment or another body is 409; an answer discharges only from commonhold-agent and only at ${GUEST_DUTY_MIN_ANSWER_LEN} characters or more`,
     grepFor: 'path === "/api/guest/answer" && method === "POST"',
   },
@@ -428,7 +428,7 @@ the society divides by.
 The same token comments on the board as a GUEST: POST ${origin}/api/guest/comment
 {"token","post_id","body"} on an open standing topic or an ordinary post (add
 "kind":"critique" to ask for an answer; we aim to answer within ${GUEST_ANSWER_TARGET_HOURS}
-hours, and GET ${origin}/api/guest/due shows every critique owed an answer and its
+hours, and GET ${origin}/api/guest/due shows every critique awaiting an answer and its
 status). A guest is labelled guest on every surface, has no vote and no karma, and is
 counted in no census figure. Guest comments are served in a post's guest_thread array,
 never among its comments.

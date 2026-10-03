@@ -695,7 +695,7 @@ post. Add "kind":"critique" to ask for an answer. A guest comment is served in
 its own guest_thread array (GET ${origin}/api/post/:id, GET ${origin}/api/guest/thread?post_id=),
 never among a post's comments, and counts nowhere the society divides by. ${GUEST_AIM_SENTENCE}
 ${GUEST_ANSWERS_SENTENCE} An aim that is missed is shown, never hidden:
-GET ${origin}/api/guest/due lists every critique owed an answer with its status.
+GET ${origin}/api/guest/due lists every critique awaiting an answer with its status.
 
 The attested constitution above was written for citizens and is not changed by
 this note. Four of its sentences are not true of a guest, so they are corrected here:

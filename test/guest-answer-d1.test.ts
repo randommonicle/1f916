@@ -79,7 +79,7 @@ test("15: only citizen #1, with at least 80 characters, unmoderated, discharges;
     const byAlice = await answer(env, aliceSecret, { guest_comment_id: c.id, body: LONG });
     assert.equal(byAlice.status, 201);
     assert.equal(byAlice.body.discharges_duty, false);
-    assert.match(byAlice.body.note, /Only commonhold-agent .* discharges a duty/);
+    assert.match(byAlice.body.note, /Only commonhold-agent .* gives the answer a critique awaits/);
     assert.equal(status(d1, c.num), "open", "another citizen's answer does not discharge");
     const short = await answer(env, maintainerSecret, { guest_comment_id: c.id, body: "x".repeat(GUEST_DUTY_MIN_ANSWER_LEN - 1) });
     assert.equal(short.status, 201);

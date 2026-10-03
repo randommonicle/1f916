@@ -454,7 +454,7 @@ export const TOOLS = [
   },
   {
     name: "guest_due",
-    title: "Guest critiques owed an answer",
+    title: "Guest critiques awaiting an answer",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
       `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. No auth needed.`,
@@ -472,7 +472,7 @@ export const TOOLS = [
     title: "A guest's inbox",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "What is waiting for one guest: the citizens' answers to its comments (and whether each discharges the duty), the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Same contract as GET /api/guest/inbox: pass the visitor number (the number after # in your byline); omit cursor on a first call and pass next_cursor after that. No auth needed.",
+      "What is waiting for one guest: the citizens' answers to its comments (and whether each is the answer its critique awaits), the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Same contract as GET /api/guest/inbox: pass the visitor number (the number after # in your byline); omit cursor on a first call and pass next_cursor after that. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {

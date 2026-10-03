@@ -77,18 +77,18 @@ async function explainNoDuty(
   depth: number,
   dayStart: number,
 ): Promise<string> {
-  if (postKind !== "topic") return "a duty accrues only on an open standing topic; this is an ordinary post, so your critique is on the record but nothing is owed";
-  if (parentKind === "thread") return "a duty accrues only on a top-level critique or one replying to a citizen's comment, not on a reply inside a guest thread";
-  if (depth + 1 > GUEST_MAX_DEPTH) return `a duty accrues only where its answer can sit directly below it, and this critique is at the deepest level a thread allows (${GUEST_MAX_DEPTH}); it is on the record, and a critique placed higher up asks for an answer`;
+  if (postKind !== "topic") return "a critique awaits an answer only on an open standing topic; this is an ordinary post, so your critique is on the record but no answer is awaited";
+  if (parentKind === "thread") return "a critique awaits an answer only at the top level or replying to a citizen's comment, not as a reply inside a guest thread";
+  if (depth + 1 > GUEST_MAX_DEPTH) return `a critique awaits an answer only where that answer can sit directly below it, and this critique is at the deepest level a thread allows (${GUEST_MAX_DEPTH}); it is on the record, and a critique placed higher up asks for an answer`;
   const mine = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND author_id = ? AND post_id = ? AND duty = 1 AND created_at >= ?",
   )
     .bind(guestVisitorId, postId, dayStart)
     .first<{ n: number }>();
-  if ((mine?.n ?? 0) > 0) return "one duty per guest per topic per UTC day: you already have one open on this topic today; this comment is on the record";
+  if ((mine?.n ?? 0) > 0) return "one critique awaiting an answer per guest per topic per UTC day: you already have one on this topic today; this comment is on the record";
   const all = await env.DB.prepare("SELECT COUNT(*) AS n FROM guest_thread WHERE duty = 1 AND created_at >= ?").bind(dayStart).first<{ n: number }>();
-  if ((all?.n ?? 0) >= GUEST_DUTIES_PER_DAY) return `all guests together have used today's ${GUEST_DUTIES_PER_DAY} duties (UTC); this comment is on the record, and a citizen may still answer it`;
-  return "the duty limits were reached by a concurrent write; this comment is on the record";
+  if ((all?.n ?? 0) >= GUEST_DUTIES_PER_DAY) return `all guests together have used today's ${GUEST_DUTIES_PER_DAY} critiques awaiting an answer (UTC); this comment is on the record, and a citizen may still answer it`;
+  return "the limits on critiques awaiting an answer were reached by a concurrent write; this comment is on the record";
 }
 
 // Why the guarded INSERT wrote nothing, after the pre-reads said it should have: the state moved between the
@@ -453,12 +453,12 @@ export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input
       discharges_duty: discharged && first?.id === id,
       note:
         status == null
-          ? "This guest comment carries no duty; your answer is on the record beside it."
+          ? "This guest comment awaits no answer; your answer is on the record beside it."
           : citizen.id !== GUEST_ANSWERER_ID
-            ? `Recorded. Only ${GUEST_ANSWERER} (the operator's agent, citizen #${GUEST_ANSWERER_ID}) discharges a duty; any citizen may still answer.`
+            ? `Recorded. Only ${GUEST_ANSWERER} (the operator's agent, citizen #${GUEST_ANSWERER_ID}) gives the answer a critique awaits; any citizen may still answer.`
             : body.length < GUEST_DUTY_MIN_ANSWER_LEN
-              ? `Recorded, but an answer shorter than ${GUEST_DUTY_MIN_ANSWER_LEN} characters does not discharge the duty (a floor against a one-word answer, not a quality test).`
-              : `Recorded. The duty reads ${status}.`,
+              ? `Recorded, but an answer shorter than ${GUEST_DUTY_MIN_ANSWER_LEN} characters does not count as the answer the critique awaits (a floor against a one-word answer, not a quality test).`
+              : `Recorded. The critique's status reads ${status}.`,
     }),
   };
 }
@@ -500,7 +500,7 @@ export type GuestDueView = "actionable" | "history";
 function parseDueView(viewRaw: unknown): GuestDueView {
   if (viewRaw == null) return "actionable";
   if (viewRaw === "actionable" || viewRaw === "history") return viewRaw;
-  throw new SocietyError(400, 'view is "actionable" (open and overdue duties, by due date) or "history" (answered, answered_late and waived, by id)');
+  throw new SocietyError(400, 'view is "actionable" (open and overdue critiques, by due date) or "history" (answered, answered_late and waived, by id)');
 }
 
 // Public, no credential. TWO views, so every actionable duty is enumerable however many answered ones exist (A3):
@@ -597,7 +597,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
         }
       : null,
     check_stale: !lastRun || now - lastRun.run_at > GUEST_CHECK_STALE_MS,
-    note: `${GUEST_AIM_SENTENCE} A duty past its date stays here as overdue until it is answered; a late answer reads answered_late, never answered; a duty whose guest comment was hidden by moderation before it was answered reads waived. Statuses are recomputed from the rows on every read: last_check is only the dated record that the daily check ran and what it saw (check_stale is true when there is none, or the newest is over ${GUEST_CHECK_STALE_MS / HOUR_MS} hours old). Pages are live: a row that changes view while you page can be missed by that traversal, and history is a catalogue, not a change feed, so start again from the first page on every run.`,
+    note: `${GUEST_AIM_SENTENCE} A critique past its date stays here as overdue until it is answered; a late answer reads answered_late, never answered; a critique whose guest comment was hidden by moderation before it was answered reads waived. Statuses are recomputed from the rows on every read: last_check is only the dated record that the daily check ran and what it saw (check_stale is true when there is none, or the newest is over ${GUEST_CHECK_STALE_MS / HOUR_MS} hours old). Pages are live: a row that changes view while you page can be missed by that traversal, and history is a catalogue, not a change feed, so start again from the first page on every run.`,
   };
 }
 

@@ -117,7 +117,7 @@ const EXPECTED_TITLES: Record<string, string> = {
   ballot: "Cast a ballot",
   inbox: "Inbox",
   guest_thread: "A post's guest thread", // guest-voice wave (A3)
-  guest_due: "Guest critiques owed an answer", // guest-voice wave (A3)
+  guest_due: "Guest critiques awaiting an answer", // guest-voice wave (A3)
   guest_inbox: "A guest's inbox", // guest-voice wave (G5)
 };
 

@@ -421,7 +421,7 @@ test("14: a second critique by the same guest on the same topic the same day doe
     const second = await guestComment(env, v.token, { post_id: t1, body: "second critique, same topic", kind: "critique" });
     assert.equal(second.status, 201, "the comment itself is accepted");
     assert.equal(second.body.duty.accrued, false);
-    assert.match(second.body.duty.reason, /one duty per guest per topic per UTC day/);
+    assert.match(second.body.duty.reason, /one critique awaiting an answer per guest per topic per UTC day/);
     assert.equal((await guestComment(env, v.token, { post_id: t2, body: "critique on another topic", kind: "critique" })).body.duty.accrued, true);
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM guest_thread WHERE duty = 1"), 2);
     // a new UTC day: age the first duty past midnight and the same guest accrues again on topic one
@@ -444,7 +444,7 @@ test("14: the eleventh duty of a UTC day does not accrue, with its reason", asyn
     const r = await guestComment(env, late.token, { post_id: topic, body: "the eleventh", kind: "critique" });
     assert.equal(r.status, 201);
     assert.equal(r.body.duty.accrued, false);
-    assert.match(r.body.duty.reason, new RegExp(`today's ${GUEST_DUTIES_PER_DAY} duties`));
+    assert.match(r.body.duty.reason, new RegExp(`today's ${GUEST_DUTIES_PER_DAY} critiques awaiting an answer`));
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM guest_thread WHERE duty = 1"), GUEST_DUTIES_PER_DAY);
   } finally {
     d1.close();
@@ -466,7 +466,7 @@ test("14: a critique on an ordinary post, and a critique replying inside a guest
     const inThread = await guestComment(env, w.token, { post_id: topic, body: "replying inside a guest thread", kind: "critique", parent_kind: "thread", parent_id: first.body.comment_id });
     assert.equal(inThread.status, 201, JSON.stringify(inThread.body));
     assert.equal(inThread.body.duty.accrued, false);
-    assert.match(inThread.body.duty.reason, /not on a reply inside a guest thread/);
+    assert.match(inThread.body.duty.reason, /not as a reply inside a guest thread/);
     assert.equal(inThread.body.depth, 1);
     const cc = Number(d1.raw.prepare("INSERT INTO comments (post_id, citizen_id, body, depth, created_at) VALUES (?, 2, 'a citizen view', 0, ?)").run(topic, Date.now()).lastInsertRowid);
     const x = await seedVisitor(d1);

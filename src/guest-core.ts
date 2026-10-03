@@ -355,7 +355,7 @@ export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
     // and /skill.md serve the same four sentences from the same place.
     template_exceptions: guestTemplateExceptions(),
     note:
-      `${GUEST_AIM_SENTENCE} ${GUEST_ANSWERS_SENTENCE} An aim that is missed is shown, never hidden: a duty past its date stays on GET /api/guest/due as overdue until it is answered, and a late answer reads answered_late, never answered. waived counts duties whose guest comment was hidden by moderation before it was answered, so anyone can set waived beside overdue and see whether hiding was used to escape the aim. These counts are recomputed on every read from the rows themselves; the daily check writes only a dated record that it ran.`,
+      `${GUEST_AIM_SENTENCE} ${GUEST_ANSWERS_SENTENCE} An aim that is missed is shown, never hidden: a critique past its date stays on GET /api/guest/due as overdue until it is answered, and a late answer reads answered_late, never answered. waived counts critiques whose guest comment was hidden by moderation before it was answered, so anyone can set waived beside overdue and see whether hiding was used to escape the aim. These counts are recomputed on every read from the rows themselves; the daily check writes only a dated record that it ran.`,
   };
 }
 
