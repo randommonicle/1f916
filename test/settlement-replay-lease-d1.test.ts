@@ -578,6 +578,52 @@ test("P-E: pay listing, refusal read under another holder's live lease: A answer
   }
 });
 
+// CODEX M3-build r1 HIGH (pre-existing since M2): A's markRefused THROWS after B took the lapsed lease and settled A's claim. The throw used
+// to skip the claim re-read, so the 402 released A's reservation and re-opened a listing whose claim is settled_unbooked (a later payer could
+// then reserve it and the old claim book against that reservation). Mutant: restore `if (!wrote && !threw)` -> 402, listing 'open'.
+test("M3 HIGH: pay listing, A reads a refusal after B settled the claim, and A's refusal write THROWS: A keeps the reservation and offers no fresh payment", async () => {
+  const d1 = createLocalD1();
+  let armed = false;
+  const stub = stubFacilitator({
+    settle: async () => {
+      const key = await bTakesTheLease(d1);
+      assert.equal(await markSettled(eq(d1), key, TX, TEST_PAYER, "B", Date.now()), true);
+      armed = true;
+      return refusedAnswer();
+    },
+  });
+  const base = eq(d1);
+  const injected = () => new Error("D1_ERROR: injected failure of the refusal write");
+  const failingDb = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (armed && sql.includes("SET state = 'refused'")) {
+            armed = false;
+            const boom: any = { bind: () => boom, run: async () => { throw injected(); }, first: async () => { throw injected(); }, all: async () => { throw injected(); } };
+            return boom;
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay({ ...base, DB: failingDb } as unknown as Env);
+    assert.notEqual(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.accepts, undefined, "no fresh payment requirements are offered");
+    assert.equal(armed, false, "the refusal write was attempted and failed");
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: B's claim is settled_unbooked");
+    assert.equal(oneClaim(d1).state, "settled_unbooked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("T3d: the control: with nobody else involved, a recorded refusal still answers 402 and refuses the claim", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: () => refusedAnswer() });

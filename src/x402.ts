@@ -646,11 +646,17 @@ export async function payAndSettle(
         threw = true;
         console.log(JSON.stringify({ level: "error", event: "settlement_claim_write_failed", step: "mark_refused", reason: clipReason(e instanceof Error ? e.message : String(e)) }));
       }
-      if (!wrote && !threw) {
+      if (!wrote || threw) {
         // R1: another holder moved the claim, or holds a live lease on it, while this request's /settle was in flight. This request's refusal is
         // then not the claim's answer: answer from the claim, never "refused, sign a fresh one" over a payment another holder may have settled.
+        // CODEX M3-build r1 HIGH (pre-existing since M2): a THROWN markRefused is no refusal recorded either. It used to skip this re-read and
+        // fall through to the 402 below, which releases pay listing's reservation, so a refusal could re-open a listing whose claim another
+        // holder had settled. Now it is re-read like any unwritten refusal; a re-read that throws, or finds no row, is an unknown outcome
+        // (thrown, so pay listing keeps its reservation: settlement_unconfirmed); only a claim that reads `refused` lets the 402 stand.
+        if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
         const now = await getClaim(env, key);
-        if (now && now.state !== "refused") {
+        if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
+        if (now.state !== "refused") {
           return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null) };
         }
       }
@@ -762,7 +768,7 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
         if (done) return done;
       }
       const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
-      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail, ...(out.settledTx ? { settledTx: out.settledTx } : {}) } : {}));
+      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail, ...(out.settledTx !== undefined ? { settledTx: out.settledTx } : {}) } : {}));
     } finally {
       await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
     }
