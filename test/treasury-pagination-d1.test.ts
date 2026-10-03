@@ -464,6 +464,11 @@ test("A1: the served claim 'every ledger writer today takes entry_date from the 
         expr.startsWith("new Date(now).toISOString().slice(0, 10),"),
         `${f}: an entry_date that is not the server clock (${expr.trim()}) falsifies the pagination_note; either keep it server-dated or rewrite the note's walk semantics (A1)`,
       );
+      // CODEX treasury r1 LOW: the spelling alone does not prove the clock; `const now = 0;` above it passed. The nearest
+      // binding of `now` before this write must be the server clock. Mutant: `const now = 0;` in any writer -> red.
+      const binds = [...text.slice(0, m.index).matchAll(/\b(?:const|let|var)\s+now\s*=\s*([^;\n]*)/g)];
+      const nearest = binds.length ? binds[binds.length - 1][1].trim() : "none";
+      assert.equal(nearest, "Date.now()", `${f}: the nearest binding of now before this entry_date is ${nearest}, not the server clock (A1)`);
       writers.push(f.slice(f.lastIndexOf("src")));
     }
   }
