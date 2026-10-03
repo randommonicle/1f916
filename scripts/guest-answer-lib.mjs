@@ -112,44 +112,72 @@ const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 // themselves included). A header-shaped line INSIDE a fence (a seat quoting another section) or a fence still open at
 // the end makes the file AMBIGUOUS, and an ambiguous file approves nothing: a quotation can never become a section,
 // and a real section can never be hidden.
+// HTML comments (CODEX guest-answer r1 HIGH): outside a fence, any line that touches a comment (opens one, closes one,
+// or sits between) is tagged `commented` and is never a verdict; a header inside a comment or a comment still open at the
+// end makes the file ambiguous. `<!--` anywhere on the line opens, wherever CommonMark would start an HTML block or not:
+// stricter than the spec, and the strict side fails closed (an ambiguous file approves nothing).
+function commentStep(line, open) {
+  let i = 0;
+  for (;;) {
+    if (open) {
+      const c = line.indexOf("-->", i);
+      if (c < 0) return true;
+      open = false;
+      i = c + 3;
+    } else {
+      const o = line.indexOf("<!--", i);
+      if (o < 0) return false;
+      open = true;
+      i = o + 4;
+    }
+  }
+}
+
 export function parseSections(text) {
   const sections = [];
   let fence = null;
+  let comment = false;
   let ambiguous = false;
   for (const line of normaliseBody(text).split("\n")) {
     const m = HEADER.exec(line);
-    if (m && fence) ambiguous = true;
-    if (m && !fence) {
+    if (m && (fence || comment)) ambiguous = true;
+    if (m && !fence && !comment) {
       const round = /\bround (\d+)\b/.exec(m[2]);
       sections.push({ handle: m[1], round: round ? Number(round[1]) : null, lines: [] });
       continue;
     }
     let fenced = fence !== null;
+    let commented = comment;
     if (fence) {
       const c = FENCE_CLOSE.exec(line);
       if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
+    } else if (comment) {
+      comment = commentStep(line, true);
     } else {
       const o = FENCE_OPEN.exec(line);
       if (o && !(o[1][0] === "`" && o[2].includes("`"))) {
         fence = { ch: o[1][0], len: o[1].length };
         fenced = true;
+      } else if (line.includes("<!--")) {
+        commented = true;
+        comment = commentStep(line, false);
       }
     }
-    if (sections.length) sections[sections.length - 1].lines.push({ text: line, fenced });
+    if (sections.length) sections[sections.length - 1].lines.push({ text: line, fenced, commented });
   }
-  if (fence) ambiguous = true;
+  if (fence || comment) ambiguous = true;
   return Object.assign(sections, { ambiguous });
 }
 
 // A seat's verdict counts only as the protocol writes it, at the END of its section: outside every fence and
-// blockquote, ignoring blank lines and the transport's HTML comments, the last line is exactly that seat's own
-// [[END <SEAT> round N]] with N the header's round, and the line before it is exactly [[CONVERGED]] at column 0
-// (an indented line is code or a quotation, never a verdict; only trailing whitespace is ignored).
+// blockquote and every HTML comment (the transport's trailing note included), ignoring blank lines, the last line is
+// exactly that seat's own [[END <SEAT> round N]] with N the header's round, and the line before it is exactly
+// [[CONVERGED]] at column 0 (an indented line is code or a quotation, never a verdict; only trailing whitespace is ignored).
 function sectionConverges(section) {
   const ls = section.lines
-    .filter((l) => !l.fenced)
+    .filter((l) => !l.fenced && !l.commented)
     .map((l) => l.text.trimEnd())
-    .filter((l) => l.trim() !== "" && !l.trimStart().startsWith(">") && !l.startsWith("<!--"));
+    .filter((l) => l.trim() !== "" && !l.trimStart().startsWith(">"));
   return section.round != null && ls.length >= 2 && ls[ls.length - 1] === `[[END ${section.handle} round ${section.round}]]` && ls[ls.length - 2] === "[[CONVERGED]]";
 }
 

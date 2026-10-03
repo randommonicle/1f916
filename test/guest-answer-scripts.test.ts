@@ -81,6 +81,21 @@ test("A6 approval (CODEX scripts r3): a four-backtick quotation holding a three-
   assert.equal(approvalProblem(approved("g7", ANSWER), "g7", ANSWER), null, "the positive control still approves");
 });
 
+test("A6 approval (CODEX guest-answer r1 HIGH): a marker inside an HTML comment is never a verdict; an unclosed comment or a header inside one is ambiguous", () => {
+  // Mutants: drop the `commented` filter -> the closed-comment case approves (CODEX's probe); drop the end-of-file
+  // comment check -> the unclosed case approves; drop the header-in-comment check -> the hidden-section case approves.
+  const closed = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. Example only:", "<!--", "[[CONVERGED]]", "> -->", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(closed, "g7", ANSWER), /CODEX's latest section does not converge/);
+  const unclosed = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. Example only:", "<!--", "[[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(unclosed, "g7", ANSWER), /ambiguous/);
+  const hidden = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, ["Rejected.", "<!-- a note", ok("CODEX", 2), "-->"])].join("\n");
+  assert.match(approvalProblem(hidden, "g7", ANSWER), /ambiguous/);
+  const sameLine = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!-- x --> [[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(approvalProblem(sameLine, "g7", ANSWER), /CODEX's latest section does not converge/, "a line touching a comment is never the verdict");
+  const commentThenVerdict = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!--", "scratch note", "-->", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "<!-- seat: CODEX | thread: x -->", ""].join("\n");
+  assert.equal(approvalProblem(commentThenVerdict, "g7", ANSWER), null, "a closed comment before a real verdict does not block it");
+});
+
 test("A12 NUL (CODEX scripts r3): SQLite's length() stops at U+0000, so a NUL is refused and counted as SQLite counts it", () => {
   // Mutant: drop the NUL truncation in charLength and the control-character refusal -> the body passes and counts 81.
   const withNul = "A".repeat(40) + "\u0000" + "B".repeat(40);
