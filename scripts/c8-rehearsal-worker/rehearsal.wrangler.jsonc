@@ -1,0 +1,21 @@
+// Throwaway rehearsal worker for the M3 gate's condition C1 (docs/REVIEW-PAID-PATH-M3-GATE-2026-10-03.md): C8's `meta.last_row_id` through the real D1 binding.
+// Bound to the SCRATCH D1 only (commonhold-migtest). Never deploy this; never point it at "commonhold" (prod). check.mjs refuses either.
+// Named rehearsal.wrangler.jsonc, not wrangler.jsonc: the project's permission rules keep agents out of every wrangler.jsonc.
+// Run from this repo's root, only on Ben's go (wrangler prompts):
+//   node scripts/c8-rehearsal-worker/check.mjs
+//   npx wrangler dev --remote --config scripts/c8-rehearsal-worker/rehearsal.wrangler.jsonc --port 8799
+//   GET http://127.0.0.1:8799/run   (then stop wrangler)
+{
+  "name": "commonhold-c8-rehearsal",
+  "main": "index.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "commonhold-migtest",
+      "database_id": "465f489c-f1ca-446e-8f5f-d35ea53fd720",
+      "preview_database_id": "465f489c-f1ca-446e-8f5f-d35ea53fd720"
+    }
+  ]
+}
