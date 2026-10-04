@@ -25,6 +25,8 @@ $LIVE_BASE_COMMIT = "daa0fe3b3eff7bae3e43fa861d482bd17985d272"
 # The propagation poll waits for THIS route to answer 200 (only this wave serves it); step 2 proves it answers 404 first.
 $NEW_CODE_URL = "$BASE/api/settlements/attention"
 $SKILL_VERSION_LINE = "version: 1.1.4"
+# GET /treasury page size (src/society.ts LEDGER_PAGE; the test compares them).
+$LEDGER_PAGE_SIZE = 200
 # The columns of settlement_claims M3 reads or writes, all from migrations/0017 (test/deploy-m3-treasury-script.test.ts proves each is in 0017).
 $CLAIM_COLUMN_NAMES = @("network", "asset", "from_addr", "nonce", "route", "intent_json", "intent_hash", "rpc_body", "rpc_body_hash", "valid_before", "state", "tx", "payer", "verdict_reason", "booked_refs", "created_at", "updated_at", "lease_owner", "leased_until")
 # The marker codes GET /api/settlements/attention may serve (src/settlement-attention.ts ATTENTION_MARKER_CODES; the test compares the lists).
@@ -97,11 +99,15 @@ $expectedSha = ([string]$expectedSha).Trim()
 if ($mainSha -ne $originSha -or $mainSha -ne $expectedSha -or $headSha -ne $expectedSha) {
   Stop-Here ("main, origin/main and -ExpectedCommit are not one commit: HEAD " + $headSha.Substring(0, 8) + ", main " + $mainSha.Substring(0, 8) + ", origin/main " + $originSha.Substring(0, 8) + ", expected " + $expectedSha.Substring(0, 8) + ". Merge, push, and pass the pushed sha.")
 }
+# Every git read below checks its own exit code before its output is read: a failed native command prints nothing, and nothing must not read
+# as "clean" or "no change" (CODEX deploy-script r1, finding 1: an exit 128 with empty stdout passed both guards).
 $dirty = @(git status --porcelain)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE): the clean-tree check cannot be read." }
 if ($dirty.Count -gt 0) { Stop-Here ("working tree not clean (" + $dirty.Count + " paths): the deploy must ship exactly the committed tree.") }
 git merge-base --is-ancestor $LIVE_BASE_COMMIT HEAD
 if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.Substring(0, 8)) (the live worker's code): this deploy would drop the guest voice." }
 $schemaMoves = @(git diff --name-only $LIVE_BASE_COMMIT HEAD -- migrations schema.sql src/doc.ts)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-migration check cannot be read." }
 if ($schemaMoves.Count -gt 0) { Stop-Here ("this wave was to carry no migration and no constitution change, but these moved since " + $LIVE_BASE_COMMIT.Substring(0, 8) + ": " + ($schemaMoves -join ", ") + ". Not this script's deploy.") }
 if (-not (Test-Path "src/settlement-attention.ts")) { Stop-Here "src/settlement-attention.ts is missing: this checkout is not the M3 second build." }
 if (-not (Select-String -Path "src/society.ts" -Pattern "export function parseLedgerCursor" -Quiet)) { Stop-Here "src/society.ts has no parseLedgerCursor: this checkout is not the treasury pagination." }
@@ -214,18 +220,32 @@ foreach ($field in "total_entries", "returned", "page_size", "has_more", "entrie
   if (-not ($tre.PSObject.Properties.Name -contains $field)) { Stop-Here "GET /treasury has no '$field' field: the treasury pagination is not live." }
 }
 $treEntries = @($tre.entries)
-if ([int64]$tre.returned -ne $treEntries.Count) { Stop-Here ("GET /treasury returned is " + $tre.returned + " but it carries " + $treEntries.Count + " entries.") }
-if ([int64]$tre.total_entries -ne [int64]$attAfter.treasury.total_rows) { Say ("[note] GET /treasury total_entries " + $tre.total_entries + " differs from the treasury chain's total_rows " + $attAfter.treasury.total_rows + " read a moment earlier: re-read both by hand (a ledger write between the reads would explain it).") }
-else { Say ("[ride] GET /treasury: total_entries " + $tre.total_entries + " = the treasury chain's rows; returned " + $tre.returned + ", page_size " + $tre.page_size + ", has_more " + $tre.has_more) }
-if ($treEntries.Count -ge 2) {
-  $first = $treEntries[0]
-  $page2 = Get-Json ("$BASE/treasury?before_entry_date=" + $first.entry_date + "&before_id=" + $first.id)
-  $page2Entries = @($page2.entries)
-  if ($page2Entries.Count -lt 1) { Stop-Here "GET /treasury with a cursor at the newest entry returned no entries: the cursor path is broken." }
-  $notOlder = @($page2Entries | Where-Object { [string]$_.entry_date -gt [string]$first.entry_date -or ([string]$_.entry_date -eq [string]$first.entry_date -and [int64]$_.id -ge [int64]$first.id) })
-  if ($notOlder.Count -gt 0) { Stop-Here "GET /treasury with a cursor returned an entry not strictly older than the cursor." }
-  Say ("[ride] GET /treasury cursor (before the newest entry, " + $first.entry_date + " / " + $first.id + ") -> " + $page2Entries.Count + " entries, all strictly older")
-}
+# The page contract, checked as a contract (CODEX deploy-script r1, finding 2: field presence alone accepted an empty page with has_more true).
+# Each mismatch STOPS before [done]: the worker is deployed by then, so the stop says the ride is not complete, not that the deploy failed.
+$treStop = "the deploy is done (version $versionId) but this ride is not: re-read GET /treasury and GET /api/attest by hand"
+if ([int64]$tre.page_size -ne $LEDGER_PAGE_SIZE) { Stop-Here ("GET /treasury page_size is " + $tre.page_size + ", expected " + $LEDGER_PAGE_SIZE + "; " + $treStop) }
+if (-not ($tre.has_more -is [bool])) { Stop-Here ("GET /treasury has_more is not a boolean ( + .has_more + ); " + $treStop) }
+if ([int64]$tre.returned -ne $treEntries.Count) { Stop-Here ("GET /treasury returned is " + $tre.returned + " but it carries " + $treEntries.Count + " entries; " + $treStop) }
+if ([int64]$tre.total_entries -ne [int64]$attAfter.treasury.total_rows) { Stop-Here ("GET /treasury total_entries " + $tre.total_entries + " differs from the treasury chain total_rows " + $attAfter.treasury.total_rows + " read a moment earlier (a ledger write between the reads would explain it); " + $treStop) }
+$wantReturned = [Math]::Min([int64]$tre.total_entries, [int64]$LEDGER_PAGE_SIZE)
+if ($treEntries.Count -ne $wantReturned) { Stop-Here ("GET /treasury carries " + $treEntries.Count + " entries; with total_entries " + $tre.total_entries + " and page_size " + $LEDGER_PAGE_SIZE + " the first page must carry " + $wantReturned + "; " + $treStop) }
+$wantMore = ([int64]$tre.total_entries -gt [int64]$LEDGER_PAGE_SIZE)
+if ($tre.has_more -ne $wantMore) { Stop-Here ("GET /treasury has_more is " + $tre.has_more + ", expected " + $wantMore + " for total_entries " + $tre.total_entries + "; " + $treStop) }
+$treNames = $tre.PSObject.Properties.Name
+if ($wantMore) {
+  $lastEntry = $treEntries[$treEntries.Count - 1]
+  if ([string]$tre.next_before_entry_date -cne [string]$lastEntry.entry_date -or [string]$tre.next_before_id -cne [string]$lastEntry.id) { Stop-Here ("GET /treasury continuation (" + $tre.next_before_entry_date + " / " + $tre.next_before_id + ") is not the last entry served (" + $lastEntry.entry_date + " / " + $lastEntry.id + "); " + $treStop) }
+} elseif (($treNames -contains "next_before_entry_date") -or ($treNames -contains "next_before_id")) { Stop-Here ("GET /treasury serves a continuation cursor with has_more false; " + $treStop) }
+Say ("[ride] GET /treasury: total_entries " + $tre.total_entries + " = the treasury chain rows; returned " + $tre.returned + ", page_size " + $tre.page_size + ", has_more " + $tre.has_more + "; continuation consistent")
+if ($treEntries.Count -lt 2) { Stop-Here ("the ledger serves fewer than two entries, so the cursor cannot be ridden (prod had 18 on 4 Oct 2026); " + $treStop) }
+$first = $treEntries[0]
+$page2 = Get-Json ("$BASE/treasury?before_entry_date=" + $first.entry_date + "&before_id=" + $first.id)
+$page2Entries = @($page2.entries)
+$wantPage2 = [Math]::Min([int64]$tre.total_entries - 1, [int64]$LEDGER_PAGE_SIZE)
+if ($page2Entries.Count -ne $wantPage2) { Stop-Here ("GET /treasury with a cursor at the newest entry returned " + $page2Entries.Count + " entries, expected " + $wantPage2 + " (every other entry is strictly older): the cursor path is broken.") }
+$notOlder = @($page2Entries | Where-Object { [string]$_.entry_date -gt [string]$first.entry_date -or ([string]$_.entry_date -eq [string]$first.entry_date -and [int64]$_.id -ge [int64]$first.id) })
+if ($notOlder.Count -gt 0) { Stop-Here "GET /treasury with a cursor returned an entry not strictly older than the cursor." }
+Say ("[ride] GET /treasury cursor (before the newest entry, " + $first.entry_date + " / " + $first.id + ") -> " + $page2Entries.Count + " entries, all strictly older")
 $half = Get-Text "$BASE/treasury?before_id=1" 20
 if ($half.Code -ne "400") { Stop-Here "GET /treasury with only before_id answered $($half.Code), expected 400 (the cursor's two halves go together)." }
 Say "[ride] GET /treasury with half a cursor -> 400"

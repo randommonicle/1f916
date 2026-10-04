@@ -7,7 +7,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createLocalD1 } from "./helpers/local-d1.ts";
@@ -108,7 +110,7 @@ test("deploy-m3-treasury.ps1: the forbidden keys it rides for are absent from th
   d1.raw
     .prepare(
       `INSERT INTO settlement_claims (network, asset, from_addr, nonce, route, intent_json, intent_hash, rpc_body, rpc_body_hash, valid_before, state, tx, payer, verdict_reason, booked_refs, created_at, updated_at, lease_owner, leased_until)
-       VALUES ('base', 'usdc', '0xSECRETFROM', '0x01', 'register', '{"secret":"INTENTSECRET"}', 'ihash', 'RPCSECRET', 'rhash', ?, 'pending', NULL, '0xSECRETPAYER', 'VERDICTSECRET', '{}', ?, ?, 'LEASESECRET', NULL)`,
+       VALUES ('base', 'usdc', '0xSECRETFROM', '0x01', 'register', '{"secret":"INTENTSECRET"}', 'IHASHSECRET', 'RPCSECRET', 'RHASHSECRET', ?, 'pending', NULL, '0xSECRETPAYER', 'VERDICTSECRET', '{}', ?, ?, 'LEASESECRET', NULL)`,
     )
     .run(old + 360_000, old, old);
   const served = JSON.stringify(await settlementsAttention(d1.DB as never, null, now));
@@ -116,6 +118,90 @@ test("deploy-m3-treasury.ps1: the forbidden keys it rides for are absent from th
   assert.equal(listed.count, 1, "the aged pending row is listed (else this test proves nothing)");
   assert.equal(listed.entries[0].marker, "pending_aged");
   for (const key of listOf("FORBIDDEN_KEYS")) assert.equal(served.includes(`"${key}"`), false, `served key ${key}`);
-  for (const secret of ["SECRETFROM", "INTENTSECRET", "RPCSECRET", "SECRETPAYER", "VERDICTSECRET", "LEASESECRET"]) assert.equal(served.includes(secret), false, `served value ${secret}`);
+  for (const secret of ["SECRETFROM", "INTENTSECRET", "RPCSECRET", "SECRETPAYER", "VERDICTSECRET", "LEASESECRET", "IHASHSECRET", "RHASHSECRET"]) assert.equal(served.includes(secret), false, `served value ${secret}`);
   d1.close();
+});
+
+test("deploy-m3-treasury.ps1: $LEDGER_PAGE_SIZE is the code's LEDGER_PAGE", async () => {
+  const { LEDGER_PAGE } = await import("../src/society.ts");
+  const m = code.match(/\$LEDGER_PAGE_SIZE = (\d+)/);
+  assert.ok(m);
+  assert.equal(Number(m[1]), LEDGER_PAGE);
+});
+
+test("deploy-m3-treasury.ps1: every git read whose output is judged checks its exit code first (CODEX deploy-script r1, finding 1)", () => {
+  const lines = code.split("\n");
+  const reads = lines.map((l, i) => [l, i] as const).filter(([l]) => /= @\(git /.test(l));
+  assert.ok(reads.length >= 2, "the clean-tree and no-migration reads are found");
+  for (const [l, i] of reads) assert.match(lines[i + 1], /^if \(\$LASTEXITCODE -ne 0\) \{ Stop-Here/, `no exit check after: ${l}`);
+});
+
+// The treasury ride block, run for real in PowerShell with the network replaced by fixtures (CODEX deploy-script r1, finding 2).
+const ledgerRows = (n: number) =>
+  Array.from({ length: n }, (_, k) => {
+    const id = n - k;
+    return { id, entry_date: `2026-09-${String(10 + Math.floor(id / 2)).padStart(2, "0")}` };
+  });
+const goodPage = (n: number) => ({ total_entries: n, returned: Math.min(n, 200), page_size: 200, has_more: n > 200, entries: ledgerRows(n).slice(0, 200) });
+const runTreasuryRide = (t: { skip: (m: string) => void }, fixture: unknown): { code: number | null; out: string } | null => {
+  const start = code.indexOf('$tre = Get-Json "$BASE/treasury"');
+  const endNeedle = 'Say "[ride] GET /treasury with half a cursor -> 400"';
+  const end = code.indexOf(endNeedle);
+  assert.ok(start > 0 && end > start, "the treasury ride block is found");
+  const block = code.slice(start, end + endNeedle.length);
+  const dir = mkdtempSync(join(tmpdir(), "m3t-ride-"));
+  const fx = join(dir, "fixture.json");
+  writeFileSync(fx, JSON.stringify(fixture));
+  const harness = [
+    '$ErrorActionPreference = "Stop"',
+    '$BASE = "https://example.invalid"',
+    '$versionId = "test-version"',
+    "$LEDGER_PAGE_SIZE = 200",
+    'function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }',
+    "function Say($msg) { Write-Host $msg }",
+    `$fixture = (Get-Content -Raw '${fx}' | ConvertFrom-Json)`,
+    "$attAfter = $fixture.att",
+    'function Get-Json($url) { if ($url -like "*before_entry_date*") { return $fixture.page2 }; return $fixture.page1 }',
+    "function Get-Text($url, $maxTime) { return @{ Code = [string]$fixture.halfCode; Body = '' } }",
+    block,
+    'Write-Host "REACHED-END"',
+    "exit 0",
+  ].join("\r\n");
+  const ps1 = join(dir, "ride.ps1");
+  writeFileSync(ps1, harness);
+  const r = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1], { encoding: "utf8" });
+  rmSync(dir, { recursive: true, force: true });
+  if (r.error) {
+    t.skip("powershell is not available on this machine");
+    return null;
+  }
+  return { code: r.status, out: r.stdout + r.stderr };
+};
+const older = (n: number) => ({ ...goodPage(n - 1), total_entries: n, entries: ledgerRows(n).slice(1, 201) });
+
+test("deploy-m3-treasury.ps1 treasury ride: a true 18-row ledger passes to the end", (t) => {
+  const r = runTreasuryRide(t, { att: { treasury: { total_rows: 18 } }, page1: goodPage(18), page2: older(18), halfCode: "400" });
+  if (!r) return;
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /REACHED-END/);
+});
+
+test("deploy-m3-treasury.ps1 treasury ride: impossible or inconsistent pages STOP before the end", (t) => {
+  const base = { att: { treasury: { total_rows: 18 } }, page1: goodPage(18), page2: older(18), halfCode: "400" };
+  const cases: Record<string, unknown> = {
+    "CODEX's empty page": { ...base, page1: { total_entries: 0, returned: 0, page_size: 0, has_more: true, entries: [] } },
+    "total differs from the chain": { ...base, att: { treasury: { total_rows: 19 } } },
+    "has_more true at 18 rows": { ...base, page1: { ...goodPage(18), has_more: true, next_before_entry_date: "2026-09-10", next_before_id: 1 } },
+    "a short first page": { ...base, page1: { ...goodPage(18), returned: 17, entries: ledgerRows(18).slice(0, 17) } },
+    "a continuation with has_more false": { ...base, page1: { ...goodPage(18), next_before_id: 1 } },
+    "a short cursor page": { ...base, page2: { ...older(18), entries: ledgerRows(18).slice(1, 10) } },
+    "half a cursor accepted": { ...base, halfCode: "200" },
+  };
+  for (const [name, fixture] of Object.entries(cases)) {
+    const r = runTreasuryRide(t, fixture);
+    if (!r) return;
+    assert.equal(r.code, 1, `${name}: ${r.out}`);
+    assert.match(r.out, /\[STOP\]/, name);
+    assert.doesNotMatch(r.out, /REACHED-END/, name);
+  }
 });
