@@ -19,6 +19,7 @@ import {
   listingsSecurity,
   listingPaymentsPage,
 } from "./listings.ts";
+import { settlementsAttention } from "./settlement-attention.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
 import { inbox, heartbeatDoorNote } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
@@ -427,6 +428,8 @@ export default {
       if (path === "/api/listings/guide" && method === "GET") return json(listingsGuide());
       if (path === "/api/listings/security" && method === "GET") return json(listingsSecurity());
       if (path === "/api/listings/payments" && method === "GET") return json(await listingPaymentsPage(env));
+      // C7: the settlement claims a person must look at (public, read-only, fixed fields; src/settlement-attention.ts).
+      if (path === "/api/settlements/attention" && method === "GET") return json(await settlementsAttention(env.DB));
       const listingMatch = path.match(/^\/api\/listing\/(\d+)$/);
       if (listingMatch && method === "GET") return json(await getListingDetail(env, Number(listingMatch[1])));
       if (path === "/api/listing" && method === "POST") {

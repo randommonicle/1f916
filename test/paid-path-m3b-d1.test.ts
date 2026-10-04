@@ -54,6 +54,8 @@ import { runReconciler } from "../src/settlement-reconcile.ts";
 import { attemptPending } from "../src/x402.ts";
 import { finishPayListingBooking, handlePayListing } from "../src/listings.ts";
 import { SocietyError } from "../src/society.ts";
+import { ATTENTION_AGED_DAYS, ATTENTION_MARKER_CODES } from "../src/settlement-attention.ts";
+import { ROUTES } from "../src/discovery.ts";
 
 const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
 const eq = (d1: LocalD1) => testEnv(d1);
@@ -868,5 +870,167 @@ test("LOW-2: the 500 for a payment that settled but whose listing no longer hold
       stub.restore();
       d1.close();
     }
+  }
+});
+
+
+// ---------- C7: GET /api/settlements/attention, the claims a person must look at ----------
+
+const DAY_MS = 86_400_000;
+const attentionReq = () => new Request("https://example.test/api/settlements/attention");
+const SENTINEL_HANDLE = "sentinel-handle-7f3a";
+const getAttention = async (d1: LocalD1) => {
+  const res = await callWorker(attentionReq(), eq(d1));
+  const text = await res.text();
+  return { status: res.status, text, body: JSON.parse(text) as Record<string, any> };
+};
+
+// A claim seeded directly, then put into the exact state a marker reads. `intent` carries a sentinel so a test can prove no intent text is served.
+async function seedMarked(
+  d1: LocalD1,
+  o: { route: ClaimRoute; state: "pending" | "settled_unbooked" | "refused" | "expired" | "booked"; reason?: string | null; tx?: string | null; ageMs?: number },
+): Promise<ClaimKey> {
+  const key = await seedClaim(d1, { route: o.route, intent: { line: "c7", handle: SENTINEL_HANDLE, public_key: null, listing_id: 1, amount_cents: 1200 }, createdAt: Date.now() - (o.ageMs ?? 1000) });
+  d1.raw
+    .prepare(`UPDATE settlement_claims SET state = ?, tx = ?, payer = ?, verdict_reason = ?, rpc_body = ${o.state === "refused" || o.state === "expired" || o.state === "booked" ? "NULL" : "rpc_body"} WHERE ${KEY_WHERE}`)
+    .run(o.state, o.tx ?? null, o.tx ? TEST_PAYER : null, o.reason ?? null, ...(keyArgs(key) as never[]));
+  return key;
+}
+
+test("C7: each marker appears for the rows that carry it, and only those: contradiction, chain-spent (stopped), listing_not_paying, handle taken, and the two aged markers", async () => {
+  const d1 = createLocalD1();
+  try {
+    const old = ATTENTION_AGED_DAYS * DAY_MS + 60_000;
+    await seedMarked(d1, { route: "patron", state: "refused", reason: `settlement_contradiction:${TX}|${REFUSAL_SENTINEL}`, tx: TX });
+    await seedMarked(d1, { route: "register", state: "expired", reason: `settlement_contradiction:${TX}|x`, tx: TX });
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:${REFUSAL_SENTINEL}` });
+    await seedMarked(d1, { route: "listing_pay", state: "settled_unbooked", reason: "listing_not_paying", tx: TX });
+    await seedMarked(d1, { route: "register", state: "settled_unbooked", reason: "handle_taken", tx: TX });
+    await seedMarked(d1, { route: "listing_create", state: "settled_unbooked", reason: null, tx: TX, ageMs: old });
+    await seedMarked(d1, { route: "patron", state: "pending", reason: "the facilitator's last words", ageMs: old });
+    // rows that must NOT be listed
+    await seedMarked(d1, { route: "patron", state: "pending", reason: "the facilitator's last words" }); // young pending
+    await seedMarked(d1, { route: "patron", state: "settled_unbooked", reason: null, tx: TX }); // young settled_unbooked
+    await seedMarked(d1, { route: "patron", state: "booked", reason: null, tx: TX, ageMs: old }); // booked, however old
+    await seedMarked(d1, { route: "patron", state: "refused", reason: "an ordinary refusal", ageMs: old }); // unstamped refused
+    await seedMarked(d1, { route: "patron", state: "expired", reason: "authorisation expired unused", ageMs: old }); // unstamped expired
+
+    const { status, body } = await getAttention(d1);
+    assert.equal(status, 200, JSON.stringify(body));
+    const markers = (body.entries as { marker: string }[]).map((e) => e.marker).sort();
+    assert.deepEqual(markers, [
+      "chain_spent_facilitator_refused",
+      "listing_not_paying",
+      "pending_aged",
+      "registration_handle_taken",
+      "settled_unbooked_aged",
+      "settlement_contradiction",
+      "settlement_contradiction",
+    ]);
+    assert.equal(body.count, 7);
+    assert.equal(body.entries.length, 7);
+    for (const e of body.entries as Record<string, unknown>[]) {
+      assert.deepEqual(Object.keys(e).sort(), ["created_at", "marker", "nonce", "route", "state", "tx", "updated_at"], "exactly the served fields");
+    }
+    const byMarker = (m: string) => (body.entries as Record<string, any>[]).filter((e) => e.marker === m);
+    assert.equal(byMarker("chain_spent_facilitator_refused")[0].state, "pending");
+    assert.equal(byMarker("chain_spent_facilitator_refused")[0].tx, null, "tx is null when none is known");
+    assert.equal(byMarker("settlement_contradiction")[0].tx, TX, "tx when known");
+    assert.equal(byMarker("registration_handle_taken")[0].state, "settled_unbooked");
+    assert.ok(typeof byMarker("listing_not_paying")[0].nonce === "string" && /^0x[0-9a-f]{64}$/.test(byMarker("listing_not_paying")[0].nonce));
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7: the whole response carries none of rpc_body, intent_json, from_addr, payer, verdict_reason, any raw verdict text, the payer's address or an intent's handle", async () => {
+  const d1 = createLocalD1();
+  try {
+    const old = ATTENTION_AGED_DAYS * DAY_MS + 60_000;
+    await seedMarked(d1, { route: "patron", state: "refused", reason: `settlement_contradiction:${TX}|${REFUSAL_SENTINEL}`, tx: TX });
+    await seedMarked(d1, { route: "register", state: "pending", reason: `${CHAIN_SPENT}:${REFUSAL_SENTINEL}` });
+    await seedMarked(d1, { route: "listing_pay", state: "settled_unbooked", reason: "listing_not_paying", tx: TX });
+    await seedMarked(d1, { route: "register", state: "settled_unbooked", reason: "handle_taken", tx: TX });
+    await seedMarked(d1, { route: "patron", state: "pending", reason: REFUSAL_SENTINEL, ageMs: old });
+    const { status, text, body } = await getAttention(d1);
+    assert.equal(status, 200);
+    assert.equal(body.count, 5);
+    for (const forbidden of ["rpc_body", "intent_json", "from_addr", "payer", "verdict_reason", REFUSAL_SENTINEL, TEST_PAYER, TEST_PAYER.toLowerCase(), SENTINEL_HANDLE, "paymentPayload", "signature", "commonhold_sk_"]) {
+      assert.ok(!text.toLowerCase().includes(forbidden.toLowerCase()), `the response must not contain ${forbidden}`);
+    }
+    for (const e of body.entries as { marker: string }[]) {
+      assert.ok(ATTENTION_MARKER_CODES.includes(e.marker), `marker ${e.marker} is from the fixed allowlist`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7: one marker per row, the specific marker beats the age marker, and the age line is exactly ATTENTION_AGED_DAYS", async () => {
+  const d1 = createLocalD1();
+  try {
+    const old = ATTENTION_AGED_DAYS * DAY_MS + 60_000;
+    await seedMarked(d1, { route: "register", state: "settled_unbooked", reason: "handle_taken", tx: TX, ageMs: old }); // both handle_taken and aged: one entry, the specific marker
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:x`, ageMs: old }); // both stopped and aged: the specific marker
+    await seedMarked(d1, { route: "patron", state: "settled_unbooked", reason: null, tx: TX, ageMs: ATTENTION_AGED_DAYS * DAY_MS - 60_000 }); // just inside the line: not listed
+    await seedMarked(d1, { route: "patron", state: "settled_unbooked", reason: null, tx: TX, ageMs: ATTENTION_AGED_DAYS * DAY_MS + 60_000 }); // just past it: listed
+    const { body } = await getAttention(d1);
+    assert.deepEqual((body.entries as { marker: string }[]).map((e) => e.marker).sort(), ["chain_spent_facilitator_refused", "registration_handle_taken", "settled_unbooked_aged"]);
+    assert.equal(body.aged_after_days, ATTENTION_AGED_DAYS);
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7: the served note says what each marker means, that the list is the maintainer's queue, and promises no resolution time", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { body, text } = await getAttention(d1);
+    assert.equal(body.count, 0);
+    assert.deepEqual(body.entries, []);
+    assert.match(String(body.note), /maintainer/i);
+    assert.match(String(body.note), /no resolution time is promised/i);
+    assert.doesNotMatch(text, /within \d+ (hours|days)|by tomorrow|guarantee/i, "no promised time");
+    assert.deepEqual(Object.keys(body.markers).sort(), [...ATTENTION_MARKER_CODES].sort(), "every marker in the allowlist is explained, and only those");
+    for (const [code, meaning] of Object.entries(body.markers as Record<string, string>)) assert.ok(String(meaning).length > 40, `${code} has a real explanation`);
+    assert.doesNotMatch(text, /—/, "no em dashes in served text");
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7: /api/official carries a count beside the payments book, equal to the number of rows the list returns", async () => {
+  const d1 = createLocalD1();
+  try {
+    const before = (await (await callWorker(new Request("https://example.test/api/official"), eq(d1))).json()) as { economy: Record<string, any> };
+    assert.equal(before.economy.settlements_awaiting_a_person, 0);
+    assert.equal(before.economy.settlements_attention, "GET /api/settlements/attention");
+    assert.equal(before.economy.payments_book, "GET /api/listings/payments");
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:x` });
+    await seedMarked(d1, { route: "listing_pay", state: "settled_unbooked", reason: "listing_not_paying", tx: TX });
+    const after = (await (await callWorker(new Request("https://example.test/api/official"), eq(d1))).json()) as { economy: Record<string, any> };
+    const list = await getAttention(d1);
+    assert.equal(after.economy.settlements_awaiting_a_person, 2);
+    assert.equal(after.economy.settlements_awaiting_a_person, list.body.entries.length);
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7: the route is in the discovery ROUTES (public, no auth) and the stopped-row answer points at it", async () => {
+  const route = ROUTES.find((r) => r.method === "GET" && r.path === "/api/settlements/attention");
+  assert.ok(route, "listed in discovery ROUTES");
+  assert.equal(route!.auth, "none");
+  assert.notEqual(route!.grepFor, undefined, "wired into index.ts (carries a grepFor the drift guard checks)");
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: chainRpc(true) });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    assert.equal((await callWorker(patronReq("rent", header), eq(d1))).status, 502);
+    const resend = await callWorker(patronReq("rent", header), eq(d1));
+    assert.match(String((await json(resend)).error), /GET \/api\/settlements\/attention/);
+  } finally {
+    stub.restore();
+    d1.close();
   }
 });

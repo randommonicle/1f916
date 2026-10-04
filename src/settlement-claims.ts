@@ -16,6 +16,11 @@
 
 import { classifyUniqueViolation, sha256Hex, chainHeadMovedError, type ChainGate, type ChainedTable } from "./chain.ts";
 import { SocietyError, type Env } from "./society.ts";
+import { CHAIN_SPENT_MARKER, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CONTRADICTION_MARKER } from "./settlement-attention.ts";
+
+// C7 (second build): the four markers the claim table carries in `verdict_reason` are DEFINED in settlement-attention.ts (a leaf module, so officialFacts can count the rows the attention list
+// serves without an import cycle) and re-exported here, so every writer and the one public reader read a single definition. Their meanings are documented where they are used below.
+export { CHAIN_SPENT_MARKER, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CONTRADICTION_MARKER };
 
 export type ClaimRoute = "register" | "patron" | "listing_create" | "listing_pay";
 export type ClaimState = "pending" | "settled_unbooked" | "booked" | "refused" | "expired";
@@ -73,17 +78,14 @@ export const SETTLEMENT_CONTRADICTION = "settlement_contradiction";
 // F1 (hub ruling, 2026-09-30): a registration whose handle was taken by a DIFFERENT seat between settlement and the
 // citizen write can never be booked by any retry. The claim stays settled_unbooked (B2 has no other transition) and
 // carries this permanent reason; the reconciler skips such rows and every answer for one says so plainly.
-export const CLAIM_HANDLE_TAKEN = "handle_taken";
 export const REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT = "registration_handle_taken_after_payment";
 // C5 (drafts/BRIEF-PAID-PATH-M3-2026-10-02.md, first-gate L4): a listing_pay claim that is settled_unbooked while its listing is no longer 'paying' can never be booked (the
 // booking INSERT requires the listing to be 'paying'). The reconciler gives it this permanent reason the first time it meets it and never selects it again, so it stops taking
 // one of the reconciler's two daily slots. The claim stays settled_unbooked (no new state); every answer for it says so plainly.
-export const CLAIM_LISTING_NOT_PAYING = "listing_not_paying";
 
 // C1 (docs: drafts/BRIEF-PAID-PATH-M3-2026-10-02.md, re-gate LOW-1(a), A1): a claim that met a settlement_contradiction (the facilitator reported a settlement
 // for an authorisation whose claim another holder had made refused or expired) is stamped, in verdict_reason, with this prefix, the facilitator's tx, a bar
 // and the original reason (clipped). No new state and no migration: the row stays refused or expired, and every later answer for it reads the marker.
-export const CONTRADICTION_MARKER = "settlement_contradiction:";
 const CONTRADICTION_ORIGINAL_CLIP = 300;
 
 // How a payer whose money moved, and who is not a citizen, reaches the maintainer (gate M1). One literal: every settled-but-incomplete message interpolates it.
@@ -390,7 +392,6 @@ const contradictionTx = (row: Pick<ClaimRow, "tx" | "verdict_reason">): string =
 // facilitator's words (clipped), and STOPPED: no re-POST, no noteUnknown overwrite, no reconciler slot, every answer says a person will check it. No new state and no migration.
 // DEFERRED-C4-OPTION-A-RECEIPT: option A (read the transaction's receipt and require the Transfer(from, payTo, value) log right after AuthorizationUsed, then book from chain
 // evidence) is NOT built in this wave; it needs the two-RPC receipt quorum, the cancellation read and a re-priced reconciler budget (the brief's A2 and H1).
-export const CHAIN_SPENT_MARKER = "chain_spent_facilitator_refused:";
 const CHAIN_SPENT_REASON_CLIP = 300;
 
 export async function markChainSpent(env: Env, key: ClaimKey, reason: string, owner: string, now: number): Promise<boolean> {
@@ -580,7 +581,7 @@ export function stoppedMessage(row: ClaimRow): string {
     row.route === "listing_pay"
       ? `To add your own report, mention @commonhold-agent in a comment naming this nonce (${row.nonce}) (POST /api/comment).`
       : `To add your own report, leave a free showhome note naming this nonce (${row.nonce}): POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
-  return `The chain shows the signed authorisation for ${describeClaim(row)} was used (spent, or cancelled by its signer), so the money may have moved: whether it did is not established, and the society cannot tell which transaction used it. The society has stopped retrying this payment automatically. A person will check it against the chain by hand; no resolution time is promised. Do not sign again. ${pointer}`;
+  return `The chain shows the signed authorisation for ${describeClaim(row)} was used (spent, or cancelled by its signer), so the money may have moved: whether it did is not established, and the society cannot tell which transaction used it. The society has stopped retrying this payment automatically. A person will check it against the chain by hand; no resolution time is promised. It is listed at GET /api/settlements/attention. Do not sign again. ${pointer}`;
 }
 
 export function claimIsSecretRegistration(row: ClaimRow): boolean {

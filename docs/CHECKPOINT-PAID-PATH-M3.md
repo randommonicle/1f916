@@ -349,3 +349,31 @@ Served strings (old -> new):
   will set it aside when it next meets it rather than retry it. Do not sign again: ..."; the transient-failure text is unchanged. The thrown (logged) message "...or the listing is no longer paying" became "...or the listing no longer holds this
   payment's reservation".
 Existing tests moved on purpose: `paid-path-m3-d1` "C3 control: PAY LISTING keeps the lease read-back" and `settlement-replay-listings-d1` 10d (both asserted /recording it failed/ for a released listing; they now assert the LOW-2 text).
+
+## S6. C7 and R2-3: GET /api/settlements/attention, and the count in /api/official
+
+What: a public read of the claims a person must look at. New LEAF module `src/settlement-attention.ts` (no runtime imports, so `officialFacts` in `society.ts` can use it without a cycle with `settlement-claims.ts`, which imports
+`society.ts`). The four markers the claim table carries (`CLAIM_HANDLE_TAKEN`, `CLAIM_LISTING_NOT_PAYING`, `CONTRADICTION_MARKER`, `CHAIN_SPENT_MARKER`) are DEFINED there and re-exported by `settlement-claims.ts`, so the writers and
+the one reader share one definition (no call site changed). Allowlist and selection together (R2-3), one marker per row in this priority: `settlement_contradiction` (refused or expired rows carrying the C1 stamp),
+`chain_spent_facilitator_refused` (pending rows carrying S1's stamp), `listing_not_paying`, `registration_handle_taken` (settled_unbooked rows carrying the F1 reason), then `settled_unbooked_aged` and `pending_aged` (rows whose
+`created_at` is more than N days old in that state and that carry no more specific marker). N is one constant, `ATTENTION_AGED_DAYS = 3` (the brief's suggested value; the brief left the choice to the build, so it is reported).
+Fields: `route`, `state`, `marker`, `tx` (null when none is known or the stamp stored an empty one), `created_at`, `updated_at`, `nonce`. The marker is derived inside the SQL, so `verdict_reason` is never selected out of the query
+(M5: the facilitator's words, kept inside the C1 and C4 stamps, cannot reach the list); there is no `SELECT *` on this path. At most `ATTENTION_LIMIT = 500` rows.
+`/api/official` gains `economy.settlements_attention` (the route) and `economy.settlements_awaiting_a_person` (the number of rows the list returns: the same function). Route added to `discovery.ts` ROUTES with its `grepFor`; the drift guards,
+the completeness checks and the 404 text all stayed green. The stopped-row answer (S1) now ends its status sentence with "It is listed at GET /api/settlements/attention."
+Non-minting: the front-door template is untouched; `/api/official` is outside the hashed template and the non-minting test stayed green.
+
+| mutant | red in |
+|---|---|
+| the contradiction branch lists every terminal row | "each marker appears ... and only those" |
+| the served note names the payer address | the forbidden-fields grep |
+| the `pending_aged` branch removed | the marker test and the grep test |
+| the age line a tenth of N days | the age-boundary and one-marker-per-row test |
+| the `/api/official` count not the list's | the official-count test |
+| the route not served | five C7 tests |
+| the stopped answer not pointing at the list | the discovery/pointer test |
+
+Served text (new): the response's `note` ("The settlement claims a person must look at ... This list is the maintainer's queue, not a promise: no resolution time is promised for any row on it. ... Rows carry no wallet address and no request
+content; only the fields listed here are served."), a `markers` object explaining each of the six codes (the meanings are in `ATTENTION_MARKER_MEANINGS`; the chain-spent one says "spent, or cancelled by its signer" and covers both the facilitator
+refusal and the listing that no longer holds the reservation), and the discovery description. No em dashes (a test checks the served JSON). The forbidden-fields test greps the WHOLE response, case-insensitively, for `rpc_body`, `intent_json`,
+`from_addr`, `payer`, `verdict_reason`, a sentinel facilitator refusal, the test payer's address, a sentinel intent handle, `paymentPayload`, `signature` and `commonhold_sk_`; the served note deliberately avoids the word "payer" so that grep can be strict.
