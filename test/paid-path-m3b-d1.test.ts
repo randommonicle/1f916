@@ -378,6 +378,24 @@ test("CODEX deploy-script r3: a re-send that itself re-POSTs /settle and loses t
   }
 });
 
+test("CODEX pending-wording r1: a re-send whose chain read is inconclusive says it did not re-send the authorisation, never that nothing was changed (its lease moved updated_at)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: () => null });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    assert.equal((await callWorker(patronReq("rent", header), eq(d1))).status, 502);
+    const resend = await callWorker(patronReq("rent", header), eq(d1));
+    const body = await json(resend);
+    assert.equal(resend.status, 502, JSON.stringify(body));
+    assert.equal(stub.calls.settle, 1, "no re-POST: the chain read was inconclusive");
+    assert.match(String(body.error), /did not re-send the authorisation to the facilitator/);
+    assert.doesNotMatch(String(body.error), /nothing was changed/);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("H2: the reconciler counts the row unchanged (not resolved), and it resolves later through the expiry proof: the chain unused after validBefore + margin gives `expired`", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: chainRpc(false) });
