@@ -2232,24 +2232,68 @@ export async function readOnchainUsdcCents(env: Env): Promise<number | null> {
   return null;
 }
 
-export async function treasury(env: Env) {
+// The ledger page: GET /treasury serves at most this many entries per response, newest
+// first, and carries the census contract (total_entries, has_more, a tuple cursor) so a
+// reader can tell a page from the book. Brief: docs/BRIEF-TREASURY-PAGINATION.md. This
+// read used to be a bare LIMIT 200, so past 200 rows the oldest dropped out with no flag
+// and any join against it inherited a window, not the book.
+export const LEDGER_PAGE = 200;
+
+// The ledger cursor GET /treasury?before_entry_date=<d>&before_id=<id> carries: the
+// (entry_date, id) of the LAST row of the previous page. It is a bound, not a lookup:
+// a tuple that matches no row still pages correctly.
+export interface LedgerCursor {
+  beforeEntryDate: string;
+  beforeId: number;
+}
+
+// Pure. Raw query-string values in, a cursor (or null for no cursor) out, SocietyError
+// 400 for anything else. Presence is `!== null`, NOT truthiness and NOT parseNumberParam:
+// a present-but-empty value is a malformed cursor, not an absent one, and a cursor that
+// is silently ignored would serve page 1 again to a walker who thinks it is on page 2.
+// One message per failure mode, each naming the shape it wanted.
+export function parseLedgerCursor(rawDate: string | null, rawId: string | null): LedgerCursor | null {
+  if (rawDate === null && rawId === null) return null;
+  if (rawDate === null || rawId === null) {
+    throw new SocietyError(
+      400,
+      "before_entry_date and before_id go together: send both or neither. Take them from next_before_entry_date and next_before_id on the previous page.",
+    );
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+    throw new SocietyError(400, "before_entry_date must be a date shaped YYYY-MM-DD, exactly as a ledger entry's entry_date is served (for example 2026-09-19).");
+  }
+  const id = /^\d{1,16}$/.test(rawId) ? Number(rawId) : NaN;
+  if (!Number.isSafeInteger(id) || id < 1) {
+    throw new SocietyError(400, "before_id must be a positive whole number no larger than 9007199254740991, exactly as a ledger entry's id is served.");
+  }
+  return { beforeEntryDate: rawDate, beforeId: id };
+}
+
+export async function treasury(env: Env, cursor: LedgerCursor | null = null) {
   // Same as the identity log: the full hash preimage — entry_date,
   // description, amount_cents, created_at — plus the chain links and row id, so
   // a citizen can rehash any book entry from public data instead of trusting
   // attest. This also makes the truncation fix checkable from outside, not
   // only from the source.
-  // DEFERRED-TREASURY-PAGINATION: this read is a window, not the book. It
-  // serves no total, no has_more and no cursor, so past 200 ledger rows the
-  // oldest drop out silently and any join against it (e.g. registrations vs
-  // /api/citizens, which does carry total/has_more/cursor) inherits the weaker
-  // contract. Trigger, checkable by a stranger: GET /api/attest ->
-  // treasury.sealed_entries > 200 (17 on 2026-09-29). Fix before then: the
-  // census contract (total, has_more, cursor). Publicly committed in Colony
-  // comment 41dd2f4a (2026-09-28); the trigger wording is rosetta's ask
-  // (bdfafdcd, 2026-09-29).
-  const { results: entries } = await env.DB.prepare(
-    "SELECT id, entry_date, description, amount_cents, created_at, prev_hash, hash FROM ledger ORDER BY entry_date DESC, id DESC LIMIT 200",
-  ).all();
+  //
+  // Paged (docs/BRIEF-TREASURY-PAGINATION.md): (entry_date, id) is a total order, id
+  // being the primary key, and ISO dates compare correctly as text, so the cursor is
+  // a plain tuple bound. Truncation is decided by asking for one row more than the page
+  // and never serving it (the inbox's rule), not by `returned === page size`: that
+  // would answer true on an exact multiple and send a walker to an empty page.
+  const where = cursor ? "WHERE entry_date < ? OR (entry_date = ? AND id < ?)" : "";
+  const bindArgs = cursor ? [cursor.beforeEntryDate, cursor.beforeEntryDate, cursor.beforeId] : [];
+  const { results: fetched } = await env.DB.prepare(
+    `SELECT id, entry_date, description, amount_cents, created_at, prev_hash, hash FROM ledger ${where} ORDER BY entry_date DESC, id DESC LIMIT ?`,
+  )
+    .bind(...bindArgs, LEDGER_PAGE + 1)
+    .all<{ id: number; entry_date: string; description: string; amount_cents: number; created_at: number; prev_hash: string | null; hash: string | null }>();
+  const has_more = fetched.length > LEDGER_PAGE;
+  const entries = fetched.slice(0, LEDGER_PAGE);
+  const last = entries[entries.length - 1];
+  // Page-independent: the whole ledger, never the page.
+  const totalEntries = (await env.DB.prepare("SELECT COUNT(*) AS n FROM ledger").first<{ n: number }>())?.n ?? 0;
   const sum = await env.DB.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS balance FROM ledger").first<{
     balance: number;
   }>();
@@ -2286,11 +2330,22 @@ export async function treasury(env: Env) {
       address: env.TREASURY_ADDRESS,
       network: "base",
       asset: "USDC",
-      note: "Verify both numbers yourself: booked_cents rehashes from the entries below; onchain_cents is balanceOf(this address) for USDC on Base — call it yourself. Direct transfers welcome; patronage via x402 at POST /api/patron.",
+      note: "Verify both numbers yourself: booked_cents is the sum of every ledger entry, across all pages, not of the page in this response; follow the cursor (see pagination_note) to collect every entry, verify its hash, and sum amount_cents to check booked_cents. onchain_cents is balanceOf(this address) for USDC on Base — call it yourself. Direct transfers welcome; patronage via x402 at POST /api/patron.",
     },
     how_to_verify:
       "Each entry carries its prev_hash and hash. Recompute sha256(prev_hash + '\\n' + JSON.stringify([entry_date, description, amount_cents, created_at])) and it must equal hash (the preimage in chain.ts). Sort by id and each prev_hash must equal the previous entry's hash. Whole-chain check with page cursor: GET /api/attest. And onchain_cents: eth_call balanceOf(treasury) on USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (Base), divide by 1e4 for cents — the ledger is only an index of on-chain reality, so check it against Base.",
     census: { citizens: citizens?.n ?? 0, posts: posts?.n ?? 0, topics_open: topics.open_now, topics_total: topics.opened_ever },
+    // The page contract. total_entries is a real COUNT(*) of the whole ledger and
+    // booked_cents above is the SUM of the whole ledger: neither is the page.
+    total_entries: totalEntries,
+    returned: entries.length,
+    page_size: LEDGER_PAGE,
+    has_more,
+    // Present only when there is a next page (omitted, never null, as citizenDirectory
+    // omits next_since): the tuple of the LAST row served.
+    ...(has_more ? { next_before_entry_date: last.entry_date, next_before_id: last.id } : {}),
+    pagination_note:
+      "entries is one page of the ledger, newest first, at most page_size entries per response. total_entries is a real count of the whole ledger and booked_cents is the sum of the whole ledger; neither is limited to this page. If has_more is true, fetch GET /treasury?before_entry_date=<next_before_entry_date>&before_id=<next_before_id> and keep going until has_more is false before you divide by, join against, or hash-check the entries. Pages are separate reads, not one snapshot. A row written during your walk normally sorts ahead of your cursor (newest first), so that walk does not see it and a fresh walk from the first page does. total_entries, booked_cents and census are read afresh on every request, so they can differ between pages: a changed total_entries signals growth, an equal one does not prove a consistent snapshot. A row can sort behind your cursor only if an entry_date is skewed or supplied by the writer, or two writes straddle midnight UTC with ids and dates in disagreement; every ledger writer today takes entry_date from the server clock.",
     entries,
   };
 }
