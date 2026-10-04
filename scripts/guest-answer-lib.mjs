@@ -2,6 +2,9 @@
 // No custody file is read here and no request here writes: every fetch is a GET. The draft step
 // (guest-due-draft.mjs) imports only this; the send step (guest-answer-send.mjs) adds the one write.
 
+// The one third-party import: the reference CommonMark parser (devDependency commonmark, pinned; never imported by src/).
+import { Parser } from "commonmark";
+
 export const DEFAULT_BASE = "https://commonhold.randommonicle.workers.dev";
 export const ANSWERER = "commonhold-agent";
 export const MIN_ANSWER_LEN = 80; // GUEST_DUTY_MIN_ANSWER_LEN (src/guest-core.ts): a shorter answer discharges nothing
@@ -101,125 +104,151 @@ export function encodeGuestText(text) {
   return JSON.stringify(text == null ? null : String(text));
 }
 
-const HEADER = /^## \[(CLAUDE|GEMINI|CODEX) ([^\]]*)\]\s*$/;
-// Fences as CommonMark reads them (CODEX scripts r3): an opener is up to three spaces, then three or more of ONE
-// character (backtick or tilde; a backtick opener's info string holds no backtick); the fence closes only on a line
-// of the SAME character, at least as long, with nothing after it. So a four-backtick quotation holding a
-// three-backtick block stays one fence.
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-// Sections by exact header lines, each line tagged with whether it sits inside a fenced block (the fence lines
-// themselves included). A header-shaped line INSIDE a fence (a seat quoting another section) or a fence still open at
-// the end makes the file AMBIGUOUS, and an ambiguous file approves nothing: a quotation can never become a section,
-// and a real section can never be hidden.
-// HTML comments (CODEX guest-answer r1 HIGH): outside a fence, any line that touches a comment (opens one, closes one,
-// or sits between) is tagged `commented` and is never a verdict; a header inside a comment or a comment still open at the
-// end makes the file ambiguous. `<!--` anywhere on the line opens, wherever CommonMark would start an HTML block or not:
-// stricter than the spec, and the strict side fails closed (an ambiguous file approves nothing).
-function commentStep(line, open) {
-  let i = 0;
-  for (;;) {
-    if (open) {
-      const c = line.indexOf("-->", i);
-      if (c < 0) return true;
-      open = false;
-      i = c + 3;
-    } else {
-      const o = line.indexOf("<!--", i);
-      if (o < 0) return false;
-      open = true;
-      i = o + 4;
-    }
-  }
-}
 
-// Characters this parser does not interpret make the file ambiguous outright (CODEX guest-answer r4 HIGH): a bare CR is a
+const HEADER = /^## \[(CLAUDE|GEMINI|CODEX) ([^\]]*)\]\s*$/;
+// Text that reads as a section header whatever the heading's form (a setext heading, extra spaces, closing hashes).
+const HEADER_TEXT = /^\[(?:CLAUDE|GEMINI|CODEX) [^\]]*\]$/;
+// Fence lines as CommonMark reads them: an opener is up to three spaces, then three or more of ONE character; a fence
+// closes only on a line of the SAME character, at least as long, with nothing after it. Used only to tell a top-level
+// fence that closed from one that ran to the end of the file; the block structure itself comes from the parser.
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// Characters this reader does not interpret make the file ambiguous outright (CODEX guest-answer r4 HIGH): a bare CR is a
 // CommonMark line ending that split("\n") misses, and U+2028/U+2029/U+0085 or any other control character can end a
-// line or a regex dot somewhere the parser does not expect. Fail closed rather than chase each one; tab and LF only.
+// line or a regex dot somewhere the reader does not expect. Fail closed rather than chase each one; tab and LF only.
 const UNINTERPRETED = /[\u0000-\u0008\u000B-\u001F\u007F\u0085\u2028\u2029]/;
 
-// A raw HTML block other than a comment (CODEX guest-answer r7 POSITION): `<pre>`, `<details>`, `<?`, `<!DOCTYPE` and the
-// rest change what CommonMark treats as a fence or a comment (a backtick line inside `<pre>` is not a fence), and this
-// parser does not model them. Outside a fence, a line that starts (after up to three spaces) with one makes the file
-// ambiguous. Comments (`<!--`) stay modelled by commentStep; the transport's one-line note is one.
-const RAW_HTML_START = /^ {0,3}<(?:[A-Za-z/?]|![A-Za-z[])/;
+// The exchange file is read by the reference CommonMark parser (commonmark.js, spec 0.31.2; D-074 note 4 Oct), never by
+// a hand-written line scanner: nine constructs (a fence or HTML comment that one reader saw and the other did not) made
+// the hand parser disagree with CommonMark about whether a verdict line was live. The document's top-level nodes are
+// the only thing read: a quotation, list item, fence or HTML block is one node, so what sits inside it is never a header
+// and never a verdict.
 
+// The text of an inline subtree, for comparing a heading with the raw line it came from.
+function textOf(node) {
+  let s = "";
+  for (let c = node.firstChild; c; c = c.next) {
+    if (c.type === "text" || c.type === "code") s += c.literal;
+    else if (c.type === "softbreak" || c.type === "linebreak") s += "\n";
+    else s += textOf(c);
+  }
+  return s;
+}
+
+// The exact text of a one-line paragraph made only of plain text, else null. commonmark.js splits `[[X]]` into several
+// sibling text nodes (`[`, `[`, `X`, `]`, `]`), so "only text" means every child is a text node and the concatenation is
+// the string. The raw source line (trailing spaces and tabs stripped) must equal it too: an escape (`\[`), an entity
+// (`&#91;`) or an indent (` [[CONVERGED]]`) renders as the marker but is not the line the protocol writes, and the
+// strict side fails closed.
+function plainLine(node, lines) {
+  if (node.type !== "paragraph") return null;
+  let s = "";
+  for (let c = node.firstChild; c; c = c.next) {
+    if (c.type !== "text") return null;
+    s += c.literal;
+  }
+  const [[first], [last]] = node.sourcepos;
+  if (first !== last) return null;
+  return lines[first - 1].replace(/[ \t]+$/, "") === s ? s : null;
+}
+
+// What an HTML block is. "comment": ONE complete `<!-- ... -->` and nothing after the first `-->` (the transport's
+// metadata note is one). "partial": a terminated comment with more text after its `-->` on the same line (ordinary
+// content, never a verdict). "open": a comment with no `-->` before the block ends. "other": `<pre>`, `<details>`,
+// `<?php`, `<!DOCTYPE` and the rest of the raw HTML block starts.
+function htmlBlockKind(node) {
+  if (node.type !== "html_block") return null;
+  const t = node.literal.replace(/^[ \t]+/, "").replace(/[ \t\n]+$/, "");
+  if (!t.startsWith("<!--")) return "other";
+  const i = t.indexOf("-->", 4);
+  if (i < 0) return "open";
+  return i + 3 === t.length ? "comment" : "partial";
+}
+
+// Sections are delimited by top-level level-2 headings whose raw line is exactly a HEADER line; a section is the run of
+// top-level nodes after its heading up to the next one. An ambiguous file approves nothing:
+//  - a control or line-separator character the reader does not interpret (UNINTERPRETED);
+//  - a HEADER-shaped raw line that is not the line of a top-level section heading (a seat quoting another section inside
+//    a fence, list, blockquote or HTML block): a quotation can never become a section, and a real one can never be hidden;
+//  - a top-level level-2 heading that reads as a section header but is not a HEADER line (setext, closing hashes);
+//  - a top-level fence still open at the end of the file, or an HTML comment that never closes;
+//  - a raw HTML block other than a comment (`<pre>`, `<details>`, `<?`, `<!DOCTYPE` ...), at any depth: it changes what
+//    CommonMark treats as a fence or a comment, and over-refusing is acceptable (an ambiguous exchange is answered by hand).
 export function parseSections(text) {
-  const sections = [];
-  let fence = null;
-  let comment = false;
   const body = normaliseBody(text);
+  const lines = body.split("\n");
+  const sections = [];
   let ambiguous = UNINTERPRETED.test(body);
-  for (const line of body.split("\n")) {
-    const m = HEADER.exec(line);
-    if (m && (fence || comment)) ambiguous = true;
-    if (m && !fence && !comment) {
-      const round = /\bround (\d+)\b/.exec(m[2]);
-      sections.push({ handle: m[1], round: round ? Number(round[1]) : null, lines: [] });
-      continue;
+  if (ambiguous) return Object.assign(sections, { ambiguous });
+  const doc = new Parser().parse(body);
+  const headingLines = new Set();
+  let current = null;
+  for (let n = doc.firstChild; n; n = n.next) {
+    if (n.type === "heading" && n.level === 2) {
+      const line = n.sourcepos[0][0];
+      const m = n.sourcepos[1][0] === line ? HEADER.exec(lines[line - 1]) : null;
+      if (m) {
+        const round = /\bround (\d+)\b/.exec(m[2]);
+        current = { handle: m[1], round: round ? Number(round[1]) : null, nodes: [], lines };
+        sections.push(current);
+        headingLines.add(line);
+        continue;
+      }
+      if (HEADER_TEXT.test(textOf(n))) ambiguous = true;
     }
-    let fenced = fence !== null;
-    let commented = comment;
-    if (fence) {
-      const c = FENCE_CLOSE.exec(line);
-      if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
-    } else if (comment) {
-      comment = commentStep(line, true);
-    } else {
-      const o = FENCE_OPEN.exec(line);
-      if (o && !(o[1][0] === "`" && o[2].includes("`"))) {
-        fence = { ch: o[1][0], len: o[1].length };
-        fenced = true;
-      } else if (RAW_HTML_START.test(line)) {
-        ambiguous = true;
-      } else if (line.includes("<!--")) {
-        commented = true;
-        comment = commentStep(line, false);
+    if (current) current.nodes.push(n);
+    if (n.type === "code_block") {
+      const open = FENCE_OPEN.exec(lines[n.sourcepos[0][0] - 1]);
+      if (open) {
+        const [[start], [end]] = n.sourcepos;
+        const close = end > start ? FENCE_CLOSE.exec(lines[end - 1]) : null;
+        if (!close || close[1][0] !== open[1][0] || close[1].length < open[1].length) ambiguous = true;
       }
     }
-    if (sections.length) sections[sections.length - 1].lines.push({ text: line, fenced, commented });
   }
-  if (fence || comment) ambiguous = true;
+  lines.forEach((l, i) => {
+    if (HEADER.test(l) && !headingLines.has(i + 1)) ambiguous = true;
+  });
+  const walker = doc.walker();
+  for (let ev = walker.next(); ev; ev = walker.next()) {
+    if (!ev.entering) continue;
+    const kind = htmlBlockKind(ev.node);
+    if (kind === "other" || kind === "open") ambiguous = true;
+  }
   return Object.assign(sections, { ambiguous });
 }
 
-// A seat's verdict counts only as the protocol writes it, at the END of its section: outside every fence and
-// blockquote and every HTML comment (the transport's trailing note included), ignoring blank lines, the last line is
-// exactly that seat's own [[END <SEAT> round N]] with N the header's round, and the line before it is exactly
-// [[CONVERGED]] at column 0 (an indented line is code or a quotation, never a verdict; only trailing whitespace is ignored).
-// The verdict also needs a hard boundary (CODEX guest-answer r2 HIGH): the raw line before [[CONVERGED]] is blank and
-// only blank lines sit between it and END. A blank line ends any blockquote, list item or paragraph, so the marker
-// cannot be a lazy continuation of a quotation (CommonMark 5.1, `> quoted:` then `[[CONVERGED]]` on the next line).
-// Blank means what CommonMark means (CODEX guest-answer r3 HIGH): only ASCII spaces and tabs. U+00A0 or U+2003 does
-// not end a lazy blockquote, and JavaScript's trim() would have counted it blank.
-const isBlank = (s) => /^[ \t]*$/.test(s);
+// A seat's verdict counts only as the protocol writes it, at the END of its section. Among the section's top-level
+// nodes, ignoring HTML blocks that are one complete comment (the transport's trailing note), the last node is a
+// paragraph that is exactly that seat's own [[END <SEAT> round N]] with N the header's round, and the node before it is
+// a paragraph that is exactly [[CONVERGED]]. Two paragraphs are two nodes only if a blank line (or another block) sits
+// between them, so a marker can never be a lazy continuation of a quotation, list item or paragraph; a marker inside a
+// list, quotation, fence or comment is part of that node and never a top-level paragraph.
 function sectionConverges(section) {
-  const raw = section.lines.map((l) => ({ ...l, t: l.text.replace(/[ \t]+$/, "") }));
-  const sig = raw
-    .map((l, i) => ({ ...l, i }))
-    .filter((l) => !l.fenced && !l.commented && !isBlank(l.text) && !l.t.trimStart().startsWith(">"));
-  if (section.round == null || sig.length < 2) return false;
-  const end = sig[sig.length - 1];
-  const verdict = sig[sig.length - 2];
-  if (end.t !== `[[END ${section.handle} round ${section.round}]]` || verdict.t !== "[[CONVERGED]]") return false;
-  if (verdict.i === 0 || !isBlank(raw[verdict.i - 1].text)) return false;
-  return raw.slice(verdict.i + 1, end.i).every((l) => isBlank(l.text));
+  if (section.round == null) return false;
+  const nodes = section.nodes.filter((n) => htmlBlockKind(n) !== "comment");
+  if (nodes.length < 2) return false;
+  return (
+    plainLine(nodes[nodes.length - 1], section.lines) === `[[END ${section.handle} round ${section.round}]]` &&
+    plainLine(nodes[nodes.length - 2], section.lines) === "[[CONVERGED]]"
+  );
 }
 
-// The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target on a
-// line exactly `Target: <gid>` and carries the answer in an ```answer fenced block equal to the body; each seat's
-// LATEST section comes after that hub section and converges. Returns null when approved, else the reason.
+// The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target in a
+// top-level paragraph exactly `Target: <gid>` and carries the answer in ONE top-level ```answer fenced block equal to the
+// body; each seat's LATEST section comes after that hub section and converges. Returns null when approved, else the reason.
 export function approvalProblem(exchangeText, target, body) {
   const sections = parseSections(exchangeText);
-  if (sections.ambiguous) return "the exchange file is ambiguous (a section header inside a fence or comment, a fence or comment left open, or a control or line-separator character other than tab and LF); write a fresh exchange";
+  if (sections.ambiguous) return "the exchange file is ambiguous (a section header inside a fence, quotation or HTML block, a fence or comment left open, a raw HTML block other than a comment, or a control or line-separator character other than tab and LF); write a fresh exchange";
   const lastHub = sections.map((s) => s.handle).lastIndexOf("CLAUDE");
   if (lastHub < 0) return "no hub section";
-  const hub = sections[lastHub].lines.map((l) => l.text);
-  if (!hub.includes(`Target: ${target}`)) return `the last hub section does not name Target: ${target}`;
-  const open = hub.indexOf("```answer");
-  const close = open < 0 ? -1 : hub.indexOf("```", open + 1);
-  if (open < 0 || close < 0) return "the last hub section has no closed ```answer block";
-  if (hub.slice(open + 1, close).join("\n") !== body) return "the ```answer block in the last hub section is not exactly the body";
+  const hub = sections[lastHub];
+  if (!hub.nodes.some((n) => plainLine(n, hub.lines) === `Target: ${target}`)) return `the last hub section does not name Target: ${target}`;
+  const blocks = hub.nodes.filter((n) => n.type === "code_block" && n.info === "answer");
+  if (blocks.length === 0) return "the last hub section has no closed ```answer block";
+  if (blocks.length > 1) return "the last hub section has more than one ```answer block";
+  if (blocks[0].literal !== body + "\n") return "the ```answer block in the last hub section is not exactly the body";
   for (const seat of ["GEMINI", "CODEX"]) {
     const last = sections.map((s) => s.handle).lastIndexOf(seat);
     if (last < lastHub) return `${seat} has not answered since the last hub section`;
