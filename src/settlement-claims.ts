@@ -314,12 +314,18 @@ async function terminate(env: Env, claimUpdate: D1PreparedStatement, release?: C
 // pending -> refused (classifier rule 7 only): terminal, the authorisation body is cleared. Pass `release` (the claim row) from the
 // reconciler and the re-send so a listing_pay reservation is released in the same batch (F2); the pay route's own request path
 // releases its reservation itself and passes nothing.
-export async function markRefused(env: Env, key: ClaimKey, reason: string, owner: string, now: number, release?: ClaimRow): Promise<boolean> {
+//
+// R2-1 (CODEX r2 HIGH, second build): `takenAt` binds the write to the claim's TAKE time. HOLDS_LEASE accepts a NULL or lapsed lease, so a first attempt whose refusal write is delayed past its
+// lease could land after another holder (B) acquired the lapsed lease, re-POSTed, met an unknown outcome and cleared the lease again (noteUnknown): the 402 it then answers, with fresh
+// `accepts`, invites a second signature while B's transfer can still mine. Every other holder's attempt MOVES updated_at (acquireLease and noteUnknown both set it, and acquireLease acts only
+// after the lease lapsed), so `updated_at = takenAt` proves no other attempt started since this request took the claim. payAndSettle's first-attempt refusal passes it; a write that
+// changes nothing is re-read and answered from the claim, never as a 402.
+export async function markRefused(env: Env, key: ClaimKey, reason: string, owner: string, now: number, release?: ClaimRow, takenAt?: number): Promise<boolean> {
   return terminate(
     env,
     env.DB.prepare(
-      `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}`,
-    ).bind(reason, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now)),
+      `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}${takenAt === undefined ? "" : " AND updated_at = ?"}`,
+    ).bind(reason, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now), ...(takenAt === undefined ? [] : [takenAt])),
     release,
   );
 }

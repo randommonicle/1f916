@@ -259,3 +259,19 @@ Served string (old -> new). Old, the payer's re-send after an unused-chain refus
 mined and a refusal now could be wrong. The claim stays pending until the chain shows the authorisation used or provably expired. <reconciler tail>".
 Existing tests moved on purpose: `settlement-replay-reconcile-d1` 7d (refused leg: pending, unchanged, 502 on the re-send); `settlement-replay-fixes-d1` F2 refused (now: pending, reservation kept, released by the expiry proof);
 `settlement-replay-lease-d1` T6 refused (the holder's own attempt reports `unchanged`, claim pending).
+
+## S3. R2-1 (HIGH, pre-existing): the first attempt's refusal is bound to its take time
+
+What: `payAndSettle` captures `takenAt` once, passes it to `takeClaim` (it becomes the claim's `created_at` and `updated_at`) and to the first-attempt `markRefused`, which gained an optional `takenAt` and a conditional
+`AND updated_at = ?`. Every other holder's attempt moves `updated_at` (`acquireLease` and `noteUnknown` both set it, and `acquireLease` acts only after the lease lapsed), so a refusal that lands after another attempt
+started writes nothing; the existing re-read then answers from the claim (pending: the unknown-outcome answer, reservation kept), never a 402. No migration, no other caller changes (the argument is optional).
+CODEX's interleaving is pinned for a patron claim and for pay listing (A's /settle in flight; B, with a clock past A's lease, acquires, re-POSTs, meets an unknown outcome, `noteUnknown` clears the lease; A's refusal then
+lands): not 402, no `accepts`, claim pending, listing still `paying`. Both were red on the unchanged code (402 with accepts for the patron; the listing released for the pay route).
+Test detail: B's writes use a clock 400 s ahead of A's, so `updated_at` differs deterministically (in production the 180 s lease lapse alone guarantees it).
+
+| mutant | red in |
+|---|---|
+| `markRefused`'s `updated_at` condition made vacuous | both interleavings and the unit test |
+| `payAndSettle` stops passing the take time | both interleavings |
+
+Served strings: none changed (the answer is the existing pending one).

@@ -8,6 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { insertCitizen, insertListing, insertSubmission } from "./helpers/local-d1.ts";
+import { declareTestWallet } from "./helpers/wallet-pin.ts";
+import { atomicFromCents } from "./helpers/x402-payload.ts";
 import {
   TEST_PAYER,
   TREASURY_ADDRESS,
@@ -33,6 +36,7 @@ import {
   getClaim,
   keyOfRow,
   markChainSpent,
+  markRefused,
   noteUnknown,
   takeClaim,
   KEY_WHERE,
@@ -44,6 +48,8 @@ import {
 } from "../src/settlement-claims.ts";
 import { runReconciler } from "../src/settlement-reconcile.ts";
 import { attemptPending } from "../src/x402.ts";
+import { handlePayListing } from "../src/listings.ts";
+import { SocietyError } from "../src/society.ts";
 
 const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
 const eq = (d1: LocalD1) => testEnv(d1);
@@ -82,6 +88,44 @@ async function seedClaim(
   return key;
 }
 const claimOfKey = async (d1: LocalD1, key: ClaimKey) => (await getClaim(eq(d1), key)) as ClaimRow;
+const theClaim = (d1: LocalD1) => {
+  const rows = d1.raw.prepare("SELECT * FROM settlement_claims").all();
+  assert.equal(rows.length, 1, "exactly one claim row");
+  return rows[0] as unknown as ClaimRow;
+};
+const loadCitizen = (d1: LocalD1, id: number) =>
+  d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(id) as { id: number; handle: string; model: string; karma: number; created_at: number; last_seen_at: number };
+
+// A funded listing with a pinned reviewer wallet and the funder's signed header, sent through the real pay route.
+async function payFixture(d1: LocalD1, opts: { validBefore?: string } = {}) {
+  const funderId = insertCitizen(d1);
+  const reviewerId = insertCitizen(d1);
+  const wallet = "0x" + "0a".repeat(20);
+  const pin = await declareTestWallet(d1, reviewerId, wallet);
+  const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1200 });
+  const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+  const header = paymentHeaderFor(wallet, atomicFromCents(1200), opts.validBefore ? { validBefore: opts.validBefore } : {});
+  const send = async () => {
+    try {
+      const r = await handlePayListing(
+        new Request(`https://example.test/api/listing/${listingId}/pay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-PAYMENT": header },
+          body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+        }),
+        eq(d1),
+        loadCitizen(d1, funderId),
+        listingId,
+      );
+      return { status: r.status, body: (await r.json()) as Record<string, any> };
+    } catch (e) {
+      if (e instanceof SocietyError) return { status: e.status, body: { error: e.message, code: e.code } as Record<string, any> };
+      throw e;
+    }
+  };
+  const listing = () => d1.raw.prepare("SELECT status, paying_since, paying_wallet_row_id, paying_wallet_row_hash FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null; paying_wallet_row_id: number | null; paying_wallet_row_hash: string | null };
+  return { send, listing, listingId, submissionId, pin, wallet, header, funderId, reviewerId };
+}
 
 // ---------- C4, option B: the chain reads the authorisation USED and the facilitator answers a recorded refusal: stamp and stop ----------
 
@@ -341,6 +385,77 @@ test("H2 control: payAndSettle's FIRST /settle still honours a rule-7 refusal at
     assert.equal(claimDetail(d1).state, "refused");
   } finally {
     stub.restore();
+    d1.close();
+  }
+});
+
+
+// ---------- R2-1 (HIGH, CODEX r2): the first attempt's refusal is bound to the take time ----------
+
+// B (a second worker) acts on A's claim long after A's lease lapsed: it takes the lapsed lease, re-POSTs, meets an unknown outcome and clears the lease. B's clock is far
+// ahead of A's so every write of B's moves updated_at (in production the lapse alone guarantees it: B can only act 180 s after A's take).
+async function bTakesAndLosesTheClaim(d1: LocalD1): Promise<void> {
+  const key = keyOfRow(theClaim(d1));
+  const later = Date.now() + 400_000;
+  assert.ok(await acquireLease(eq(d1), key, "B", later), "B took A's lapsed lease");
+  await noteUnknown(eq(d1), key, "B: the re-POST's outcome was unknown", "B", later + 1);
+  assert.equal(theClaim(d1).lease_owner, null, "B's unknown outcome cleared the lease");
+}
+
+test("R2-1: A's refusal lands after B acquired the lapsed lease, re-POSTed, met an unknown outcome and cleared the lease: A answers from the claim (pending, no 402, no accepts) and the claim is not refused", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async () => {
+      await bTakesAndLosesTheClaim(d1);
+      return refusedAnswer();
+    },
+  });
+  try {
+    const res = await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1));
+    const body = await json(res);
+    assert.notEqual(res.status, 402, JSON.stringify(body));
+    assert.equal(body.accepts, undefined, "no fresh payment requirements: B's transfer may still mine");
+    assert.equal(claimDetail(d1).state, "pending", "not refused");
+    assert.notEqual(claimDetail(d1).rpc_body, null, "the body is kept for B's, or the reconciler's, next attempt");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("R2-1 (pay listing): the same interleaving keeps the listing's reservation and answers from the claim", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1);
+  const stub = stubFacilitator({
+    settle: async () => {
+      await bTakesAndLosesTheClaim(d1);
+      return refusedAnswer();
+    },
+  });
+  try {
+    const res = await fx.send();
+    assert.notEqual(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.accepts, undefined);
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: the money may yet move under B's attempt");
+    assert.notEqual(fx.listing().paying_since, null);
+    assert.equal(claimDetail(d1).state, "pending");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("R2-1: markRefused bound to a take time writes only while updated_at still equals it; unbound it behaves as before", async () => {
+  const d1 = createLocalD1();
+  try {
+    const key = await seedClaim(d1, { route: "patron", intent: { line: "r21" }, updatedAt: 5_000 });
+    assert.equal(await markRefused(eq(d1), key, "r", "A", Date.now(), undefined, 4_999), false, "another holder moved updated_at: nothing written");
+    assert.equal(claimDetail(d1).state, "pending");
+    assert.equal(await markRefused(eq(d1), key, "r", "A", Date.now(), undefined, 5_000), true, "updated_at is still the take time");
+    assert.equal(claimDetail(d1).state, "refused");
+    const other = await seedClaim(d1, { route: "patron", intent: { line: "r21 unbound" }, updatedAt: 6_000 });
+    assert.equal(await markRefused(eq(d1), other, "r", "A", Date.now()), true, "unbound (every other caller): as before");
+  } finally {
     d1.close();
   }
 });

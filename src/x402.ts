@@ -562,6 +562,8 @@ export async function payAndSettle(
   // reserved something in afterVerify (pay listing) releases it on the ok:false path
   // instead of keeping it as if a settle had been sent.
   const owner = crypto.randomUUID();
+  // R2-1: the time takeClaim writes as the claim's created_at AND updated_at; the first-attempt refusal below is bound to it.
+  const takenAt = Date.now();
   if (claim && claimId) {
     // L1 (gate, 2026-09-30): a claim INSERT that THROWS (a database error, not a key conflict) after afterVerify reserved something leaves
     // that reservation with no claim behind it, and, reaching handlePayListing's catch, would be served as "the facilitator may have moved
@@ -569,7 +571,7 @@ export async function payAndSettle(
     // releases its own reservation (B3: "an explicit revert of the reservation before rethrowing").
     let taken: Awaited<ReturnType<typeof takeClaim>>;
     try {
-      taken = await takeClaim(env, claimId, claim, owner, Date.now());
+      taken = await takeClaim(env, claimId, claim, owner, takenAt);
     } catch (e) {
       console.log(
         JSON.stringify({
@@ -645,7 +647,9 @@ export async function payAndSettle(
       let wrote = false;
       let threw = false;
       try {
-        wrote = await markRefused(env, key, reason, owner, Date.now());
+        // R2-1: bound to the take time. Any other holder's attempt since (acquireLease, noteUnknown) moved updated_at, so a refusal that is late past its lease writes nothing and
+        // is answered from the claim below, never as a 402 over a transfer another attempt may still mine.
+        wrote = await markRefused(env, key, reason, owner, Date.now(), undefined, takenAt);
       } catch (e) {
         threw = true;
         console.log(JSON.stringify({ level: "error", event: "settlement_claim_write_failed", step: "mark_refused", reason: clipReason(e instanceof Error ? e.message : String(e)) }));
