@@ -423,3 +423,10 @@ Close-out addendum (after `9798cefc`, which is the last code and test commit; S7
     `pending_aged` surfaces it after three days and a person resolves it by hand.
 11. `scripts/pay-listing.mjs` was not re-run against, and its classification of, the new 502 `settlement_unresolved` from the takeClaim catch was not read. Its retry rule (re-sign only after validBefore + 300 s with the nonce unused at a two-RPC quorum) is safe by construction, but the body's handling there is unverified.
 12. Working tree: every touched file is CRLF (this checkout's autocrlf convention); the index stores LF. Checked with `git ls-files --eol` at the end; one bare `sed -i` had converted `src/x402.ts` to LF mid-session and it was put back. No em dash was added to any `src` line.
+
+## S8. Follow-up 1 (CODEX second-build r1 LOW): `pay-listing.mjs` no longer says the server "did not take" the payment
+
+What: the non-200 branch of `scripts/pay-listing.mjs` (reason `leg2_refused`) opened "The server did not take the payment (HTTP n, code)"; neither a 502 `settlement_unresolved` nor an unused-nonce reading establishes that. It now opens
+"The server did not confirm the payment (HTTP n, code)"; the rest of the message (unused as of this check, not yet proof nothing was paid, re-run only after validBefore + margin and only if the chain still shows it unused) is unchanged.
+Tests (`test/pay-listing.test.ts`): the 502 `settlement_unresolved` test and the 402 test each pin the new opening (`startsWith`) and that "did not take the payment" is absent. Both were red against the old opening, green after.
+Served string, old -> new (operator script output, not a served surface): "The server did not take the payment (HTTP 402) ..." -> "The server did not confirm the payment (HTTP 402) ...".
