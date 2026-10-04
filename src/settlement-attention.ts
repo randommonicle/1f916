@@ -46,7 +46,7 @@ export const ATTENTION_MARKER_MEANINGS: Record<AttentionMarker, string> = {
   registration_handle_taken:
     "A registration payment settled, but another seat took the handle before the seat could be written, so no seat was created. Re-sending the request cannot book it, and a person decides what to do with it.",
   settled_unbooked_aged: `A payment settled and the society's booking of it has not finished after ${ATTENTION_AGED_DAYS} days.`,
-  pending_aged: `The outcome of a payment has not been established after ${ATTENTION_AGED_DAYS} days: the facilitator's answer was unknown and the chain has not settled the question. This also covers a claim admitted before the validBefore bound existed.`,
+  pending_aged: `The outcome of a payment has not been established after ${ATTENTION_AGED_DAYS} days: the facilitator's answer was unknown or not acted on, or the claim is waiting for the chain to show its authorisation used or expired. This also covers a claim admitted before the validBefore bound existed.`,
 };
 
 export interface AttentionEntry {

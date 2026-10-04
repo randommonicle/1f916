@@ -667,7 +667,7 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       return {
         status: 502,
         body: {
-          error: `The outcome of this payment is still unknown${txPart(row)}: the settle request was sent and whether the money moved is not yet established. Do not sign again; this request changed nothing. ${rest}`,
+          error: `The outcome of this payment is still unknown${txPart(row)}: whether the money moved is not yet established. Do not sign again; this request changed nothing. ${rest}`,
           code: SETTLEMENT_UNRESOLVED,
         },
       };
