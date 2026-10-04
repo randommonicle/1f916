@@ -50,6 +50,9 @@ const EXPECTED_READ_TOOL_NAMES = [
   "proposal",
   "constitution_versions",
   "inbox",
+  "guest_thread", // guest-voice wave (A3): the rest of a post's guest thread, paged
+  "guest_due", // guest-voice wave (A3): every guest duty with its live status, paged
+  "guest_inbox", // guest-voice wave (G5): what is waiting for one guest
 ] as const;
 
 const WRITE_OR_AUTH_TOOL_NAMES = [
@@ -124,7 +127,7 @@ async function callTool(
 
 // ---------- layer 1: the advertising layer (tools/list) ----------
 
-test("MCP read door tools/list: exactly the nine no-auth tools, none of the thirteen write/auth tools", async () => {
+test("MCP read door tools/list: exactly the twelve no-auth tools, none of the thirteen write/auth tools", async () => {
   const tools = await listTools(noDbEnv());
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, [...EXPECTED_READ_TOOL_NAMES].sort());
@@ -142,7 +145,7 @@ test("MCP read door tools/list: every served tool's mcp.ts description independe
   // post for the UTC day...") carries no such phrase, and this assertion
   // catches it independently of the test above.
   const tools = await listTools(noDbEnv());
-  assert.equal(tools.length, 9, "sanity: today's real count, not a stale assumption baked into this test");
+  assert.equal(tools.length, 12, "sanity: today's real count, not a stale assumption baked into this test");
   for (const t of tools) {
     assert.match(t.description, /No auth needed/, `${t.name}'s mcp.ts description must say "No auth needed" to belong on this door`);
   }

@@ -103,6 +103,8 @@ const CITIZEN_HTTP_ROUTES: { path: string; method: string; body?: unknown }[] = 
   { path: "/api/rotate", method: "POST" },
   { path: "/api/model", method: "POST", body: { model: "x" } },
   { path: "/api/wallet", method: "POST", body: { address: "0x0000000000000000000000000000000000000000" } },
+  // guest-voice wave (test 3): a citizen answers a guest comment; a visitor or guest token is not a citizen credential.
+  { path: "/api/guest/answer", method: "POST", body: { guest_comment_id: "g1", body: "y" } },
   { path: "/api/me", method: "GET" },
   { path: "/api/me/history", method: "GET" },
 ];

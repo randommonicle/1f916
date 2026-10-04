@@ -17,6 +17,17 @@ import { handleMcp } from "../src/mcp.ts";
 import { handleMcpRead } from "../src/mcp-read.ts";
 import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, heartbeatDoorNote, SKILL_VERSION, slugify, postsSql, ballotsSql, type HeartbeatSkillFacts } from "../src/inbox.ts";
 import { REGISTRATION_PRICE_CENTS } from "../src/register-gate.ts";
+import {
+  GUEST_ADMISSION_SENTENCE,
+  GUEST_AIM_SENTENCE,
+  GUEST_ANSWERS_SENTENCE,
+  GUEST_CONTINUITY_SENTENCE,
+  GUEST_DUTIES_PER_DAY,
+  GUEST_DUTY_MIN_ANSWER_LEN,
+  GUEST_REFUSED_STEMS,
+  guestCapsSentence,
+  guestTemplateExceptions,
+} from "../src/guest-core.ts";
 
 const DAY = 86_400_000;
 const TEST_ORIGIN = "https://commonhold.example.invalid";
@@ -1114,8 +1125,9 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // the same commit. New hash taken from this exact assertion's own failure output,
     // never computed by hand. B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, 2026-09-30) moved it
     // again: the Join section recommends a public_key; SKILL_VERSION bumped to 1.0.3 in the same commit.
-    assert.equal(await sha256Hex(pinnedText), "80f8c24d82cbd2a0c9c71da22e00d277249ceb7be41ab3304b1f438948909790", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.0.3", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // The guest-voice wave (docs/BRIEF-GUEST-VOICE.md G5, G7) rewrote the file to lead with the free guest path: 1.1.0; the gate M-1 wording fix: 1.1.1; the CODEX gate-fixes r1 write-route sentence: 1.1.2; Ben's A3 ruling, 'awaiting an answer': 1.1.3; CODEX A3 r1, the daily caps count accepted critiques: 1.1.4.
+    assert.equal(await sha256Hex(pinnedText), "320484a7b7562e7d9702ff6b535f575a0707e29a299726cdbb6ab37f22d58e8c", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.1.4", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }
@@ -1303,7 +1315,23 @@ test("D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md's three fenced blocks, the inbox 
   for (const mode of ["open", "invite_only"] as const) {
     const facts: HeartbeatSkillFacts = { origin: O, society: S, registrationMode: mode };
 
-    const expectedHb = substitutePlaceholders(hbBlock, { O, S, SLUG, P, C, V, OPENED_BY, BALLOT_NOTE: TEST_BALLOT_NOTE });
+    // guest-voice wave: the guest sentences and numbers come from src/guest-core.ts, the one source the renderers read too.
+    const EX = guestTemplateExceptions();
+    const GUEST = {
+      CAPS: guestCapsSentence(),
+      AIM: GUEST_AIM_SENTENCE,
+      ANSWERS: GUEST_ANSWERS_SENTENCE,
+      ADMISSION: GUEST_ADMISSION_SENTENCE,
+      STEMS: GUEST_REFUSED_STEMS,
+      CONTINUITY: GUEST_CONTINUITY_SENTENCE,
+      DUTIES_PER_DAY: String(GUEST_DUTIES_PER_DAY),
+      MIN_ANSWER: String(GUEST_DUTY_MIN_ANSWER_LEN),
+      EX_RULE4: EX.rule_4,
+      EX_RULE3: EX.rule_3,
+      EX_LEDGER: EX.ledger,
+      EX_WRITES: EX.writes,
+    };
+    const expectedHb = substitutePlaceholders(hbBlock, { O, S, SLUG, P, C, V, OPENED_BY, BALLOT_NOTE: TEST_BALLOT_NOTE, ...GUEST });
     assert.equal(renderHeartbeatMd(facts, TEST_BALLOT_NOTE), expectedHb, `renderHeartbeatMd must equal the doc's /heartbeat.md block (${mode})`);
 
     const expectedSk = substitutePlaceholders(skBlock, {
@@ -1314,6 +1342,7 @@ test("D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md's three fenced blocks, the inbox 
       INVITE_LINE: mode === "invite_only" ? inviteLineInvite : "",
       AUTH: TEST_AUTH_LABEL,
       SKILL_VERSION,
+      ...GUEST,
     });
     assert.equal(renderSkillMd(facts, TEST_AUTH_LABEL), expectedSk, `renderSkillMd must equal the doc's /skill.md block (${mode})`);
   }

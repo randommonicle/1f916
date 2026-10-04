@@ -598,6 +598,60 @@ test("PROOF CONCIERGE-BOUNDARY (CC2) -- sweep (1 due) + concierge AT ITS OWN PRI
   }
 });
 
+// ---------- shape 2c: the guest-voice daily check, wired between the concierge and the reconciler (docs/BRIEF-GUEST-VOICE.md G4) ----------
+
+// The 06:00 invocation now runs FIVE phases in order: sweep, concierge, the guest duty check, the reconciler, the clerk. The check
+// is two statements and no model call, and what it spent is added to what the reconciler and the clerk are told. This is the
+// compound proof with that phase in it, in the file's own style: every phase does real work, one counter over BOTH boundaries, and
+// the verdict is `total <= 50 && !breached`. The guest table is FULL of duties (the check's aggregate and its id list both have
+// real work), the concierge engages, the sweep tallies a due proposal, and the clerk is offered more drafts than it can afford so
+// its insert count is bound by what it was TOLD had been spent.
+test("PROOF GUEST-CHECK -- sweep (1 due) + concierge (1 real engagement) + the guest check (25 overdue duties) + the reconciler + clerk (full gather, drafts beyond what it can afford), one invocation, <= 50, and the check ran", async () => {
+  const K = 40;
+  const counter = installSubrequestCounter(conciergeAwareClerkResponder(K));
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    for (let i = 0; i < 4; i++) insertCitizen(d1, {});
+    const now = Date.now();
+    seedDueProposal(d1, now - 1_000);
+    const authorId = insertCitizen(d1, { handle: "sisyphus" });
+    d1.raw
+      .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, 'm', ?)")
+      .run(authorId, "a post nobody answered", "body", "dupe-guest-check-target", now - 25 * 60 * 60 * 1000);
+    for (let i = 0; i < 50; i++) {
+      const postId = Number(d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (1, ?, ?, ?, 0, 'm', ?)").run(`P${i}`, `body ${i}`, `h${i}`, now - 1_000_000).lastInsertRowid);
+      d1.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (1, 'post', ?, 'spam', ?)").run(postId, now - (50 - i) * 100);
+    }
+    const topicId = Number(
+      d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at, kind, topic_state) VALUES (1, 't', 'b', 'dupe-topic', 0, NULL, ?, 'topic', 'open')").run(now - 40 * 86_400_000).lastInsertRowid,
+    );
+    for (let i = 0; i < 25; i++) {
+      d1.raw
+        .prepare("INSERT INTO guest_thread (post_id, author_kind, author_id, handle, model, kind, body, duty, due_at, created_at) VALUES (?, 'guest', ?, 'g', 'm', 'critique', 'c', 1, ?, ?)")
+        .run(topicId, 5000 + i, now - 5 * 3_600_000 + i, now - 101 * 3_600_000);
+    }
+
+    await callScheduled(CLERK_CRON, makeEnv(d1));
+
+    assert.equal(counter.breached(), false, `five phases never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+    assert.ok(counter.total() <= 50, `sweep+concierge+guest check+reconciler+clerk compound total ${counter.total()} <= 50`);
+    const run = d1.raw.prepare("SELECT open_count, overdue_count FROM guest_duty_runs").all() as { open_count: number; overdue_count: number }[];
+    assert.equal(run.length, 1, "the check ran and wrote its one row, so this is a real five-phase compound");
+    assert.deepEqual([run[0].open_count, run[0].overdue_count], [25, 25]);
+    const conciergeRun = d1.raw.prepare("SELECT engaged FROM concierge_runs ORDER BY id DESC LIMIT 1").get() as { engaged: number };
+    assert.equal(conciergeRun.engaged, 1, "the concierge engaged for real");
+    const inserted = (d1.raw.prepare("SELECT COUNT(*) AS n FROM maintainer_queue WHERE kind = 'bookkeeping_note'").get() as { n: number }).n;
+    assert.ok(inserted > 0 && inserted < K, `the clerk shed inserts it could no longer pay for (${inserted} of ${K}): its count is bound by what it was told had been spent`);
+    assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM maintainer_runs WHERE kind = 'clerk'").get() as { n: number }).n, 1, "and the clerk ran and finalised");
+    const dueStatus = (d1.raw.prepare("SELECT status FROM proposals ORDER BY id DESC LIMIT 1").get() as { status: string }).status;
+    assert.notEqual(dueStatus, "open", "the sweep processed its due proposal in the same invocation");
+  } finally {
+    counter.restore();
+    d1.close();
+  }
+});
+
 // ---------- shapes 3 & 4: costed, stated (no repair expected on 3; 4's repair IS §8) ----------
 
 test("PROOF shape 4 -- POST /api/governance/sweep at zero/one/cap due each stays a small bounded cost (the permissionless public surface)", async () => {

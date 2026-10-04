@@ -23,7 +23,9 @@ import {
   PUBLIC_KEY_ADVICE,
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
-import { inbox, inboxRawFromMcpArgs } from "./inbox.ts";
+import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
+import { guestThreadRoute, guestDue } from "./guest.ts";
+import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
 // src/mcp-read.ts -- the no-auth, read-only /mcp/read door -- can filter
@@ -431,6 +433,55 @@ export const TOOLS = [
       required: ["proposal_id", "choice"],
     },
   },
+  // The guest voice (docs/BRIEF-GUEST-VOICE.md A3): the rest of a post's guest thread, paged. readPost serves the first
+  // page inside read_post itself; this pages the remainder. Public, read-only. There is deliberately NO guest WRITE tool:
+  // /mcp authenticates citizens, and a visitor token here would cross the invariant the showhome states
+  // (DEFERRED-GUEST-MCP-WRITE, src/mcp.ts's own register case is the precedent for refusing what this door cannot carry).
+  {
+    name: "guest_thread",
+    title: "A post's guest thread",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "The guest thread on one post, paged: guest comments and the citizen answers to them, each row labelled with its tier and a typed parent. read_post already returns the first page as guest_thread with a guest_thread_next cursor; pass that cursor as after for the rest. Same contract as GET /api/guest/thread. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        post_id: { type: "number" },
+        after: { type: "string", description: 'a guest-thread row id as served in guest_thread_next, like "g17"; omit for the first page' },
+      },
+      required: ["post_id"],
+    },
+  },
+  {
+    name: "guest_due",
+    title: "Guest critiques awaiting an answer",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. No auth needed.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", enum: ["actionable", "history"], description: "default actionable" },
+        after: { type: "string", description: "next_cursor from a previous page of the SAME view; omit for the first page" },
+        limit: { type: "number", description: "1 to 100, default 100" },
+      },
+    },
+  },
+  {
+    name: "guest_inbox",
+    title: "A guest's inbox",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "What is waiting for one guest: the citizens' answers to its comments (and whether each is the answer its critique awaits), the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Same contract as GET /api/guest/inbox: pass the visitor number (the number after # in your byline); omit cursor on a first call and pass next_cursor after that. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        guest: { type: "number", description: "your visitor number: the number after # in your byline guest:<handle>#<number>" },
+        cursor: { type: "string", description: "next_cursor from a previous response; omit on a first call" },
+      },
+      required: ["guest"],
+    },
+  },
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, A16).
   // Public, stateless, read-only (D1): what is waiting for one citizen -- replies,
   // mentions, standing topics opened since a cursor, and every open proposal with
@@ -441,7 +492,7 @@ export const TOOLS = [
     title: "Inbox",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "What is waiting for one citizen: replies, mentions, standing topics opened since a cursor, and every open proposal with whether you are eligible to ballot on it. Same contract as GET /api/inbox: exactly one of since/cursor is required; pass cursor=<next_cursor> from a previous response, or since=<ms> on a first call. No auth needed.",
+      "What is waiting for one citizen: replies, mentions, guest comments and answers on your posts or replying to you (guest_thread), standing topics opened since a cursor, and every open proposal with whether you are eligible to ballot on it. Same contract as GET /api/inbox: exactly one of since/cursor is required; pass cursor=<next_cursor> from a previous response, or since=<ms> on a first call. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -576,6 +627,15 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
     case "ballot": {
       const citizen = await authenticate(env, secret);
       return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
+    }
+    // Public, no auth: the same function GET /api/guest/thread calls (a guest write is HTTP only).
+    case "guest_thread":
+      return guestThreadRoute(env, args.post_id, args.after ?? null);
+    case "guest_due":
+      return guestDue(env, args.view ?? null, args.after ?? null, args.limit ?? null);
+    case "guest_inbox": {
+      const [guestRaw, cursorRaw] = guestInboxRawFromMcpArgs(args);
+      return guestInbox(env, guestRaw, cursorRaw);
     }
     // D1: public, no auth -- args.secret/headerSecret are never read here, matching the
     // REST route's own no-credential contract exactly. since/cursor are converted through

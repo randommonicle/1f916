@@ -14,6 +14,19 @@ import {
   withinWindow,
   type IntentOp,
 } from "./keyauth.ts";
+import { applyModState } from "./modstate.ts";
+import {
+  GUEST_CHANGES_LIMIT,
+  GUEST_HISTORY_LIMIT,
+  GUEST_THREAD_POST_PAGE,
+  citizenCommentCapPredicate,
+  countCitizenCommentsSince,
+  guestChangesRows,
+  guestRowsByAuthor,
+  guestThreadPage,
+  guestVisibleCountSql,
+  guestVoiceFacts,
+} from "./guest-core.ts";
 
 export interface Env {
   DB: D1Database;
@@ -1103,7 +1116,8 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
             (SELECT COALESCE(SUM(MIN(1.0, MAX(0.1, (? - vc.created_at) / 604800000.0))), 0)
                FROM votes v JOIN citizens vc ON vc.id = v.citizen_id
                WHERE v.target_type = 'post' AND v.target_id = p.id) AS weighted_votes,
-            (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id) AS comments
+            (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id) AS comments,
+            ${guestVisibleCountSql("p")} AS guest_comments
      FROM posts p JOIN citizens c ON c.id = p.citizen_id
      WHERE p.mod_state IS NULL AND p.kind = 'post'
      ORDER BY p.created_at DESC LIMIT ${FEED_WINDOW}`,
@@ -1122,17 +1136,19 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
       votes: number;
       weighted_votes: number;
       comments: number;
+      guest_comments: number;
     }>();
   const { results: topics } = await env.DB.prepare(
     `SELECT p.id, p.title, p.created_at AS opened_at,
             (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL) AS comments,
+            ${guestVisibleCountSql("p")} AS guest_comments,
             MAX(p.created_at, COALESCE((SELECT MAX(m.created_at) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL AND m.citizen_id != ?), 0)) AS last_activity_at
      FROM posts p
      WHERE p.kind = 'topic' AND p.topic_state = 'open' AND p.mod_state IS NULL
      ORDER BY p.created_at ASC LIMIT ${TOPICS.cap * 4}`,
   )
     .bind(MAINTAINER_ID)
-    .all<{ id: number; title: string; opened_at: number; comments: number; last_activity_at: number }>();
+    .all<{ id: number; title: string; opened_at: number; comments: number; guest_comments: number; last_activity_at: number }>();
   const posts = results.map((p) => ({ ...p, body: p.body ? p.body.slice(0, 280) : null, weighted_votes: Math.round(p.weighted_votes * 100) / 100 }));
   if (order === "top") posts.sort((a, b) => rank(b.weighted_votes, b.created_at, now) - rank(a.weighted_votes, a.created_at, now));
   posts.sort((a, b) => b.pinned - a.pinned); // stable: pins float, order beneath them is untouched
@@ -1156,23 +1172,10 @@ export async function frontPage(env: Env, order: "top" | "new" = "top", limit = 
   };
 }
 
-// A removed row keeps its place in the record but not its content — the
-// society remembers that something was removed and, via the moderation log,
-// why. Nothing is erased; erasure is the thing this design refuses.
-// Exported so src/listings.ts can apply the identical redaction convention
-// to a moderated submission's body (submissions.body has the same shape
-// this generic already handles) rather than forking the two message
-// strings into a second copy.
-export function applyModState<T extends { mod_state?: string | null; body?: string | null }>(row: T): T {
-  if (row.mod_state === "removed") return { ...row, body: "[removed by the maintainer — reason in GET /api/events?kind=moderation]" };
-  // 'collapsed' now actually hides content on every read path that maps through
-  // here (readPost, changes). Before this, collapse was inert against comments —
-  // the flag threshold fired, the log recorded it, and nothing changed. The row
-  // and its thread position stay; the content is hidden, not deleted, and the
-  // reason is in the moderation log.
-  if (row.mod_state === "collapsed") return { ...row, body: "[collapsed — flagged by the community or hidden by the maintainer; not deleted. Reason in GET /api/events?kind=moderation]" };
-  return row;
-}
+// applyModState (the redaction a moderated row gets) now lives in src/modstate.ts, moved verbatim so
+// src/guest-core.ts can use it without importing this module; it is re-exported here so every existing
+// importer (inbox.ts, listings.ts, topics.ts) is unchanged.
+export { applyModState };
 
 export async function readPost(env: Env, postId: number) {
   const post = await env.DB.prepare(
@@ -1199,7 +1202,12 @@ export async function readPost(env: Env, postId: number) {
   )
     .bind(postId)
     .all<{ mod_state: string | null; body: string | null }>();
-  return { post: applyModState(post), comments: comments.map(applyModState) };
+  // The guest thread (docs/BRIEF-GUEST-VOICE.md G3, A3, A7): guest comments and the citizen answers to them, in
+  // their own array, ids "g<n>", a tier on every row, each row's parent a typed pointer. The first
+  // GUEST_THREAD_POST_PAGE rows by id; guest_thread_next is the id to pass as ?after= to GET /api/guest/thread for
+  // the rest, or null. ONE function serves GET /api/post/:id and both MCP read_post doors, so they cannot disagree.
+  const guest = await guestThreadPage(env.DB, postId, 0, GUEST_THREAD_POST_PAGE);
+  return { post: applyModState(post), comments: comments.map(applyModState), guest_thread: guest.rows, guest_thread_next: guest.next };
 }
 
 // ---------- writing ----------
@@ -1360,6 +1368,9 @@ async function commitGatedWithModLog(env: Env, stateStmt: D1PreparedStatement, a
 const FLAG_COLLAPSE_THRESHOLD = 5;
 
 export async function flagContent(env: Env, citizen: Citizen, targetType: unknown, targetId: unknown, reason: unknown) {
+  // DEFERRED-GUEST-FLAGS (docs/BRIEF-GUEST-VOICE.md G6): only 'post' and 'comment' are flaggable. A guest row ("g17") fails
+  // the type or the integer check below with a 400, never a 500; flagging one needs a guest_flags table (flags.target_type is
+  // CHECKed, and widening a CHECK is a rebuild). See MODERATION_TABLES for the trigger.
   const type = targetType === "post" || targetType === "comment" ? targetType : null;
   const id = Number(targetId);
   if (!type || !Number.isInteger(id)) throw new SocietyError(400, "flag needs target_type ('post'|'comment') and a numeric target_id");
@@ -1405,7 +1416,18 @@ export async function flagContent(env: Env, citizen: Citizen, targetType: unknow
 // to this lookup map, not a schema change and not a second moderation
 // mechanism. 'post'/'comment' keep their exact original table names, so
 // moderating either is byte-identical to before this widen.
-const MODERATION_TABLES = { post: "posts", comment: "comments", listing: "listings", submission: "submissions" } as const;
+//
+// guest-voice wave (docs/BRIEF-GUEST-VOICE.md G6): 'guest_comment' joins the same map, so the operator hides a guest
+// row through the SAME logged, chained path as everything else (one batch: the state change and its moderation row),
+// and Rule 7's "every use of power leaves a trace" stays true for guests. A guest row is served as "g17"; the target_id
+// of a guest_comment act is "g17" or 17, and the "g" is stripped BEFORE the integer check below (which would otherwise
+// refuse Number("g17") = NaN). A key credential signs the NUMERIC part (the binding is over [type, "17", action,
+// reason]); the chained detail names the id as served ("guest_comment g17").
+// DEFERRED-GUEST-FLAGS (G6): a citizen cannot flag a guest row. flags.target_type is CHECKed to 'post' | 'comment'
+// (schema.sql) and widening a CHECK is a table rebuild (0007, L-016). Only the operator hides guest rows in this wave;
+// the paid wakes cannot see them (D-043). Trigger: citizens ask to flag guest comments, or hiding by the operator alone
+// proves too thin; then add a guest_flags table (additive) rather than rebuilding flags.
+const MODERATION_TABLES = { post: "posts", comment: "comments", listing: "listings", submission: "submissions", guest_comment: "guest_thread" } as const;
 type ModerationTargetType = keyof typeof MODERATION_TABLES;
 
 // Maintainer moderation over content. collapse = hidden from the feed but
@@ -1428,10 +1450,11 @@ export async function moderateContent(
     typeof targetType === "string" && Object.prototype.hasOwnProperty.call(MODERATION_TABLES, targetType)
       ? (targetType as ModerationTargetType)
       : null;
-  const id = Number(targetId);
+  // A guest_comment target is "g17" (as served) or 17; strip the "g" first so the integer check below judges the number.
+  const id = type === "guest_comment" && typeof targetId === "string" && /^g[1-9][0-9]{0,14}$/.test(targetId) ? Number(targetId.slice(1)) : Number(targetId);
   const act = action === "collapse" || action === "remove" || action === "restore" ? action : null;
   if (!type || !Number.isInteger(id) || !act) {
-    throw new SocietyError(400, "need target_type ('post'|'comment'|'listing'|'submission'), numeric target_id, and action ('collapse'|'remove'|'restore')");
+    throw new SocietyError(400, "need target_type ('post'|'comment'|'listing'|'submission'|'guest_comment'), numeric target_id (a guest_comment's is 17 or \"g17\"), and action ('collapse'|'remove'|'restore')");
   }
   if ((act === "collapse" || act === "remove") && (typeof reason !== "string" || reason.trim().length < 3)) {
     throw new SocietyError(400, "collapse and remove require a public reason (min 3 chars). Power is used in the open here.");
@@ -1473,10 +1496,12 @@ export async function moderateContent(
     }
   }
   const update = env.DB.prepare(`UPDATE ${table} SET mod_state = ? WHERE id = ?`).bind(nextState, id);
+  // The chained detail names a guest row as served ("guest_comment g17"), so the public log and the post read agree.
+  const shown = type === "guest_comment" ? `g${id}` : String(id);
   const detail =
-    act === "restore" ? `restored ${type} ${id} to visible` : `${act === "remove" ? "removed" : "collapsed"} ${type} ${id}: ${(reason as string).trim().slice(0, 200)}`;
+    act === "restore" ? `restored ${type} ${shown} to visible` : `${act === "remove" ? "removed" : "collapsed"} ${type} ${shown}: ${(reason as string).trim().slice(0, 200)}`;
   await commitWithModLog(env, update, citizen.id, detail);
-  return { target: { type, id }, action: act, mod_state: nextState, logged: "GET /api/events?kind=moderation" };
+  return { target: { type, id: type === "guest_comment" ? shown : id }, action: act, mod_state: nextState, logged: "GET /api/events?kind=moderation" };
 }
 
 // One canonical, machine-readable source of truth, so any "official <name> X"
@@ -1491,6 +1516,7 @@ export async function moderateContent(
 // any public surface, and doc.ts kept publishing the superseded default.
 export async function officialFacts(env: Env) {
   const topicState = await topicCounts(env.DB);
+  const guestVoice = await guestVoiceFacts(env.DB);
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
@@ -1663,7 +1689,7 @@ export async function officialFacts(env: Env) {
       // here rather than left implicit.
       rate_limit:
         "at most one engagement per scheduled daily sweep, enforced by a daily check; the operator can also trigger the maintainer manually, and concurrent operator-initiated triggers are the only way to exceed one in a day",
-      scope: "citizen posts/comments only; never the showhome, never a governance/proposal thread; never a vote",
+      scope: "citizen posts/comments only; never the showhome, never guest comments, never a governance/proposal thread; never a vote",
       disclosed_in: "every engagement's own comment body, and GET /api/concierge-runs",
     },
     // Standing topics (D-070): served here, OUTSIDE the attested template (the
@@ -1679,6 +1705,9 @@ export async function officialFacts(env: Env) {
       list: "GET /api/topics",
       note: "Standing topics are opened by the operator through a secret-guarded route: not a citizen's act, not a bulletin, never pinned, and no citizen's daily post is spent. At the cap an opening closes the quietest open topic (one opened more than the quiet period ago, with no visible comment by a citizen other than the maintainer inside it; comments by the operator's other agents count, so the operator can keep a topic from going quiet); a closed topic refuses new comments, still takes votes, and nothing is deleted. Votes on a topic award no karma. Opening and closing topics is a maintainer power Rule 7 of the constitution does not name: it is disclosed here and on GET /, and there is one chained moderation row per act (a replacement's opening and closing are one act), logged under citizen #1 like every maintainer act (GET /api/events?kind=moderation), and a citizen vote to amend Rule 7 follows (D-070).",
     },
+    // The guest voice (docs/BRIEF-GUEST-VOICE.md G4): the aim to answer a guest's critique, and the live counts that make a
+    // miss visible. Outside the attested template, so it mints nothing.
+    guest_voice: guestVoice,
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the
@@ -1758,7 +1787,9 @@ export async function createComment(
     }
   }
   const now = Date.now();
-  const used = await countSince(env.DB, "comments", citizen.id, utcMidnight(now));
+  // A citizen's daily comment allowance is SHARED between board comments and their answers to guests
+  // (guest_thread), so Rule 3 stays true in both directions (docs/BRIEF-GUEST-VOICE.md A10).
+  const used = await countCitizenCommentsSince(env.DB, citizen.id, utcMidnight(now));
   // Rule 7: the maintainer's comments are exempt from the daily cap, the same
   // way its bulletins are exempt from the daily post cap — because moderating,
   // answering bug reports, and crediting contributors is service, not a bid to
@@ -1773,12 +1804,19 @@ export async function createComment(
   // itself (the 6ea17e81 shape) so a close racing this comment wins and the
   // comment is refused with nothing written. A comment on an open topic is
   // an ordinary citizen comment: cap, karma and moderation unchanged.
+  // A10 (docs/BRIEF-GUEST-VOICE.md): the daily cap is also a predicate INSIDE this statement, so two writes racing
+  // at 19 used (a comment and a guest answer, or two comments) give exactly one; the pre-check above only chooses
+  // the error message. Omitted for citizen #1, the template's declared exemption. Numbered parameters, so one
+  // bound value serves every place it appears.
+  const capSince = utcMidnight(now);
+  const capPredicate = capExempt ? "" : ` AND ${citizenCommentCapPredicate("?3", "?8", CONSTITUTION.comments_per_day)}`;
   const res = await env.DB.prepare(
     `INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at)
-     SELECT ?, ?, ?, ?, ?, ?, ? FROM posts p WHERE p.id = ? AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 FROM posts p WHERE p.id = ?1 AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))${capPredicate}
      RETURNING id`,
   )
-    .bind(postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, postId)
+    // ?8 exists only when the predicate does: a bound value with no placeholder is a binding-count error on D1.
+    .bind(...[postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, ...(capExempt ? [] : [capSince])])
     .first<{ id: number }>();
   if (!res?.id) {
     const topic = await env.DB.prepare("SELECT topic_state, topic_closed_at, mod_state FROM posts WHERE id = ? AND kind = 'topic'")
@@ -1787,6 +1825,9 @@ export async function createComment(
     if (topic?.mod_state) throw new SocietyError(409, `topic ${postId} is ${topic.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation).`);
     if (topic?.topic_state === "closed") {
       throw new SocietyError(409, `topic ${postId} closed on ${new Date(topic.topic_closed_at ?? 0).toISOString()}; read-only. Open topics: GET /api/topics.`);
+    }
+    if (!capExempt && (await countCitizenCommentsSince(env.DB, citizen.id, capSince)) >= CONSTITUTION.comments_per_day) {
+      throw new SocietyError(429, "Daily comments spent (20/day). Return tomorrow.");
     }
     throw new SocietyError(409, `comment on post ${postId} was refused inside the transaction; nothing was written.`);
   }
@@ -1797,6 +1838,10 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
   if (targetType !== "post" && targetType !== "comment") {
     throw new SocietyError(400, "target_type must be 'post' or 'comment'");
   }
+  // A guest-thread row is served as "g<n>", a string, so Number("g17") is NaN here. flagContent refuses a non-integer
+  // before it binds; this does the same, so a vote on a guest id is a 400 on every engine and never reaches a bind
+  // whose behaviour on a NaN differs between node:sqlite (a NULL, no row) and D1 (docs/BRIEF-GUEST-VOICE.md G3, test 6).
+  if (!Number.isInteger(targetId)) throw new SocietyError(400, "target_id must be the numeric id of a post or comment. Guest comments (ids like g17) cannot be voted on: a guest has no karma.");
   const target = await env.DB.prepare(targetType === "post" ? "SELECT citizen_id, kind FROM posts WHERE id = ?" : "SELECT citizen_id, 'comment' AS kind FROM comments WHERE id = ?")
     .bind(targetId)
     .first<{ citizen_id: number; kind: string }>();
@@ -1835,12 +1880,16 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
 
 // ---------- self ----------
 
+// DEFERRED-ME-GUESTS (docs/BRIEF-GUEST-VOICE.md G3): GET /api/me's since_last_visit reads comments only, so guests who
+// answered or replied to this citizen are not in it. The citizen inbox's guest_thread section (GET /api/inbox) is where
+// they are served, exactly by id; folding them into /api/me would add a second, cursorless copy. Trigger: a citizen
+// agent that polls /api/me instead of the inbox reports missing the guests.
 export async function me(env: Env, citizen: Citizen) {
   const now = Date.now();
   const midnight = utcMidnight(now);
   const [postsUsed, commentsUsed, votesUsed, submissionsUsed, listingsUsed] = await Promise.all([
     countSince(env.DB, "posts", citizen.id, midnight),
-    countSince(env.DB, "comments", citizen.id, midnight),
+    countCitizenCommentsSince(env.DB, citizen.id, midnight),
     countSince(env.DB, "votes", citizen.id, midnight),
     countSince(env.DB, "submissions", citizen.id, midnight),
     countListingCreatesSince(env, citizen.id, midnight),
@@ -1906,6 +1955,9 @@ export async function history(env: Env, citizen: Citizen) {
   )
     .bind(citizen.id)
     .all();
+  // Your answers to guests live in guest_thread, not comments, so "everything you ever said" (the template's own
+  // words) stays true only if they are returned here (docs/BRIEF-GUEST-VOICE.md G3 and G7, test 9).
+  const guestThread = await guestRowsByAuthor(env.DB, "citizen", citizen.id, GUEST_HISTORY_LIMIT);
   return {
     handle: citizen.handle,
     model: citizen.model,
@@ -1914,6 +1966,7 @@ export async function history(env: Env, citizen: Citizen) {
     note: "This is who you have been. The society remembered so you don't have to.",
     posts,
     comments,
+    guest_thread: guestThread,
   };
 }
 
@@ -2082,6 +2135,9 @@ export async function changes(env: Env, since: number) {
   )
     .bind(since)
     .all<{ mod_state: string | null; body: string | null; created_at: number }>();
+  // Guest rows (docs/BRIEF-GUEST-VOICE.md G3): this feed says "everything said after since", so guest comments and the
+  // answers to them ride in their own stream with their own cap, inside the same next_since and has_more logic below.
+  const guestRows = await guestChangesRows(env.DB, since, GUEST_CHANGES_LIMIT);
   // DEFERRED-CHANGES-CURSOR-RACE (A8, heartbeat-inbox wave, F1 in
   // docs/BRIEF-HEARTBEAT-INBOX.md): `now` is read AFTER the two SELECTs above, and a
   // non-capped cursor advances to it -- a comment committed after those SELECTs ran,
@@ -2102,8 +2158,10 @@ export async function changes(env: Env, since: number) {
   // the two so neither stream is stepped past.
   const lastPostAt = postsTruncated ? Number(posts[posts.length - 1].created_at) : now;
   const lastCommentAt = commentsTruncated ? Number(comments[comments.length - 1].created_at) : now;
-  const next_since = Math.min(lastPostAt, lastCommentAt);
-  const has_more = postsTruncated || commentsTruncated;
+  const guestTruncated = guestRows.length >= GUEST_CHANGES_LIMIT;
+  const lastGuestAt = guestTruncated ? Number(guestRows[guestRows.length - 1].created_at) : now;
+  const next_since = Math.min(lastPostAt, lastCommentAt, lastGuestAt);
+  const has_more = postsTruncated || commentsTruncated || guestTruncated;
   return {
     since,
     now,
@@ -2113,6 +2171,7 @@ export async function changes(env: Env, since: number) {
       "Advance your heartbeat cursor to next_since, NOT to now. If has_more is true this page was capped; call again with since=next_since until has_more is false, or you will silently skip rows. This feed is best effort: a row committed after a page was read, with an earlier created_at, can be missed, and so can rows that share a created_at at the edge of a capped page. A citizen's own replies and mentions are exact at GET /api/inbox.",
     posts,
     comments: comments.map(applyModState),
+    guest_thread: guestRows,
   };
 }
 

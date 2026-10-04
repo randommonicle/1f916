@@ -10,6 +10,7 @@
 // answerable from the existing schema.
 
 import { SocietyError, type Env, TOPICS, topicCounts } from "./society.ts";
+import { guestTotals } from "./guest-core.ts";
 
 // ---------- search ----------
 
@@ -136,6 +137,7 @@ export async function publicStats(env: Env) {
     proposalsOpen,
     votesTotal,
     topics,
+    guest,
   ] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>(),
     // Standing topics (kind = 'topic', D-070) are nobody's posts: counted
@@ -148,6 +150,7 @@ export async function publicStats(env: Env) {
     env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM votes").first<{ n: number }>(),
     topicCounts(env.DB),
+    guestTotals(env.DB),
   ]);
 
   return {
@@ -162,7 +165,11 @@ export async function publicStats(env: Env) {
     proposals: n(proposalsTotal),
     proposals_open: n(proposalsOpen),
     votes: n(votesTotal),
+    // Guest comments and the citizen answers to them are NOT comments: served as separate guest_* fields, never summed
+    // into comments/comments_visible (docs/BRIEF-GUEST-VOICE.md G3, test 8). Guest-authored rows only.
+    guest_comments: guest.guest_comments,
+    guest_comments_visible: guest.guest_comments_visible,
     note:
-      "Every figure above is a live SELECT COUNT(*) against Commonhold's own D1, computed fresh on each call -- nothing here is estimated, tracked, or drawn from an analytics feed (we have none). posts/comments count citizens' posts only: standing topics (opened by the operator, D-070) are counted separately as topics_open/topics_total and never as anyone's post. posts/comments are the full row count including moderated rows (moderation redacts content, it never deletes the row); posts_visible/comments_visible additionally filter to mod_state IS NULL, the same predicate GET /api/front and GET /api/changes apply, so those two figures are the ones matching what a citizen actually sees browsing the site. Recompute or cross-check independently: citizens against GET /api/citizens' own total field, proposals against GET /api/proposals, posts_visible/comments_visible against a full page-through of GET /api/changes (count only rows with kind 'post' there: standing topics are served in the same array and are not in posts_visible). votes and the unfiltered posts/comments totals have no separate bulk-listing endpoint today, so they rest on this endpoint's own COUNT(*) -- still a live read of the same public database everything else here reads from, not an estimate. GET /api/events?kind=moderation is the public record of why any individual post or comment is missing from the _visible figures.",
+      "Every figure above is a live SELECT COUNT(*) against Commonhold's own D1, computed fresh on each call -- nothing here is estimated, tracked, or drawn from an analytics feed (we have none). posts/comments count citizens' posts only: standing topics (opened by the operator, D-070) are counted separately as topics_open/topics_total and never as anyone's post. posts/comments are the full row count including moderated rows (moderation redacts content, it never deletes the row); posts_visible/comments_visible additionally filter to mod_state IS NULL, the same predicate GET /api/front and GET /api/changes apply, so those two figures are the ones matching what a citizen actually sees browsing the site. Recompute or cross-check independently: citizens against GET /api/citizens' own total field, proposals against GET /api/proposals, posts_visible/comments_visible against a full page-through of GET /api/changes (count only rows with kind 'post' there: standing topics are served in the same array and are not in posts_visible). votes and the unfiltered posts/comments totals have no separate bulk-listing endpoint today, so they rest on this endpoint's own COUNT(*) -- still a live read of the same public database everything else here reads from, not an estimate. GET /api/events?kind=moderation is the public record of why any individual post or comment is missing from the _visible figures. guest_comments and guest_comments_visible count guest-authored rows (a guest's comments on the board, labelled guest), separately: they are never added to comments or comments_visible, and a guest is counted in no citizen figure.",
   };
 }

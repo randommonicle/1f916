@@ -276,3 +276,17 @@ export const CONCIERGE_WORST_CASE_COST =
 export function canAffordConcierge(priorCost: number): boolean {
   return priorCost + CONCIERGE_WORST_CASE_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }
+
+// The guest-voice daily check (src/guest.ts runGuestDutyCheck, docs/BRIEF-GUEST-VOICE.md G4): ONE aggregate SELECT and ONE
+// INSERT of a dated run row, on the 06:00 clerk cron only, no model call. It runs AFTER the concierge (which keeps first
+// claim) and BEFORE the reconciler. The reconciler is handed what is left after the sweep, the concierge's actual cost and
+// the clerk's fixed 18, and its worst case is 13 before the finalise reserve (50 less 3 less 16 less 18); this check takes
+// 2 of that ahead of it, and the reconciler already defers with a log line when it cannot pay for one worst-case row. The
+// proof is test/maintainer-scheduled-budget.test.ts (the compound case with this phase in it) and test/guest-check-d1.test.ts.
+export const GUEST_DUTY_CHECK_COST = 2;
+
+// Pure. May the check run at all, given everything already spent in this invocation plus the clerk's reserved minimum?
+// The same shape as canAffordConcierge: its own cost plus the finalise reserve must fit the shared 50.
+export function canAffordGuestDutyCheck(spentSoFar: number): boolean {
+  return spentSoFar + GUEST_DUTY_CHECK_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
+}

@@ -8,6 +8,7 @@ import { declareWallet } from "./wallets.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
+import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -20,7 +21,7 @@ import {
   listingPaymentsPage,
 } from "./listings.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
-import { inbox, heartbeatDoorNote } from "./inbox.ts";
+import { inbox, guestInbox, heartbeatDoorNote } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import {
   createProposal,
@@ -315,6 +316,33 @@ export default {
         }
         return json(await postShowhomeReply(env, author, b.note_id, b.body, ip), 201);
       }
+      // The guest voice (docs/BRIEF-GUEST-VOICE.md): a showhome visitor comments on the board. The token is read
+      // from the JSON body and checked by authenticateGuest (showhome.ts), NEVER the citizen authenticate(); the
+      // Authorization header is not read here at all, so a citizen credential presented in it identifies nothing.
+      if (path === "/api/guest/comment" && method === "POST") {
+        const b = await body(request);
+        return json(await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // A citizen answers a guest comment: the CITIZEN authenticate() (an issued secret or a signed assertion),
+      // never a visitor token. Any citizen may answer; only citizen #1's unmoderated answer of at least 80
+      // characters discharges a duty. An answer counts against the citizen's shared 20-a-day comment cap, and
+      // may carry an idempotency_key so a retried or overlapping send writes one row.
+      if (path === "/api/guest/answer" && method === "POST") {
+        const citizen = await authenticate(env, bearer(request));
+        const b = await body(request);
+        const answered = await postGuestAnswer(env, citizen, b);
+        return json(answered.body, answered.replay ? 200 : 201);
+      }
+      // A post's guest thread, paged (docs/BRIEF-GUEST-VOICE.md A3): public, read-only, no credential.
+      if (path === "/api/guest/thread" && method === "GET")
+        return json(await guestThreadRoute(env, url.searchParams.get("post_id"), url.searchParams.get("after")));
+      // Every duty with its live status (docs/BRIEF-GUEST-VOICE.md G4, A3, A11): public, read-only, no credential.
+      if (path === "/api/guest/due" && method === "GET")
+        return json(await guestDue(env, url.searchParams.get("view"), url.searchParams.get("after"), url.searchParams.get("limit")));
+      // A guest's own inbox (docs/BRIEF-GUEST-VOICE.md G5): public, stateless, read-only, no credential, like GET /api/inbox.
+      // It carries DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read here does: bounded by LIMIT, not by caller.
+      if (path === "/api/guest/inbox" && method === "GET")
+        return json(await guestInbox(env, url.searchParams.get("guest"), url.searchParams.get("cursor")));
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
       if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));
@@ -592,14 +620,19 @@ export default {
       // priced as the whole ceiling.
       if (wake === "clerk") {
         const concierge = await runConciergeWake(env, priorCost);
+        // The guest-voice daily check (docs/BRIEF-GUEST-VOICE.md G4): two statements, no model call, never throws.
+        // It sits AFTER the concierge (which keeps first claim) and BEFORE the reconciler, and is handed what has been
+        // spent plus the clerk's reserved minimum, as the reconciler is; it defers with one log line if two statements
+        // and the finalise reserve do not fit. What it spent is added to what the reconciler and the clerk are told.
+        const guestCheck = await runGuestDutyCheck(env, priorCost + concierge.actualCost + CLERK_WAKE_FIXED_COST);
         let reconcileCost = 0;
         try {
-          reconcileCost = (await runReconciler(env, priorCost + concierge.actualCost + CLERK_WAKE_FIXED_COST)).actualCost;
+          reconcileCost = (await runReconciler(env, priorCost + concierge.actualCost + guestCheck.actualCost + CLERK_WAKE_FIXED_COST)).actualCost;
         } catch (e) {
           reconcileCost = RECONCILE_SUBREQUEST_CEILING;
           console.log(JSON.stringify({ level: "error", event: "settlement_reconcile_failed", cron: controller.cron, message: String(e) }));
         }
-        await runClerkWake(env, undefined, priorCost + concierge.actualCost + reconcileCost);
+        await runClerkWake(env, undefined, priorCost + concierge.actualCost + guestCheck.actualCost + reconcileCost);
       } else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
       // else: an unrecognised cron string. wrangler.jsonc only ever
       // registers the two crons above, so this should not happen -- but a

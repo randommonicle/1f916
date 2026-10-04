@@ -38,8 +38,9 @@ test("B10: the recommendation is one sentence that names its reason, and every r
     // /skill.md (versioned: the text changed, so the version moved)
     const skill = await (await get(d1, "/skill.md")).text();
     assert.ok(skill.includes(PUBLIC_KEY_ADVICE), "/skill.md");
-    assert.equal(SKILL_VERSION, "1.0.3");
-    assert.match(skill, /^version: 1\.0\.3$/m);
+    // guest-voice wave: the skill was rewritten again (1.1.0); this test pins that the public_key advice survived it.
+    assert.equal(SKILL_VERSION, "1.1.4");
+    assert.match(skill, /^version: 1\.1\.4$/m);
 
     // the register door's 402: its description and the PayAI discovery declaration's public_key field
     const probe = await callWorker(new Request("https://example.test/api/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ handle: "advice-probe", model: "m" }) }), testEnv(d1));
