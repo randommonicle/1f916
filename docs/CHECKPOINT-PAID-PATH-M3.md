@@ -200,3 +200,41 @@ C3 changes WHICH answer is served (the claim's, not a booking failure) but no st
 2. The stale-claim-versus-later-reservation window (finding 1): close it in C5 (bind the booking gate to the claim's own reservation) or accept until the first meeting?
 3. Real D1 `meta.last_row_id` per batch statement (finding 4): rehearse before deploy.
 4. C4 (option A or B) and C7 (route, `from_addr`, age N) still need the operator's rulings; C1's stamped rows and C5's `listing_not_paying` rows are exactly what C7's list will show.
+
+---
+
+# Second build (branch `m3-second-build-2026-10-04`, off the gate-clear first build `a580b9c3`)
+
+Commission `drafts/BUILDER-COMMISSION-M3-SECOND-BUILD-2026-10-04.md`; operative spec = the brief's "Amendments after CODEX r2", then Ben's option-B ruling, then CODEX r1, then C2-C8. Tests live in
+`test/paid-path-m3b-d1.test.ts` (new); red-proofs are done with the target file run alone (mutants listed per commit; the runner restored each file byte-identical, sha checked).
+Baseline at `a580b9c3`: 1557/1557, tsc 0. Working-tree note: this checkout is CRLF (core.autocrlf true, the index stores LF); a bare `sed -i` converted one file to LF mid-session and it was put back.
+
+## S1. C4 option B, A3, R2-3 (stopped-row answer), reconciler exclusion
+
+What: a PENDING claim whose authorisation the chain reads used, while the facilitator answers a recorded refusal on the re-POST path, is STAMPED (`markChainSpent`,
+`verdict_reason = 'chain_spent_facilitator_refused:' + the facilitator's words, clipped to 300`) and STOPPED. No new state, no migration. `attemptPending` returns the new outcome `stopped`
+(distinct from `unchanged`) after the stamp, logs one `settlement_chain_spent_stopped` error line, and returns early (no fetch, no write) on a row that already carries the marker.
+`noteUnknown` gained `AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`; the reconciler's SELECT excludes the marker's prefix the same way and counts the outcome in a new
+`ReconcileResult.stopped` (the stamp clears the lease, so no release is paid). `respondToExistingClaim` answers a stopped row before taking any lease (a replay writes nothing).
+Decision: `substr`, not `LIKE`: the brief's A3 text says `NOT LIKE '<marker prefix>%'`, but the marker contains underscores, which LIKE reads as single-character wildcards. The stamp is conditional on
+`state = 'pending'` and on the row not already carrying the marker, so the first reason is kept. The marker is read from `state === 'pending'` only (a row in any other state never counts as stopped).
+Deviation from the brief's wording: none in behaviour. `DEFERRED-C4-OPTION-A-RECEIPT` is planted at the stamp (x402.ts attemptPending, and the marker's comment); `DEFERRED-DURABLE-HELD-SUCCESS` is planted
+at `holdSuccessAgainstTerminal` naming R2-2's six requirements.
+
+| mutant | red in |
+|---|---|
+| noteUnknown without the marker guard | "noteUnknown never overwrites a marker" |
+| attemptPending without the early return on a marked row | "attemptPending returns early on a marked row" |
+| the stamp replaced by the old `unchanged` outcome | stamp test, reconciler test, R2-3 test |
+| reconciler SELECT without the prefix exclusion | "the reconciler stamps the row once and never selects it again" |
+| respondToExistingClaim without the pre-lease short-circuit | R2-3 test (the replay moved `updated_at`) |
+| claimAnswer without the stopped arm | R2-3 test |
+| markChainSpent without the `state = 'pending'` condition | "markChainSpent stamps only a pending row" |
+
+Served strings (old -> new): the pending answer for a stopped row. Old: "The outcome of this payment is still unknown...: the settle request was sent and whether the money moved is not yet established. Do not sign again;
+this request changed nothing. <reconciler tail>" (plus the old `detail` "The chain shows this authorisation spent, but the facilitator reports a refusal. The answers contradict; the claim is left pending for a person
+to decide."). New (500, `settlement_unresolved`): "The chain shows the signed authorisation for <what> was used (spent, or cancelled by its signer), so the money may have moved: whether it did is not
+established, and the society cannot tell which transaction used it. The society has stopped retrying this payment automatically. A person will check it against the chain by hand; no resolution time is
+promised. Do not sign again. To add your own report, <mention @commonhold-agent in a comment naming this nonce | leave a free showhome note naming this nonce> (...)." It carries no reconciler tail, no repeat
+instruction, no `accepts`, and none of the facilitator's words. "Spent, or cancelled" is deliberate (gate INFO-3: `authorizationState` is true for a cancelled authorisation as well).
+Existing test moved on purpose: `settlement-replay-reconcile-d1` 7e (the refusal leg now expects `stopped` 1 / `unchanged` 0; the unknown-outcome leg is unchanged).

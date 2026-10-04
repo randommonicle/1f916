@@ -359,16 +359,39 @@ const contradictionTx = (row: Pick<ClaimRow, "tx" | "verdict_reason">): string =
   return inside;
 };
 
+// C4, option B (Ben's ruling of 4 Oct 2026; drafts/BRIEF-PAID-PATH-M3-2026-10-02.md "Ben's ruling ... option B", A3, M5): a PENDING claim whose authorisation the chain reads USED (spent, or
+// cancelled by its signer: authorizationState answers true for both) while the facilitator answers a recorded refusal, or whose listing no longer holds the claim's own
+// reservation, can neither be refused (the money may have moved) nor booked (nothing says which transaction used it). It is STAMPED, in verdict_reason, with this prefix and the
+// facilitator's words (clipped), and STOPPED: no re-POST, no noteUnknown overwrite, no reconciler slot, every answer says a person will check it. No new state and no migration.
+// DEFERRED-C4-OPTION-A-RECEIPT: option A (read the transaction's receipt and require the Transfer(from, payTo, value) log right after AuthorizationUsed, then book from chain
+// evidence) is NOT built in this wave; it needs the two-RPC receipt quorum, the cancellation read and a re-priced reconciler budget (the brief's A2 and H1).
+export const CHAIN_SPENT_MARKER = "chain_spent_facilitator_refused:";
+const CHAIN_SPENT_REASON_CLIP = 300;
+
+export async function markChainSpent(env: Env, key: ClaimKey, reason: string, owner: string, now: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE settlement_claims SET verdict_reason = ? || substr(?, 1, ?), updated_at = ?, lease_owner = NULL, leased_until = NULL
+     WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE} AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`,
+  )
+    .bind(CHAIN_SPENT_MARKER, reason, CHAIN_SPENT_REASON_CLIP, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now), CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER)
+    .run();
+  return r.meta.changes === 1;
+}
+
+export const isChainSpent = (row: Pick<ClaimRow, "state" | "verdict_reason">): boolean =>
+  row.state === "pending" && typeof row.verdict_reason === "string" && row.verdict_reason.startsWith(CHAIN_SPENT_MARKER);
+
 // An unknown outcome leaves the row pending; this records the last thing the
 // facilitator said (already served once, clipped) and lets go of the lease so an
-// identical re-send can reconcile at once. STRICT holder-only (fix pass 4, H3, hub ruling): unlike the other holder
+// identical re-send can reconcile at once. It never overwrites a stopped row's marker (A3). STRICT holder-only (fix pass 4, H3, hub ruling): unlike the other holder
 // writes it CLEARS the lease, so it must never run on a claim whose lease is named for someone else, lapsed or not.
 // A holder whose lease was taken and then released by another worker (lease_owner NULL) writes nothing.
 export async function noteUnknown(env: Env, key: ClaimKey, reason: string, owner: string, now: number): Promise<void> {
   await env.DB.prepare(
-    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL WHERE ${KEY_WHERE} AND state = 'pending' AND lease_owner = ?`,
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL
+     WHERE ${KEY_WHERE} AND state = 'pending' AND lease_owner = ? AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`,
   )
-    .bind(reason.slice(0, 400), now, ...keyArgs(key), owner)
+    .bind(reason.slice(0, 400), now, ...keyArgs(key), owner, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER)
     .run();
 }
 
@@ -521,6 +544,17 @@ export function listingNotPayingMessage(row: Pick<ClaimRow, "intent_json" | "tx"
   return `Your ${money(Number(i.amount_cents ?? 0))} payment settled${txPart(row as ClaimRow)}, but the listing it was paid against (listing ${String(i.listing_id)}) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler has set it aside rather than retry it. Do not sign again: this payment has already moved. It is logged for the maintainer to look at by hand; no resolution time is promised. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment).`;
 }
 
+// R2-3: what a payer is told about a STOPPED row (a pending claim carrying CHAIN_SPENT_MARKER). It claims only what is established: the chain reads the nonce used
+// (authorizationState is true for a spent AND a cancelled authorisation), the society stopped retrying, and a person will look. It never says the reconciler will finish
+// it, never says repeating the request does anything, never says nothing was charged, never invites a signature, and never quotes the facilitator.
+export function stoppedMessage(row: ClaimRow): string {
+  const pointer =
+    row.route === "listing_pay"
+      ? `To add your own report, mention @commonhold-agent in a comment naming this nonce (${row.nonce}) (POST /api/comment).`
+      : `To add your own report, leave a free showhome note naming this nonce (${row.nonce}): POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
+  return `The chain shows the signed authorisation for ${describeClaim(row)} was used (spent, or cancelled by its signer), so the money may have moved: whether it did is not established, and the society cannot tell which transaction used it. The society has stopped retrying this payment automatically. A person will check it against the chain by hand; no resolution time is promised. Do not sign again. ${pointer}`;
+}
+
 export function claimIsSecretRegistration(row: ClaimRow): boolean {
   return row.route === "register" && intentOf(row).public_key == null;
 }
@@ -585,6 +619,8 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
         },
       };
     case "pending": {
+      // R2-3: a STOPPED row (C4, option B) is answered with its own words, below the success-in-hand case (a caller that knows the tx says so) and never with the reconciler's tail.
+      if (opts.settledTx === undefined && isChainSpent(row)) return { status: 500, body: { error: stoppedMessage(row), code: SETTLEMENT_UNRESOLVED } };
       const heldClause = opts.leaseHeld ? (row.route === "listing_pay" ? "Another attempt to resolve it is in progress. " : "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. ") : "";
       const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`;
       // C2 (re-gate LOW-1(b)): this request holds a success verdict naming the tx. The claim is still pending because another attempt held it when this request

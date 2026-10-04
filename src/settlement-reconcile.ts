@@ -43,7 +43,7 @@ import { attemptPending, finishPatronBooking, clipReason, holdSuccessAgainstTerm
 import { finishRegistration } from "./register-gate.ts";
 import { finishListingCreateBooking, finishPayListingBooking } from "./listings.ts";
 import { INVOCATION_SUBREQUEST_BUDGET, FINALISE_RESERVE } from "./maintainer/budget.ts";
-import { acquireLease, intentOf, keyOfRow, markListingNotPaying, releaseLease, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, type ClaimRow } from "./settlement-claims.ts";
+import { acquireLease, intentOf, keyOfRow, markListingNotPaying, releaseLease, CHAIN_SPENT_MARKER, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, type ClaimRow } from "./settlement-claims.ts";
 import type { Env } from "./society.ts";
 
 // At most this many rows are worked in one run (a fixed batch).
@@ -70,9 +70,11 @@ export interface ReconcileResult {
   // Rows where the facilitator said settled but another holder had already made the claim refused or expired (fix pass 4, H2). attemptPending logged each
   // one (settlement_contradiction); they are counted here, never as booked or resolved.
   contradicted: number;
+  // Rows this run STAMPED and stopped (C4, option B): the chain reads the authorisation used and the facilitator answered a refusal. Never selected again; a person looks.
+  stopped: number;
 }
 
-const NOTHING: ReconcileResult = { actualCost: 0, examined: 0, booked: 0, resolved: 0, unchanged: 0, failed: 0, contradicted: 0 };
+const NOTHING: ReconcileResult = { actualCost: 0, examined: 0, booked: 0, resolved: 0, unchanged: 0, failed: 0, contradicted: 0, stopped: 0 };
 
 // An env whose DB counts every statement it is asked to run (a batch counts each of its statements,
 // the conservative reading docs/RECON-CLOUDFLARE-FREE-LIMITS §1.2 and the test harness use).
@@ -146,14 +148,16 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // 201, register-gate.ts finishRegistration; a PENDING secret-mode row is still worked: it can become settled_unbooked
   // or expire); and a bounty payment whose listing is no longer 'paying' (given CLAIM_LISTING_NOT_PAYING the first time
   // it is met, below). The exclusion of marked rows is by the two exact constants: a pending row's verdict_reason is the
-  // facilitator's last words (noteUnknown), which must never exclude it.
+  // facilitator's last words (noteUnknown), which must never exclude it. A STOPPED row (C4, option B) is excluded by its marker's PREFIX (substr, not LIKE: the marker
+  // contains underscores, which LIKE reads as wildcards); the facilitator's last words are server-built text that never begins with it.
   const { results } = await env.DB.prepare(
     `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?)
        AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))
+       AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)
        AND NOT (route = 'register' AND state = 'settled_unbooked' AND json_extract(intent_json, '$.public_key') IS NULL)
      ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
   )
-    .bind(now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, RECONCILE_BATCH_ROWS)
+    .bind(now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, RECONCILE_BATCH_ROWS)
     .all<ClaimRow>();
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };
@@ -186,6 +190,10 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
         if (attempt.kind !== "settled") {
           if (attempt.kind === "expired" || attempt.kind === "refused") {
             out.resolved++;
+            needsRelease = false;
+          } else if (attempt.kind === "stopped") {
+            // C4, option B: the stamp cleared the lease in the same statement, and the SELECT excludes the marker's prefix from now on.
+            out.stopped++;
             needsRelease = false;
           } else if (attempt.kind === "contradiction") out.contradicted++;
           // CODEX M3-build r2 (2) + r4 follow-up: an attempt holding a success it could not write re-reads once more, exactly as the re-send does

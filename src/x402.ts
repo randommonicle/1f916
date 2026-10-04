@@ -22,10 +22,12 @@ import {
   claimResponse,
   contradictionAnswer,
   getClaim,
+  isChainSpent,
   isContradicted,
   isHandleTaken,
   isListingNotPaying,
   keyOfRow,
+  markChainSpent,
   markContradiction,
   markExpired,
   markRefused,
@@ -742,8 +744,8 @@ async function quietly(step: string, fn: () => Promise<unknown>): Promise<void> 
 async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolean, reqs: PaymentRequirements, claim: PaidClaim): Promise<Response> {
   if (!identical) return claimResponse(claimAnswer(row, false, reqs));
   // F1: a registration whose handle was taken after payment is answered, never re-attempted (no retry can book it). C5: so is a bounty payment whose listing is no longer
-  // 'paying'.
-  if (isHandleTaken(row) || isListingNotPaying(row)) return claimResponse(claimAnswer(row, true, reqs));
+  // 'paying'. C4 (option B): so is a STOPPED claim (the chain reads its authorisation used and a person must look), before any lease is taken or any fetch is made.
+  if (isHandleTaken(row) || isListingNotPaying(row) || isChainSpent(row)) return claimResponse(claimAnswer(row, true, reqs));
   if (row.state === "settled_unbooked") {
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
@@ -849,6 +851,12 @@ export type HeldSuccess = { tx: string; payer: string; req: { resource: string; 
 // discarded, so neither this caller nor a later identical replay of the row serves a 402 with fresh accepts. Used by the re-send answer (respondToExistingClaim)
 // and the scheduled reconciler, so the two cannot drift. A window after this read stays open in both; the settlement_success_unrecorded line names the tx.
 // Cost: one read, plus the stamp when terminal (the reconciler's row stays well inside RECONCILE_ROW_WORST_CASE: this branch books nothing).
+//
+// DEFERRED-DURABLE-HELD-SUCCESS (brief R2-2; the agreed residual of exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): a terminal write that lands AFTER the read
+// below and BEFORE the caller releases its lease stays unstamped. The complete remedy is durable success evidence on the PENDING row that markRefused and markExpired respect.
+// It is its own wave: it needs (1) a migration (a column the held-success path writes; today only markSettled writes tx), (2) an atomic contract for BOTH orderings
+// (evidence first: refusal and expiry write nothing; terminal first: the evidence writer stamps a contradiction and handles zero changes), (3) the empty-tx success
+// (a success whose tx is ""), (4) replay behaviour for a row carrying evidence, (5) migration ordering against the worker deploy, (6) tests for every one of those.
 export async function holdSuccessAgainstTerminal(env: Env, key: ClaimKey, held: HeldSuccess): Promise<{ contradicted: "refused" | "expired" | null; fresh: ClaimRow | null }> {
   const fresh = await getClaim(env, key);
   if (fresh && (fresh.state === "refused" || fresh.state === "expired")) {
@@ -925,10 +933,14 @@ export type AttemptOutcome = (
   | { kind: "refused" }
   | { kind: "unchanged"; detail: string; held?: HeldSuccess }
   | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
+  // C4, option B: THIS call stamped the claim (CHAIN_SPENT_MARKER) and stopped it: the chain reads the authorisation used and a person must look. The lease is cleared by the stamp.
+  | { kind: "stopped" }
 ) & { fetches: number };
 
 export async function attemptPending(env: Env, row: ClaimRow, owner: string): Promise<AttemptOutcome> {
   if (row.state !== "pending" || row.rpc_body == null) return { kind: "unchanged", detail: "the claim is no longer pending", fetches: 0 };
+  // A3: a stopped row is never read, re-POSTed or written again (no fetch, no D1 write); it waits for a person.
+  if (isChainSpent(row)) return { kind: "unchanged", detail: "the claim is stopped for a person to check", fetches: 0 };
   const key = keyOfRow(row);
   const nowMs = Date.now();
   const chain = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce);
@@ -965,7 +977,20 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
   const fetches = chain.fetches + 1;
   if (settled.verdict.kind === "refused") {
     if (chain.used === true) {
-      return { kind: "unchanged", detail: "The chain shows this authorisation spent, but the facilitator reports a refusal. The answers contradict; the claim is left pending for a person to decide.", fetches };
+      // C4, option B: the chain reads the nonce used and the facilitator answers a recorded refusal. The two answers contradict; the claim is STOPPED (stamped, never refused: the
+      // money may have moved) for a person to decide. DEFERRED-C4-OPTION-A-RECEIPT: option A (book from the transaction's own receipt) is not built in this wave.
+      if (!(await markChainSpent(env, key, settled.verdict.error, owner, Date.now()))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
+      console.log(
+        JSON.stringify({
+          level: "error",
+          event: "settlement_chain_spent_stopped",
+          route: row.route,
+          claim_from: row.from_addr,
+          claim_nonce: row.nonce,
+          reason: clipReason(settled.verdict.error),
+        }),
+      );
+      return { kind: "stopped", fetches };
     }
     if (!(await markRefused(env, key, settled.verdict.error, owner, Date.now(), row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
     return { kind: "refused", fetches };
