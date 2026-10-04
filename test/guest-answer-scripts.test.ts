@@ -85,13 +85,13 @@ test("A6 approval (CODEX guest-answer r1 HIGH): a marker inside an HTML comment 
   // Mutants: drop the `commented` filter -> the closed-comment case approves (CODEX's probe); drop the end-of-file
   // comment check -> the unclosed case approves; drop the header-in-comment check -> the hidden-section case approves.
   const closed = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. Example only:", "<!--", "[[CONVERGED]]", "> -->", "[[END CODEX round 1]]", ""].join("\n");
-  assert.match(approvalProblem(closed, "g7", ANSWER), /CODEX's latest section does not converge/);
+  assert.match(approvalProblem(closed, "g7", ANSWER), /ambiguous/, "CODEX r8 round 5: a `>` inside the comment makes it not inert; refused either way");
   const unclosed = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Rejected. Example only:", "<!--", "[[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
   assert.match(approvalProblem(unclosed, "g7", ANSWER), /ambiguous/);
   const hidden = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, ["Rejected.", "<!-- a note", ok("CODEX", 2), "-->"])].join("\n");
   assert.match(approvalProblem(hidden, "g7", ANSWER), /ambiguous/);
   const sameLine = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!-- x --> [[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
-  assert.match(approvalProblem(sameLine, "g7", ANSWER), /CODEX's latest section does not converge/, "a line touching a comment is never the verdict");
+  assert.match(approvalProblem(sameLine, "g7", ANSWER), /ambiguous/, "a line touching a comment is never the verdict (CODEX r8 round 3: a comment block with more after its `-->` is ambiguous)");
   const commentThenVerdict = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!--", "scratch note", "-->", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "<!-- seat: CODEX | thread: x -->", ""].join("\n");
   assert.equal(approvalProblem(commentThenVerdict, "g7", ANSWER), null, "a closed comment before a real verdict does not block it");
 });
@@ -133,6 +133,145 @@ test("A6 approval (CODEX guest-answer r2 HIGH): a marker that is a lazy continua
   const tabBlank = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "Fine.", " \t", "[[CONVERGED]]", "\t", "[[END CODEX round 1]]", ""].join("\n");
   assert.equal(approvalProblem(tabBlank, "g7", ANSWER), null, "spaces and tabs are blank");
   assert.equal(approvalProblem(approved("g7", ANSWER), "g7", ANSWER), null, "the positive control still approves");
+});
+
+// ---------- the reference CommonMark reader (D-074 note 4 Oct): the hand parser disagreed with CommonMark nine times ----------
+// The exchange file is now read by commonmark.js; a verdict is two top-level paragraphs. Each case below is its own test so
+// a failure names the construct; the mutant each one kills is named in its first comment line.
+
+const withCodex = (...verdict: string[]) => ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, verdict)].join("\n");
+const TRANSPORT = "<!-- seat: CODEX | thread: x | usage: in=1 out=1 -->\n";
+const refusal = (exchange: string) => approvalProblem(exchange, "g7", ANSWER);
+
+test("A6 parser (CODEX r8 HIGH, list item): an HTML block inside a list item cannot hide a verdict, with or without the transport note", () => {
+  // Mutant: stop treating a non-comment html_block (at any depth) as ambiguous -> the list-item probe is still refused
+  // by the open-comment rule; drop both -> CODEX's probe approves, as it did against the hand parser.
+  const probe = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "Rejected. Example:", "", "- <pre>", "  ```", "  </pre>", "<!--", "```", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(refusal(probe), /ambiguous/);
+  assert.match(refusal(probe + TRANSPORT), /ambiguous/, "the transport note closes the comment only after both markers");
+});
+
+test("A6 parser (hub r8 round 2, mid-line comment): a `<!--` in the middle of a paragraph followed by a fence line hides the verdict", () => {
+  // Mutant: drop the unclosed-fence check -> the fence runs to the end of the file, the section ends on a code block and is
+  // refused as 'does not converge' instead; the hand parser approved it.
+  const probe = withCodex("Rejected. See text <!--", "```", "-->", "", "[[CONVERGED]]");
+  assert.match(refusal(probe), /ambiguous/);
+  assert.match(refusal(probe + TRANSPORT), /ambiguous/);
+});
+
+test("A6 parser (CODEX r8 round 3, raw HTML an HTML reader acts on): a comment block with more after its `-->`, or any inline HTML, makes the file ambiguous", () => {
+  // The AST reads these verdicts as top-level paragraphs, but CommonMark passes raw HTML through to an HTML reader, where the
+  // trailing `<!--` or an inline `<script>` hides everything after it. Mutants: accept a 'partial' comment block -> the first
+  // and the hub probe approve; ignore html_inline -> the script and inline-comment probes approve.
+  const partial = withCodex("<!-- note --> <!--", "", "[[CONVERGED]]");
+  assert.match(refusal(partial), /ambiguous/);
+  assert.match(refusal(partial + TRANSPORT), /ambiguous/);
+  assert.match(refusal(withCodex("Rejected. <script>", "", "[[CONVERGED]]")), /ambiguous/);
+  assert.match(refusal(withCodex("Reviewed. <!-- an aside -->", "", "[[CONVERGED]]")), /ambiguous/, "inline HTML of any kind, a comment included: over-refusal is acceptable");
+  const hubFirst = ["# REVIEW", "", hub("g7", ANSWER).replace("Target: g7", "<!-- n --> <!--\n\nTarget: g7"), ok("GEMINI"), ok("CODEX")].join("\n");
+  assert.match(refusal(hubFirst), /ambiguous/, "the same opener before the hub's target would hide the rendered answer");
+  assert.equal(refusal(approved("g7", ANSWER) + TRANSPORT), null, "control: the transport's own comment, a complete block alone on its line, still approves");
+});
+
+test("A6 parser (CODEX r8 round 5, HTML comment tokenisation): only an inert comment is accepted; one an HTML reader closes early is ambiguous", () => {
+  // `<!-->` and `<!--->` end an empty comment at once, and `--!>` ends one too (WHATWG comment-start, comment-start-dash and
+  // comment-end-bang states), so a `<script>` inside what CommonMark calls one comment block becomes live for an HTML reader.
+  // Accepted: `<!--` + text with no `<`, `>` or `--` + `-->`, not starting with `>` or `->`. Mutant: the old open/close-only
+  // classification -> all three probes approve, in a seat section and before the hub's target.
+  for (const opener of ["<!--> <script> -->", "<!---> <script> -->", "<!-- note --!> <script> -->"]) {
+    assert.match(refusal(withCodex(opener, "", "[[CONVERGED]]") + TRANSPORT), /ambiguous/, opener);
+    const hubFirst = ["# REVIEW", "", hub("g7", ANSWER).replace("Target: g7", `${opener}\n\nTarget: g7`), ok("GEMINI"), ok("CODEX")].join("\n");
+    assert.match(refusal(hubFirst), /ambiguous/, `${opener} before the hub's target`);
+  }
+  assert.match(refusal(withCodex("<!-- a <b> c -->", "", "[[CONVERGED]]")), /ambiguous/, "a tag-like text inside a comment: refused, over-refusal is acceptable");
+  assert.equal(refusal(withCodex("<!--", "a multi-line note, inert", "-->", "", "[[CONVERGED]]") + TRANSPORT), null, "control: a multi-line inert comment still approves");
+  assert.equal(refusal(approved("g7", ANSWER) + "<!-- seat: CODEX | thread: 01a1-x | seat_turns: - | usage: in=1 out=2 -->\n"), null, "control: the transport's real note shape approves");
+});
+
+test("A6 parser: a blockquoted verdict, or one inside a list item, is not a verdict", () => {
+  // Mutant: treat block_quote or list as a paragraph in sectionConverges -> these approve.
+  for (const marker of ["> [[CONVERGED]]", "- [[CONVERGED]]", "1. [[CONVERGED]]", "  > [[CONVERGED]]"]) {
+    assert.match(refusal(withCodex(marker)), /CODEX's latest section does not converge/, marker);
+  }
+  const quotedEnd = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "[[CONVERGED]]", "", "> [[END CODEX round 1]]", ""].join("\n");
+  assert.match(refusal(quotedEnd), /CODEX's latest section does not converge/, "the END line quoted is not an END line");
+});
+
+test("A6 parser: a fence left open before the verdict hides it, so the file is ambiguous", () => {
+  // Mutant: drop the top-level unclosed-fence check -> the section ends on a code block: 'does not converge', not ambiguous.
+  for (const fence of ["```", "~~~", "````"]) {
+    assert.match(refusal(withCodex(fence, "", "[[CONVERGED]]")), /ambiguous/, `${fence} never closes`);
+  }
+  const shortCloser = withCodex("````", "text", "```", "", "[[CONVERGED]]");
+  assert.match(refusal(shortCloser), /ambiguous/, "a shorter fence line does not close a four-backtick fence");
+  const closed = withCodex("```", "an example", "```", "", "[[CONVERGED]]");
+  assert.equal(refusal(closed), null, "a fence that closed leaves the verdict live");
+});
+
+test("A6 parser: a raw HTML block at the top level (`<pre>` and the rest) makes the file ambiguous, even when it closes before the verdict", () => {
+  // Mutant: drop the html_block 'other' branch -> the closed <pre> case approves (CommonMark ends type 1 at </pre>).
+  assert.match(refusal(withCodex("<pre>", "", "[[CONVERGED]]")), /ambiguous/, "runs to the end of the file");
+  assert.match(refusal(withCodex("<pre>", "x", "</pre>", "", "[[CONVERGED]]")), /ambiguous/, "closed before the verdict: CommonMark would read the verdict as live");
+  assert.match(refusal(withCodex("<script>", "</script>", "", "[[CONVERGED]]")), /ambiguous/);
+});
+
+test("A6 parser: the valid exchange is approved with the transport's trailing comment on every section", () => {
+  // Mutant: stop ignoring a complete comment block in sectionConverges -> the END line is no longer last, red.
+  const noted = ["# REVIEW", "", hub("g7", ANSWER) + "<!-- seat: CLAUDE | thread: a -->\n", ok("GEMINI") + "<!-- seat: GEMINI | thread: b | usage: in=1 out=1 -->\n", ok("CODEX") + TRANSPORT].join("\n");
+  assert.equal(refusal(noted), null);
+  const spaced = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, ["Reviewed.", "", "[[CONVERGED]]   \t"]).replace("[[END CODEX round 1]]", "[[END CODEX round 1]]  ")].join("\n");
+  assert.equal(refusal(spaced), null, "trailing spaces and tabs do not matter");
+  const twoComments = approved("g7", ANSWER) + TRANSPORT + "\n<!-- a second note -->\n";
+  assert.equal(refusal(twoComments), null);
+});
+
+test("A6 parser: a marker CommonMark renders as the marker but the protocol did not write is not a verdict", () => {
+  // Mutant: drop the raw-line comparison in plainLine -> the escaped, entity and indented cases approve.
+  for (const marker of ["\\[\\[CONVERGED]]", "&#91;&#91;CONVERGED]]", " [[CONVERGED]]", "*[[CONVERGED]]*", "[[CONVERGED]] ok", "[[CONVERGED]](http://example.com)"]) {
+    assert.match(refusal(withCodex(marker)), /CODEX's latest section does not converge/, marker);
+  }
+  const softbreak = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "[[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(refusal(softbreak), /CODEX's latest section does not converge/, "adjacent lines are one paragraph");
+  const setext = withCodex("[[CONVERGED]]", "---");
+  assert.match(refusal(setext), /CODEX's latest section does not converge/, "a setext heading is a heading");
+  // Visible text after a closed comment on the same line is part of the HTML block, not a comment: it is content after the verdict.
+  // Mutant: ignore a comment block that has text after its --> -> this approves.
+  const textAfterComment = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "[[CONVERGED]]", "", "<!-- note --> but the second sentence overclaims", "", "[[END CODEX round 1]]", ""].join("\n");
+  assert.match(refusal(textAfterComment), /ambiguous/, "CODEX r8 round 3: a comment block with more after its `-->` is ambiguous");
+  const afterEnd = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "", "One more thing.", ""].join("\n");
+  assert.match(refusal(afterEnd), /CODEX's latest section does not converge/, "END is the last node");
+});
+
+test("A6 parser: a header-shaped line is a section only as a top-level `## [SEAT round N]` heading; anything else that reads like one is ambiguous", () => {
+  // Mutant: drop the HEADER_TEXT check -> the setext, closing-hash and two-space cases are silently not sections;
+  // drop the headingLines check -> a header inside an HTML block becomes a hidden section.
+  for (const header of ["[CODEX round 2]\n---", "## [CODEX round 2] ##", "##  [CODEX round 2]"]) {
+    const x = withCodex("Reviewed.", "", "[[CONVERGED]]") + "\n" + header + "\n\nReviewed.\n\n[[CONVERGED]]\n\n[[END CODEX round 2]]\n";
+    assert.match(refusal(x), /ambiguous/, JSON.stringify(header));
+  }
+  // Real headers carry free text after the round, code spans included (`REVIEW_wake-reconciliation_2026-08-11.md`).
+  // Mutant: require the heading's text to equal the bracketed raw text -> this header stops being a section.
+  const extended = parseSections("# R\n\n## [CLAUDE round 2 - fixes at `c35dfbd` *landed*; round open]\n\ntext\n\n[[END CLAUDE round 2]]\n");
+  assert.deepEqual(extended.map((s: { handle: string; round: number }) => [s.handle, s.round]), [["CLAUDE", 2]]);
+  assert.equal(extended.ambiguous, false);
+  const inDiv = withCodex("<div>", "## [GEMINI round 9]", "</div>", "", "[[CONVERGED]]");
+  assert.match(refusal(inDiv), /ambiguous/, "a header inside an HTML block");
+  const quoted = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, ["Rejected. For the record:", "", "> ## [GEMINI round 9]", "", "[[CONVERGED]]"])].join("\n");
+  assert.deepEqual(parseSections(quoted).map((s: { handle: string }) => s.handle), ["CLAUDE", "GEMINI", "CODEX"], "a quoted header is part of the quotation");
+  assert.equal(refusal(quoted), null, "a quotation inside a section is just a quotation");
+});
+
+test("A6 parser: the hub names the target in a top-level paragraph and carries exactly one top-level ```answer block equal to the body", () => {
+  // Mutant: look for Target or the answer block in every line, as the hand parser did -> the fenced and quoted cases approve.
+  const hubWith = (...lines: string[]) => ["# REVIEW", "", ["## [CLAUDE round 1]", "", ...lines, "", "[[END CLAUDE round 1]]", ""].join("\n"), ok("GEMINI"), ok("CODEX")].join("\n");
+  const block = ["```answer", ANSWER, "```"];
+  assert.equal(refusal(hubWith("Target: g7", "", ...block)), null);
+  assert.match(refusal(hubWith("```", "Target: g7", "```", "", ...block)), /does not name Target: g7/, "Target inside a fence is code");
+  assert.match(refusal(hubWith("Target: g7 (maybe)", "", ...block)), /does not name Target: g7/, "Target is the whole paragraph");
+  assert.match(refusal(hubWith("Target: g7", "", "> ```answer", "> " + ANSWER, "> ```")), /no closed ```answer block/, "a quoted answer block is not the answer");
+  assert.match(refusal(hubWith("Target: g7", "", "```answer extra", ANSWER, "```")), /no closed ```answer block/, "the info string is exactly answer");
+  assert.match(refusal(hubWith("Target: g7", "", ...block, "", ...block)), /more than one ```answer block/, "two answer blocks: which one was reviewed?");
+  assert.match(refusal(hubWith("Target: g7", "", "```answer", ANSWER + "\n", "```")), /not exactly the body/, "an extra blank line is not the body");
 });
 
 test("A12 NUL (CODEX scripts r3): SQLite's length() stops at U+0000, so a NUL is refused and counted as SQLite counts it", () => {
