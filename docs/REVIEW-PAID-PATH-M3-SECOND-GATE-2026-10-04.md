@@ -77,3 +77,13 @@ C7 selects named columns only; `verdict_reason` is read inside the CASE and neve
 - `src/settlement-chain.ts` beyond what `attemptPending` calls (no diff in this scope).
 - The C8 rehearsal worker under `scripts/c8-rehearsal-worker/` (the hub's C1 record covers it).
 - The exchange files beyond the CODEX rounds of the second-build exchange; GEMINI's and the r4 exchange's findings were taken as evidence, not re-derived, except where the code above re-derives them.
+
+## Dated note, 4 Oct 2026 (hub, after the deploy)
+
+Deployed as worker `af1c4ad3-52d5-4e71-bd4a-56053fb1d1f4` at main `7a1432a9` (Ben's go; `scripts/deploy-m3-treasury.ps1`, dry run then real run, ridden on public reads).
+
+- **C1 met.** Deployed from the tree merged with main (parser `13c4273d`, M3, treasury pagination): suite 1770/1770, tsc 0.
+- **C2 owed.** No paid request has run under M2 or M3 (prod `settlement_claims` had no rows before the deploy). Ride the first real pay-listing: claim `booked`, payment row present, listing `paid`.
+- **C3 met.** The morning watchman (item 3b, `RemoteTrigger update` at 16:59:27Z on Ben's yes) and the session-start ritual both read `economy.settlements_awaiting_a_person` daily.
+- **Outside this gate's scope (`7c13f680..53f1cec0`), exchange-converged on both seats:** `88e82580` (LOW-1 and LOW-2 wording), `8430611e` (the generic pending answer no longer says "this request changed nothing"; a re-send can re-POST `/settle`), `2706eb51` (an inconclusive chain read says the request did not re-send the authorisation, not "nothing was changed"); and the deploy script and test helper commits `af39c00d`, `1f66cca6`, `4b6700b8`, `48200399`. All are served wording, deploy tooling or tests; no logic on the money path changed after this gate.
+- **LOW-3** (a refused listing payment holds its listing until the expiry proof) recorded, not changed.
