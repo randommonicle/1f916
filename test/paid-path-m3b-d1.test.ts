@@ -237,3 +237,110 @@ test("C4-B control: the chain says USED and the facilitator says SETTLED: the cl
     d1.close();
   }
 });
+
+
+// ---------- H2: a rule-7 refusal on the re-POST path, while the chain reads UNUSED, never marks the claim refused ----------
+
+test("H2: the re-POST draws a rule-7 refusal while the chain reads UNUSED: the claim stays pending (outcome `unchanged`, the detail names the refusal), the body and reservation are untouched, never `refused`", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => refusedAnswer(), rpc: chainRpc(false) });
+  try {
+    const { row } = await leasedPending(d1);
+    const out = await attemptPending(eq(d1), row, "R");
+    assert.equal(out.kind, "unchanged", JSON.stringify(out));
+    assert.match(String((out as { detail?: string }).detail), new RegExp(REFUSAL_SENTINEL), "the detail names the facilitator's refusal");
+    const after = claimDetail(d1);
+    assert.equal(after.state, "pending", "never refused on a re-POST: an earlier attempt's transfer may still be mined");
+    assert.notEqual(after.rpc_body, null, "the authorisation body is kept");
+    assert.equal(after.lease_owner, null, "the lease is let go so the next attempt is not blocked");
+    assert.ok(!String(after.verdict_reason).startsWith(`${CHAIN_SPENT}:`), "and it is not stopped either: the chain reads it unused");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H2 interleaving: unused read, rule-7 refusal, the transfer is mined later: the claim never reads `refused`, and the next attempt books it (the facilitator's cached success) or stops it", async () => {
+  for (const second of ["settled", "refused"] as const) {
+    const d1 = createLocalD1();
+    let chainUsed = false;
+    const stub = stubFacilitator({ settle: () => (second === "settled" && chainUsed ? settledAnswer() : refusedAnswer()), rpc: (url, n, init) => chainRpc(() => chainUsed)(url, n, init) });
+    try {
+      const { key, row } = await leasedPending(d1);
+      const first = await attemptPending(eq(d1), row, "R");
+      assert.equal(first.kind, "unchanged");
+      assert.equal(claimDetail(d1).state, "pending");
+      chainUsed = true; // the earlier attempt's broadcast transfer is mined
+      const row2 = (await acquireLease(eq(d1), key, "R2", Date.now())) as ClaimRow;
+      assert.ok(row2, "R2 holds the lease");
+      const next = await attemptPending(eq(d1), row2, "R2");
+      if (second === "settled") {
+        assert.equal(next.kind, "settled", JSON.stringify(next));
+        assert.equal(claimDetail(d1).state, "settled_unbooked");
+        assert.equal(claimDetail(d1).tx, TX);
+      } else {
+        assert.equal(next.kind, "stopped", JSON.stringify(next));
+        assert.equal(claimDetail(d1).state, "pending");
+      }
+      assert.notEqual(claimDetail(d1).state, "refused", "at no point refused");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+});
+
+test("H2: the same through the payer's re-send: the answer is the pending one (502, no accepts), not a 402 inviting a second signature", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: chainRpc(false) });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    assert.equal((await callWorker(patronReq("rent", header), eq(d1))).status, 502);
+    const resend = await callWorker(patronReq("rent", header), eq(d1));
+    const body = await json(resend);
+    assert.equal(resend.status, 502, JSON.stringify(body));
+    assert.equal(body.accepts, undefined, "no fresh payment requirements");
+    assert.match(String(body.error), /Do not sign again/);
+    assert.equal(claimDetail(d1).state, "pending");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H2: the reconciler counts the row unchanged (not resolved), and it resolves later through the expiry proof: the chain unused after validBefore + margin gives `expired`", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: chainRpc(false) });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    assert.equal((await callWorker(patronReq("rent", header), eq(d1)))?.status, 502);
+    const first = await runReconciler(eq(d1));
+    assert.equal(first.unchanged, 1, JSON.stringify(first));
+    assert.equal(first.resolved, 0);
+    assert.equal(claimDetail(d1).state, "pending");
+    // time passes: validBefore + the margin is now in the past
+    d1.raw.prepare("UPDATE settlement_claims SET valid_before = ?").run(NOW_S() - 10_000);
+    d1.raw.prepare("UPDATE settlement_claims SET updated_at = 1").run();
+    const second = await runReconciler(eq(d1));
+    assert.equal(second.resolved, 1, JSON.stringify(second));
+    assert.equal(claimDetail(d1).state, "expired");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H2 control: payAndSettle's FIRST /settle still honours a rule-7 refusal at once (402 with accepts, the claim refused)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => refusedAnswer() });
+  try {
+    const res = await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1));
+    const body = await json(res);
+    assert.equal(res.status, 402, JSON.stringify(body));
+    assert.ok(Array.isArray(body.accepts));
+    assert.equal(claimDetail(d1).state, "refused");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

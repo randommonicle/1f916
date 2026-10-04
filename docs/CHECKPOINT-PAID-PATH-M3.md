@@ -238,3 +238,24 @@ established, and the society cannot tell which transaction used it. The society 
 promised. Do not sign again. To add your own report, <mention @commonhold-agent in a comment naming this nonce | leave a free showhome note naming this nonce> (...)." It carries no reconciler tail, no repeat
 instruction, no `accepts`, and none of the facilitator's words. "Spent, or cancelled" is deliberate (gate INFO-3: `authorizationState` is true for a cancelled authorisation as well).
 Existing test moved on purpose: `settlement-replay-reconcile-d1` 7e (the refusal leg now expects `stopped` 1 / `unchanged` 0; the unknown-outcome leg is unchanged).
+
+## S2. H2 (replaces L6): a re-POST refusal while the chain reads UNUSED never marks the claim refused
+
+What: in `attemptPending` the rule-7 branch with `chain.used === false` no longer calls `markRefused`. It records the facilitator's words as the claim's last words (`noteUnknown`, which also lets go of the lease) and
+returns `unchanged` with a detail that names the refusal. The `refused` variant of `AttemptOutcome` is gone (nothing returns it); the reconciler no longer counts a refusal as `resolved`. The claim resolves through the chain
+showing the nonce used (booked, or S1's stamp) or C6's pinned unused-after-expiry proof (`expired`, which releases a pay-listing reservation in the same batch). `payAndSettle`'s first `/settle` is untouched and still
+honours a rule-7 refusal at once. `markRefused`'s `release` parameter now has no production caller (the pay route's own path releases itself, the re-send/reconciler refusal path is gone); it is kept for the tests that drive a
+refusal by hand (H1) and for a future caller.
+Decision: the detail is served to the payer inside the pending answer: the facilitator's own verdict text (the same text the first /settle already quotes in its 402) plus one sentence saying why it is not acted on.
+
+| mutant | red in |
+|---|---|
+| the re-POST refusal marks the claim refused again | all four H2 tests (state, interleaving, re-send, reconciler) |
+| no `noteUnknown` (lease left held) | the unit test and the interleaving test |
+| the first `/settle` no longer honours a refusal | the H2 control |
+
+Served string (old -> new). Old, the payer's re-send after an unused-chain refusal: 402 `{error: "The facilitator reports that this settlement failed (HTTP 200, reason: X). By its account no money moved.", accepts}`. New: 502 `settlement_unresolved`,
+"The outcome of this payment is still unknown: ... Do not sign again; this request changed nothing. <verdict text> It is not acted on: the chain still reads this authorisation unused, so an earlier attempt's transfer may yet be
+mined and a refusal now could be wrong. The claim stays pending until the chain shows the authorisation used or provably expired. <reconciler tail>".
+Existing tests moved on purpose: `settlement-replay-reconcile-d1` 7d (refused leg: pending, unchanged, 502 on the re-send); `settlement-replay-fixes-d1` F2 refused (now: pending, reservation kept, released by the expiry proof);
+`settlement-replay-lease-d1` T6 refused (the holder's own attempt reports `unchanged`, claim pending).

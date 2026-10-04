@@ -871,9 +871,10 @@ for (const kind of ["expired", "refused"] as const) {
       assert.equal(out.kind, "unchanged", JSON.stringify(out));
       assert.equal((await getClaim(eq(d1), key))?.state, "pending");
       assert.equal((await getClaim(eq(d1), key))?.lease_owner, "B");
-      // the holder's own attempt resolves it
+      // the holder's own attempt resolves it: an unused authorisation past its margin is expired; a rule-7 refusal on this re-POST path is NOT honoured (H2, second build): it stays pending
       const mine = await attemptPending(eq(d1), (await getClaim(eq(d1), key)) as ClaimRow, "B");
-      assert.equal(mine.kind, kind);
+      assert.equal(mine.kind, kind === "refused" ? "unchanged" : kind);
+      assert.equal((await getClaim(eq(d1), key))?.state, kind === "refused" ? "pending" : "expired");
     } finally {
       stub.restore();
       d1.close();

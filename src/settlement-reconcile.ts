@@ -5,8 +5,9 @@
 //   pending           -> attemptPending (x402.ts): the chain decides (authorizationState at a
 //                        two-RPC quorum), then the stored body is re-POSTed to /settle as PayAI's
 //                        documentation prescribes; a settled answer makes the row settled_unbooked;
-//                        unused past validBefore (+ margin) makes it expired; a recorded refusal
-//                        makes it refused; anything else changes nothing.
+//                        unused past validBefore (+ margin) makes it expired; a recorded refusal is
+//                        NOT honoured here (H2: unused, it stays pending; used, it is stamped and
+//                        stopped, C4 option B); anything else changes nothing.
 //   settled_unbooked  -> the route's own booking (the same code the paid request and the payer's
 //                        re-send run), skipping whatever booked_refs already records.
 //
@@ -188,7 +189,7 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
         const attempt = await attemptPending(rowEnv, working, owner);
         fetches += attempt.fetches;
         if (attempt.kind !== "settled") {
-          if (attempt.kind === "expired" || attempt.kind === "refused") {
+          if (attempt.kind === "expired") {
             out.resolved++;
             needsRelease = false;
           } else if (attempt.kind === "stopped") {

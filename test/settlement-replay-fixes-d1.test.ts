@@ -224,14 +224,22 @@ test("F2: a pay-listing claim that EXPIRES (chain unused, past validBefore + mar
   }
 });
 
-test("F2: a pay-listing claim that is REFUSED (a recorded rule-7 answer) releases the reservation back to open", async () => {
+test("F2 (moved by H2, second build): a pay-listing claim whose re-POST draws a rule-7 refusal while the chain reads UNUSED is NOT refused and its reservation is KEPT; it is released when the claim EXPIRES", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: () => authStateAnswer(false) });
   try {
     const fx = await payingListing(d1);
+    const reserved = fx.listing();
     const out = await runReconciler(testEnv(d1));
-    assert.equal(out.resolved, 1);
-    assert.equal(oneClaim(d1).state, "refused");
+    assert.equal(out.resolved, 0);
+    assert.equal(out.unchanged, 1);
+    assert.equal(oneClaim(d1).state, "pending", "never refused: an earlier attempt's transfer may still be mined");
+    assert.deepEqual(fx.listing(), reserved, "the reservation is untouched");
+    // the authorisation's window passes unused: the pinned expiry proof resolves it and releases the reservation in the same batch
+    d1.raw.prepare("UPDATE settlement_claims SET valid_before = 1000, updated_at = 1").run();
+    const later = await runReconciler(testEnv(d1));
+    assert.equal(later.resolved, 1);
+    assert.equal(oneClaim(d1).state, "expired");
     assert.deepEqual(fx.listing(), OPEN);
   } finally {
     stub.restore();

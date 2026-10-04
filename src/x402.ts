@@ -913,10 +913,10 @@ export async function answerFromClaim(env: Env, key: ClaimKey, owner: string): P
 // decides": (1) read authorizationState(from, nonce) at a two-RPC quorum, no quorum means no
 // transition; (2) UNUSED after validBefore, plus a margin, is `expired` (the authorisation can
 // no longer move money), never on the clock alone; (3) otherwise, when the authorisation was
-// used or can still be used, re-POST the stored body and classify the answer exactly as the
-// first /settle was: settled books it, a recorded refusal (rule 7) refuses it, anything else
-// leaves it pending. A refusal is not honoured against a spent authorisation: the chain says
-// the money moved, so the answers contradict and the row waits for a person.
+// used or can still be used, re-POST the stored body and classify the answer as the
+// first /settle was: settled books it; anything else leaves it pending. A recorded refusal (rule 7) is NOT honoured on this path (H2): against a spent authorisation the chain
+// says the money moved, so the answers contradict and the claim is stamped and stopped for a person (C4, option B); against an unused one an earlier attempt's transfer may
+// still be mined, so the claim stays pending until the chain shows it used or provably expired. Only payAndSettle's first /settle writes `refused`.
 //
 // EXPIRY_MARGIN: `expired` invites a second signature, so it must never be premature. A
 // transfer broadcast just before validBefore can be mined a little after it in wall-clock
@@ -930,7 +930,6 @@ export const RECONCILE_EXPIRY_MARGIN_SECONDS = PAYMENT_MAX_TIMEOUT_SECONDS;
 export type AttemptOutcome = (
   | { kind: "settled"; row: ClaimRow }
   | { kind: "expired" }
-  | { kind: "refused" }
   | { kind: "unchanged"; detail: string; held?: HeldSuccess }
   | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
   // C4, option B: THIS call stamped the claim (CHAIN_SPENT_MARKER) and stopped it: the chain reads the authorisation used and a person must look. The lease is cleared by the stamp.
@@ -992,8 +991,18 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
       );
       return { kind: "stopped", fetches };
     }
-    if (!(await markRefused(env, key, settled.verdict.error, owner, Date.now(), row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
-    return { kind: "refused", fetches };
+    // H2 (CODEX r1 on the M3 brief, replacing L6): a rule-7 refusal on the RE-POST path, while the chain reads the authorisation UNUSED, is not acted on. An earlier attempt's broadcast
+    // transfer can be mined after any number of "unused" reads, right up to validBefore, so a refusal written now could be false for money that then moved (and its 402 would invite a
+    // second signature). The claim stays pending; the facilitator's words are kept as its last words; it resolves through the chain showing the nonce used (booked, or stopped above)
+    // or through C6's pinned unused-after-expiry proof (expired, which releases a pay-listing reservation in the same batch). payAndSettle's FIRST /settle keeps honouring a rule-7
+    // refusal at once: the claim was taken by that very request, so no earlier attempt exists.
+    const refusal = settled.verdict.error;
+    await quietly("note_unknown", () => noteUnknown(env, key, refusal, owner, Date.now()));
+    return {
+      kind: "unchanged",
+      detail: `${refusal} It is not acted on: the chain still reads this authorisation unused, so an earlier attempt's transfer may yet be mined and a refusal now could be wrong. The claim stays pending until the chain shows the authorisation used or provably expired.`,
+      fetches,
+    };
   }
   const { tx, payer } = settled.verdict;
   if (!(await markSettled(env, key, tx, payer, owner, Date.now()))) {
