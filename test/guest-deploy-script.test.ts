@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { parsePowerShellFile } from "./helpers/ps-parse.ts";
 import { fileURLToPath } from "node:url";
 import { createLocalD1, seedCitizens, seedPost, guestEnv, call } from "./helpers/guest.ts";
 
@@ -33,16 +33,12 @@ const at = (needle: string) => {
 
 test("the script parses under PowerShell's own parser with zero errors, and is ASCII only", (t) => {
   assert.equal(/[^\x00-\x7f]/.test(script), false, "5.1 reads a BOM-less UTF-8 script as the ANSI code page: ASCII only");
-  const probe = spawnSync(
-    "powershell",
-    ["-NoProfile", "-Command", `$e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile('${SCRIPT_PATH}', [ref]$null, [ref]$e); $e.Count`],
-    { encoding: "utf8" },
-  );
-  if (probe.error) {
-    t.skip("powershell is not available on this machine; the static checks below still run");
+  const parsed = parsePowerShellFile(SCRIPT_PATH);
+  if (!parsed.available) {
+    t.skip(`${parsed.reason}; the static checks below still run`);
     return;
   }
-  assert.equal(probe.stdout.trim(), "0", `parse errors: ${probe.stdout}${probe.stderr}`);
+  assert.equal(parsed.errors, 0, `parse errors: ${parsed.detail}`);
 });
 
 test("no PowerShell traps: no two variables differing only by case ($COLS/$cols), no `$var:` drive reference, no stderr merged outside a Continue block, no -notmatch over a pipeline", () => {

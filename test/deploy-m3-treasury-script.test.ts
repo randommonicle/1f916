@@ -11,6 +11,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { classifyParseRun, parsePowerShellFile } from "./helpers/ps-parse.ts";
 import { fileURLToPath } from "node:url";
 import { createLocalD1 } from "./helpers/local-d1.ts";
 import { ATTENTION_MARKER_CODES, settlementsAttention } from "../src/settlement-attention.ts";
@@ -30,16 +31,12 @@ const listOf = (name: string): string[] => {
 
 test("deploy-m3-treasury.ps1 parses under PowerShell's own parser with zero errors, and is ASCII only", (t) => {
   assert.equal(/[^\x00-\x7f]/.test(script), false, "5.1 reads a BOM-less UTF-8 script as the ANSI code page: ASCII only");
-  const probe = spawnSync(
-    "powershell",
-    ["-NoProfile", "-Command", `$e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile('${SCRIPT_PATH}', [ref]$null, [ref]$e); $e.Count`],
-    { encoding: "utf8" },
-  );
-  if (probe.error) {
-    t.skip("powershell is not available on this machine; the static checks below still run");
+  const parsed = parsePowerShellFile(SCRIPT_PATH);
+  if (!parsed.available) {
+    t.skip(`${parsed.reason}; the static checks below still run`);
     return;
   }
-  assert.equal(probe.stdout.trim(), "0", `parse errors: ${probe.stdout}${probe.stderr}`);
+  assert.equal(parsed.errors, 0, `parse errors: ${parsed.detail}`);
 });
 
 test("deploy-m3-treasury.ps1: one spelling per variable name, no stderr merged under Stop, and no write SQL", () => {
@@ -203,5 +200,29 @@ test("deploy-m3-treasury.ps1 treasury ride: impossible or inconsistent pages STO
     assert.equal(r.code, 1, `${name}: ${r.out}`);
     assert.match(r.out, /\[STOP\]/, name);
     assert.doesNotMatch(r.out, /REACHED-END/, name);
+  }
+});
+
+test("the shared parse helper can fail: a broken script reports its errors, and a parser that never ran is an error, not a clean parse (CODEX deploy-script r2)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ps-parse-"));
+  try {
+    const broken = join(dir, "broken.ps1");
+    writeFileSync(broken, "if ($x -eq 1 {\r\n  Write-Host 'unclosed'\r\n");
+    const parsed = parsePowerShellFile(broken);
+    if (!parsed.available) {
+      t.skip(parsed.reason);
+      return;
+    }
+    assert.ok(parsed.errors > 0, `a broken script must report errors: ${parsed.detail}`);
+    const missing = parsePowerShellFile(join(dir, "no-such-file.ps1"));
+    assert.ok(missing.available && missing.errors > 0, "a missing file is a parse error, never a clean parse");
+    // CODEX r2's reproduction of the old probe's false pass, and the other ways a run can fail to reach the parser.
+    assert.equal(classifyParseRun(0, "0\r\n", "Cannot create type. Only core types are supported in this language mode.").available, false);
+    assert.throws(() => classifyParseRun(0, "0\r\n", ""), /did not run/);
+    assert.throws(() => classifyParseRun(0, "NOPARSE\r\n", ""), /did not run/);
+    assert.throws(() => classifyParseRun(1, "ERRORS=0\r\n", "boom"), /did not run/);
+    assert.deepEqual(classifyParseRun(0, "ERRORS=0\r\n", ""), { available: true, errors: 0, detail: "ERRORS=0\r\n" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
