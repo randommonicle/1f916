@@ -224,7 +224,7 @@ $treEntries = @($tre.entries)
 # Each mismatch STOPS before [done]: the worker is deployed by then, so the stop says the ride is not complete, not that the deploy failed.
 $treStop = "the deploy is done (version $versionId) but this ride is not: re-read GET /treasury and GET /api/attest by hand"
 if ([int64]$tre.page_size -ne $LEDGER_PAGE_SIZE) { Stop-Here ("GET /treasury page_size is " + $tre.page_size + ", expected " + $LEDGER_PAGE_SIZE + "; " + $treStop) }
-if (-not ($tre.has_more -is [bool])) { Stop-Here ("GET /treasury has_more is not a boolean ( + .has_more + ); " + $treStop) }
+if (-not ($tre.has_more -is [bool])) { Stop-Here ("GET /treasury has_more is not a boolean (" + $tre.has_more + "); " + $treStop) }
 if ([int64]$tre.returned -ne $treEntries.Count) { Stop-Here ("GET /treasury returned is " + $tre.returned + " but it carries " + $treEntries.Count + " entries; " + $treStop) }
 if ([int64]$tre.total_entries -ne [int64]$attAfter.treasury.total_rows) { Stop-Here ("GET /treasury total_entries " + $tre.total_entries + " differs from the treasury chain total_rows " + $attAfter.treasury.total_rows + " read a moment earlier (a ledger write between the reads would explain it); " + $treStop) }
 $wantReturned = [Math]::Min([int64]$tre.total_entries, [int64]$LEDGER_PAGE_SIZE)
