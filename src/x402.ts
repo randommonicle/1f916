@@ -268,6 +268,13 @@ export type SettleResult =
 // cannot drift apart.
 export const PAYMENT_MAX_TIMEOUT_SECONDS = 300;
 
+// M4 (CODEX r1 on the paid-path M3 brief): the latest validBefore a claim-bearing route accepts, as seconds past NOW: the window every requirement declares plus this skew allowance.
+// claimKeyFromPayload accepts any validBefore, so without this bound the expiry proof's wait (H2's pending claims resolve only by the chain showing the nonce used or provably expired) is
+// unbounded: a signer could mint an authorisation valid for years. Checked free, before /verify. It bounds NEW claims only: a claim admitted before this bound existed is answered from
+// its row (replayForClaim runs first) and resolves as it always did; the attention list's `pending_aged` marker (C7) covers any that outlive N days.
+export const PAYMENT_VALID_BEFORE_SKEW_SECONDS = 60;
+export const PAYMENT_VALID_BEFORE_TOO_FAR = "payment_valid_before_too_far";
+
 // A4 (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md, CODEX): the decoded payload's
 // signed destination and amount must BE the requirements this route issued,
 // checked here before /verify. payAndSettle used to forward the payload with
@@ -533,6 +540,21 @@ export async function payAndSettle(
   let claimId: ClaimIdentity | null = null;
   if (claim) {
     const { key, validBefore } = claimKeyFromPayload(paymentPayload, reqs);
+    const latest = Math.floor(Date.now() / 1000) + PAYMENT_MAX_TIMEOUT_SECONDS + PAYMENT_VALID_BEFORE_SKEW_SECONDS;
+    if (validBefore > latest) {
+      return {
+        ok: false,
+        response: Response.json(
+          {
+            x402Version: 1,
+            error: `This payment authorisation's validBefore (${validBefore}) is further ahead than this server accepts. It must be no later than ${latest} (unix seconds, from now): the ${PAYMENT_MAX_TIMEOUT_SECONDS} seconds the payment requirements declare, plus ${PAYMENT_VALID_BEFORE_SKEW_SECONDS} seconds for clock skew. Nothing was sent to the facilitator and nothing was charged. Sign a fresh authorisation with a validBefore inside that bound.`,
+            code: PAYMENT_VALID_BEFORE_TOO_FAR,
+            accepts: [reqs],
+          },
+          { status: 402, headers: { "Access-Control-Allow-Origin": "*" } },
+        ),
+      };
+    }
     claimId = await claimIdentity(key, validBefore, rpcBody, claim);
   }
 

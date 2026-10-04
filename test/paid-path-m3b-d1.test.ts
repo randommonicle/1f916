@@ -459,3 +459,63 @@ test("R2-1: markRefused bound to a take time writes only while updated_at still 
     d1.close();
   }
 });
+
+
+// ---------- M4: no bound on validBefore (CODEX r1 on the M3 brief) ----------
+
+const nowSeconds = () => Math.floor(Date.now() / 1000);
+const BOUND = 300 + 60; // PAYMENT_MAX_TIMEOUT_SECONDS + the skew allowance
+
+test("M4: an authorisation whose validBefore is beyond now + 300 + 60 is refused FREE and BEFORE /verify: 402 with accepts naming the bound; nothing is claimed or reserved", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const far = String(nowSeconds() + BOUND + 5);
+    const res = await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000", { validBefore: far })), eq(d1));
+    const body = await json(res);
+    assert.equal(res.status, 402, JSON.stringify(body));
+    assert.ok(Array.isArray(body.accepts), "a fresh signature with a proper window is the honest invitation: nothing was charged");
+    assert.equal(body.code, "payment_valid_before_too_far");
+    assert.match(String(body.error), /validBefore/);
+    assert.match(String(body.error), /360|300/, "the bound is named");
+    assert.match(String(body.error), /Nothing was sent to the facilitator and nothing was charged/);
+    assert.equal(stub.calls.verify, 0, "refused before /verify");
+    assert.equal(stub.calls.settle, 0);
+    assert.equal(count(d1, "settlement_claims"), 0, "no claim");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("M4: just inside the bound is accepted (the 402 for the bound is not the only reason the request can fail); a validBefore in the past is still the facilitator's to judge", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const inside = await callWorker(patronReq("rent inside", paymentHeaderFor(TREASURY_ADDRESS, "1000000", { validBefore: String(nowSeconds() + BOUND - 5) })), eq(d1));
+    assert.equal(inside.status, 200, JSON.stringify(await inside.clone().json()));
+    const past = await callWorker(patronReq("rent past", paymentHeaderFor(TREASURY_ADDRESS, "1000000", { validBefore: String(nowSeconds() - 100_000) })), eq(d1));
+    assert.notEqual((await json(past)).code, "payment_valid_before_too_far", "the bound is an upper bound only");
+    assert.ok(stub.calls.verify >= 2, "both reached /verify");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("M4 (pay listing): the same refusal, and the listing is not reserved", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1, { validBefore: String(nowSeconds() + BOUND + 5) });
+  const stub = stubFacilitator();
+  try {
+    const res = await fx.send();
+    assert.equal(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.code, "payment_valid_before_too_far");
+    assert.equal(stub.calls.verify, 0);
+    assert.equal(fx.listing().status, "open", "never reserved");
+    assert.equal(count(d1, "settlement_claims"), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

@@ -275,3 +275,22 @@ Test detail: B's writes use a clock 400 s ahead of A's, so `updated_at` differs 
 | `payAndSettle` stops passing the take time | both interleavings |
 
 Served strings: none changed (the answer is the existing pending one).
+
+## S4. M4: the validBefore bound
+
+What: `payAndSettle`, for a claim-bearing route and right after `claimKeyFromPayload` (so before `/verify`, before any reservation, before any claim), refuses an authorisation whose
+`validBefore > now + PAYMENT_MAX_TIMEOUT_SECONDS (300) + PAYMENT_VALID_BEFORE_SKEW_SECONDS (60)`: 402 with `accepts`, code `payment_valid_before_too_far`, naming the latest accepted value. It is an upper bound only
+(a validBefore in the past is still the facilitator's and the chain's to judge). It bounds NEW claims; a claim admitted before this existed is answered from its row (`replayForClaim` runs first) and the attention list's
+`pending_aged` marker (S7) covers any that outlive N days. Both constants are exported next to `PAYMENT_MAX_TIMEOUT_SECONDS`.
+Harness: `test/helpers/x402-payload.ts` `paymentHeaderFor` defaulted `validBefore` to `"9999999999"`, which M4 rightly refuses; its default is now `now + 300` (the window the requirements declare). No existing test changed
+meaning: the full suite stayed green with only that default moved (tests that seed claims directly choose their own validBefore). The operator scripts already sign `now + maxTimeoutSeconds` from the server's requirements.
+
+| mutant | red in |
+|---|---|
+| the bound removed | both refusal tests (patron, pay listing) |
+| the bound off by a day | both refusal tests |
+| the bound also refusing a long-past validBefore | "just inside the bound is accepted ... past ... still the facilitator's to judge" |
+
+Served string, new: 402 "This payment authorisation's validBefore (T) is further ahead than this server accepts. It must be no later than B (unix seconds, from now): the 300 seconds the payment requirements declare, plus 60
+seconds for clock skew. Nothing was sent to the facilitator and nothing was charged. Sign a fresh authorisation with a validBefore inside that bound." Before: no such refusal (any validBefore was admitted).
+The reconciler re-measurement the commission lists under M4 is S8 (nothing in M4 adds a statement or a fetch to a reconciler row: the check is a comparison).
