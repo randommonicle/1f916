@@ -532,7 +532,7 @@ test("M4 (pay listing): the same refusal, and the listing is not reserved", asyn
 const UNWRAP = Symbol("unwrap");
 // An Env whose INSERT into settlement_claims COMMITS and then throws (D1 committed and still reported an error). With `readBackThrows`, every later read of the claim table throws too,
 // so the re-read cannot tell whether the row exists.
-function claimInsertCommitsThenThrowsEnv(d1: LocalD1, opts: { readBackThrows?: boolean } = {}): Env {
+function claimInsertCommitsThenThrowsEnv(d1: LocalD1, opts: { readBackThrows?: boolean; afterCommit?: () => void } = {}): Env {
   const real = d1.DB;
   let inserted = false;
   const wrap = (stmt: any, sql: string): any =>
@@ -544,6 +544,7 @@ function claimInsertCommitsThenThrowsEnv(d1: LocalD1, opts: { readBackThrows?: b
           return async (...a: unknown[]) => {
             await target.run(...a);
             inserted = true;
+            opts.afterCommit?.();
             throw new Error("D1 reported an error after the commit (test)");
           };
         }
@@ -583,6 +584,33 @@ test("H3/MEDIUM-1 (pay listing): the claim INSERT commits and then throws: the r
     assert.equal(claim.lease_owner, null, "this request let go of its own lease, so the reconciler or a re-send is not told to wait for it");
     assert.notEqual(claim.rpc_body, null);
     assert.equal(eventLines(lines, "settlement_claim_not_taken").length, 1, "the failure is still logged once");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// CODEX second-build r1 HIGH: the INSERT commits, but its error arrives after the lease lapsed and B took the claim (a re-send or the
+// reconciler, mid /settle). A's re-read then sees B as lease_owner. The claim is still THIS payment's (same route, same request), so A
+// must keep the reservation: releasing it would re-open the listing while B's settlement is in flight. Red when "ours" is judged by
+// the mutable lease_owner alone (the listing reads 'open').
+test("H3/MEDIUM-1 (pay listing, CODEX r1 HIGH): the INSERT commits, the error arrives after B took the lapsed lease: the reservation is KEPT, B's lease untouched", async () => {
+  const d1 = createLocalD1();
+  const takeOver = () => {
+    d1.raw.prepare(`UPDATE settlement_claims SET lease_owner = 'B', leased_until = ${Date.now() + 60_000}`).run();
+  };
+  const fx = await payFixture(d1, { env: claimInsertCommitsThenThrowsEnv(d1, { afterCommit: takeOver }) });
+  const stub = stubFacilitator();
+  try {
+    const res = await fx.send();
+    assert.notEqual(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.accepts, undefined, "no fresh payment requirements");
+    assert.doesNotMatch(String(res.body.error), /Try again later|has not been used/i);
+    assert.equal(fx.listing().status, "paying", "the reservation is kept while B may settle this payment");
+    const claim = claimDetail(d1);
+    assert.equal(claim.state, "pending");
+    assert.equal(claim.lease_owner, "B", "A does not touch B's lease");
+    assert.equal(stub.calls.settle, 0, "A sent nothing to /settle");
   } finally {
     stub.restore();
     d1.close();

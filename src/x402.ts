@@ -652,7 +652,13 @@ export async function payAndSettle(
           ),
         };
       }
-      if (landed !== null) return { ok: false, response: await respondToExistingClaim(env, landed, landed.route === claim.route && sameRequest(landed, claimId), reqs, claim) };
+      // CODEX second-build r1 HIGH: "ours" judged by lease_owner alone fails once the INSERT's error arrives after the lease lapsed and another
+      // holder (a re-send, the reconciler) took the SAME claim and may be mid /settle. A row that is this payment by identity (same route, same
+      // request) keeps the reservation whoever holds its lease, and is answered from the claim; only a DIFFERENT request's row lets this
+      // request's own reservation go.
+      const identical = landed !== null && landed.route === claim.route && sameRequest(landed, claimId);
+      if (landed !== null && identical) return { ok: false, keepReservation: true, response: await respondToExistingClaim(env, landed, true, reqs, claim) };
+      if (landed !== null) return { ok: false, response: await respondToExistingClaim(env, landed, false, reqs, claim) };
       return {
         ok: false,
         response: Response.json(
