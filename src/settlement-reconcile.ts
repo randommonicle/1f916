@@ -187,6 +187,10 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
             out.resolved++;
             needsRelease = false;
           } else if (attempt.kind === "contradiction") out.contradicted++;
+          // DEFERRED-RECONCILER-HELD-SUCCESS-REREAD (CODEX M3-build r2 (2), 4 Oct): an `unchanged` attempt carrying settledTx holds a success it could not write;
+          // the re-send's answer path re-reads and stamps a claim another holder has since made terminal (x402.ts respondToExistingClaim), this loop does
+          // not: it serves no answer, the settlement_success_unrecorded line already names the tx, and the extra read and stamp would re-price the itemised
+          // row worst case above. A later replay of such a row would read its unstamped 402. Lands here, with the budget re-itemised, if the seats want parity.
           else out.unchanged++;
           continue;
         }

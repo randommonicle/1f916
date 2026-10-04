@@ -47,6 +47,7 @@ import {
   getClaim,
   keyOfRow,
   markExpired,
+  markContradiction,
   markHandleTaken,
   markRefused,
   markSettled,
@@ -1004,6 +1005,118 @@ for (const kind of ["refused", "expired"] as const) {
       assert.equal(row.tx, TX, "C1: stamped with the facilitator's tx");
       assert.ok(String((row as { verdict_reason?: string }).verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "and the marker");
       assert.equal(count(d1, "ledger"), 0);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+// ---------- CODEX M3-build r2 (4 Oct): two terminal answers that discarded settlement evidence ----------
+
+// (1) A's /settle is in flight; its lease lapses, B takes it and refuses the claim, and a later success (another holder's re-POST) stamps the refused row with
+// the contradiction; then A's own refusal arrives. A's markRefused writes nothing and A re-reads a refused claim that is STAMPED. Mutant: drop
+// `|| isContradicted(now)` in payAndSettle's refusal branch -> A answers 402 with accepts and pay listing releases its reservation.
+test("CODEX r2 (1): pay listing, A's refusal arrives after B refused the claim and a contradiction stamped it: A answers the contradiction, offers no fresh payment, keeps the reservation", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async () => {
+      const key = await bTakesTheLease(d1);
+      assert.equal(await markRefused(eq(d1), key, "The facilitator reports that this settlement failed", "B", Date.now()), true);
+      assert.equal(await markContradiction(eq(d1), key, TX, Date.now()), true);
+      return refusedAnswer();
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay();
+    assert.equal(res.status, 500, JSON.stringify(res.body));
+    assert.equal(res.body.code, "settlement_contradiction");
+    assert.equal(res.body.accepts, undefined, "no fresh payment requirements are offered");
+    assert.match(String(res.body.error), new RegExp(TX));
+    assert.match(String(res.body.error), /Do not sign again/);
+    assert.doesNotMatch(String(res.body.error), /no money moved|sign a fresh one/i);
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: the stamp says the money may have moved");
+    const row = oneClaim(d1) as unknown as { state: string; verdict_reason: string | null };
+    assert.equal(row.state, "refused");
+    assert.ok(String(row.verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "still stamped");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// (2) The gate's LOW-1, severity upgraded: a re-send's re-POST reads SUCCESS while the claim is pending under B (A's lease lapsed inside the re-POST), so
+// attemptPending logs the success and returns unchanged + settledTx; B then refuses the claim before respondToExistingClaim's final read. The interleaving is
+// injected at that read (the second `SELECT * FROM settlement_claims WHERE` after the re-POST answered). Mutant: remove the held-success branch in
+// respondToExistingClaim -> 402 with accepts, the row refused and unstamped.
+for (const txv of [TX, ""] as const) {
+  test(`CODEX r2 (2) (${txv ? "tx named" : "empty tx"}): B refuses the claim between a re-send's held SUCCESS and its final read: the success is kept as a stamped contradiction, a 500, no fresh payment`, async () => {
+    const d1 = createLocalD1();
+    let armed = false;
+    let reads = 0;
+    let refusedByB = false;
+    let key: ClaimKey | null = null;
+    const stub = stubFacilitator({
+      settle: async (n) => {
+        if (n === 1) return pendingAnswer(); // the first request: outcome unknown, the claim stays pending
+        key = await bTakesTheLease(d1); // inside the re-send's re-POST: its lease lapses and B holds a live one on the still-pending claim
+        armed = true;
+        return new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: txv }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+      rpc: () => authStateAnswer(false),
+    });
+    const base = eq(d1);
+    const db = new Proxy(base.DB as object, {
+      get(t: any, p: string | symbol) {
+        if (p === "prepare") {
+          return (sql: string) => {
+            if (armed && sql.startsWith("SELECT * FROM settlement_claims WHERE") && ++reads === 2) {
+              armed = false;
+              return {
+                bind: (...a: unknown[]) => ({
+                  first: async () => {
+                    refusedByB = await markRefused(eq(d1), key as ClaimKey, "The facilitator reports that this settlement failed", "B", Date.now());
+                    return t.prepare(sql).bind(...a).first();
+                  },
+                }),
+              };
+            }
+            return t.prepare(sql);
+          };
+        }
+        const v = t[p];
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+    const env = { ...base, DB: db } as unknown as Env;
+    try {
+      const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+      const first = await callWorker(patronReq("rent", header), env);
+      assert.equal(first.status, 502);
+      assert.equal(oneClaim(d1).state, "pending");
+
+      const { value: res, lines } = await captureLog(() => callWorker(patronReq("rent", header), env));
+      const body = await json(res);
+      assert.equal(refusedByB, true, "B refused the claim between the attempt's read and the final read");
+      assert.equal(eventLines(lines, "settlement_success_unrecorded").length, 1, "the attempt held a success it could not write");
+      assert.equal(res.status, 500, JSON.stringify(body));
+      assert.equal(body.code, "settlement_contradiction");
+      assert.equal(body.accepts, undefined, "no fresh payment requirements");
+      assert.match(String(body.error), txv ? new RegExp(txv) : /tx not reported/);
+      assert.match(String(body.error), /Do not sign again/);
+      assert.doesNotMatch(String(body.error), /no money moved|sign a fresh one/i);
+      const c = eventLines(lines, "settlement_contradiction");
+      assert.equal(c.length, 1, "exactly one contradiction line");
+      assert.equal(c[0].state, "refused");
+      assert.equal(c[0].tx, txv);
+      assert.equal(c[0].payer, TEST_PAYER);
+      const row = oneClaim(d1) as unknown as { state: string; verdict_reason: string | null };
+      assert.equal(row.state, "refused");
+      assert.ok(String(row.verdict_reason).startsWith(`settlement_contradiction:${txv}|`), "stamped, so a later identical replay reads the contradiction too");
+      assert.equal(count(d1, "ledger"), 0, "nothing was booked");
+      const replay = await callWorker(patronReq("rent", header), eq(d1));
+      assert.equal(replay.status, 500, "a later identical replay of the stamped row answers the same contradiction");
     } finally {
       stub.restore();
       d1.close();

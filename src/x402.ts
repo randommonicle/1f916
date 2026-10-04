@@ -22,6 +22,7 @@ import {
   claimResponse,
   contradictionAnswer,
   getClaim,
+  isContradicted,
   isHandleTaken,
   isListingNotPaying,
   keyOfRow,
@@ -654,10 +655,12 @@ export async function payAndSettle(
         // fall through to the 402 below, which releases pay listing's reservation, so a refusal could re-open a listing whose claim another
         // holder had settled. Now it is re-read like any unwritten refusal; a re-read that throws, or finds no row, is an unknown outcome
         // (thrown, so pay listing keeps its reservation: settlement_unconfirmed); only a claim that reads `refused` lets the 402 stand.
+        // CODEX M3-build r2 (1): ...and only an UNSTAMPED one. A refused claim stamped with a settlement contradiction (another holder's re-POST read a
+        // success after the refusal) is answered from the claim, the contradiction's 500, and pay listing keeps its reservation: the money may have moved.
         if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
         const now = await getClaim(env, key);
         if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
-        if (now.state !== "refused") {
+        if (now.state !== "refused" || isContradicted(now)) {
           return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null, owner) };
         }
       }
@@ -769,6 +772,14 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
         if (done) return done;
       }
       const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
+      // CODEX M3-build r2 (2), the gate's LOW-1 (severity upgraded): this attempt holds a facilitator SUCCESS it could not write (the claim was pending under
+      // another holder). If that holder has since made the claim refused or expired, the success is not discarded into the terminal row's 402 with fresh
+      // accepts: the row is stamped and the contradiction logged and answered, empty tx included. The reconciler holds the same outcome but serves no answer
+      // (DEFERRED-RECONCILER-HELD-SUCCESS-REREAD in settlement-reconcile.ts).
+      if (out.kind === "unchanged" && out.settledTx !== undefined && (fresh.state === "refused" || fresh.state === "expired")) {
+        await recordContradiction(env, fresh, fresh.state, { tx: out.settledTx, payer: out.settledPayer ?? "" }, reqs);
+        return contradictionResponse(out.settledTx, fresh.state);
+      }
       return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail, ...(out.settledTx !== undefined ? { settledTx: out.settledTx } : {}) } : {}));
     } finally {
       await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
@@ -897,7 +908,7 @@ export type AttemptOutcome = (
   | { kind: "settled"; row: ClaimRow }
   | { kind: "expired" }
   | { kind: "refused" }
-  | { kind: "unchanged"; detail: string; settledTx?: string }
+  | { kind: "unchanged"; detail: string; settledTx?: string; settledPayer?: string }
   | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
 ) & { fetches: number };
 
@@ -959,7 +970,7 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
       // C2 (re-gate LOW-1(b)): the re-POST answered SUCCESS, another holder holds the still-pending claim, and nothing here may write the tx to it. Logged once and
       // carried in the outcome, so the re-send's answer names it; the reconciler's outcome counts it unchanged, the line already written.
       logSettlementSuccessUnrecorded(moved, { tx, payer }, body.paymentRequirements);
-      return { kind: "unchanged", detail: "", settledTx: tx, fetches };
+      return { kind: "unchanged", detail: "", settledTx: tx, settledPayer: payer, fetches };
     }
     return { kind: "unchanged", detail: "another worker moved the claim", fetches };
   }
