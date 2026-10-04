@@ -157,13 +157,18 @@ function plainLine(node, lines) {
 // metadata note is one). "partial": a terminated comment with more text after its `-->` on the same line (ordinary
 // content, never a verdict). "open": a comment with no `-->` before the block ends. "other": `<pre>`, `<details>`,
 // `<?php`, `<!DOCTYPE` and the rest of the raw HTML block starts.
+// CODEX r8 round 5: an HTML reader tokenises a comment differently from CommonMark's block rule (`<!-->` and `<!--->` end an
+// empty comment at once, `--!>` ends one too), so "comment" is only an INERT one: `<!--`, then text with no `<`, `>` or `--`,
+// then `-->`, not starting with `>` or `->`. The transport's note has that shape. Any other comment block is "malformed".
+const INERT_COMMENT = /^<!--(?![->])(?:[^<>-]|-(?!-))*-->$/;
 function htmlBlockKind(node) {
   if (node.type !== "html_block") return null;
   const t = node.literal.replace(/^[ \t]+/, "").replace(/[ \t\n]+$/, "");
   if (!t.startsWith("<!--")) return "other";
+  if (INERT_COMMENT.test(t)) return "comment";
   const i = t.indexOf("-->", 4);
   if (i < 0) return "open";
-  return i + 3 === t.length ? "comment" : "partial";
+  return i + 3 === t.length ? "malformed" : "partial";
 }
 
 // Sections are delimited by top-level level-2 headings whose raw line is exactly a HEADER line; a section is the run of
@@ -219,7 +224,7 @@ export function parseSections(text) {
     if (!ev.entering) continue;
     if (ev.node.type === "html_inline") ambiguous = true;
     const kind = htmlBlockKind(ev.node);
-    if (kind === "other" || kind === "open" || kind === "partial") ambiguous = true;
+    if (kind !== null && kind !== "comment") ambiguous = true;
   }
   return Object.assign(sections, { ambiguous });
 }
