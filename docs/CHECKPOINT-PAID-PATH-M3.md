@@ -414,3 +414,12 @@ Findings and deviations for the gate:
 5. M4 bounds NEW claims only. A pending claim admitted before it keeps its far `validBefore`; `pending_aged` (3 days) puts it on the attention list. A claim whose authorisation is valid for years can still wait years for the expiry proof.
 6. `settled_unbooked_aged` lists a secret-mode registration whose payer never came back to re-send (by design it waits for them); after 3 days it is on the maintainer's list. That is the intent of "older than N days", stated because the row is not a fault.
 7. Not done, by instruction: durable success evidence (R2-2), option A's receipt-level Transfer check, any migration.
+
+Close-out addendum (after `9798cefc`, which is the last code and test commit; S7 above says "this commit" for the R2-4 pin, it is `9798cefc`). Further findings for the gate:
+
+8. H3's reservation read sits BEFORE `/settle`. A release that lands between that read and the settle still lets a re-POST move money for a listing nobody holds; C5 catches it afterwards (and the booking INSERT's gate refuses it). The window narrowed from "always" to that gap; it did not close.
+9. `officialFacts` now runs one extra D1 statement for every caller: GET /, /api/official, llms.txt, the discovery surface and both MCP doors' official tool. This is request-path load on the busiest read, not the scheduled budget; the claim table is small and the query is one scan.
+10. Sharpening finding 5: a pending listing_pay claim admitted before M4, whose listing is unbound and whose authorisation is unused, is selected by the reconciler every day (it returns `unchanged`, costing a lease and a read) until its far `validBefore` proves expiry. That is a "takes a slot until expiry" shape C5 did not foresee;
+    `pending_aged` surfaces it after three days and a person resolves it by hand.
+11. `scripts/pay-listing.mjs` was not re-run against, and its classification of, the new 502 `settlement_unresolved` from the takeClaim catch was not read. Its retry rule (re-sign only after validBefore + 300 s with the nonce unused at a two-RPC quorum) is safe by construction, but the body's handling there is unverified.
+12. Working tree: every touched file is CRLF (this checkout's autocrlf convention); the index stores LF. Checked with `git ls-files --eol` at the end; one bare `sed -i` had converted `src/x402.ts` to LF mid-session and it was put back. No em dash was added to any `src` line.
