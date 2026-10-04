@@ -63,7 +63,7 @@ export interface AttentionEntry {
 // SQL; `verdict_reason` is read only inside the query and never selected out of it. The list page and the total are two statements over THIS ONE marked selection (the same text, the same
 // bindings), so what the total counts and what the pages serve cannot drift.
 const MARKED = `(
-  SELECT route, state, tx, created_at, updated_at, nonce,
+  SELECT rowid AS rid, route, state, tx, created_at, updated_at, nonce,
     CASE
       WHEN state IN ('refused', 'expired') AND substr(COALESCE(verdict_reason, ''), 1, ?) = ? THEN 'settlement_contradiction'
       WHEN state = 'pending' AND substr(COALESCE(verdict_reason, ''), 1, ?) = ? THEN 'chain_spent_facilitator_refused'
@@ -79,31 +79,36 @@ const markedBinds = (now: number): unknown[] => {
   return [CONTRADICTION_MARKER.length, CONTRADICTION_MARKER, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, CLAIM_LISTING_NOT_PAYING, CLAIM_HANDLE_TAKEN, agedBefore, agedBefore];
 };
 
-// The paging cursor: "<created_at>:<nonce>" of the last row of a page. Rows are served in (created_at, nonce) order and a cursor returns the rows STRICTLY after it. A string that is not exactly
-// that shape is not a cursor (null); the route answers it with a 400. (Known limit: two claims by different signers with the very same created_at millisecond AND the very same nonce would
-// tie on the cursor and the second could be skipped between pages; a nonce is 32 random bytes, so this needs a deliberate collision.)
+// The paging cursor: "<created_at>:<rowid>" of the last row of a page. Rows are served in (created_at, rowid) order and a cursor returns the rows STRICTLY after it. A signer CHOOSES its nonce
+// (only the 32-byte hex shape is checked), so two claims by different signers can share both created_at and nonce; the rowid (settlement_claims is an ordinary rowid table: its primary key is
+// composite text, there is no WITHOUT ROWID, and rows are never deleted) is unique, so the order is total and no claim can fall between two pages (CODEX second-build r2). The rowid is an internal
+// row number, not an address; it is selected for the cursor and appears nowhere else in a response. A string that is not exactly digits, a colon, digits is not a cursor (null); the route answers it with
+// a 400. Both numbers must be safe integers.
 export interface AttentionCursor {
   createdAt: number;
-  nonce: string;
+  rowid: number;
 }
 export function parseAttentionCursor(s: string): AttentionCursor | null {
-  if (!/^[0-9]{1,16}:0x[0-9a-f]{64}$/.test(s)) return null;
-  const createdAt = Number(s.slice(0, s.indexOf(":")));
-  return Number.isSafeInteger(createdAt) ? { createdAt, nonce: s.slice(s.indexOf(":") + 1) } : null;
+  if (!/^[0-9]{1,16}:[0-9]{1,19}$/.test(s)) return null;
+  const [a, b] = s.split(":");
+  const createdAt = Number(a);
+  const rowid = Number(b);
+  return Number.isSafeInteger(createdAt) && Number.isSafeInteger(rowid) ? { createdAt, rowid } : null;
 }
-export const attentionCursorOf = (e: Pick<AttentionEntry, "created_at" | "nonce">): string => `${e.created_at}:${e.nonce}`;
 
-// One page: up to ATTENTION_LIMIT rows strictly after `after` (if given), and whether another row follows (LIMIT + 1 is fetched to know).
-export async function attentionPage(db: D1Database, now: number, after: AttentionCursor | null = null): Promise<{ entries: AttentionEntry[]; hasMore: boolean }> {
-  const where = after === null ? "" : " AND (created_at > ? OR (created_at = ? AND nonce > ?))";
-  const afterBinds = after === null ? [] : [after.createdAt, after.createdAt, after.nonce];
+// One page: up to ATTENTION_LIMIT rows strictly after `after` (if given), whether another row follows (LIMIT + 1 is fetched to know), and, when it does, the cursor of the last row served.
+export async function attentionPage(db: D1Database, now: number, after: AttentionCursor | null = null): Promise<{ entries: AttentionEntry[]; hasMore: boolean; next: string | null }> {
+  const where = after === null ? "" : " AND (created_at > ? OR (created_at = ? AND rid > ?))";
+  const afterBinds = after === null ? [] : [after.createdAt, after.createdAt, after.rowid];
   const { results } = await db
-    .prepare(`SELECT route, state, tx, created_at, updated_at, nonce, marker FROM ${MARKED} WHERE marker IS NOT NULL${where} ORDER BY created_at ASC, nonce ASC LIMIT ?`)
+    .prepare(`SELECT rid, route, state, tx, created_at, updated_at, nonce, marker FROM ${MARKED} WHERE marker IS NOT NULL${where} ORDER BY created_at ASC, rid ASC LIMIT ?`)
     .bind(...markedBinds(now), ...afterBinds, ATTENTION_LIMIT + 1)
-    .all<{ route: string; state: string; tx: string | null; created_at: number; updated_at: number; nonce: string; marker: AttentionMarker }>();
+    .all<{ rid: number; route: string; state: string; tx: string | null; created_at: number; updated_at: number; nonce: string; marker: AttentionMarker }>();
   const hasMore = results.length > ATTENTION_LIMIT;
-  const entries = results.slice(0, ATTENTION_LIMIT).map((r) => ({ route: r.route, state: r.state, marker: r.marker, tx: r.tx === null || r.tx === "" ? null : r.tx, created_at: r.created_at, updated_at: r.updated_at, nonce: r.nonce }));
-  return { entries, hasMore };
+  const served = results.slice(0, ATTENTION_LIMIT);
+  const entries = served.map((r) => ({ route: r.route, state: r.state, marker: r.marker, tx: r.tx === null || r.tx === "" ? null : r.tx, created_at: r.created_at, updated_at: r.updated_at, nonce: r.nonce }));
+  const last = served[served.length - 1];
+  return { entries, hasMore, next: hasMore && last ? `${last.created_at}:${last.rid}` : null };
 }
 
 // Every eligible row, whatever the page: the number /api/official serves beside the payments book.
@@ -113,17 +118,17 @@ export async function attentionTotal(db: D1Database, now: number): Promise<numbe
 }
 
 export async function settlementsAttention(db: D1Database, after: AttentionCursor | null = null, now = Date.now()) {
-  const { entries, hasMore } = await attentionPage(db, now, after);
+  const { entries, hasMore, next } = await attentionPage(db, now, after);
   const total = await attentionTotal(db, now);
   return {
-    note: "The settlement claims a person must look at: payments whose outcome the society's automatic steps could not settle. This list is the maintainer's queue, not a promise: no resolution time is promised for any row on it. Whoever paid finds their own row by its tx or its authorisation's nonce. Rows carry no wallet address and no request content; only the fields listed here are served. The list is paged, oldest first: count is the rows in this response (at most limit), total is every eligible row, has_more says whether more follow, and next, when has_more is true, is the value to send back as ?after= for the next page.",
+    note: "The settlement claims a person must look at: payments whose outcome the society's automatic steps could not settle. This list is the maintainer's queue, not a promise: no resolution time is promised for any row on it. Whoever paid finds their own row by its tx or its authorisation's nonce. Rows carry no wallet address and no request content; only the fields listed here are served. The list is paged, oldest first: count is the rows in this response (at most limit), total is every eligible row, has_more says whether more follow, and next, when has_more is true, is an opaque value to send back unchanged as ?after= for the next page.",
     aged_after_days: ATTENTION_AGED_DAYS,
     limit: ATTENTION_LIMIT,
     markers: ATTENTION_MARKER_MEANINGS,
     count: entries.length,
     total,
     has_more: hasMore,
-    next: hasMore ? attentionCursorOf(entries[entries.length - 1]) : null,
+    next,
     entries,
   };
 }

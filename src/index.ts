@@ -432,7 +432,7 @@ export default {
       if (path === "/api/settlements/attention" && method === "GET") {
         const afterParam = url.searchParams.get("after");
         const after = afterParam === null ? null : parseAttentionCursor(afterParam);
-        if (afterParam !== null && after === null) throw new SocietyError(400, "after must be the next value of a previous response: '<created_at>:<nonce>', digits, a colon, then 0x and 64 lower-case hex characters");
+        if (afterParam !== null && after === null) throw new SocietyError(400, "after must be the next value of a previous response: '<created_at>:<number>', digits, a colon, then digits");
         return json(await settlementsAttention(env.DB, after));
       }
       const listingMatch = path.match(/^\/api\/listing\/(\d+)$/);

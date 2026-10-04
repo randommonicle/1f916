@@ -458,3 +458,28 @@ Known limit, stated: two claims by different signers with the very same `created
 needs a deliberate collision; the cursor shape is the coordinator's and carries no signer address by design.
 Served string, new: the response's `note` gains "The list is paged, oldest first: count is the rows in this response (at most limit), total is every eligible row, has_more says whether more follow, and next, when has_more is true, is the value to
 send back as ?after= for the next page."; new top-level fields `limit`, `total`, `has_more`, `next`; the 400 above; the discovery description gains "Paged, oldest first: has_more and next say whether more follow, total counts every eligible row.".
+
+## S10. Follow-up 3 (CODEX second-build r2): the attention cursor is unique, so no claim can fall between two pages
+
+What: S9 closed the 500-row cap but kept a stated limit that CODEX r2 reproduced as a real defect. A signer CHOOSES its nonce (only the 32-byte hex shape is checked), so two claims by different signers can share `created_at` AND
+`nonce`; with 499 earlier rows and the tied pair across the page boundary, the cursor `<created_at>:<nonce>` matched neither tied row as "after" and page two returned 0 rows, so one eligible claim was never listed.
+Fix: the order is now `created_at ASC, rowid ASC` and the cursor is `<created_at>:<rowid>`. `settlement_claims` is an ordinary rowid table (migration 0017: composite text primary key, no `WITHOUT ROWID`; rows are never deleted), so the
+rowid is unique and the order is total. Advance with `created_at > ? OR (created_at = ? AND rid > ?)`. The marked subquery selects `rowid AS rid`; the rowid is used for the order and the cursor only and is not a response field (an exact-field-set
+test enforces it); no address is involved. A cursor must match `^[0-9]{1,16}:[0-9]{1,19}$` and both numbers must be safe integers, else 400 (an old-style `<created_at>:<nonce>` cursor is therefore a 400). The limit text in the
+code comment is gone (the limitation is closed); the served note now calls `next` "an opaque value to send back unchanged as ?after=", the 400 text and the discovery `after` description name the new shape. Caveat recorded in the comment: rowids of a table
+with no INTEGER primary key are not stable across a VACUUM; the claim table is never vacuumed or deleted from by the application.
+Tests: CODEX's case (499 earlier eligible rows, then two eligible rows with the same `created_at` and the same nonce from different signers across the boundary) follows `next` opaquely and gets both, total 501 on both pages, no signer address
+anywhere in the pages or the cursor; it was RED against `2c966b46`'s cursor (page two returned 0 rows, as CODEX described). The earlier paging tests were updated to the new cursor format (the test reads a row's rowid from the table), and the
+malformed-cursor list now covers the old nonce format, non-safe integers and over-long numbers. `seedClaim`/`seedMarked` gained optional `from`/`nonce`/`createdAt`.
+
+| mutant | red in |
+|---|---|
+| the cursor not strict on rowid | the 501-row, short-list and CODEX r2 tests |
+| the `created_at` tie dropped from the cursor | the CODEX r2 test |
+| the cursor regex accepts an empty rowid | the malformed-cursor test |
+| the safe-integer check removed | the malformed-cursor test |
+| the rowid served as a field | the exact-field-set test |
+| `next` carries the nonce again | the 501-row and CODEX r2 tests |
+| ordered by nonce, not rowid | the 501-row test |
+
+Served strings: the 400 text, the `note`'s description of `next`, and the discovery `after` description changed as above; no other served text.

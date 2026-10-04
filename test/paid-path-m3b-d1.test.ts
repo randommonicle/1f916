@@ -79,10 +79,10 @@ const claimDetail = (d1: LocalD1) => d1.raw.prepare("SELECT state, tx, verdict_r
 let nonceSeq = 0x5000;
 async function seedClaim(
   d1: LocalD1,
-  o: { route: ClaimRoute; intent: Record<string, unknown>; updatedAt?: number; reason?: string | null; validBefore?: string; createdAt?: number },
+  o: { route: ClaimRoute; intent: Record<string, unknown>; updatedAt?: number; reason?: string | null; validBefore?: string; createdAt?: number; from?: string; nonce?: string },
 ): Promise<ClaimKey> {
-  const nonce = "0x" + (++nonceSeq).toString(16).padStart(64, "0");
-  const payload = { payload: { authorization: { from: TEST_PAYER, to: "0x1", value: "1000000", validBefore: o.validBefore ?? String(NOW_S() + 300), nonce } } };
+  const nonce = o.nonce ?? "0x" + (++nonceSeq).toString(16).padStart(64, "0");
+  const payload = { payload: { authorization: { from: o.from ?? TEST_PAYER, to: "0x1", value: "1000000", validBefore: o.validBefore ?? String(NOW_S() + 300), nonce } } };
   const { key, validBefore } = claimKeyFromPayload(payload, REQS);
   const spec: ClaimSpec = { route: o.route, intent: o.intent };
   const rpcBody = { paymentPayload: payload, paymentRequirements: { resource: "https://example.test/api/patron", payTo: TREASURY_ADDRESS, maxAmountRequired: "1000000" } };
@@ -916,9 +916,9 @@ const getAttention = async (d1: LocalD1) => {
 // A claim seeded directly, then put into the exact state a marker reads. `intent` carries a sentinel so a test can prove no intent text is served.
 async function seedMarked(
   d1: LocalD1,
-  o: { route: ClaimRoute; state: "pending" | "settled_unbooked" | "refused" | "expired" | "booked"; reason?: string | null; tx?: string | null; ageMs?: number },
+  o: { route: ClaimRoute; state: "pending" | "settled_unbooked" | "refused" | "expired" | "booked"; reason?: string | null; tx?: string | null; ageMs?: number; createdAt?: number; from?: string; nonce?: string },
 ): Promise<ClaimKey> {
-  const key = await seedClaim(d1, { route: o.route, intent: { line: "c7", handle: SENTINEL_HANDLE, public_key: null, listing_id: 1, amount_cents: 1200 }, createdAt: Date.now() - (o.ageMs ?? 1000) });
+  const key = await seedClaim(d1, { route: o.route, intent: { line: "c7", handle: SENTINEL_HANDLE, public_key: null, listing_id: 1, amount_cents: 1200 }, createdAt: o.createdAt ?? Date.now() - (o.ageMs ?? 1000), from: o.from, nonce: o.nonce });
   d1.raw
     .prepare(`UPDATE settlement_claims SET state = ?, tx = ?, payer = ?, verdict_reason = ?, rpc_body = ${o.state === "refused" || o.state === "expired" || o.state === "booked" ? "NULL" : "rpc_body"} WHERE ${KEY_WHERE}`)
     .run(o.state, o.tx ?? null, o.tx ? TEST_PAYER : null, o.reason ?? null, ...(keyArgs(key) as never[]));
@@ -1223,8 +1223,9 @@ test("C7 paging: 501 eligible rows: the first page is 500 with has_more, total 5
     assert.equal(first.entries.length, PAGE);
     assert.equal(first.has_more, true, "a 501st row exists: it must not be hidden");
     assert.equal(first.total, PAGE + 1, "total counts every eligible row");
-    const last = first.entries[PAGE - 1];
-    assert.equal(first.next, `${last.created_at}:${last.nonce}`);
+    assert.match(String(first.next), /^[0-9]+:[0-9]+$/, "the cursor is <created_at>:<rowid>");
+    assert.ok(!String(first.next).includes(first.entries[PAGE - 1].nonce), "the cursor carries no nonce");
+    assert.equal(String(first.next).split(":")[0], String(first.entries[PAGE - 1].created_at));
 
     const secondRes = await callWorker(pageUrl(first.next), eq(d1));
     assert.equal(secondRes.status, 200);
@@ -1258,14 +1259,19 @@ test("C7 paging: a list that fits one page has has_more false, next null and tot
     assert.equal(body.total, 2);
     assert.equal(body.has_more, false);
     assert.equal(body.next, null);
-    const lastKey = `${body.entries[1].created_at}:${body.entries[1].nonce}`;
+    // the cursor of a row is <created_at>:<rowid>; the rowid is not served, so the test reads it from the table
+    const cursorOf = (nonce: string) => {
+      const r = d1.raw.prepare("SELECT created_at, rowid AS rid FROM settlement_claims WHERE nonce = ?").get(nonce) as { created_at: number; rid: number };
+      return `${r.created_at}:${r.rid}`;
+    };
+    const lastKey = cursorOf(body.entries[1].nonce);
     const past = (await (await callWorker(pageUrl(lastKey), eq(d1))).json()) as Record<string, any>;
     assert.deepEqual(past.entries, []);
     assert.equal(past.count, 0);
     assert.equal(past.has_more, false);
     assert.equal(past.next, null);
     assert.equal(past.total, 2, "total is not a function of the cursor");
-    const firstKey = `${body.entries[0].created_at}:${body.entries[0].nonce}`;
+    const firstKey = cursorOf(body.entries[0].nonce);
     const afterFirst = (await (await callWorker(pageUrl(firstKey), eq(d1))).json()) as Record<string, any>;
     assert.equal(afterFirst.entries.length, 1, "strictly after the cursor: the first row itself is not repeated");
     assert.equal(afterFirst.entries[0].nonce, body.entries[1].nonce);
@@ -1279,14 +1285,14 @@ test("C7 paging: a malformed ?after= answers 400 with a plain error and serves n
   try {
     await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:x` });
     const nonce = "0x" + "ab".repeat(32);
-    for (const bad of ["", "abc", "123", "123:", ":" + nonce, `-1:${nonce}`, `1.5:${nonce}`, `123:0x${"AB".repeat(32)}`, `123:0x${"ab".repeat(31)}a`, `123:${nonce}:extra`, `123: ${nonce}`, `99999999999999999999:${nonce}`]) {
+    for (const bad of ["", "abc", "123", "123:", ":456", "-1:5", "1.5:5", "123:-4", "123:4.5", "123:456:7", "123: 456", "123:456 ", `123:${nonce}`, `${"9".repeat(17)}:1`, `1:${"9".repeat(20)}`, "1:99999999999999999"]) {
       const res = await callWorker(pageUrl(bad), eq(d1));
       const text = await res.text();
       assert.equal(res.status, 400, `after=${JSON.stringify(bad)} -> ${text}`);
       assert.match(text, /after/i);
       assert.ok(!text.includes("entries"), "no rows are served for a malformed cursor");
     }
-    const ok = await callWorker(pageUrl(`123:${nonce}`), eq(d1));
+    const ok = await callWorker(pageUrl("123:456"), eq(d1));
     assert.equal(ok.status, 200, "a well-formed cursor is accepted");
   } finally {
     d1.close();
@@ -1304,6 +1310,43 @@ test("C7 paging: the served note and the discovery entry say the list is paged, 
     const route = ROUTES.find((r) => r.method === "GET" && r.path === "/api/settlements/attention");
     assert.ok(route?.queryParams?.some((p) => p.name === "after"), "the cursor parameter is in the discovery entry");
     assert.match(String(route?.description), /page/i);
+  } finally {
+    d1.close();
+  }
+});
+
+
+// CODEX second-build r2: a signer CHOOSES its nonce, so two claims from DIFFERENT signers can share both created_at and nonce. The cursor must still be unique (it is the rowid, no address involved).
+test("C7 paging (CODEX r2): two eligible claims with the same created_at and the SAME nonce from different signers, straddling the page boundary: following `next` retrieves both, and total is 501 on every page", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = Date.now() - 600_000;
+    for (let i = 0; i < PAGE - 1; i++) await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:earlier ${i}`, createdAt: base + i }); // 499 earlier rows
+    const tiedAt = Date.now() - 5_000;
+    const sharedNonce = "0x" + "cd".repeat(32);
+    const signerA = "0x" + "a1".repeat(20);
+    const signerB = "0x" + "b2".repeat(20);
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:tied A`, createdAt: tiedAt, from: signerA, nonce: sharedNonce }); // row 500: the last of page one
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:tied B`, createdAt: tiedAt, from: signerB, nonce: sharedNonce }); // row 501: page two
+    assert.equal(count(d1, "settlement_claims"), PAGE + 1);
+
+    const first = (await (await callWorker(pageUrl(), eq(d1))).json()) as Record<string, any>;
+    assert.equal(first.entries.length, PAGE);
+    assert.equal(first.has_more, true);
+    assert.equal(first.total, PAGE + 1);
+    assert.equal(first.entries[PAGE - 1].nonce, sharedNonce, "the first tied claim ends page one");
+    assert.equal(typeof first.next, "string");
+    const second = (await (await callWorker(pageUrl(first.next), eq(d1))).json()) as Record<string, any>;
+    assert.equal(second.entries.length, 1, "the second tied claim is NOT skipped: page two carries it");
+    assert.equal(second.entries[0].nonce, sharedNonce);
+    assert.equal(second.entries[0].created_at, tiedAt);
+    assert.equal(second.has_more, false);
+    assert.equal(second.next, null);
+    assert.equal(second.total, PAGE + 1);
+    assert.equal(first.entries.length + second.entries.length, PAGE + 1, "every eligible claim is listed exactly once");
+    for (const forbidden of [signerA, signerB, signerA.slice(2), signerB.slice(2)]) {
+      assert.ok(!JSON.stringify([first, second]).toLowerCase().includes(forbidden.toLowerCase()), "no signer address is served, in the entries or the cursor");
+    }
   } finally {
     d1.close();
   }
