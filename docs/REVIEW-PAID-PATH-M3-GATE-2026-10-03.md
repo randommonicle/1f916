@@ -137,3 +137,12 @@ Probe and runner source, for the hub to lift P1 into a committed test (C2(i)): `
 - Real D1 anywhere. Whether D1 can commit an INSERT and still throw is ASSUMED real, as the hub's own C8 assumes. MEDIUM-1 rests on it.
 - CODEX's owed re-check of `d4f25eb0`/`c3e935d1`/`5b69532c`. The live site (no GET made). Served text outside the diff. `scripts/` beyond `pay-listing.mjs`'s retry rule.
 - C4 and C7 (not built). L6 (a rule-7 refusal after an unused chain read, honoured without a re-read) stays open with C4. Within this wave, LOW-1 is the only place it surfaces.
+
+---
+
+**Dated note, 4 Oct 2026 (hub): condition C1 MET on real D1.** Run on Ben's go ("go", Remote Control chat; D-074 note 4 Oct) at about 09:03Z: `scripts/c8-rehearsal-worker/` (`eeac1158`; reviewed by both exchange seats, `exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md`, CODEX converged r3 after two false-pass fixes) through `npx wrangler dev --remote` bound to the scratch D1 `commonhold-migtest` only (`check.mjs` passed: no production id bound). The real `runBookingStep` with register-gate.ts's citizen statement, through the Workers D1 binding's `batch()`. Result (`docs/C1-REHEARSAL-RESULT-2026-10-04.json`), pass true:
+- (a) gate true: `out[0].meta.changes` 1, `last_row_id` 2 (number) = `citizens.id` 2 = claim `booked_refs.citizen_id` 2, claim `booked`; the table held one row before (max id 1), so the new id is not 1.
+- (b) after an unrelated `reg_log` INSERT on the same binding (stale `last_row_id` 1): `out[0].meta.last_row_id` 3 = the new citizen 3 = `booked_refs.citizen_id` 3, not the stale 1.
+- (c) gate false (another owner's live lease): `out[0].meta.changes` 0, `out[1].meta.changes` 0, applied false, no citizen, claim still `settled_unbooked`.
+- (d) side by side: real D1 reports the SAME `last_row_id` on the record UPDATE as on the citizen INSERT in (a) and (b) (2/2, 3/3), and in (c) the stale 3 on both. So on real D1 the code's `out[stmts.length - 1]` and mutant M7's `out[out.length - 1]` read the same id in this two-statement batch: the code is correct, and M7 is indistinguishable on D1 as well as locally. (c) shows why `rowId` must be read only when the batch applied: a zero-change INSERT still reports the connection's previous id.
+Cleanup deleted the two rehearsal citizens, three claims and one `reg_log` row. The wrangler dev process tree was stopped afterwards (port 8799 closed).
