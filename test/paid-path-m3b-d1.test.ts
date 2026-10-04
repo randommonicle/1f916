@@ -54,7 +54,7 @@ import { RECONCILE_ROW_WORST_CASE, RECONCILE_SELECT_COST, runReconciler } from "
 import { attemptPending } from "../src/x402.ts";
 import { finishPayListingBooking, handlePayListing } from "../src/listings.ts";
 import { SocietyError } from "../src/society.ts";
-import { ATTENTION_AGED_DAYS, ATTENTION_MARKER_CODES } from "../src/settlement-attention.ts";
+import { ATTENTION_AGED_DAYS, ATTENTION_LIMIT, ATTENTION_MARKER_CODES } from "../src/settlement-attention.ts";
 import { ROUTES } from "../src/discovery.ts";
 
 const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
@@ -956,6 +956,7 @@ test("C7: each marker appears for the rows that carry it, and only those: contra
       "settlement_contradiction",
     ]);
     assert.equal(body.count, 7);
+    assert.equal(body.total, 7, "total counts the eligible rows only, not the five ineligible ones seeded beside them");
     assert.equal(body.entries.length, 7);
     for (const e of body.entries as Record<string, unknown>[]) {
       assert.deepEqual(Object.keys(e).sort(), ["created_at", "marker", "nonce", "route", "state", "tx", "updated_at"], "exactly the served fields");
@@ -1199,4 +1200,111 @@ test("R2-4: every row shape the second build adds stays inside RECONCILE_ROW_WOR
 
   for (const [name, cost] of Object.entries(measured)) assert.ok(cost <= RECONCILE_ROW_WORST_CASE, `${name}: ${cost} is inside RECONCILE_ROW_WORST_CASE (${RECONCILE_ROW_WORST_CASE})`);
   assert.deepEqual(measured, EXPECTED_ROW_COSTS, "the measured per-row costs (update EXPECTED_ROW_COSTS and the itemised note in settlement-reconcile.ts together)");
+});
+
+
+// ---------- C7 paging (CODEX second-build r1 MEDIUM): no row is silently hidden beyond the page size ----------
+
+const PAGE = ATTENTION_LIMIT;
+// PAGE + 1 eligible rows (stopped claims), oldest first; pairs share a created_at so the (created_at, nonce) order and the cursor's tie-break are exercised.
+async function seedManyEligible(d1: LocalD1, n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:paging ${i}`, ageMs: 600_000 - Math.floor(i / 2) });
+  }
+}
+const pageUrl = (after?: string) => new Request(`https://example.test/api/settlements/attention${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`);
+
+test("C7 paging: 501 eligible rows: the first page is 500 with has_more, total 501 and next; the second page (?after=next) is the 501st with has_more false and next null; /api/official counts all 501", async () => {
+  const d1 = createLocalD1();
+  try {
+    await seedManyEligible(d1, PAGE + 1);
+    const first = await (await callWorker(pageUrl(), eq(d1))).json() as Record<string, any>;
+    assert.equal(first.count, PAGE, "count is the rows in THIS response");
+    assert.equal(first.entries.length, PAGE);
+    assert.equal(first.has_more, true, "a 501st row exists: it must not be hidden");
+    assert.equal(first.total, PAGE + 1, "total counts every eligible row");
+    const last = first.entries[PAGE - 1];
+    assert.equal(first.next, `${last.created_at}:${last.nonce}`);
+
+    const secondRes = await callWorker(pageUrl(first.next), eq(d1));
+    assert.equal(secondRes.status, 200);
+    const second = (await secondRes.json()) as Record<string, any>;
+    assert.equal(second.entries.length, 1, "the 501st row");
+    assert.equal(second.count, 1);
+    assert.equal(second.has_more, false);
+    assert.equal(second.next, null);
+    assert.equal(second.total, PAGE + 1);
+    const seen = new Set([...first.entries, ...second.entries].map((e: { nonce: string }) => e.nonce));
+    assert.equal(seen.size, PAGE + 1, "the two pages together are every eligible row, none twice");
+    const all = [...first.entries, ...second.entries] as { created_at: number; nonce: string }[];
+    for (let i = 1; i < all.length; i++) {
+      assert.ok(all[i - 1].created_at < all[i].created_at || (all[i - 1].created_at === all[i].created_at && all[i - 1].nonce < all[i].nonce), "strictly ascending by (created_at, nonce) across the pages");
+    }
+
+    const official = (await (await callWorker(new Request("https://example.test/api/official"), eq(d1))).json()) as { economy: Record<string, any> };
+    assert.equal(official.economy.settlements_awaiting_a_person, PAGE + 1, "the /api/official count is the total, not the capped page");
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7 paging: a list that fits one page has has_more false, next null and total equal to count; a cursor past the last row answers an empty page", async () => {
+  const d1 = createLocalD1();
+  try {
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:one` });
+    await seedMarked(d1, { route: "listing_pay", state: "settled_unbooked", reason: "listing_not_paying", tx: TX });
+    const body = (await (await callWorker(pageUrl(), eq(d1))).json()) as Record<string, any>;
+    assert.equal(body.count, 2);
+    assert.equal(body.total, 2);
+    assert.equal(body.has_more, false);
+    assert.equal(body.next, null);
+    const lastKey = `${body.entries[1].created_at}:${body.entries[1].nonce}`;
+    const past = (await (await callWorker(pageUrl(lastKey), eq(d1))).json()) as Record<string, any>;
+    assert.deepEqual(past.entries, []);
+    assert.equal(past.count, 0);
+    assert.equal(past.has_more, false);
+    assert.equal(past.next, null);
+    assert.equal(past.total, 2, "total is not a function of the cursor");
+    const firstKey = `${body.entries[0].created_at}:${body.entries[0].nonce}`;
+    const afterFirst = (await (await callWorker(pageUrl(firstKey), eq(d1))).json()) as Record<string, any>;
+    assert.equal(afterFirst.entries.length, 1, "strictly after the cursor: the first row itself is not repeated");
+    assert.equal(afterFirst.entries[0].nonce, body.entries[1].nonce);
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7 paging: a malformed ?after= answers 400 with a plain error and serves no rows", async () => {
+  const d1 = createLocalD1();
+  try {
+    await seedMarked(d1, { route: "patron", state: "pending", reason: `${CHAIN_SPENT}:x` });
+    const nonce = "0x" + "ab".repeat(32);
+    for (const bad of ["", "abc", "123", "123:", ":" + nonce, `-1:${nonce}`, `1.5:${nonce}`, `123:0x${"AB".repeat(32)}`, `123:0x${"ab".repeat(31)}a`, `123:${nonce}:extra`, `123: ${nonce}`, `99999999999999999999:${nonce}`]) {
+      const res = await callWorker(pageUrl(bad), eq(d1));
+      const text = await res.text();
+      assert.equal(res.status, 400, `after=${JSON.stringify(bad)} -> ${text}`);
+      assert.match(text, /after/i);
+      assert.ok(!text.includes("entries"), "no rows are served for a malformed cursor");
+    }
+    const ok = await callWorker(pageUrl(`123:${nonce}`), eq(d1));
+    assert.equal(ok.status, 200, "a well-formed cursor is accepted");
+  } finally {
+    d1.close();
+  }
+});
+
+test("C7 paging: the served note and the discovery entry say the list is paged, and the page size is the constant", async () => {
+  const d1 = createLocalD1();
+  try {
+    const body = (await (await callWorker(pageUrl(), eq(d1))).json()) as Record<string, any>;
+    assert.equal(body.limit, ATTENTION_LIMIT);
+    assert.match(String(body.note), /after=/);
+    assert.match(String(body.note), /has_more/);
+    assert.match(String(body.note), /total/);
+    const route = ROUTES.find((r) => r.method === "GET" && r.path === "/api/settlements/attention");
+    assert.ok(route?.queryParams?.some((p) => p.name === "after"), "the cursor parameter is in the discovery entry");
+    assert.match(String(route?.description), /page/i);
+  } finally {
+    d1.close();
+  }
 });

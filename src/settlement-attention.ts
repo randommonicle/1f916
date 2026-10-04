@@ -22,7 +22,8 @@ export const CHAIN_SPENT_MARKER = "chain_spent_facilitator_refused:";
 
 // Rows older than this many days (from the claim's creation) in a state that should have moved on are listed too. Ben's note suggested three; the brief's choice 4 left it to the build.
 export const ATTENTION_AGED_DAYS = 3;
-// The most rows one read returns. The /api/official count is the number of rows this read returns (the same function), so it is never larger than this.
+// The PAGE size: the most rows one response carries. It is not a cap on the list. A response says whether more follow (`has_more`), where the next page starts (`next`, to be sent back as
+// `?after=`) and how many rows are eligible in all (`total`); /api/official's count is that `total`, never the page's length, so no eligible row is hidden beyond the page size.
 export const ATTENTION_LIMIT = 500;
 
 export const ATTENTION_MARKER_CODES = [
@@ -59,8 +60,9 @@ export interface AttentionEntry {
 }
 
 // One marker per row, in this priority: a specific marker beats an age marker, so a row listed for two reasons appears once, under the more specific one. The marker is derived in
-// SQL; `verdict_reason` is read only inside the query and never selected out of it.
-const ATTENTION_SQL = `SELECT route, state, tx, created_at, updated_at, nonce, marker FROM (
+// SQL; `verdict_reason` is read only inside the query and never selected out of it. The list page and the total are two statements over THIS ONE marked selection (the same text, the same
+// bindings), so what the total counts and what the pages serve cannot drift.
+const MARKED = `(
   SELECT route, state, tx, created_at, updated_at, nonce,
     CASE
       WHEN state IN ('refused', 'expired') AND substr(COALESCE(verdict_reason, ''), 1, ?) = ? THEN 'settlement_contradiction'
@@ -71,24 +73,57 @@ const ATTENTION_SQL = `SELECT route, state, tx, created_at, updated_at, nonce, m
       WHEN state = 'pending' AND created_at <= ? THEN 'pending_aged'
     END AS marker
   FROM settlement_claims
-) WHERE marker IS NOT NULL ORDER BY created_at ASC, nonce ASC LIMIT ?`;
-
-export async function attentionRows(db: D1Database, now: number): Promise<AttentionEntry[]> {
+)`;
+const markedBinds = (now: number): unknown[] => {
   const agedBefore = now - ATTENTION_AGED_DAYS * 86_400_000;
+  return [CONTRADICTION_MARKER.length, CONTRADICTION_MARKER, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, CLAIM_LISTING_NOT_PAYING, CLAIM_HANDLE_TAKEN, agedBefore, agedBefore];
+};
+
+// The paging cursor: "<created_at>:<nonce>" of the last row of a page. Rows are served in (created_at, nonce) order and a cursor returns the rows STRICTLY after it. A string that is not exactly
+// that shape is not a cursor (null); the route answers it with a 400. (Known limit: two claims by different signers with the very same created_at millisecond AND the very same nonce would
+// tie on the cursor and the second could be skipped between pages; a nonce is 32 random bytes, so this needs a deliberate collision.)
+export interface AttentionCursor {
+  createdAt: number;
+  nonce: string;
+}
+export function parseAttentionCursor(s: string): AttentionCursor | null {
+  if (!/^[0-9]{1,16}:0x[0-9a-f]{64}$/.test(s)) return null;
+  const createdAt = Number(s.slice(0, s.indexOf(":")));
+  return Number.isSafeInteger(createdAt) ? { createdAt, nonce: s.slice(s.indexOf(":") + 1) } : null;
+}
+export const attentionCursorOf = (e: Pick<AttentionEntry, "created_at" | "nonce">): string => `${e.created_at}:${e.nonce}`;
+
+// One page: up to ATTENTION_LIMIT rows strictly after `after` (if given), and whether another row follows (LIMIT + 1 is fetched to know).
+export async function attentionPage(db: D1Database, now: number, after: AttentionCursor | null = null): Promise<{ entries: AttentionEntry[]; hasMore: boolean }> {
+  const where = after === null ? "" : " AND (created_at > ? OR (created_at = ? AND nonce > ?))";
+  const afterBinds = after === null ? [] : [after.createdAt, after.createdAt, after.nonce];
   const { results } = await db
-    .prepare(ATTENTION_SQL)
-    .bind(CONTRADICTION_MARKER.length, CONTRADICTION_MARKER, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, CLAIM_LISTING_NOT_PAYING, CLAIM_HANDLE_TAKEN, agedBefore, agedBefore, ATTENTION_LIMIT)
+    .prepare(`SELECT route, state, tx, created_at, updated_at, nonce, marker FROM ${MARKED} WHERE marker IS NOT NULL${where} ORDER BY created_at ASC, nonce ASC LIMIT ?`)
+    .bind(...markedBinds(now), ...afterBinds, ATTENTION_LIMIT + 1)
     .all<{ route: string; state: string; tx: string | null; created_at: number; updated_at: number; nonce: string; marker: AttentionMarker }>();
-  return results.map((r) => ({ route: r.route, state: r.state, marker: r.marker, tx: r.tx === null || r.tx === "" ? null : r.tx, created_at: r.created_at, updated_at: r.updated_at, nonce: r.nonce }));
+  const hasMore = results.length > ATTENTION_LIMIT;
+  const entries = results.slice(0, ATTENTION_LIMIT).map((r) => ({ route: r.route, state: r.state, marker: r.marker, tx: r.tx === null || r.tx === "" ? null : r.tx, created_at: r.created_at, updated_at: r.updated_at, nonce: r.nonce }));
+  return { entries, hasMore };
 }
 
-export async function settlementsAttention(db: D1Database, now = Date.now()) {
-  const entries = await attentionRows(db, now);
+// Every eligible row, whatever the page: the number /api/official serves beside the payments book.
+export async function attentionTotal(db: D1Database, now: number): Promise<number> {
+  const r = await db.prepare(`SELECT COUNT(*) AS n FROM ${MARKED} WHERE marker IS NOT NULL`).bind(...markedBinds(now)).first<{ n: number }>();
+  return r?.n ?? 0;
+}
+
+export async function settlementsAttention(db: D1Database, after: AttentionCursor | null = null, now = Date.now()) {
+  const { entries, hasMore } = await attentionPage(db, now, after);
+  const total = await attentionTotal(db, now);
   return {
-    note: "The settlement claims a person must look at: payments whose outcome the society's automatic steps could not settle. This list is the maintainer's queue, not a promise: no resolution time is promised for any row on it. Whoever paid finds their own row by its tx or its authorisation's nonce. Rows carry no wallet address and no request content; only the fields listed here are served.",
+    note: "The settlement claims a person must look at: payments whose outcome the society's automatic steps could not settle. This list is the maintainer's queue, not a promise: no resolution time is promised for any row on it. Whoever paid finds their own row by its tx or its authorisation's nonce. Rows carry no wallet address and no request content; only the fields listed here are served. The list is paged, oldest first: count is the rows in this response (at most limit), total is every eligible row, has_more says whether more follow, and next, when has_more is true, is the value to send back as ?after= for the next page.",
     aged_after_days: ATTENTION_AGED_DAYS,
+    limit: ATTENTION_LIMIT,
     markers: ATTENTION_MARKER_MEANINGS,
     count: entries.length,
+    total,
+    has_more: hasMore,
+    next: hasMore ? attentionCursorOf(entries[entries.length - 1]) : null,
     entries,
   };
 }

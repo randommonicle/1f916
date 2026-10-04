@@ -430,3 +430,31 @@ What: the non-200 branch of `scripts/pay-listing.mjs` (reason `leg2_refused`) op
 "The server did not confirm the payment (HTTP n, code)"; the rest of the message (unused as of this check, not yet proof nothing was paid, re-run only after validBefore + margin and only if the chain still shows it unused) is unchanged.
 Tests (`test/pay-listing.test.ts`): the 502 `settlement_unresolved` test and the 402 test each pin the new opening (`startsWith`) and that "did not take the payment" is absent. Both were red against the old opening, green after.
 Served string, old -> new (operator script output, not a served surface): "The server did not take the payment (HTTP 402) ..." -> "The server did not confirm the payment (HTTP 402) ...".
+
+## S9. Follow-up 2 (CODEX second-build r1 MEDIUM): C7 no longer hides rows beyond the page size
+
+What: `ATTENTION_LIMIT` (500) was a silent cap: the oldest 500 rows, no cursor, no signal, and `/api/official`'s `settlements_awaiting_a_person` counted that capped list. Now it is a PAGE size.
+`GET /api/settlements/attention?after=<created_at>:<nonce>` returns the rows strictly after that cursor in the existing order (`created_at > ? OR (created_at = ? AND nonce > ?)`); a string that is not exactly
+`/^\d+:0x[0-9a-f]{64}$/` (digits capped at 16 so it is a safe integer) answers 400 "after must be the next value of a previous response ...". The page fetches `LIMIT + 1` to learn `has_more`; `next` is the last returned row's
+`<created_at>:<nonce>` when `has_more`, else null. `total` is a `COUNT(*)` over the same marked selection (one `MARKED` subquery and one bindings function shared by the page and the count, so they cannot drift); `count` stays the rows in this
+response; `limit` is served. `/api/official`'s `settlements_awaiting_a_person` is now `total` (the same `attentionTotal`), not the page length. The served note, the `ATTENTION_LIMIT` comment and the discovery entry (description and a
+`queryParams` entry for `after`) say the list is paged. The leaf module stays import-free: it returns `null` for a bad cursor and `index.ts` throws the 400. Reconciler budget untouched (this is a request-path read).
+Tests: 501 eligible rows (pairs share a `created_at`, so the tie-break is exercised): page one 500, `has_more`, `total` 501, `next` set; `?after=next` returns the 501st, `has_more` false, `next` null, the pages together are 501 distinct
+rows strictly ascending; `/api/official` 501 while the page count is 500 (red before: the 500 page had no `has_more`, `total` or `after`); a short list has `has_more` false and `next` null, a cursor past the end answers an empty page,
+a cursor on the first row returns only the second; twelve malformed cursors answer 400 and no rows, a well-formed one 200; the note and discovery entry say it is paged; the first C7 test now also pins `total` against ineligible rows.
+
+| mutant | red in |
+|---|---|
+| no `LIMIT + 1` (`has_more` never true) | the 501-row test |
+| the cursor not strict on `created_at` | the 501-row test and the short-list/cursor test |
+| `/api/official` count capped at the page | the 501-row test |
+| `next` set on the last page | the 501-row test and the short-list test |
+| uppercase hex accepted in a cursor | the malformed-cursor test |
+| `total` counts every row, not the marked ones | the first C7 test |
+| a malformed cursor treated as no cursor | the malformed-cursor test |
+| the page cap (slice) dropped | the 501-row test |
+
+Known limit, stated: two claims by different signers with the very same `created_at` millisecond AND the very same nonce tie on the cursor, and the second could be skipped between pages. A nonce is 32 bytes chosen by the signer, so it
+needs a deliberate collision; the cursor shape is the coordinator's and carries no signer address by design.
+Served string, new: the response's `note` gains "The list is paged, oldest first: count is the rows in this response (at most limit), total is every eligible row, has_more says whether more follow, and next, when has_more is true, is the value to
+send back as ?after= for the next page."; new top-level fields `limit`, `total`, `has_more`, `next`; the 400 above; the discovery description gains "Paged, oldest first: has_more and next say whether more follow, total counts every eligible row.".
