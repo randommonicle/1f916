@@ -610,7 +610,7 @@ export function contradictionAnswer(tx: string, state: string): ClaimAnswer {
 // a fresh signature (refused, expired). B9: every answer names the tx when one is
 // known and invites a second signature ONLY for refused and expired.
 // `settledTx` (C2): the caller holds a facilitator SUCCESS verdict for this authorisation naming that tx, but could not write it to the claim because another
-// holder holds the still-pending row. The answer then names the tx and says what the caller knows, instead of "this request changed nothing".
+// holder holds the still-pending row. The answer then names the tx and says what the caller knows, instead of the generic "outcome unknown" answer.
 export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string } = {}): ClaimAnswer {
   if (!identical) {
     return {
@@ -667,7 +667,7 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       return {
         status: 502,
         body: {
-          error: `The outcome of this payment is still unknown${txPart(row)}: whether the money moved is not yet established. Do not sign again; this request changed nothing. ${rest}`,
+          error: `The outcome of this payment is still unknown${txPart(row)}: whether the money moved is not yet established. Do not sign again. ${rest}`,
           code: SETTLEMENT_UNRESOLVED,
         },
       };

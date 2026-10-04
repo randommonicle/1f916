@@ -394,7 +394,7 @@ test("C2 (the reconciler's re-POST): the same race inside the scheduled reconcil
   }
 });
 
-test("C2 control: an ordinary unknown outcome (no verdict in hand) still says this request changed nothing and writes no settlement_success_unrecorded line", async () => {
+test("C2 control: an ordinary unknown outcome (no verdict in hand) says do not sign again, never that the request changed nothing (CODEX deploy-script r3), and writes no settlement_success_unrecorded line", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: () => pendingAnswer() });
   try {
@@ -407,7 +407,11 @@ test("C2 control: an ordinary unknown outcome (no verdict in hand) still says th
     for (const r of res) {
       assert.equal(r.status, 502);
     }
-    assert.match(String((await json(res[1])).error), /changed nothing/);
+    const replayError = String((await json(res[1])).error);
+    // This replay answers from the claim without a /settle (no chain read here); the re-sending case is in paid-path-m3b-d1.test.ts.
+    assert.equal(stub.calls.settle, 1);
+    assert.match(replayError, /Do not sign again/);
+    assert.doesNotMatch(replayError, /changed nothing/);
     assert.equal(eventLines(lines, "settlement_success_unrecorded").length, 0, "no success verdict, no success line");
   } finally {
     stub.restore();

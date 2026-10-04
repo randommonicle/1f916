@@ -358,6 +358,26 @@ test("H2: the same through the payer's re-send: the answer is the pending one (5
   }
 });
 
+test("CODEX deploy-script r3: a re-send that itself re-POSTs /settle and loses the answer never says the request changed nothing", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => { if (n === 1) return pendingAnswer(); throw new Error("connection reset after the request was sent"); }, rpc: chainRpc(false) });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    assert.equal((await callWorker(patronReq("rent", header), eq(d1))).status, 502);
+    const resend = await callWorker(patronReq("rent", header), eq(d1));
+    const body = await json(resend);
+    assert.equal(resend.status, 502, JSON.stringify(body));
+    assert.equal(stub.calls.settle, 2, "the re-send itself re-POSTed /settle (else this test proves nothing)");
+    assert.equal(body.accepts, undefined, "no fresh payment requirements");
+    assert.match(String(body.error), /Do not sign again/);
+    assert.doesNotMatch(String(body.error), /changed nothing/, "this request may have moved the money");
+    assert.equal(claimDetail(d1).state, "pending");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("H2: the reconciler counts the row unchanged (not resolved), and it resolves later through the expiry proof: the chain unused after validBefore + margin gives `expired`", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: chainRpc(false) });
