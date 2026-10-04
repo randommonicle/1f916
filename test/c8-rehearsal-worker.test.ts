@@ -78,3 +78,65 @@ test("C1 rehearsal worker: its citizen statement is verbatim register-gate.ts's,
   assert.ok(readFileSync(join(root, "src/register-gate.ts"), "utf8").includes(literal), "register-gate.ts's citizen INSERT changed: re-copy it into the rehearsal worker");
   assert.ok(readFileSync(join(root, "src/settlement-claims.ts"), "utf8").includes("out[stmts.length - 1]"));
 });
+
+test("C1 rehearsal worker, negative controls (CODEX r2 on the worker): a record UPDATE with no last_row_id fails (d); an unrelated INSERT with no id fails (b); MISSING is printed, not dropped", async () => {
+  const strip = (mode: "update-id" | "stale-id") => {
+    const d1 = createLocalD1();
+    insertCitizen(d1);
+    const base = testEnv(d1);
+    const db = new Proxy(base.DB as object, {
+      get(t: any, p: string | symbol) {
+        if (mode === "update-id" && p === "batch") {
+          return async (stmts: unknown[]) => {
+            const out = await t.batch(stmts);
+            if (out.length === 2 && out[1]?.meta) {
+              const { last_row_id: _drop, ...meta } = out[1].meta;
+              out[1] = { ...out[1], meta };
+            }
+            return out;
+          };
+        }
+        if (mode === "stale-id" && p === "prepare") {
+          return (sql: string) => {
+            const stmt = t.prepare(sql);
+            if (!sql.startsWith("INSERT INTO reg_log")) return stmt;
+            return {
+              bind: (...a: unknown[]) => {
+                const bound = stmt.bind(...a);
+                return {
+                  run: async () => {
+                    const r = await bound.run();
+                    const { last_row_id: _drop, ...meta } = r.meta;
+                    return { ...r, meta };
+                  },
+                };
+              },
+            };
+          };
+        }
+        const v = t[p];
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+    return { d1, env: { ...base, DB: db } as unknown as Env };
+  };
+  const u = strip("update-id");
+  try {
+    const report = await run(u.env);
+    assert.equal(report.pass, false, JSON.stringify(report));
+    assert.equal(report.checks.d_printed, false);
+    assert.equal(report.cases[0].out1.last_row_id, "MISSING", "a missing id is printed, not dropped from the JSON");
+  } finally {
+    u.d1.close();
+  }
+  const s = strip("stale-id");
+  try {
+    const report = await run(s.env);
+    assert.equal(report.pass, false, JSON.stringify(report));
+    assert.equal(report.checks.b, false);
+    assert.equal(report.checks.a, true, "only (b) depends on the stale id");
+    assert.equal(report.cases[1].stale_insert_last_row_id, "MISSING");
+  } finally {
+    s.d1.close();
+  }
+});

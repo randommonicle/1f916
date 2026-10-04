@@ -1,7 +1,7 @@
 // M3 gate condition C1 (docs/REVIEW-PAID-PATH-M3-GATE-2026-10-03.md): a real-D1 rehearsal of C8 through the Workers D1 binding's batch().
 // runBookingStep (src/settlement-claims.ts) takes a secret-mode citizen's id from `out[stmts.length - 1].meta.last_row_id` with no read-back; node:sqlite cannot
 // show which statement's meta that is (mutant M7, reading the record UPDATE's meta instead, is green locally). This worker runs the REAL runBookingStep with
-// the exact citizen statement register-gate.ts builds (check.mjs asserts the SQL is verbatim) and prints, per case, both statements' meta side by side:
+// the exact citizen statement register-gate.ts builds (test/c8-rehearsal-worker.test.ts asserts the SQL is verbatim) and prints, per case, both statements' meta side by side:
 //   (a) gate true: out[0].meta.changes === 1, last_row_id a number equal to the new citizens.id and to the claim's booked_refs.citizen_id, on a table with rows;
 //   (b) the same after an unrelated INSERT on the same binding just before the batch (a stale last_insert_rowid()): still the NEW citizen's id;
 //   (c) gate false (another owner's live lease): out[0] and out[1] changes 0, applied false, no citizen;
@@ -16,6 +16,8 @@ const OWNER = "c1-rehearsal-owner";
 const LEASE_MS = 60_000;
 
 type Meta = { changes?: number; last_row_id?: unknown };
+const shown = (v: unknown): unknown => (v === undefined ? "MISSING" : v);
+const positiveInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 
 function recording(env: Env) {
   const seen: { out: Array<{ meta: Meta }> | null } = { out: null };
@@ -81,9 +83,10 @@ async function runCase(env: Env, label: string, handle: string, nonce: string, l
   return {
     label,
     batch_length: out.length,
-    out0: { changes: out[0]?.meta.changes, last_row_id: out[0]?.meta.last_row_id, last_row_id_type: typeof out[0]?.meta.last_row_id },
-    out1: { changes: out[1]?.meta.changes, last_row_id: out[1]?.meta.last_row_id },
-    stale_insert_last_row_id: stale,
+    // Missing metadata is printed as "MISSING", never left undefined (JSON would drop the field and a check could pass on an absence: CODEX r2 on the C1 worker).
+    out0: { changes: shown(out[0]?.meta.changes), last_row_id: shown(out[0]?.meta.last_row_id), last_row_id_type: typeof out[0]?.meta.last_row_id },
+    out1: { changes: shown(out[1]?.meta.changes), last_row_id: shown(out[1]?.meta.last_row_id), last_row_id_type: typeof out[1]?.meta.last_row_id },
+    stale_insert_last_row_id: staleInsert ? shown(stale) : null,
     applied: result.applied,
     rowId: result.rowId ?? null,
     citizen_id_by_handle: citizen?.id ?? null,
@@ -118,9 +121,11 @@ export default {
         (x.citizen_id_by_handle ?? 0) > 1;
       const checks = {
         a: good(a),
-        b: good(b) && b.stale_insert_last_row_id !== b.citizen_id_by_handle,
+        // (b) needs a REAL stale id: a positive integer the unrelated INSERT reported, distinct from the new citizen id.
+        b: good(b) && positiveInt(b.stale_insert_last_row_id) && b.stale_insert_last_row_id !== b.citizen_id_by_handle,
         c: c.out0.changes === 0 && c.out1.changes === 0 && c.applied === false && c.citizen_id_by_handle === null && c.claim_state === "settled_unbooked",
-        d_printed: [a, b, c].every((x) => "last_row_id" in x.out0 && "last_row_id" in x.out1),
+        // (d) both ids, as numbers, where a row was created; the gate-false case prints whatever D1 reports ("MISSING" if nothing).
+        d_printed: [a, b].every((x) => x.out0.last_row_id_type === "number" && x.out1.last_row_id_type === "number"),
       };
       Object.assign(report, { cases: [a, b, c], checks, pass: Object.values(checks).every(Boolean) });
       report.m7_note =
