@@ -423,6 +423,23 @@ test("execute: a 502 without the settlement_unconfirmed code still takes the gen
   assert.equal(JSON.parse(store()!).status, "refused");
 });
 
+// M3 second build (hub, 4 Oct): the server's 502 settlement_unresolved (a claim exists, its outcome unknown) takes the same branch. The chain
+// reading "unused" NOW is not proof nothing was paid: until validBefore whoever holds the authorisation, the server included, may still
+// execute it. The message must not say "refused" or "Nothing was paid"; the retry gate (after validBefore + margin, chain re-read) is unchanged.
+test("execute: a 502 settlement_unresolved with the chain unused is recorded 'refused' but the message claims neither a refusal nor that nothing was paid", async () => {
+  const { deps, store } = fakeDeps({ second: { status: 502, body: { error: "The society recorded a claim for this payment authorisation but could not confirm that it had. Do not sign again.", code: "settlement_unresolved" } }, nonceUsed: false });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "leg2_refused");
+  assert.equal(JSON.parse(store()!).status, "refused");
+  assert.doesNotMatch(String(r.message), /refused the signed payment|Nothing was paid/);
+  // hub LOW (CODEX second-build r1): neither a 502 settlement_unresolved nor an unused nonce establishes that the server "did not take" the payment
+  assert.ok(String(r.message).startsWith("The server did not confirm the payment (HTTP 502, settlement_unresolved)"), String(r.message));
+  assert.doesNotMatch(String(r.message), /did not take the payment/);
+  assert.match(String(r.message), /settlement_unresolved/);
+  assert.match(String(r.message), /may still execute it/);
+  assert.match(String(r.message), /only if the chain still shows it unused/);
+});
+
 test("execute: an existing 'signing' tombstone refuses before any network call; a 'settled' one is idempotent success", async () => {
   const blocked = fakeDeps({ existing: JSON.stringify({ status: "signing", key: "k" }) });
   const r1 = await payListing({ ...RUN, execute: true }, blocked.deps);
@@ -760,9 +777,11 @@ test("execute: a 402 second leg whose nonce the chain says is UNUSED becomes a '
   const { deps, calls, store } = fakeDeps({ second: { status: 402, body: { x402Version: 1, error: "insufficient funds", accepts: [goodReqs()] } }, nonceUsed: false });
   const r = await payListing({ ...RUN, execute: true }, deps);
   assert.equal(r.reason, "leg2_refused");
-  assert.match(String(r.message), /Nothing was paid/);
+  assert.match(String(r.message), /not yet proof that nothing was paid/, "M3 second build: unused now is not never-executed until validBefore");
+  assert.ok(String(r.message).startsWith("The server did not confirm the payment (HTTP 402)"), String(r.message));
+  assert.doesNotMatch(String(r.message), /did not take the payment/);
   // the time the operator is told to wait for is the gate's time: validBefore + margin
-  assert.match(String(r.message), new RegExp("re-run is allowed after " + new Date((VALID_BEFORE + RETRY_MARGIN_SECONDS) * 1000).toISOString().replace(/[.]/g, "[.]")));
+  assert.match(String(r.message), new RegExp("re-run is allowed only after " + new Date((VALID_BEFORE + RETRY_MARGIN_SECONDS) * 1000).toISOString().replace(/[.]/g, "[.]")));
   const t = JSON.parse(store()!);
   assert.equal(t.status, "refused");
   assert.equal(t.nonce, NONCE);

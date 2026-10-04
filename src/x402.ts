@@ -20,10 +20,15 @@ import {
   claimIdentity,
   claimKeyFromPayload,
   claimResponse,
+  contradictionAnswer,
   getClaim,
+  isChainSpent,
+  isContradicted,
   isHandleTaken,
+  isListingNotPaying,
   keyOfRow,
-  leaseHeldByAnother,
+  markChainSpent,
+  markContradiction,
   markExpired,
   markRefused,
   markSettled,
@@ -31,9 +36,13 @@ import {
   reconcileTail,
   refsOf,
   releaseLease,
+  leaseHeldByAnother,
+  listingReservationState,
   runBookingStep,
-  SETTLEMENT_CONTRADICTION,
+  SETTLEMENT_UNRESOLVED,
+  SHOWHOME_REPORT_POINTER,
   sameRequest,
+  stepGatedOutByLease,
   takeClaim,
   type ClaimIdentity,
   type ClaimKey,
@@ -260,6 +269,13 @@ export type SettleResult =
 // issued. listings.ts's UNRESOLVED_AFTER_MS is derived from it, so the two
 // cannot drift apart.
 export const PAYMENT_MAX_TIMEOUT_SECONDS = 300;
+
+// M4 (CODEX r1 on the paid-path M3 brief): the latest validBefore a claim-bearing route accepts, as seconds past NOW: the window every requirement declares plus this skew allowance.
+// claimKeyFromPayload accepts any validBefore, so without this bound the expiry proof's wait (H2's pending claims resolve only by the chain showing the nonce used or provably expired) is
+// unbounded: a signer could mint an authorisation valid for years. Checked free, before /verify. It bounds NEW claims only: a claim admitted before this bound existed is answered from
+// its row (replayForClaim runs first) and resolves as it always did; the attention list's `pending_aged` marker (C7) covers any that outlive N days.
+export const PAYMENT_VALID_BEFORE_SKEW_SECONDS = 60;
+export const PAYMENT_VALID_BEFORE_TOO_FAR = "payment_valid_before_too_far";
 
 // A4 (docs/BRIEF-SERVER-SIDE-WALLET-PIN.md, CODEX): the decoded payload's
 // signed destination and amount must BE the requirements this route issued,
@@ -526,6 +542,21 @@ export async function payAndSettle(
   let claimId: ClaimIdentity | null = null;
   if (claim) {
     const { key, validBefore } = claimKeyFromPayload(paymentPayload, reqs);
+    const latest = Math.floor(Date.now() / 1000) + PAYMENT_MAX_TIMEOUT_SECONDS + PAYMENT_VALID_BEFORE_SKEW_SECONDS;
+    if (validBefore > latest) {
+      return {
+        ok: false,
+        response: Response.json(
+          {
+            x402Version: 1,
+            error: `This payment authorisation's validBefore (${validBefore}) is further ahead than this server accepts. It must be no later than ${latest} (unix seconds, from now): the ${PAYMENT_MAX_TIMEOUT_SECONDS} seconds the payment requirements declare, plus ${PAYMENT_VALID_BEFORE_SKEW_SECONDS} seconds for clock skew. Nothing was sent to the facilitator and nothing was charged. Sign a fresh authorisation with a validBefore inside that bound.`,
+            code: PAYMENT_VALID_BEFORE_TOO_FAR,
+            accepts: [reqs],
+          },
+          { status: 402, headers: { "Access-Control-Allow-Origin": "*" } },
+        ),
+      };
+    }
     claimId = await claimIdentity(key, validBefore, rpcBody, claim);
   }
 
@@ -555,6 +586,8 @@ export async function payAndSettle(
   // reserved something in afterVerify (pay listing) releases it on the ok:false path
   // instead of keeping it as if a settle had been sent.
   const owner = crypto.randomUUID();
+  // R2-1: the time takeClaim writes as the claim's created_at AND updated_at; the first-attempt refusal below is bound to it.
+  const takenAt = Date.now();
   if (claim && claimId) {
     // L1 (gate, 2026-09-30): a claim INSERT that THROWS (a database error, not a key conflict) after afterVerify reserved something leaves
     // that reservation with no claim behind it, and, reaching handlePayListing's catch, would be served as "the facilitator may have moved
@@ -562,8 +595,20 @@ export async function payAndSettle(
     // releases its own reservation (B3: "an explicit revert of the reservation before rethrowing").
     let taken: Awaited<ReturnType<typeof takeClaim>>;
     try {
-      taken = await takeClaim(env, claimId, claim, owner, Date.now());
+      taken = await takeClaim(env, claimId, claim, owner, takenAt);
     } catch (e) {
+      // H3 + gate MEDIUM-1 (second build): a THROWN INSERT does not prove there is no row. D1 can commit and still report an error, and releasing a reservation under a claim that exists re-opens
+      // the listing while the claim is alive: the funder's identical re-send then settles it against a listing nobody holds. So the claim is re-read, and only a PROVEN ABSENCE may release:
+      //   - no row: today's 503 and release (nothing was created);
+      //   - our row (its lease is this request's owner: the INSERT landed): the reservation is KEPT and the answer says the claim exists and nothing was sent;
+      //   - another request's row: answered from it exactly as a key conflict is (the reservation this request took is its own and is released by the pay route as before);
+      //   - the re-read throws too: unknown, so the reservation is KEPT (fail closed) and the answer says the society could not confirm.
+      let landed: ClaimRow | null | undefined;
+      try {
+        landed = await getClaim(env, claimId.key);
+      } catch {
+        landed = undefined;
+      }
       console.log(
         JSON.stringify({
           level: "error",
@@ -572,9 +617,48 @@ export async function payAndSettle(
           amount_atomic: reqs.maxAmountRequired,
           claim_from: claimId.key.from,
           claim_nonce: claimId.key.nonce,
+          claim_row: landed === undefined ? "unknown" : landed === null ? "none" : landed.lease_owner === owner ? "ours" : "other",
           reason: clipReason(e instanceof Error ? e.message : String(e)),
         }),
       );
+      if (landed === undefined) {
+        return {
+          ok: false,
+          keepReservation: true,
+          response: Response.json(
+            {
+              error: `The society could not confirm whether a claim for this payment authorisation was recorded (a database error), so nothing was sent to the facilitator's /settle by this request and it charged nothing.${
+                claim.route === "listing_pay" ? " The listing stays reserved, because releasing it could re-open it under a claim that does exist." : ""
+              } Do not sign again: this is logged for the maintainer to resolve.`,
+              code: "settlement_claim_unavailable",
+            },
+            { status: 503, headers: { "Access-Control-Allow-Origin": "*" } },
+          ),
+        };
+      }
+      if (landed !== null && landed.lease_owner === owner) {
+        await quietly("release_lease", () => releaseLease(env, claimId.key, owner));
+        return {
+          ok: false,
+          keepReservation: true,
+          response: Response.json(
+            {
+              error: `The society recorded a claim for this payment authorisation but could not confirm that it had (a database error). Nothing was sent to the facilitator's /settle by this request, so by this request's own account no money moved. Do not sign again.${
+                claim.route === "listing_pay" ? " The listing stays reserved for this payment until the claim resolves: an authorisation nobody uses lapses within minutes, after which the reconciler can release the listing." : ""
+              } ${reconcileTail(claim.route)}`,
+              code: SETTLEMENT_UNRESOLVED,
+            },
+            { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
+          ),
+        };
+      }
+      // CODEX second-build r1 HIGH: "ours" judged by lease_owner alone fails once the INSERT's error arrives after the lease lapsed and another
+      // holder (a re-send, the reconciler) took the SAME claim and may be mid /settle. A row that is this payment by identity (same route, same
+      // request) keeps the reservation whoever holds its lease, and is answered from the claim; only a DIFFERENT request's row lets this
+      // request's own reservation go.
+      const identical = landed !== null && landed.route === claim.route && sameRequest(landed, claimId);
+      if (landed !== null && identical) return { ok: false, keepReservation: true, response: await respondToExistingClaim(env, landed, true, reqs, claim) };
+      if (landed !== null) return { ok: false, response: await respondToExistingClaim(env, landed, false, reqs, claim) };
       return {
         ok: false,
         response: Response.json(
@@ -638,17 +722,27 @@ export async function payAndSettle(
       let wrote = false;
       let threw = false;
       try {
-        wrote = await markRefused(env, key, reason, owner, Date.now());
+        // R2-1: bound to the take time. Any other holder's attempt since (acquireLease, noteUnknown) moved updated_at, so a refusal that is late past its lease writes nothing and
+        // is answered from the claim below, never as a 402 over a transfer another attempt may still mine.
+        wrote = await markRefused(env, key, reason, owner, Date.now(), undefined, takenAt);
       } catch (e) {
         threw = true;
         console.log(JSON.stringify({ level: "error", event: "settlement_claim_write_failed", step: "mark_refused", reason: clipReason(e instanceof Error ? e.message : String(e)) }));
       }
-      if (!wrote && !threw) {
+      if (!wrote || threw) {
         // R1: another holder moved the claim, or holds a live lease on it, while this request's /settle was in flight. This request's refusal is
         // then not the claim's answer: answer from the claim, never "refused, sign a fresh one" over a payment another holder may have settled.
+        // CODEX M3-build r1 HIGH (pre-existing since M2): a THROWN markRefused is no refusal recorded either. It used to skip this re-read and
+        // fall through to the 402 below, which releases pay listing's reservation, so a refusal could re-open a listing whose claim another
+        // holder had settled. Now it is re-read like any unwritten refusal; a re-read that throws, or finds no row, is an unknown outcome
+        // (thrown, so pay listing keeps its reservation: settlement_unconfirmed); only a claim that reads `refused` lets the 402 stand.
+        // CODEX M3-build r2 (1): ...and only an UNSTAMPED one. A refused claim stamped with a settlement contradiction (another holder's re-POST read a
+        // success after the refusal) is answered from the claim, the contradiction's 500, and pay listing keeps its reservation: the money may have moved.
+        if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
         const now = await getClaim(env, key);
-        if (now && now.state !== "refused") {
-          return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null) };
+        if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
+        if (now.state !== "refused" || isContradicted(now)) {
+          return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null, owner) };
         }
       }
     }
@@ -728,8 +822,9 @@ async function quietly(step: string, fn: () => Promise<unknown>): Promise<void> 
 // lease (B5); a live lease held by another worker is named, not raced.
 async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolean, reqs: PaymentRequirements, claim: PaidClaim): Promise<Response> {
   if (!identical) return claimResponse(claimAnswer(row, false, reqs));
-  // F1: a registration whose handle was taken after payment is answered, never re-attempted (no retry can book it).
-  if (isHandleTaken(row)) return claimResponse(claimAnswer(row, true, reqs));
+  // F1: a registration whose handle was taken after payment is answered, never re-attempted (no retry can book it). C5: so is a bounty payment whose listing is no longer
+  // 'paying'. C4 (option B): so is a STOPPED claim (the chain reads its authorisation used and a person must look), before any lease is taken or any fetch is made.
+  if (isHandleTaken(row) || isListingNotPaying(row) || isChainSpent(row)) return claimResponse(claimAnswer(row, true, reqs));
   if (row.state === "settled_unbooked") {
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
@@ -756,6 +851,12 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
       if (out.kind === "settled") {
         const done = await claim.finish(out.row, owner);
         if (done) return done;
+      }
+      if (out.kind === "unchanged" && out.held) {
+        // CODEX M3-build r2 (2), the gate's LOW-1 (severity upgraded): a held success is never discarded into a terminal row's 402 (holdSuccessAgainstTerminal).
+        const held = await holdSuccessAgainstTerminal(env, keyOfRow(row), out.held);
+        if (held.contradicted) return contradictionResponse(out.held.tx, held.contradicted);
+        return claimResponse(claimAnswer(held.fresh ?? row, true, reqs, { detail: out.detail, settledTx: out.held.tx }));
       }
       const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
       return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail } : {}));
@@ -795,14 +896,57 @@ function logSettlementContradiction(row: Pick<ClaimRow, "from_addr" | "nonce">, 
   );
 }
 
+// C2: a facilitator success verdict this call holds could not be written to a claim that is still pending under another holder's lease (answerFromMovedClaim, and
+// attemptPending's re-read). ONE error-level line carries the tx, so a person can still book it if the holder meets C1 or the facilitator's recovery record expires.
+function logSettlementSuccessUnrecorded(row: Pick<ClaimRow, "from_addr" | "nonce" | "state">, settled: { tx: string; payer: string }, req: { resource: string; maxAmountRequired: string }): void {
+  console.log(
+    JSON.stringify({
+      level: "error",
+      event: "settlement_success_unrecorded",
+      tx: settled.tx,
+      payer: settled.payer,
+      resource: req.resource,
+      amount_atomic: req.maxAmountRequired,
+      claim_from: row.from_addr,
+      claim_nonce: row.nonce,
+      state: row.state,
+    }),
+  );
+}
+
+// C1: the log line AND the stamp, so the two contradiction branches (this request's own /settle, an attempt's re-POST) cannot drift. The stamp makes every
+// LATER identical replay of the terminal row read the contradiction (claimAnswer) instead of a 402 with fresh accepts. It must never change what THIS caller is
+// told, so a failed stamp is logged by `quietly` and the answer is unchanged.
+async function recordContradiction(env: Env, row: ClaimRow, state: string, settled: { tx: string; payer: string }, req: { resource: string; maxAmountRequired: string }): Promise<void> {
+  logSettlementContradiction(row, state, settled, req);
+  await quietly("mark_contradiction", () => markContradiction(env, keyOfRow(row), settled.tx, Date.now()));
+}
+
+// A facilitator SUCCESS an attempt holds but could not write: the claim was pending under another holder (attemptPending's moved-pending branch).
+export type HeldSuccess = { tx: string; payer: string; req: { resource: string; maxAmountRequired: string } };
+
+// CODEX M3-build r2 (2) and its r4 follow-up (exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): after an attempt that HOLDS a success, the claim is
+// read once more; if the other holder has since made it refused or expired, the success is recorded as the contradiction (log line and stamp) instead of being
+// discarded, so neither this caller nor a later identical replay of the row serves a 402 with fresh accepts. Used by the re-send answer (respondToExistingClaim)
+// and the scheduled reconciler, so the two cannot drift. A window after this read stays open in both; the settlement_success_unrecorded line names the tx.
+// Cost: one read, plus the stamp when terminal (the reconciler's row stays well inside RECONCILE_ROW_WORST_CASE: this branch books nothing).
+//
+// DEFERRED-DURABLE-HELD-SUCCESS (brief R2-2; the agreed residual of exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): a terminal write that lands AFTER the read
+// below and BEFORE the caller releases its lease stays unstamped. The complete remedy is durable success evidence on the PENDING row that markRefused and markExpired respect.
+// It is its own wave: it needs (1) a migration (a column the held-success path writes; today only markSettled writes tx), (2) an atomic contract for BOTH orderings
+// (evidence first: refusal and expiry write nothing; terminal first: the evidence writer stamps a contradiction and handles zero changes), (3) the empty-tx success
+// (a success whose tx is ""), (4) replay behaviour for a row carrying evidence, (5) migration ordering against the worker deploy, (6) tests for every one of those.
+export async function holdSuccessAgainstTerminal(env: Env, key: ClaimKey, held: HeldSuccess): Promise<{ contradicted: "refused" | "expired" | null; fresh: ClaimRow | null }> {
+  const fresh = await getClaim(env, key);
+  if (fresh && (fresh.state === "refused" || fresh.state === "expired")) {
+    await recordContradiction(env, fresh, fresh.state, { tx: held.tx, payer: held.payer }, held.req);
+    return { contradicted: fresh.state, fresh };
+  }
+  return { contradicted: null, fresh };
+}
+
 function contradictionResponse(tx: string, state: string): Response {
-  return claimResponse({
-    status: 500,
-    body: {
-      error: `The facilitator reported this payment settled (tx ${tx}), but the society's own record of the signed authorisation reads "${state}", which contradicts it. The money may have moved: whether it did is not established. Do not sign again. This is logged for the maintainer to check against the chain by hand. ${SHOWHOME_REPORT_POINTER}`,
-      code: SETTLEMENT_CONTRADICTION,
-    },
-  });
+  return claimResponse(contradictionAnswer(tx, state));
 }
 
 async function answerFromMovedClaim(
@@ -811,16 +955,24 @@ async function answerFromMovedClaim(
   reqs: PaymentRequirements,
   claim: PaidClaim,
   settled: { tx: string; payer: string } | null,
+  // Gate C2 (3 Oct): the refusal branch passes its own owner, so "another attempt is in progress" is said only when ANOTHER holder's lease is live.
+  // After a thrown refusal write this request released its own lease, and nobody may hold one. Other callers keep the old answer.
+  owner?: string,
 ): Promise<Response> {
   if (settled && (row.state === "refused" || row.state === "expired")) {
-    logSettlementContradiction(row, row.state, settled, reqs);
+    await recordContradiction(env, row, row.state, settled, reqs);
     return contradictionResponse(settled.tx, row.state);
   }
-  // DEFERRED-DROPPED-SETTLE-TX (re-gate LOW-1(b) and LOW-2, the next paid-path wave): a settle that succeeded while another holder holds a live
-  // lease on the still-pending claim reaches the line below with its tx neither logged nor served; and a booking step gated out while its ref
-  // is unrecorded and the claim is still settled_unbooked is answered as a booking failure. Fix: log one line with the tx and claim key here,
-  // and answer such a step from the claim (sites listed in the re-gate record).
-  if (row.state === "pending") return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+  if (row.state === "pending") {
+    // C2 (re-gate LOW-1(b)): this request's /settle said SUCCESS but the claim is pending under another holder, so nothing here records the tx. It is
+    // logged once (the one place a person can still find it) and the answer names it. It is NOT written to the pending row: markSettled is the only writer
+    // of `tx`, and the holder that has the lease will either book (the facilitator's cached success) or meet C1.
+    if (settled) {
+      logSettlementSuccessUnrecorded(row, settled, reqs);
+      return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true, settledTx: settled.tx }));
+    }
+    return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: owner === undefined ? true : leaseHeldByAnother(row, owner, Date.now()) }));
+  }
   return respondToExistingClaim(env, row, true, reqs, claim);
 }
 
@@ -840,10 +992,10 @@ export async function answerFromClaim(env: Env, key: ClaimKey, owner: string): P
 // decides": (1) read authorizationState(from, nonce) at a two-RPC quorum, no quorum means no
 // transition; (2) UNUSED after validBefore, plus a margin, is `expired` (the authorisation can
 // no longer move money), never on the clock alone; (3) otherwise, when the authorisation was
-// used or can still be used, re-POST the stored body and classify the answer exactly as the
-// first /settle was: settled books it, a recorded refusal (rule 7) refuses it, anything else
-// leaves it pending. A refusal is not honoured against a spent authorisation: the chain says
-// the money moved, so the answers contradict and the row waits for a person.
+// used or can still be used, re-POST the stored body and classify the answer as the
+// first /settle was: settled books it; anything else leaves it pending. A recorded refusal (rule 7) is NOT honoured on this path (H2): against a spent authorisation the chain
+// says the money moved, so the answers contradict and the claim is stamped and stopped for a person (C4, option B); against an unused one an earlier attempt's transfer may
+// still be mined, so the claim stays pending until the chain shows it used or provably expired. Only payAndSettle's first /settle writes `refused`.
 //
 // EXPIRY_MARGIN: `expired` invites a second signature, so it must never be premature. A
 // transfer broadcast just before validBefore can be mined a little after it in wall-clock
@@ -857,23 +1009,63 @@ export const RECONCILE_EXPIRY_MARGIN_SECONDS = PAYMENT_MAX_TIMEOUT_SECONDS;
 export type AttemptOutcome = (
   | { kind: "settled"; row: ClaimRow }
   | { kind: "expired" }
-  | { kind: "refused" }
-  | { kind: "unchanged"; detail: string }
+  | { kind: "unchanged"; detail: string; held?: HeldSuccess }
   | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
+  // C4, option B: THIS call stamped the claim (CHAIN_SPENT_MARKER) and stopped it: the chain reads the authorisation used and a person must look. The lease is cleared by the stamp.
+  | { kind: "stopped" }
 ) & { fetches: number };
+
+// C4, option B: stamp the claim (markChainSpent) and say so once, loudly, for the maintainer. `unchanged` when another worker moved the claim first (the stamp wrote nothing).
+async function stopPending(env: Env, row: ClaimRow, owner: string, reason: string, fetches: number): Promise<AttemptOutcome> {
+  if (!(await markChainSpent(env, keyOfRow(row), reason, owner, Date.now()))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
+  console.log(JSON.stringify({ level: "error", event: "settlement_chain_spent_stopped", route: row.route, claim_from: row.from_addr, claim_nonce: row.nonce, reason: clipReason(reason) }));
+  return { kind: "stopped", fetches };
+}
 
 export async function attemptPending(env: Env, row: ClaimRow, owner: string): Promise<AttemptOutcome> {
   if (row.state !== "pending" || row.rpc_body == null) return { kind: "unchanged", detail: "the claim is no longer pending", fetches: 0 };
+  // A3: a stopped row is never read, re-POSTed or written again (no fetch, no D1 write); it waits for a person.
+  if (isChainSpent(row)) return { kind: "unchanged", detail: "the claim is stopped for a person to check", fetches: 0 };
   const key = keyOfRow(row);
   const nowMs = Date.now();
   const chain = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce);
   if (chain.used === null) return { kind: "unchanged", detail: `The chain could not settle the question (${chain.reason}); nothing was changed.`, fetches: chain.fetches };
   if (chain.used === false && nowMs / 1000 > row.valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS) {
-    if (!(await markExpired(env, key, owner, nowMs, row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches: chain.fetches };
-    return { kind: "expired", fetches: chain.fetches };
+    // C6 (first-gate L5, A4): `expired` invites a second signature, so the Worker's clock alone must never decide it: the chain's own clock must agree. Only on this branch (so an
+    // ordinary poll costs nothing extra) the authorisation is read AGAIN at a quorum of two RPCs, each at its own latest block, and "unused" counts only from a block whose timestamp
+    // is past validBefore + margin (an RPC that trails the chain head answers from an older block and is no answer). It is read again, not trusted from above: the first read
+    // was at a block of unknown time, and an authorisation read as unused there could have been mined since.
+    const proof = await readAuthorizationState(env, row.asset, row.from_addr, row.nonce, { pastTimestamp: row.valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS });
+    const fetches = chain.fetches + proof.fetches;
+    if (proof.used === null) {
+      return { kind: "unchanged", detail: `The wall clock says this authorisation has expired, but the chain's own clock has not confirmed it (${proof.reason}); nothing was changed.`, fetches };
+    }
+    if (proof.used === true) {
+      return { kind: "unchanged", detail: "The authorisation was spent while the society was confirming its expiry; the next attempt re-checks it as used.", fetches };
+    }
+    if (!(await markExpired(env, key, owner, nowMs, row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
+    return { kind: "expired", fetches };
   }
   if (chain.used === false && nowMs / 1000 > row.valid_before) {
     return { kind: "unchanged", detail: "The authorisation is past its validBefore and unused so far; the society waits out a margin before calling it expired.", fetches: chain.fetches };
+  }
+
+  // H3 (second build; gate MEDIUM-1; the booking-reservation-binding deferral, discharged): a listing_pay claim is re-POSTed only while its listing still holds THIS claim's reservation. A claim
+  // stranded after its reservation was released (or replaced by another payer's) could otherwise be re-sent, move money for a listing nobody holds, and only then be noticed by C5. Not bound:
+  // the chain used -> the money moved and nothing here can book it, so the claim is stamped and stopped for a person (C4, option B); the chain unused -> no re-POST, the claim waits for the
+  // expiry proof (a replacement reservation is never released by it: F2's release is bound the same way). One listing read, only for this route; a read that throws is a throw (no re-POST).
+  if (row.route === "listing_pay") {
+    const reservation = await listingReservationState(env, row);
+    if (!reservation.bound) {
+      if (chain.used === true) {
+        return stopPending(env, row, owner, `the chain reads the authorisation used, but the listing (${reservation.status ?? "missing"}) no longer holds this claim's reservation, so the claim was not re-sent`, chain.fetches);
+      }
+      return {
+        kind: "unchanged",
+        detail: `This payment's listing (${reservation.status ?? "missing"}) no longer holds the reservation this claim was made under, so the society does not re-send the authorisation to the facilitator. The claim waits until the chain shows the authorisation used or provably expired.`,
+        fetches: chain.fetches,
+      };
+    }
   }
 
   const body = JSON.parse(row.rpc_body) as { paymentRequirements: PaymentRequirements };
@@ -888,10 +1080,22 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
   const fetches = chain.fetches + 1;
   if (settled.verdict.kind === "refused") {
     if (chain.used === true) {
-      return { kind: "unchanged", detail: "The chain shows this authorisation spent, but the facilitator reports a refusal. The answers contradict; the claim is left pending for a person to decide.", fetches };
+      // C4, option B: the chain reads the nonce used and the facilitator answers a recorded refusal. The two answers contradict; the claim is STOPPED (stamped, never refused: the
+      // money may have moved) for a person to decide. DEFERRED-C4-OPTION-A-RECEIPT: option A (book from the transaction's own receipt) is not built in this wave.
+      return stopPending(env, row, owner, settled.verdict.error, fetches);
     }
-    if (!(await markRefused(env, key, settled.verdict.error, owner, Date.now(), row))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
-    return { kind: "refused", fetches };
+    // H2 (CODEX r1 on the M3 brief, replacing L6): a rule-7 refusal on the RE-POST path, while the chain reads the authorisation UNUSED, is not acted on. An earlier attempt's broadcast
+    // transfer can be mined after any number of "unused" reads, right up to validBefore, so a refusal written now could be false for money that then moved (and its 402 would invite a
+    // second signature). The claim stays pending; the facilitator's words are kept as its last words; it resolves through the chain showing the nonce used (booked, or stopped above)
+    // or through C6's pinned unused-after-expiry proof (expired, which releases a pay-listing reservation in the same batch). payAndSettle's FIRST /settle keeps honouring a rule-7
+    // refusal at once: the claim was taken by that very request, so no earlier attempt exists.
+    const refusal = settled.verdict.error;
+    await quietly("note_unknown", () => noteUnknown(env, key, refusal, owner, Date.now()));
+    return {
+      kind: "unchanged",
+      detail: `${refusal} It is not acted on: the chain still reads this authorisation unused, so an earlier attempt's transfer may yet be mined and a refusal now could be wrong. The claim stays pending until the chain shows the authorisation used or provably expired.`,
+      fetches,
+    };
   }
   const { tx, payer } = settled.verdict;
   if (!(await markSettled(env, key, tx, payer, owner, Date.now()))) {
@@ -900,10 +1104,17 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
     if (moved && (moved.state === "refused" || moved.state === "expired")) {
       // H2: this re-POST was answered with a SUCCESS and the claim is already terminal-without-money. Discarding the verdict would let the re-send serve the
       // terminal row's 402 with fresh accepts, inviting a second signature for money that may have moved, and log nothing.
-      logSettlementContradiction(moved, moved.state, { tx, payer }, body.paymentRequirements);
+      await recordContradiction(env, moved, moved.state, { tx, payer }, body.paymentRequirements);
       return { kind: "contradiction", tx, state: moved.state, fetches };
     }
-    return moved && moved.state === "settled_unbooked" ? { kind: "settled", row: moved, fetches } : { kind: "unchanged", detail: "another worker moved the claim", fetches };
+    if (moved && moved.state === "settled_unbooked") return { kind: "settled", row: moved, fetches };
+    if (moved && moved.state === "pending") {
+      // C2 (re-gate LOW-1(b)): the re-POST answered SUCCESS, another holder holds the still-pending claim, and nothing here may write the tx to it. Logged once and
+      // carried in the outcome, so the re-send's answer names it; the reconciler's outcome counts it unchanged, the line already written.
+      logSettlementSuccessUnrecorded(moved, { tx, payer }, body.paymentRequirements);
+      return { kind: "unchanged", detail: "", held: { tx, payer, req: body.paymentRequirements }, fetches };
+    }
+    return { kind: "unchanged", detail: "another worker moved the claim", fetches };
   }
   // The row as markSettled left it (no re-read: a pending row has recorded no booking yet).
   return { kind: "settled", row: { ...row, state: "settled_unbooked", tx, payer, verdict_reason: null }, fetches };
@@ -972,10 +1183,8 @@ export async function ledgerReceipt(env: Env, ledgerId: number): Promise<{ prev_
 // before the citizen is created, listing creation before the listing row), so
 // neither leaves a half-made record behind; each route's own later
 // paid-but-failed handling is unchanged.
-// How a payer whose money moved, and who is not a citizen, reaches the maintainer (gate M1).
-// One literal: every settled-but-incomplete message of this file interpolates it.
-const SHOWHOME_REPORT_POINTER =
-  "To add your own report, leave a free showhome note naming this tx: POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.";
+// SHOWHOME_REPORT_POINTER (how a payer whose money moved, and who is not a citizen, reaches the maintainer, gate M1) lives in settlement-claims.ts,
+// next to the contradiction answer that also serves it; every settled-but-incomplete message of this file interpolates it.
 
 export type SettledPaymentRoute = "registration" | "patron" | "listing_fee";
 
@@ -1028,9 +1237,10 @@ export async function recordSettledPayment(
     const now = await getClaim(env, claim.key);
     const ledgerId = now ? refsOf(now).ledger_id : undefined;
     if (ledgerId == null) {
-      // The gate is three conditions: settled_unbooked, this ref unrecorded, and this owner holds the lease or none is live. With the line unrecorded, if
-      // another owner holds a live lease it is the third that failed: that holder is still booking. Anything else is a failure to book, never a silent success.
-      if (leaseHeldByAnother(now, claim.owner, Date.now())) return { applied: false, prev_hash: null, hash: null };
+      // The gate is three conditions: settled_unbooked, this ref unrecorded, and this owner holds the lease or none is live. This call's batch did not apply, and
+      // the claim is still settled_unbooked with the line unrecorded: so the lease was the condition that failed, and another holder is booking (C3: proven from state
+      // and ref, never from a lease read that can have lapsed since). Anything else is a failure to book, never a silent success.
+      if (stepGatedOutByLease(now, "ledger_id")) return { applied: false, prev_hash: null, hash: null };
       throw new Error("the claim is not settled_unbooked: no treasury line was recorded for it");
     }
     return { ...(await ledgerReceipt(env, ledgerId)), applied: false };

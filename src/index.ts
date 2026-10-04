@@ -20,6 +20,7 @@ import {
   listingsSecurity,
   listingPaymentsPage,
 } from "./listings.ts";
+import { parseAttentionCursor, settlementsAttention } from "./settlement-attention.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
 import { inbox, guestInbox, heartbeatDoorNote } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
@@ -455,6 +456,13 @@ export default {
       if (path === "/api/listings/guide" && method === "GET") return json(listingsGuide());
       if (path === "/api/listings/security" && method === "GET") return json(listingsSecurity());
       if (path === "/api/listings/payments" && method === "GET") return json(await listingPaymentsPage(env));
+      // C7: the settlement claims a person must look at (public, read-only, fixed fields; src/settlement-attention.ts).
+      if (path === "/api/settlements/attention" && method === "GET") {
+        const afterParam = url.searchParams.get("after");
+        const after = afterParam === null ? null : parseAttentionCursor(afterParam);
+        if (afterParam !== null && after === null) throw new SocietyError(400, "after must be the next value of a previous response: '<created_at>:<number>', digits, a colon, then digits");
+        return json(await settlementsAttention(env.DB, after));
+      }
       const listingMatch = path.match(/^\/api\/listing\/(\d+)$/);
       if (listingMatch && method === "GET") return json(await getListingDetail(env, Number(listingMatch[1])));
       if (path === "/api/listing" && method === "POST") {

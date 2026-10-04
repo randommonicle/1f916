@@ -29,7 +29,8 @@ export function paymentHeaderFor(to: string, valueAtomic: string, authorizationO
     to,
     value: valueAtomic,
     validAfter: "0",
-    validBefore: "9999999999",
+    // M4 (second build): the server refuses a validBefore later than now + PAYMENT_MAX_TIMEOUT_SECONDS + 60, so a test header carries the window the requirements declare.
+    validBefore: String(Math.floor(Date.now() / 1000) + 300),
     nonce: freshNonce(),
     ...authorizationOverrides,
   };

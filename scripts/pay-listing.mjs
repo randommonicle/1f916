@@ -629,7 +629,10 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
       const used = await deps.authorizationUsed(sent.from, sent.nonce);
       if (used === false) {
         deps.writeAtomic(tombPath, JSON.stringify({ status: "refused", key, target, ...purchase, from: sent.from, nonce: sent.nonce, valid_before: sent.validBefore, http_status: second.status, refused_at: deps.nowSeconds(), detail: secondText.slice(0, 2000) }, null, 2));
-        return { ...base, ok: false, exitCode: 1, reason: "leg2_refused", message: `The server refused the signed payment (HTTP ${second.status}) and the chain confirms the authorization was not executed. Nothing was paid. Recorded as 'refused'; a re-run is allowed after ${new Date((sent.validBefore + RETRY_MARGIN_SECONDS) * 1000).toISOString()} (the signed authorization's validBefore plus a ${RETRY_MARGIN_SECONDS}s clock-skew margin, when nobody holding it can execute it).`, detail: secondText };
+        // M3 second build (hub, 4 Oct): a non-200 is not always a refusal (the server's 502 settlement_unresolved means a claim exists with
+        // its outcome unknown), and "unused" now is not "never executed": until validBefore whoever holds the authorization may still run it.
+        const code = secondJson && typeof secondJson.code === "string" ? `, ${secondJson.code}` : "";
+        return { ...base, ok: false, exitCode: 1, reason: "leg2_refused", message: `The server did not confirm the payment (HTTP ${second.status}${code}), and the chain shows the authorization not executed as of this check. Until its validBefore (${new Date(sent.validBefore * 1000).toISOString()}) whoever holds it, the server included, may still execute it, so this is not yet proof that nothing was paid. Recorded as 'refused'; a re-run is allowed only after ${new Date((sent.validBefore + RETRY_MARGIN_SECONDS) * 1000).toISOString()} (validBefore plus a ${RETRY_MARGIN_SECONDS}s clock-skew margin), and only if the chain still shows it unused then.`, detail: secondText };
       }
     } catch {
       // fall through: keep 'signing'

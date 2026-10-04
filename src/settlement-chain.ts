@@ -50,19 +50,72 @@ async function askRpc(url: string, asset: string, from: string, nonce: string): 
   }
 }
 
+// C6 (first-gate L5): one RPC's answer to "was this authorisation used?" asked AT a named block, with that block's own timestamp. The block is read first ("latest": its number and
+// timestamp), then the eth_call is made at THAT block number on the same RPC, so the answer and the time it is an answer for are the same block. Expiry needs this: an
+// authorisation read as unused at an older block could have been mined since, so only an unused answer at a block whose timestamp is already past validBefore (+ margin) proves
+// it can never be mined (EIP-3009 refuses a transfer once block.timestamp reaches validBefore). `fetches` is how many fetches this RPC cost (1 if the block read failed, else 2).
+const QUANTITY_RE = /^0x[0-9a-fA-F]{1,16}$/;
+
+async function postRpc(url: string, method: string, params: unknown[]): Promise<unknown> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), RPC_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: ctrl.signal });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { result?: unknown; error?: unknown };
+    return body.error !== undefined ? undefined : body.result;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function askRpcAtLatestBlock(url: string, asset: string, from: string, nonce: string): Promise<{ answer: { used: boolean; blockTime: number } | null; fetches: number }> {
+  const block = await postRpc(url, "eth_getBlockByNumber", ["latest", false]);
+  if (block === null || typeof block !== "object") return { answer: null, fetches: 1 };
+  const { number, timestamp } = block as { number?: unknown; timestamp?: unknown };
+  if (typeof number !== "string" || !QUANTITY_RE.test(number) || typeof timestamp !== "string" || !QUANTITY_RE.test(timestamp)) return { answer: null, fetches: 1 };
+  const blockTime = Number(BigInt(timestamp));
+  if (!Number.isSafeInteger(blockTime)) return { answer: null, fetches: 1 };
+  const result = await postRpc(url, "eth_call", [
+    { to: asset, data: AUTH_STATE_SELECTOR + word(from.replace(/^0x/, "").toLowerCase()) + word(nonce.replace(/^0x/, "").toLowerCase()) },
+    "0x" + BigInt(number).toString(16),
+  ]);
+  if (typeof result !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(result)) return { answer: null, fetches: 2 };
+  const v = BigInt(result);
+  return { answer: v === 0n ? { used: false, blockTime } : v === 1n ? { used: true, blockTime } : null, fetches: 2 };
+}
+
 // The state of one authorisation, read at a two-RPC quorum: the first TWO distinct RPCs (in the
 // list's order) that answer must agree. Fewer than two answers, or two that disagree, is no
 // answer. At most four fetches (one per distinct RPC); a disagreement stops at two.
-export async function readAuthorizationState(env: Env, asset: string, from: string, nonce: string): Promise<AuthorizationState> {
+//
+// With `pastTimestamp` (C6; the caller is about to call the authorisation EXPIRED, an answer that invites a second signature) every RPC is asked at its own latest block
+// and an RPC whose answer is "unused" from a block NOT YET past `pastTimestamp` (unix seconds) is lagging: it is no answer, and the next RPC is tried. "Used" is accepted from
+// any block (a used authorisation stays used). At most two fetches per RPC, eight in all; only the expiry decision pays for it.
+export async function readAuthorizationState(env: Env, asset: string, from: string, nonce: string, opts: { pastTimestamp?: number } = {}): Promise<AuthorizationState> {
   const answers: { url: string; used: boolean }[] = [];
   let fetches = 0;
+  let lagging = 0;
   for (const url of [...new Set(baseRpcUrls(env))]) {
-    fetches++;
-    const used = await askRpc(url, asset, from, nonce);
-    if (used !== null) answers.push({ url, used });
+    if (opts.pastTimestamp === undefined) {
+      fetches++;
+      const used = await askRpc(url, asset, from, nonce);
+      if (used !== null) answers.push({ url, used });
+    } else {
+      const r = await askRpcAtLatestBlock(url, asset, from, nonce);
+      fetches += r.fetches;
+      if (r.answer !== null) {
+        if (r.answer.used === false && !(r.answer.blockTime > opts.pastTimestamp)) lagging++;
+        else answers.push({ url, used: r.answer.used });
+      }
+    }
     if (answers.length === 2) break;
   }
-  if (answers.length < 2) return { used: null, reason: `${answers.length} of the required 2 distinct Base RPCs answered`, fetches };
+  if (answers.length < 2) {
+    return { used: null, reason: `${answers.length} of the required 2 distinct Base RPCs answered${lagging > 0 ? ` (${lagging} answered "unused" from a block whose timestamp is not yet past the authorisation's expiry)` : ""}`, fetches };
+  }
   if (answers[0].used !== answers[1].used) return { used: null, reason: "two Base RPCs disagree about the authorisation's state", fetches };
   return { used: answers[0].used, fetches };
 }

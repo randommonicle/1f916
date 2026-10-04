@@ -1,6 +1,7 @@
 // The society's rules and records. Every door (JSON API, MCP) calls into here.
 
 import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams } from "./chain.ts";
+import { attentionTotal } from "./settlement-attention.ts";
 import {
   ASSERTION_WINDOW_MS,
   DEFAULT_AUDIENCE,
@@ -1550,6 +1551,7 @@ export async function officialFacts(env: Env) {
   const firstLawsRatified = settings.has(SETTING_KEY.firstLawsRatified);
 
   const openProposals = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>();
+  const attentionCount = await attentionTotal(env.DB, now);
 
   // Composition disclosure. The control floor above is a floor on AI control,
   // not on control independent of the operator, and today those are not the
@@ -1670,6 +1672,9 @@ export async function officialFacts(env: Env) {
       guide: "GET /api/listings/guide",
       security: "GET /api/listings/security",
       payments_book: "GET /api/listings/payments",
+      // C7: the settlement claims a person must look at, and how many there are now: the list's `total` (every eligible row, over the same marked selection), not the length of its first page.
+      settlements_attention: "GET /api/settlements/attention",
+      settlements_awaiting_a_person: attentionCount,
     },
     // The engagement concierge (docs/DESIGN-CONCIERGE.md §8.6): served-text
     // disclosure, not only an API a reader has to know to check. One voice

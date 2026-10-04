@@ -38,7 +38,7 @@ import {
 import { sha256Hex } from "../src/chain.ts";
 import { finishRegistration } from "../src/register-gate.ts";
 import { attemptPending, finishPatronBooking } from "../src/x402.ts";
-import { runReconciler } from "../src/settlement-reconcile.ts";
+import { runReconciler, RECONCILE_ROW_WORST_CASE } from "../src/settlement-reconcile.ts";
 import { finishListingCreateBooking, finishPayListingBooking, handleCreateListing, handlePayListing, computeListingFeeCents } from "../src/listings.ts";
 import {
   acquireLease,
@@ -47,6 +47,7 @@ import {
   getClaim,
   keyOfRow,
   markExpired,
+  markContradiction,
   markHandleTaken,
   markRefused,
   markSettled,
@@ -578,6 +579,93 @@ test("P-E: pay listing, refusal read under another holder's live lease: A answer
   }
 });
 
+// CODEX M3-build r1 HIGH (pre-existing since M2): A's markRefused THROWS after B took the lapsed lease and settled A's claim. The throw used
+// to skip the claim re-read, so the 402 released A's reservation and re-opened a listing whose claim is settled_unbooked (a later payer could
+// then reserve it and the old claim book against that reservation). Mutant: restore `if (!wrote && !threw)` -> 402, listing 'open'.
+test("M3 HIGH: pay listing, A reads a refusal after B settled the claim, and A's refusal write THROWS: A keeps the reservation and offers no fresh payment", async () => {
+  const d1 = createLocalD1();
+  let armed = false;
+  const stub = stubFacilitator({
+    settle: async () => {
+      const key = await bTakesTheLease(d1);
+      assert.equal(await markSettled(eq(d1), key, TX, TEST_PAYER, "B", Date.now()), true);
+      armed = true;
+      return refusedAnswer();
+    },
+  });
+  const base = eq(d1);
+  const injected = () => new Error("D1_ERROR: injected failure of the refusal write");
+  const failingDb = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (armed && sql.includes("SET state = 'refused'")) {
+            armed = false;
+            const boom: any = { bind: () => boom, run: async () => { throw injected(); }, first: async () => { throw injected(); }, all: async () => { throw injected(); } };
+            return boom;
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay({ ...base, DB: failingDb } as unknown as Env);
+    assert.notEqual(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.accepts, undefined, "no fresh payment requirements are offered");
+    assert.equal(armed, false, "the refusal write was attempted and failed");
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: B's claim is settled_unbooked");
+    assert.equal(oneClaim(d1).state, "settled_unbooked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// D-018 gate C2 (3 Oct, probe P1 committed): the commonest input to d4f25eb0's fix, a refusal write that THROWS with nobody else involved.
+// Mutants: let a thrown write fall through to the 402 (`if (!wrote && !threw)`) -> 402 and the listing re-opens; hard-code leaseHeld: true
+// again -> the answer claims an attempt in progress that does not exist.
+test("gate C2: pay listing, a recorded refusal whose write THROWS with nobody else involved: no 402, the reservation kept, and no claim of another attempt", async () => {
+  const d1 = createLocalD1();
+  let armed = true;
+  const stub = stubFacilitator({ settle: () => refusedAnswer() });
+  const base = eq(d1);
+  const failingDb = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (armed && sql.includes("SET state = 'refused'")) {
+            armed = false;
+            const boom: any = { bind: () => boom, run: async () => { throw new Error("D1_ERROR: injected"); }, first: async () => { throw new Error("D1_ERROR: injected"); }, all: async () => { throw new Error("D1_ERROR: injected"); } };
+            return boom;
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay({ ...base, DB: failingDb } as unknown as Env);
+    const row = d1.raw.prepare("SELECT state, lease_owner FROM settlement_claims").get() as { state: string; lease_owner: string | null };
+    assert.equal(armed, false, "the refusal write was attempted and failed");
+    assert.notEqual(res.status, 402, JSON.stringify(res.body));
+    assert.equal(res.body.accepts, undefined);
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: the claim's state is unconfirmed");
+    assert.equal(row.state, "pending");
+    assert.equal(row.lease_owner, null, "this request released its own lease; nobody holds one");
+    assert.doesNotMatch(String(res.body.error), /Another attempt to resolve it is in progress/, "no attempt is in progress, so none is claimed");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 test("T3d: the control: with nobody else involved, a recorded refusal still answers 402 and refuses the claim", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: () => refusedAnswer() });
@@ -667,14 +755,14 @@ test("T4b: a non-final booking step inside the lease renews it (B cannot acquire
   try {
     const key = await take(d1, "A", 1_000);
     assert.equal(await markSettled(eq(d1), key, TX, TEST_PAYER, "A", 1_000), true);
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 1_000 + 170_000), { applied: true });
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 1_000 + 170_000)).applied, true);
     const row = (await getClaim(eq(d1), key)) as ClaimRow;
     assert.equal(row.leased_until, 1_000 + 170_000 + CLAIM_LEASE_TTL_MS, "the step renewed the lease");
     assert.equal(row.lease_owner, "A");
     assert.equal(await acquireLease(eq(d1), key, "B", 1_000 + 200_000), null, "B cannot acquire at taken_at + 200 s");
-    assert.deepEqual(await runBookingStep(eq(d1), key, paymentStep(d1), "B", 1_000 + 200_000), { applied: false }, "and B's step is gated out by the ownership condition");
+    assert.equal((await runBookingStep(eq(d1), key, paymentStep(d1), "B", 1_000 + 200_000)).applied, false, "and B's step is gated out by the ownership condition");
     assert.equal(count(d1, "ledger"), 1, "B wrote nothing");
-    assert.deepEqual(await runBookingStep(eq(d1), key, paymentStep(d1), "A", 1_000 + 201_000), { applied: true }, "A, the holder, finishes");
+    assert.equal((await runBookingStep(eq(d1), key, paymentStep(d1), "A", 1_000 + 201_000)).applied, true, "A, the holder, finishes");
     const booked = (await getClaim(eq(d1), key)) as ClaimRow;
     assert.equal(booked.state, "booked");
     assert.equal(booked.lease_owner, null, "the final step clears the lease");
@@ -692,12 +780,12 @@ test("T4c: the stale holder's booking step AFTER another worker took the lapsed 
     assert.equal(await markSettled(eq(d1), key, TX, TEST_PAYER, "A", 1_000), true);
     // A's lease (renewed to 181_000) lapses; B takes it at 200_000
     assert.equal((await acquireLease(eq(d1), key, "B", 200_000))?.lease_owner, "B");
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 201_000), { applied: false }, "A is no longer the holder");
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "C", 201_000), { applied: false }, "nor is anyone else");
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "A", 201_000)).applied, false, "A is no longer the holder");
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "C", 201_000)).applied, false, "nor is anyone else");
     assert.equal(count(d1, "ledger"), 0);
-    assert.deepEqual(await runBookingStep(eq(d1), key, ledgerStep(d1, false), "B", 201_000), { applied: true }, "B is");
+    assert.equal((await runBookingStep(eq(d1), key, ledgerStep(d1, false), "B", 201_000)).applied, true, "B is");
     // B's (renewed) lease lapses and nobody takes it: the old holder is not locked out
-    assert.deepEqual(await runBookingStep(eq(d1), key, paymentStep(d1), "A", 201_000 + CLAIM_LEASE_TTL_MS + 1), { applied: true });
+    assert.equal((await runBookingStep(eq(d1), key, paymentStep(d1), "A", 201_000 + CLAIM_LEASE_TTL_MS + 1)).applied, true);
     assert.equal((await getClaim(eq(d1), key))?.state, "booked");
   } finally {
     d1.close();
@@ -783,9 +871,10 @@ for (const kind of ["expired", "refused"] as const) {
       assert.equal(out.kind, "unchanged", JSON.stringify(out));
       assert.equal((await getClaim(eq(d1), key))?.state, "pending");
       assert.equal((await getClaim(eq(d1), key))?.lease_owner, "B");
-      // the holder's own attempt resolves it
+      // the holder's own attempt resolves it: an unused authorisation past its margin is expired; a rule-7 refusal on this re-POST path is NOT honoured (H2, second build): it stays pending
       const mine = await attemptPending(eq(d1), (await getClaim(eq(d1), key)) as ClaimRow, "B");
-      assert.equal(mine.kind, kind);
+      assert.equal(mine.kind, kind === "refused" ? "unchanged" : kind);
+      assert.equal((await getClaim(eq(d1), key))?.state, kind === "refused" ? "pending" : "expired");
     } finally {
       stub.restore();
       d1.close();
@@ -844,7 +933,7 @@ async function bTerminates(d1: LocalD1, kind: "refused" | "expired") {
 }
 
 for (const kind of ["refused", "expired"] as const) {
-  test(`H2 re-send (${kind}): the re-POST answers SUCCESS after another holder made the claim ${kind}: one contradiction line, a 500 that does not invite a second signature, the claim row unchanged`, async () => {
+  test(`H2 re-send (${kind}): the re-POST answers SUCCESS after another holder made the claim ${kind}: one contradiction line, a 500 that does not invite a second signature, the claim stays ${kind} and is stamped with the contradiction (C1)`, async () => {
     const d1 = createLocalD1();
     const stub = stubFacilitator({
       settle: async (n) => {
@@ -876,8 +965,10 @@ for (const kind of ["refused", "expired"] as const) {
       assert.equal(c[0].tx, TX);
       assert.equal(c[0].payer, TEST_PAYER);
       const row = oneClaim(d1);
-      assert.equal(row.state, kind, "the claim row is as B left it");
-      assert.equal(row.tx, null);
+      assert.equal(row.state, kind, "the claim row is still in the terminal state B left it");
+      // C1 (A1): the contradiction stamped the row: the facilitator's tx, and a verdict_reason marker that keeps B's own reason inside it.
+      assert.equal(row.tx, TX);
+      assert.ok(String((row as { verdict_reason?: string }).verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "stamped with the contradiction marker");
       assert.equal(row.rpc_body, null);
       assert.equal(count(d1, "ledger"), 0, "nothing was booked");
       assert.equal(stub.calls.settle, 2);
@@ -887,7 +978,7 @@ for (const kind of ["refused", "expired"] as const) {
     }
   });
 
-  test(`H2 reconciler (${kind}): the same race inside the scheduled reconciler is counted as contradicted (never booked, resolved or unchanged), logged once, and leaves the claim as B made it`, async () => {
+  test(`H2 reconciler (${kind}): the same race inside the scheduled reconciler is counted as contradicted (never booked, resolved or unchanged), logged once, and leaves the claim ${kind}, now stamped (C1)`, async () => {
     const d1 = createLocalD1();
     const stub = stubFacilitator({
       settle: async (n) => {
@@ -912,7 +1003,8 @@ for (const kind of ["refused", "expired"] as const) {
       assert.equal(c[0].tx, TX);
       const row = oneClaim(d1);
       assert.equal(row.state, kind);
-      assert.equal(row.tx, null);
+      assert.equal(row.tx, TX, "C1: stamped with the facilitator's tx");
+      assert.ok(String((row as { verdict_reason?: string }).verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "and the marker");
       assert.equal(count(d1, "ledger"), 0);
     } finally {
       stub.restore();
@@ -920,3 +1012,188 @@ for (const kind of ["refused", "expired"] as const) {
     }
   });
 }
+
+// ---------- CODEX M3-build r2 (4 Oct): two terminal answers that discarded settlement evidence ----------
+
+// (1) A's /settle is in flight; its lease lapses, B takes it and refuses the claim, and a later success (another holder's re-POST) stamps the refused row with
+// the contradiction; then A's own refusal arrives. A's markRefused writes nothing and A re-reads a refused claim that is STAMPED. Mutant: drop
+// `|| isContradicted(now)` in payAndSettle's refusal branch -> A answers 402 with accepts and pay listing releases its reservation.
+test("CODEX r2 (1): pay listing, A's refusal arrives after B refused the claim and a contradiction stamped it: A answers the contradiction, offers no fresh payment, keeps the reservation", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({
+    settle: async () => {
+      const key = await bTakesTheLease(d1);
+      assert.equal(await markRefused(eq(d1), key, "The facilitator reports that this settlement failed", "B", Date.now()), true);
+      assert.equal(await markContradiction(eq(d1), key, TX, Date.now()), true);
+      return refusedAnswer();
+    },
+  });
+  try {
+    const fx = await payFixture(d1);
+    const res = await fx.pay();
+    assert.equal(res.status, 500, JSON.stringify(res.body));
+    assert.equal(res.body.code, "settlement_contradiction");
+    assert.equal(res.body.accepts, undefined, "no fresh payment requirements are offered");
+    assert.match(String(res.body.error), new RegExp(TX));
+    assert.match(String(res.body.error), /Do not sign again/);
+    assert.doesNotMatch(String(res.body.error), /no money moved|sign a fresh one/i);
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: the stamp says the money may have moved");
+    const row = oneClaim(d1) as unknown as { state: string; verdict_reason: string | null };
+    assert.equal(row.state, "refused");
+    assert.ok(String(row.verdict_reason).startsWith(`settlement_contradiction:${TX}|`), "still stamped");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// (2) The gate's LOW-1, severity upgraded: a re-send's re-POST reads SUCCESS while the claim is pending under B (A's lease lapsed inside the re-POST), so
+// attemptPending logs the success and returns unchanged + settledTx; B then refuses the claim before respondToExistingClaim's final read. The interleaving is
+// injected at that read (the second `SELECT * FROM settlement_claims WHERE` after the re-POST answered). Mutant: remove the held-success branch in
+// respondToExistingClaim -> 402 with accepts, the row refused and unstamped.
+for (const txv of [TX, ""] as const) {
+  test(`CODEX r2 (2) (${txv ? "tx named" : "empty tx"}): B refuses the claim between a re-send's held SUCCESS and its final read: the success is kept as a stamped contradiction, a 500, no fresh payment`, async () => {
+    const d1 = createLocalD1();
+    let armed = false;
+    let reads = 0;
+    let refusedByB = false;
+    let key: ClaimKey | null = null;
+    const stub = stubFacilitator({
+      settle: async (n) => {
+        if (n === 1) return pendingAnswer(); // the first request: outcome unknown, the claim stays pending
+        key = await bTakesTheLease(d1); // inside the re-send's re-POST: its lease lapses and B holds a live one on the still-pending claim
+        armed = true;
+        return new Response(JSON.stringify({ success: true, payer: TEST_PAYER, transaction: txv }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+      rpc: () => authStateAnswer(false),
+    });
+    const base = eq(d1);
+    const db = new Proxy(base.DB as object, {
+      get(t: any, p: string | symbol) {
+        if (p === "prepare") {
+          return (sql: string) => {
+            if (armed && sql.startsWith("SELECT * FROM settlement_claims WHERE") && ++reads === 2) {
+              armed = false;
+              return {
+                bind: (...a: unknown[]) => ({
+                  first: async () => {
+                    refusedByB = await markRefused(eq(d1), key as ClaimKey, "The facilitator reports that this settlement failed", "B", Date.now());
+                    return t.prepare(sql).bind(...a).first();
+                  },
+                }),
+              };
+            }
+            return t.prepare(sql);
+          };
+        }
+        const v = t[p];
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+    const env = { ...base, DB: db } as unknown as Env;
+    try {
+      const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+      const first = await callWorker(patronReq("rent", header), env);
+      assert.equal(first.status, 502);
+      assert.equal(oneClaim(d1).state, "pending");
+
+      const { value: res, lines } = await captureLog(() => callWorker(patronReq("rent", header), env));
+      const body = await json(res);
+      assert.equal(refusedByB, true, "B refused the claim between the attempt's read and the final read");
+      assert.equal(eventLines(lines, "settlement_success_unrecorded").length, 1, "the attempt held a success it could not write");
+      assert.equal(res.status, 500, JSON.stringify(body));
+      assert.equal(body.code, "settlement_contradiction");
+      assert.equal(body.accepts, undefined, "no fresh payment requirements");
+      assert.match(String(body.error), txv ? new RegExp(txv) : /tx not reported/);
+      assert.match(String(body.error), /Do not sign again/);
+      assert.doesNotMatch(String(body.error), /no money moved|sign a fresh one/i);
+      const c = eventLines(lines, "settlement_contradiction");
+      assert.equal(c.length, 1, "exactly one contradiction line");
+      assert.equal(c[0].state, "refused");
+      assert.equal(c[0].tx, txv);
+      assert.equal(c[0].payer, TEST_PAYER);
+      const row = oneClaim(d1) as unknown as { state: string; verdict_reason: string | null };
+      assert.equal(row.state, "refused");
+      assert.ok(String(row.verdict_reason).startsWith(`settlement_contradiction:${txv}|`), "stamped, so a later identical replay reads the contradiction too");
+      assert.equal(count(d1, "ledger"), 0, "nothing was booked");
+      const replay = await callWorker(patronReq("rent", header), eq(d1));
+      assert.equal(replay.status, 500, "a later identical replay of the stamped row answers the same contradiction");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+// (3) CODEX r4 follow-up (exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): the same held success inside the scheduled reconciler. Its re-POST reads
+// SUCCESS while B holds the still-pending claim, and B refuses it before the reconciler's next read. The reconciler re-reads through the shared
+// holdSuccessAgainstTerminal: counted contradicted, row stamped, and a later identical replay answers 500, not a 402. Removing the reconciler branch turns it red
+// (unchanged 1, the replay 402 with accepts).
+test("CODEX r4 (3): reconciler, B refuses the claim after the attempt's held SUCCESS: counted contradicted, stamped, and a later replay answers 500 with no accepts", async () => {
+  const d1 = createLocalD1();
+  let armed = false;
+  let reads = 0;
+  let refusedByB = false;
+  let key: ClaimKey | null = null;
+  const stub = stubFacilitator({
+    settle: async (n) => {
+      if (n === 1) return pendingAnswer();
+      key = await bTakesTheLease(d1);
+      armed = true;
+      return settledAnswer();
+    },
+    rpc: () => authStateAnswer(false),
+  });
+  const base = eq(d1);
+  const db = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (armed && sql.startsWith("SELECT * FROM settlement_claims WHERE") && ++reads === 2) {
+            armed = false;
+            return {
+              bind: (...a: unknown[]) => ({
+                first: async () => {
+                  refusedByB = await markRefused(eq(d1), key as ClaimKey, "The facilitator reports that this settlement failed", "B", Date.now());
+                  return t.prepare(sql).bind(...a).first();
+                },
+              }),
+            };
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    const first = await callWorker(patronReq("rent", header), eq(d1));
+    assert.equal(first.status, 502);
+    const { value: out, lines } = await captureLog(() => runReconciler({ ...base, DB: db } as unknown as Env));
+    assert.equal(refusedByB, true, "B refused between the attempt's read and the reconciler's next read");
+    assert.equal(eventLines(lines, "settlement_success_unrecorded").length, 1);
+    assert.equal(out.contradicted, 1, JSON.stringify(out));
+    assert.equal(out.unchanged, 0);
+    assert.equal(out.booked, 0);
+    assert.equal(out.failed, 0);
+    assert.ok(out.actualCost <= RECONCILE_ROW_WORST_CASE + 1, `inside one row's worst case plus the select (${out.actualCost})`);
+    const c = eventLines(lines, "settlement_contradiction");
+    assert.equal(c.length, 1, "exactly one contradiction line");
+    assert.equal(c[0].state, "refused");
+    assert.equal(c[0].tx, TX);
+    assert.equal(c[0].payer, TEST_PAYER);
+    const row = oneClaim(d1) as unknown as { state: string; verdict_reason: string | null };
+    assert.equal(row.state, "refused");
+    assert.ok(String(row.verdict_reason).startsWith(`settlement_contradiction:${TX}|`));
+    const replay = await callWorker(patronReq("rent", header), eq(d1));
+    const body = await json(replay);
+    assert.equal(replay.status, 500, JSON.stringify(body));
+    assert.equal(body.accepts, undefined);
+    assert.equal(count(d1, "ledger"), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

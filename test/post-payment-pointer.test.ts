@@ -32,7 +32,11 @@ test("M1: no served source still points a payer at GET /api/official for help", 
 
 test("M1: each post-payment message carries the pointer its payer can use", () => {
   const count = (hay: string, needle: string) => hay.split(needle).length - 1;
-  assert.equal(count(src("x402.ts"), SHOWHOME_POINTER), 1, "recordSettledPayment (registration and patron) names the showhome");
+  // C1 (paid-path M3): the one literal moved to settlement-claims.ts (exported), because the contradiction answer served from claimAnswer needs it and that
+  // module imports no route module. x402.ts's own messages (recordSettledPayment for registration and patron, the unrecorded-claim 500) interpolate it.
+  assert.equal(count(src("settlement-claims.ts"), SHOWHOME_POINTER), 1, "the one literal lives in settlement-claims.ts");
+  assert.equal(count(src("x402.ts"), SHOWHOME_POINTER), 0, "x402.ts carries no second copy");
+  assert.ok(src("x402.ts").includes("${SHOWHOME_REPORT_POINTER}"), "recordSettledPayment (registration and patron) interpolates it, so it still names the showhome");
   assert.equal(count(src("register-gate.ts"), SHOWHOME_POINTER), 1, "registration's settled-but-incomplete tail names the showhome");
   assert.equal(count(src("listings.ts"), CITIZEN_POINTER), 2, "listing create and pay listing name the maintainer mention");
 });

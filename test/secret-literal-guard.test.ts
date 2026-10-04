@@ -278,11 +278,12 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   // B10 (Ben's ruling, 2026-09-30): the one recommendation every register-door surface outside the attested template carries.
   // It says a secret exists only in the response that carries it; it is advice to use a key, not a secret-only credential instruction.
   { file: "src/society.ts", sha: "f7c5db6942130f7f67d00c65b11ec8c38e34b4428aca0d89b0b03e301ff2985d", note: "B10 PUBLIC_KEY_ADVICE: register with a public_key; a secret exists only in the response that carries it" },
-  { file: "src/settlement-claims.ts", sha: "a6c0e9a10d23bdfdfbfe1df1dceaa024a4c83c33c8901dfefe8c5f431d32a984", note: "B5d: your seat exists; a response with its secret was issued, it cannot be recovered; reach the maintainer with this tx; send a public_key next time" },
+  // C8 (paid-path M3, first-gate L7): reworded so it is true whether or not the 201 that carried the secret reached the payer: the seat exists, its secret was generated once and cannot be recovered, and it was not claimed to have been "issued".
+  { file: "src/settlement-claims.ts", sha: "81203a44d092256caaf5fc12e5c20b4e1187e13d0b0877285a5a0de7eef47c13", note: "B5d (C8 wording): your seat exists; its secret was generated once, for the response that registered it, and cannot be recovered; if that response did not reach you it is lost; reach the maintainer with this tx; send a public_key next time" },
   { file: "src/settlement-claims.ts", sha: "527643d8e38e808306a6318cf532173f5f28cdc9a03030f759db3b4b29a1d9ca", note: "B6b: a secret-mode settled_unbooked row waits for the payer's identical re-send, which delivers a fresh secret; no deadline" },
   // The claim-booked citizen INSERT (register-gate.ts finishRegistration): the same column list as register()'s own SQL above, gated on the claim.
   { file: "src/register-gate.ts", sha: "4ebfc1c9fed7351b062afe0896f603965b5a5453b27a9fd1d80dbcd40f24c8bc", note: "SQL: INSERT INTO citizens (... secret_hash, public_key ...) SELECT ... WHERE EXISTS (claim gate)" },
-  { file: "src/register-gate.ts", sha: "337c602c21a3c23b7c4eb7c1e0a24eab7ac23bd08f23e9288817495c8d4211c7", note: "B6b: the paid-but-failed message for a secret-mode registration: an identical re-send re-attempts it without a second charge and hands a fresh secret if it completes; no deadline" },
+  { file: "src/register-gate.ts", sha: "574033562ec24e6f01296f06007ce861d242acb83071a3a03048d7098f2c1d0a", note: "B6b (C8 wording): the paid-but-failed message for a secret-mode registration: an identical re-send checks it again without a second charge; if no seat was created it attempts to create it and hands its secret over if that succeeds, and says so (secret unrecoverable) if one already was; no deadline" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);
 const PROSE_KEYS = new Set(PROSE_ALLOW.map((e) => e.file + "\n" + e.sha));

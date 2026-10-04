@@ -57,7 +57,12 @@ test("1. an identical replay after booked: no /verify, no /settle, no second cit
       assert.equal(answer.code, "settlement_already_booked");
       assert.ok(String(answer.error).includes(TX), "the 409 names the tx");
       assert.match(String(answer.error), /nothing was charged again/);
-      if (publicKey === null) assert.match(String(answer.error), /the secret cannot be recovered/, "secret-mode names its limit plainly (B5d)");
+      if (publicKey === null) {
+        assert.match(String(answer.error), /its secret was generated once/, "secret-mode names its limit plainly (B5d)");
+        assert.match(String(answer.error), /cannot be recovered/);
+        // C8: true whether or not the 201 reached the payer, so it never claims a response containing the secret "was issued".
+        assert.doesNotMatch(String(answer.error), /was issued/);
+      }
       assert.deepEqual(stub.calls, { verify: 1, settle: 1 }, "the replay reached neither /verify nor /settle");
       assert.equal(count(d1, "citizens"), 1, "no second citizen");
       assert.equal(count(d1, "ledger"), 1, "no second ledger row");

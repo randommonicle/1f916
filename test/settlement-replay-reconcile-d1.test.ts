@@ -197,7 +197,7 @@ test("7c. the two RPCs DISAGREE -> no transition, nothing re-POSTed; fewer than 
   }
 });
 
-test("7d. chain says UNUSED and validBefore is ahead -> the stored body is re-POSTed and classified as today: settled books it, a recorded refusal (rule 7) refuses it", async () => {
+test("7d. chain says UNUSED and validBefore is ahead -> the stored body is re-POSTed and classified as today: settled books it; a recorded refusal (rule 7) is NOT honoured on this path (H2): the claim stays pending", async () => {
   for (const verdict of ["settled", "refused"] as const) {
     const d1 = createLocalD1();
     const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : verdict === "settled" ? settledAnswer() : refusedAnswer()), rpc: bothRpcs(false) });
@@ -212,15 +212,15 @@ test("7d. chain says UNUSED and validBefore is ahead -> the stored body is re-PO
         assert.equal(row.state, "booked");
         assert.equal(count(d1, "citizens"), 1);
       } else {
-        assert.equal(out.resolved, 1);
-        assert.equal(row.state, "refused");
-        assert.equal(row.rpc_body, null, "B7");
+        assert.equal(out.resolved, 0, "a re-POST refusal against an unused authorisation resolves nothing (an earlier attempt's transfer may still be mined)");
+        assert.equal(out.unchanged, 1);
+        assert.equal(row.state, "pending");
+        assert.notEqual(row.rpc_body, null, "the authorisation body is kept while the claim can still move money");
         assert.equal(count(d1, "citizens"), 0);
         assert.equal(count(d1, "ledger"), 0);
         const resend = await seat.send();
-        assert.equal(resend.status, 402, "the recorded refusal is served back, with requirements to sign again");
-        assert.match(String((await json(resend)).error), /insufficient_funds/);
-        assert.equal(stub.calls.settle, 2, "and is not asked again");
+        assert.equal(resend.status, 502, "the payer is told the outcome is unresolved, never a 402 inviting a second signature");
+        assert.equal((await json(resend)).accepts, undefined);
       }
     } finally {
       stub.restore();
@@ -229,7 +229,7 @@ test("7d. chain says UNUSED and validBefore is ahead -> the stored body is re-PO
   }
 });
 
-test("7e. chain says USED but the facilitator's answer is unknown, or a refusal: the claim stays pending (a spent authorisation is never refused)", async () => {
+test("7e. chain says USED but the facilitator's answer is unknown, or a refusal: the claim stays pending (a spent authorisation is never refused); a refusal STOPS it (C4, option B: stamped, counted `stopped`)", async () => {
   for (const second of [() => new Response("{}", { status: 500 }), refusedAnswer]) {
     const d1 = createLocalD1();
     const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : second()), rpc: bothRpcs(true) });
@@ -237,7 +237,13 @@ test("7e. chain says USED but the facilitator's answer is unknown, or a refusal:
       const seat = await pendingRegistration(d1);
       assert.equal((await seat.send()).status, 502);
       const out = await runReconciler(testEnv(d1));
-      assert.equal(out.unchanged, 1);
+      if (second === refusedAnswer) {
+        assert.equal(out.stopped, 1);
+        assert.equal(out.unchanged, 0);
+      } else {
+        assert.equal(out.unchanged, 1);
+        assert.equal(out.stopped, 0);
+      }
       assert.equal(oneClaim(d1).state, "pending");
       assert.equal(count(d1, "citizens"), 0);
     } finally {
