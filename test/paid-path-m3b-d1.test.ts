@@ -25,8 +25,11 @@ import {
   json,
   patronReq,
   paymentHeaderFor,
+  failInserts,
+  dropTrigger,
   stubFacilitator,
   testEnv,
+  type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
 import {
@@ -35,6 +38,7 @@ import {
   claimKeyFromPayload,
   getClaim,
   keyOfRow,
+  listingReservationState,
   markChainSpent,
   markRefused,
   noteUnknown,
@@ -48,7 +52,7 @@ import {
 } from "../src/settlement-claims.ts";
 import { runReconciler } from "../src/settlement-reconcile.ts";
 import { attemptPending } from "../src/x402.ts";
-import { handlePayListing } from "../src/listings.ts";
+import { finishPayListingBooking, handlePayListing } from "../src/listings.ts";
 import { SocietyError } from "../src/society.ts";
 
 const REQS = { network: "base", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
@@ -97,7 +101,7 @@ const loadCitizen = (d1: LocalD1, id: number) =>
   d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(id) as { id: number; handle: string; model: string; karma: number; created_at: number; last_seen_at: number };
 
 // A funded listing with a pinned reviewer wallet and the funder's signed header, sent through the real pay route.
-async function payFixture(d1: LocalD1, opts: { validBefore?: string } = {}) {
+async function payFixture(d1: LocalD1, opts: { validBefore?: string; env?: Env } = {}) {
   const funderId = insertCitizen(d1);
   const reviewerId = insertCitizen(d1);
   const wallet = "0x" + "0a".repeat(20);
@@ -113,7 +117,7 @@ async function payFixture(d1: LocalD1, opts: { validBefore?: string } = {}) {
           headers: { "Content-Type": "application/json", "X-PAYMENT": header },
           body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
         }),
-        eq(d1),
+        opts.env ?? eq(d1),
         loadCitizen(d1, funderId),
         listingId,
       );
@@ -517,5 +521,352 @@ test("M4 (pay listing): the same refusal, and the listing is not reserved", asyn
   } finally {
     stub.restore();
     d1.close();
+  }
+});
+
+
+// ---------- H3 (a): a takeClaim that THROWS re-reads the claim (gate MEDIUM-1) ----------
+
+const UNWRAP = Symbol("unwrap");
+// An Env whose INSERT into settlement_claims COMMITS and then throws (D1 committed and still reported an error). With `readBackThrows`, every later read of the claim table throws too,
+// so the re-read cannot tell whether the row exists.
+function claimInsertCommitsThenThrowsEnv(d1: LocalD1, opts: { readBackThrows?: boolean } = {}): Env {
+  const real = d1.DB;
+  let inserted = false;
+  const wrap = (stmt: any, sql: string): any =>
+    new Proxy(stmt, {
+      get(target, prop) {
+        if (prop === UNWRAP) return target;
+        if (prop === "bind") return (...a: unknown[]) => wrap(target.bind(...a), sql);
+        if (prop === "run" && /^\s*INSERT INTO settlement_claims/.test(sql)) {
+          return async (...a: unknown[]) => {
+            await target.run(...a);
+            inserted = true;
+            throw new Error("D1 reported an error after the commit (test)");
+          };
+        }
+        if (prop === "first" && opts.readBackThrows && inserted && /FROM settlement_claims WHERE/.test(sql)) {
+          return async () => {
+            throw new Error("D1 read failed after the commit (test)");
+          };
+        }
+        const v = target[prop];
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+  const DB = {
+    prepare: (sql: string) => wrap(real.prepare(sql), sql),
+    batch: (stmts: any[]) => real.batch(stmts.map((x) => x[UNWRAP] ?? x)),
+  };
+  return { ...testEnv(d1), DB } as unknown as Env;
+}
+
+test("H3/MEDIUM-1 (pay listing): the claim INSERT commits and then throws: the reservation is KEPT, nothing is sent to /settle, and the answer is not a 'try again' 503 (the claim exists; do not sign again)", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1, { env: claimInsertCommitsThenThrowsEnv(d1) });
+  const stub = stubFacilitator();
+  try {
+    const { value: res, lines } = await captureLog(() => fx.send());
+    assert.notEqual(res.status, 503, JSON.stringify(res.body));
+    assert.equal(res.status, 502, JSON.stringify(res.body));
+    const text = String(res.body.error);
+    assert.match(text, /nothing was sent to the facilitator's \/settle/i);
+    assert.match(text, /Do not sign again/);
+    assert.doesNotMatch(text, /Try again later|has not been used|Nothing was reserved or created/i, "the claim exists and the listing is reserved: neither sentence is true");
+    assert.equal(fx.listing().status, "paying", "the reservation is kept: releasing it would re-open the listing under a claim a re-send could settle");
+    assert.notEqual(fx.listing().paying_since, null);
+    assert.equal(stub.calls.settle, 0, "no /settle was sent");
+    const claim = claimDetail(d1);
+    assert.equal(claim.state, "pending");
+    assert.equal(claim.lease_owner, null, "this request let go of its own lease, so the reconciler or a re-send is not told to wait for it");
+    assert.notEqual(claim.rpc_body, null);
+    assert.equal(eventLines(lines, "settlement_claim_not_taken").length, 1, "the failure is still logged once");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H3/MEDIUM-1 (pay listing): the INSERT commits, throws, and the re-read throws too: the society cannot tell whether a claim exists, so the reservation is KEPT and the answer says so", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1, { env: claimInsertCommitsThenThrowsEnv(d1, { readBackThrows: true }) });
+  const stub = stubFacilitator();
+  try {
+    const res = await fx.send();
+    assert.equal(res.status, 503, JSON.stringify(res.body));
+    assert.equal(res.body.code, "settlement_claim_unavailable");
+    const text = String(res.body.error);
+    assert.match(text, /nothing was sent to the facilitator's \/settle/i);
+    assert.match(text, /could not (tell|confirm)/i);
+    assert.match(text, /Do not sign again/);
+    assert.doesNotMatch(text, /Nothing was reserved or created|Try again later|has not been used/i);
+    assert.equal(fx.listing().status, "paying", "fail closed: only a proven absence of the row may release");
+    assert.equal(stub.calls.settle, 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H3/MEDIUM-1 (patron): the INSERT commits and throws: the answer says the claim exists and nothing was sent; the payer's identical re-send then completes the payment once", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ rpc: chainRpc(false) });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    const first = await callWorker(patronReq("rent", header), claimInsertCommitsThenThrowsEnv(d1));
+    const body = await json(first);
+    assert.equal(first.status, 502, JSON.stringify(body));
+    assert.match(String(body.error), /nothing was sent to the facilitator's \/settle/i);
+    assert.match(String(body.error), /Repeating this identical request re-checks it sooner/, "for a route with no reservation a re-send really does re-check it");
+    assert.equal(stub.calls.settle, 0);
+    assert.equal(claimDetail(d1).state, "pending");
+    const resend = await callWorker(patronReq("rent", header), eq(d1));
+    assert.equal(resend.status, 200, JSON.stringify(await resend.clone().json()));
+    assert.equal(stub.calls.settle, 1, "settled exactly once");
+    assert.equal(claimDetail(d1).state, "booked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H3/MEDIUM-1 control: an INSERT that throws WITHOUT committing (no row) still releases the reservation and says nothing was created (the existing L1 answer)", async () => {
+  const d1 = createLocalD1();
+  const fx = await payFixture(d1);
+  const stub = stubFacilitator();
+  try {
+    failInserts(d1, "no_claims_m3b", "settlement_claims", null, "disk I/O error (test)");
+    const res = await fx.send();
+    assert.equal(res.status, 503, JSON.stringify(res.body));
+    assert.equal(res.body.code, "settlement_claim_unavailable");
+    assert.match(String(res.body.error), /Nothing was reserved or created by this request/);
+    assert.equal(fx.listing().status, "open", "no row: the reservation is released");
+    dropTrigger(d1, "no_claims_m3b");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- H3 (b): a stranded pending listing_pay claim is never re-POSTed against a reservation that is not its own ----------
+
+// A pay-listing claim left PENDING by an unknown first outcome, its reservation held.
+async function pendingPayClaim(d1: LocalD1) {
+  const fx = await payFixture(d1);
+  const res = await fx.send();
+  assert.equal(res.status, 502, JSON.stringify(res.body));
+  assert.equal(fx.listing().status, "paying");
+  assert.equal(claimDetail(d1).state, "pending");
+  return fx;
+}
+const reopen = (d1: LocalD1, listingId: number) =>
+  d1.raw.prepare("UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ?").run(listingId);
+// Another payer reserves the re-opened listing LATER (same pinned wallet row: it is still the payee's newest).
+const rereserve = (d1: LocalD1, listingId: number, pin: { id: number; hash: string }, since: number) =>
+  d1.raw.prepare("UPDATE listings SET status = 'paying', paying_since = ?, paying_wallet_row_id = ?, paying_wallet_row_hash = ? WHERE id = ?").run(since, pin.id, pin.hash, listingId);
+
+for (const scenario of ["the listing was re-opened", "a replacement reservation holds it"] as const) {
+  test(`H3: an old pending claim and ${scenario}: the chain unused, a re-send and the reconciler make NO /settle call and the claim stays pending`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: chainRpc(false) });
+    try {
+      const fx = await pendingPayClaim(d1);
+      const claim = theClaim(d1);
+      reopen(d1, fx.listingId);
+      if (scenario !== "the listing was re-opened") rereserve(d1, fx.listingId, fx.pin, claim.created_at + 60_000);
+      const listingBefore = fx.listing();
+      assert.equal(stub.calls.settle, 1);
+
+      const resend = await fx.send();
+      assert.equal(stub.calls.settle, 1, "the funder's identical re-send re-POSTed nothing");
+      if (scenario === "the listing was re-opened") assert.equal(resend.status, 502, JSON.stringify(resend.body));
+      assert.equal(resend.body.accepts, undefined);
+
+      const out = await runReconciler(eq(d1));
+      assert.equal(stub.calls.settle, 1, "and neither did the reconciler");
+      assert.equal(out.unchanged, 1, JSON.stringify(out));
+      assert.equal(claimDetail(d1).state, "pending");
+      assert.notEqual(claimDetail(d1).rpc_body, null);
+      assert.deepEqual(fx.listing(), listingBefore, "the listing (and a replacement payer's reservation) is untouched");
+      assert.equal(count(d1, "listing_payments"), 0);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+
+  test(`H3: ${scenario}, and the chain reads the authorisation USED: the claim is stamped and stopped for a person; still no /settle call`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: chainRpc(true) });
+    try {
+      const fx = await pendingPayClaim(d1);
+      const claim = theClaim(d1);
+      reopen(d1, fx.listingId);
+      if (scenario !== "the listing was re-opened") rereserve(d1, fx.listingId, fx.pin, claim.created_at + 60_000);
+      const out = await runReconciler(eq(d1));
+      assert.equal(out.stopped, 1, JSON.stringify(out));
+      assert.equal(stub.calls.settle, 1, "no /settle: the chain says the money moved, and the listing is not this claim's");
+      assert.ok(String(claimDetail(d1).verdict_reason).startsWith(`${CHAIN_SPENT}:`));
+      assert.equal(claimDetail(d1).state, "pending");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+test("H3 control: a pending claim that still holds ITS OWN reservation is re-POSTed and booked as before", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: chainRpc(false) });
+  try {
+    const fx = await pendingPayClaim(d1);
+    const out = await runReconciler(eq(d1));
+    assert.equal(stub.calls.settle, 2);
+    assert.equal(out.booked, 1, JSON.stringify(out));
+    assert.equal(fx.listing().status, "paid");
+    assert.equal(count(d1, "listing_payments"), 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H3: listingReservationState: bound only for the claim's own reservation (status, pin id and hash, and paying_since no later than the claim's creation)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ settle: () => pendingAnswer() });
+  try {
+    const fx = await pendingPayClaim(d1);
+    const row = theClaim(d1);
+    assert.deepEqual(await listingReservationState(eq(d1), row), { status: "paying", bound: true });
+    d1.raw.prepare("UPDATE listings SET paying_since = ? WHERE id = ?").run(row.created_at + 1, fx.listingId);
+    assert.equal((await listingReservationState(eq(d1), row)).bound, false, "reserved later than the claim was created: another payer's");
+    d1.raw.prepare("UPDATE listings SET paying_since = ? WHERE id = ?").run(row.created_at, fx.listingId);
+    assert.equal((await listingReservationState(eq(d1), row)).bound, true, "the same instant is still the claim's own");
+    d1.raw.prepare("UPDATE listings SET paying_wallet_row_hash = 'other' WHERE id = ?").run(fx.listingId);
+    assert.equal((await listingReservationState(eq(d1), row)).bound, false, "another pinned wallet row");
+    d1.raw.prepare("UPDATE listings SET paying_wallet_row_hash = ?, paying_wallet_row_id = paying_wallet_row_id + 1 WHERE id = ?").run(fx.pin.hash, fx.listingId);
+    assert.equal((await listingReservationState(eq(d1), row)).bound, false, "another pinned wallet row id");
+    reopen(d1, fx.listingId);
+    assert.deepEqual(await listingReservationState(eq(d1), row), { status: "open", bound: false });
+    const ghost = { ...row, intent_json: JSON.stringify({ ...JSON.parse(row.intent_json), listing_id: 999_999 }) };
+    assert.deepEqual(await listingReservationState(eq(d1), ghost), { status: null, bound: false }, "no such listing");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- H3 (c): the booking is bound to the same reservation (the booking-reservation-binding deferral, discharged) ----------
+
+// A settled bounty payment whose booking failed once (so the claim is settled_unbooked and the reservation held).
+async function settledUnbookedPayClaim(d1: LocalD1) {
+  const fx = await payFixture(d1);
+  failInserts(d1, "m3b_fail_payment", "listing_payments", null, "disk I/O error (test)");
+  const first = await fx.send();
+  assert.equal(first.status, 500, JSON.stringify(first.body));
+  dropTrigger(d1, "m3b_fail_payment");
+  assert.equal(claimDetail(d1).state, "settled_unbooked");
+  assert.equal(fx.listing().status, "paying");
+  return fx;
+}
+
+test("H3: a settled_unbooked claim is NEVER booked against a later payer's reservation: the booking INSERT is gated on the claim's own reservation, nothing is written, the listing stays that payer's", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const fx = await settledUnbookedPayClaim(d1);
+    const row = theClaim(d1);
+    reopen(d1, fx.listingId);
+    rereserve(d1, fx.listingId, fx.pin, row.created_at + 60_000);
+    const laterReservation = fx.listing();
+    await assert.rejects(() => finishPayListingBooking(eq(d1), row, "O"), /nothing was recorded|recording|no longer/i);
+    assert.equal(count(d1, "listing_payments"), 0, "no payment row was written against the later reservation");
+    assert.deepEqual(fx.listing(), laterReservation, "the later payer's reservation is untouched, not marked paid");
+    assert.equal(claimDetail(d1).state, "settled_unbooked");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H3: C5's check uses the same binding: the reconciler sets a claim aside (listing_not_paying) when the listing is held by a replacement reservation, rather than handing it to the booking", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const fx = await settledUnbookedPayClaim(d1);
+    const row = theClaim(d1);
+    reopen(d1, fx.listingId);
+    rereserve(d1, fx.listingId, fx.pin, row.created_at + 60_000);
+    const { value: out, lines } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(out.unchanged, 1, JSON.stringify(out));
+    assert.equal(out.failed, 0, "it did not try (and fail) to book it");
+    assert.equal(out.booked, 0);
+    assert.equal(eventLines(lines, "settlement_listing_not_paying").length, 1);
+    assert.equal(claimDetail(d1).verdict_reason, "listing_not_paying");
+    assert.equal(count(d1, "listing_payments"), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("H3 control: the booking still completes against the claim's OWN reservation (the reconciler books it after a transient booking failure)", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const fx = await settledUnbookedPayClaim(d1);
+    const out = await runReconciler(eq(d1));
+    assert.equal(out.booked, 1, JSON.stringify(out));
+    assert.equal(fx.listing().status, "paid");
+    assert.equal(count(d1, "listing_payments"), 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- gate LOW-2: the booking-failure 500 must not promise a reconciler pass that will not happen ----------
+
+test("LOW-2: the 500 for a payment that settled but whose listing no longer holds the reservation does NOT promise the reconciler's daily pass (it will set the claim aside); a transient failure with the reservation intact still does", async () => {
+  // (a) the operator releases the reservation while the settle is in flight: the booking cannot happen
+  {
+    const d1 = createLocalD1();
+    const fxRef: { fx?: Awaited<ReturnType<typeof payFixture>> } = {};
+    const stub = stubFacilitator({
+      settle: () => {
+        reopen(d1, fxRef.fx!.listingId);
+        return settledAnswer();
+      },
+    });
+    try {
+      const fx = await payFixture(d1);
+      fxRef.fx = fx;
+      const res = await fx.send();
+      assert.equal(res.status, 500, JSON.stringify(res.body));
+      const text = String(res.body.error);
+      assert.match(text, new RegExp(TX));
+      assert.match(text, /no longer (awaiting|holds)/i);
+      assert.match(text, /set it aside/i);
+      assert.match(text, /Do not sign again/);
+      assert.doesNotMatch(text, /one pass a day|06:00|can wait more than one day|re-checks it sooner|works a limited number/i, "no promise that the reconciler will book it");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (b) a transient failure with the reservation intact: the reconciler WILL book it, and the text may say so
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator();
+    try {
+      const fx = await payFixture(d1);
+      failInserts(d1, "m3b_fail_payment2", "listing_payments", null, "disk I/O error (test)");
+      const res = await fx.send();
+      assert.equal(res.status, 500, JSON.stringify(res.body));
+      assert.match(String(res.body.error), /one pass a day/);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
   }
 });

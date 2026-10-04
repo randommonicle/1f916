@@ -294,3 +294,58 @@ meaning: the full suite stayed green with only that default moved (tests that se
 Served string, new: 402 "This payment authorisation's validBefore (T) is further ahead than this server accepts. It must be no later than B (unix seconds, from now): the 300 seconds the payment requirements declare, plus 60
 seconds for clock skew. Nothing was sent to the facilitator and nothing was charged. Sign a fresh authorisation with a validBefore inside that bound." Before: no such refusal (any validBefore was admitted).
 The reconciler re-measurement the commission lists under M4 is S8 (nothing in M4 adds a statement or a fetch to a reconciler row: the check is a comparison).
+
+## S5. H3 + gate MEDIUM-1 + the booking-reservation binding + gate LOW-2
+
+What, in four parts.
+1. THE BINDING (which one, as the commission asks): the one the code already had, F2's release (`listingReleaseStatement`): the listing is `paying`, unpaid, records THIS claim's pinned wallet row (id and hash from the
+   claim's intent), and `paying_since <= claim.created_at` (a reservation is always taken before its claim in the same request, so a later `paying_since` is another payer's). It is now ONE exported fragment,
+   `RESERVATION_BOUND` + `reservationArgs(row)` in `settlement-claims.ts`, and the release statement was refactored onto it (behaviour unchanged: the F2 tests stayed green). It is used by: the release, the booking INSERT's
+   `EXISTS`, the booking `UPDATE listings`, C5's check in the reconciler, and the new pre-re-POST check, via `listingReservationState(env, row)` (one read: status and `bound`). Closes this checkpoint's open question 2 and the
+   gate's MEDIUM-1 binding requirement (lines 68-71 of the gate record). The `DEFERRED-BOOKING-RESERVATION-BINDING` flag is removed.
+2. PRE-RE-POST CHECK (`attemptPending`, listing_pay only, after the expiry branches and before the body is parsed or `/settle` is called): not bound and the chain reads USED -> stamped and stopped (S1's marker, via a new
+   `stopPending` helper that the rule-7 branch now shares); not bound and unused -> `unchanged`, no `/settle`, the claim waits for C6's expiry proof (whose F2 release is bound the same way, so a replacement payer's reservation is
+   never released by it). Cost: one D1 read for a listing_pay row.
+   Decision to flag: the stamp for "chain used + listing not holding the reservation" reuses the marker `chain_spent_facilitator_refused` (the allowlist is fixed), though no facilitator refusal is involved. The served text for a
+   stopped row says only what is established (the chain reads the nonce used; retries stopped; a person will look), so it is true for both causes; the stored reason after the colon names the real one.
+3. `takeClaim` THAT THROWS (`payAndSettle`): the claim is re-read. No row: today's 503 and release. Our row (its `lease_owner` is this request's owner: the INSERT landed): the reservation is KEPT, our own lease is released, the answer
+   is a 502 `settlement_unresolved` saying the claim exists and nothing was sent. Another request's row: answered from it as a key conflict is (no keepReservation, as before). The re-read throws too: the reservation is KEPT (fail closed:
+   only a proven absence of the row may release) with a 503 `settlement_claim_unavailable` that says the society could not confirm. Decision: the gate offered "proceed as its holder" or "answer from it"; the commission says answer from
+   it, which is what is built (it is the smaller change; the claim then resolves through the reconciler's expiry proof, or, for a route with no reservation, the payer's identical re-send).
+4. GATE LOW-2: `finishPayListing`'s booking-failure 500 now branches on `listingReservationState`: not bound -> `listingNotPayingMessage(row, "will")` (the C5 text with the tense fixed: the reconciler WILL set it aside when it next
+   meets it; it used to promise the daily pass that works the claim); bound (a transient failure) -> the unchanged backstop text; a read that fails -> the backstop. The 500's code is `settlement_unresolved` in the new branch.
+
+Tests (`test/paid-path-m3b-d1.test.ts`): INSERT commits then throws (pay listing: reservation kept, 0 `/settle`, 502, lease released, one log line; re-read also throws: 503, kept; patron: 502 with the repeat clause and the re-send
+completes the payment once; the no-row control still releases); old pending claim against a re-opened listing and against a replacement reservation, chain unused (re-send and reconciler: 0 further `/settle`, claim pending, listing
+untouched) and chain used (stamped, 0 further `/settle`); the in-reservation control (re-POSTed and booked); `listingReservationState` unit; a settled_unbooked claim is never booked against a later reservation (INSERT gate) and C5 sets it
+aside; the booking control; LOW-2 both branches.
+
+| mutant | red in |
+|---|---|
+| the catch never keeps the reservation for our own row | both INSERT-commits-then-throws tests |
+| the catch releases when the re-read throws | the unreadable-claim test |
+| no pre-re-POST check | all four stranded-claim tests |
+| unbound + used does not stamp | both chain-used tests |
+| booking INSERT gated on `status = 'paying'` only | the never-booked-against-a-later-reservation test |
+| C5's check on status only | the C5 same-binding test |
+| LOW-2 always serves the backstop | the LOW-2 test |
+| the binding without the `paying_since` order | five tests |
+| the binding without the pinned wallet row | the unit test |
+
+Not independently red-proofable: the binding on the booking `UPDATE listings`. It sits in the same D1 batch as the INSERT and is guarded by `changes() = 1` from the INSERT, so the INSERT's gate already stops it and no test can make
+the UPDATE's own condition decisive (defence in depth, the same stance as before). Stated rather than hidden.
+
+Served strings (old -> new):
+- claim-INSERT throw with the row present and ours. Old: 503 "The society could not record a claim for this payment (a database error), so nothing was sent to the facilitator's /settle and nothing was charged. Nothing was reserved or created by
+  this request. Try again later: the same signed authorisation has not been used." (false: the claim exists; the reservation was released). New: 502 "The society recorded a claim for this payment authorisation but could not confirm that it had
+  (a database error). Nothing was sent to the facilitator's /settle by this request, so by this request's own account no money moved. Do not sign again. [listing_pay: The listing stays reserved for this payment until the claim resolves: an
+  authorisation nobody uses lapses within minutes, after which the reconciler can release the listing.] <reconcile tail>".
+- claim-INSERT throw, re-read throws. New: 503 "The society could not confirm whether a claim for this payment authorisation was recorded (a database error), so nothing was sent to the facilitator's /settle by this request and it charged
+  nothing. [listing_pay: The listing stays reserved, because releasing it could re-open it under a claim that does exist.] Do not sign again: this is logged for the maintainer to resolve." The no-row answer is the old text, unchanged.
+- pending answer's detail for an unbound listing_pay claim, new: "This payment's listing (<status>) no longer holds the reservation this claim was made under, so the society does not re-send the authorisation to the facilitator. The claim waits
+  until the chain shows the authorisation used or provably expired."
+- `finishPayListing` 500 when the listing no longer holds the reservation. Old: "Your payment settled (tx T) but recording it failed. This is logged for the maintainer ... <RECONCILE_BACKSTOP> To add your own report ...". New (500,
+  `settlement_unresolved`): the C5 text with a future tense, "Your $X payment settled (tx T), but the listing it was paid against (listing N) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler
+  will set it aside when it next meets it rather than retry it. Do not sign again: ..."; the transient-failure text is unchanged. The thrown (logged) message "...or the listing is no longer paying" became "...or the listing no longer holds this
+  payment's reservation".
+Existing tests moved on purpose: `paid-path-m3-d1` "C3 control: PAY LISTING keeps the lease read-back" and `settlement-replay-listings-d1` 10d (both asserted /recording it failed/ for a released listing; they now assert the LOW-2 text).

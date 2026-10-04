@@ -35,7 +35,7 @@ import {
   PAYMENT_MAX_TIMEOUT_SECONDS,
   type PaidClaim,
 } from "./x402.ts";
-import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, refsOf, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, stepGatedOutByLease, type ClaimRow } from "./settlement-claims.ts";
+import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, listingNotPayingMessage, listingReservationState, refsOf, reservationArgs, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, RESERVATION_BOUND, SETTLEMENT_UNRESOLVED, stepGatedOutByLease, type ClaimRow } from "./settlement-claims.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
@@ -998,9 +998,9 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
     const now = Date.now();
     let paymentStep: { applied: boolean };
     try {
-      // DEFERRED-BOOKING-RESERVATION-BINDING (builder flag 1, CODEX M3-build r1 HIGH second half): the INSERT below and the UPDATE after it
-      // check `status = 'paying'` only, not that the reservation is THIS claim's (its paying_since and pin). d4f25eb0 closed the route that
-      // released a reservation under a settled claim; binding the booking to its own reservation is defence in depth, for the D-018 gate.
+      // The INSERT and the UPDATE after it are gated on THIS claim's own reservation (RESERVATION_BOUND: 'paying', unpaid, the claim's pinned wallet row, and taken no later than the claim
+      // was created), not on `status = 'paying'` alone (builder flag 1, CODEX M3-build r1 HIGH second half, gate MEDIUM-1: the old booking-reservation-binding deferral, discharged in the second
+      // build). A claim can therefore never be booked against another payer's reservation; C5's check and the pre-re-POST check use the same fragment.
       paymentStep = await runBookingStep(
         env,
         claimKey,
@@ -1010,11 +1010,11 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
           statements: async (gate) => [
             env.DB.prepare(
               `INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at, wallet_row_id, wallet_row_hash)
-               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${gate.sql}) AND EXISTS (SELECT 1 FROM listings WHERE id = ? AND status = 'paying')`,
-            ).bind(i.listing_id, i.submission_id, i.payee_citizen_id, i.payee_address, payer, i.amount_cents, tx, now, i.wallet_row_id, i.wallet_row_hash, ...gate.args, i.listing_id),
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${gate.sql}) AND EXISTS (SELECT 1 FROM listings WHERE id = ? AND ${RESERVATION_BOUND})`,
+            ).bind(i.listing_id, i.submission_id, i.payee_citizen_id, i.payee_address, payer, i.amount_cents, tx, now, i.wallet_row_id, i.wallet_row_hash, ...gate.args, i.listing_id, ...reservationArgs(row)),
             env.DB.prepare(
-              "UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND status = 'paying' AND changes() = 1",
-            ).bind(i.submission_id, tx, i.listing_id),
+              `UPDATE listings SET status = 'paid', paid_submission_id = ?, paid_tx = ?, paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL WHERE id = ? AND ${RESERVATION_BOUND} AND changes() = 1`,
+            ).bind(i.submission_id, tx, i.listing_id, ...reservationArgs(row)),
           ],
         },
         owner,
@@ -1025,7 +1025,7 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
       // moved, not only that another holder's lease gated it. Another owner holding a live lease and still booking: the answer is the claim's, not an error (R1/R3).
       if (refsOf(after).payment_id == null && !paymentStep.applied && leaseHeldByAnother(after, owner, Date.now())) return answerFromClaim(env, claimKey, owner);
       if (refsOf(after).payment_id == null) {
-        throw new Error("nothing was recorded: the claim is not settled_unbooked or the listing is no longer paying");
+        throw new Error("nothing was recorded: the claim is not settled_unbooked or the listing no longer holds this payment's reservation");
       }
     } catch (e) {
       console.log(
@@ -1047,6 +1047,16 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
       // refuses -- never a double-pay, even though the public payments book
       // is temporarily incomplete. The claim stays settled_unbooked, and the
       // reconciler books it from the recorded facts.
+      // Gate LOW-2 (second build): ...unless the listing no longer holds this claim's reservation (the operator released it, or another payer holds it now). Then the reconciler will not book
+      // it: it sets the claim aside the first time it meets it (C5). The backstop sentence promises a daily pass that works the claim, so it is served only while the reservation is intact;
+      // otherwise the answer is the listing-no-longer-awaiting-this-payment one, in the future tense (the reconciler has not met the claim yet). A read that fails serves the backstop.
+      let noLongerHeld = false;
+      try {
+        noLongerHeld = !(await listingReservationState(env, row)).bound;
+      } catch {
+        noLongerHeld = false;
+      }
+      if (noLongerHeld) throw new SocietyError(500, listingNotPayingMessage(row, "will"), SETTLEMENT_UNRESOLVED);
       throw new SocietyError(
         500,
         `Your payment settled (tx ${tx}) but recording it failed. This is logged for the maintainer to see and put right by hand. ${RECONCILE_BACKSTOP} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Verify your payment independently on Base.`,

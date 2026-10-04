@@ -592,7 +592,9 @@ test("C3 control: PAY LISTING keeps the lease read-back: a step gated out becaus
     });
     assert.ok("thrown" in outcome, `the pay route still throws its booking failure (got ${JSON.stringify(outcome)})`);
     assert.ok(outcome.thrown instanceof SocietyError && outcome.thrown.status === 500);
-    assert.match(String((outcome.thrown as SocietyError).message), /recording it failed/, "the pay route's booking-failure answer, unchanged");
+    // moved by gate LOW-2 (second build): the listing no longer holds the reservation, so the answer is the listing-no-longer-awaiting-this-payment one, not the reconciler backstop
+    assert.match(String((outcome.thrown as SocietyError).message), /no longer awaiting this payment/);
+    assert.doesNotMatch(String((outcome.thrown as SocietyError).message), /one pass a day/);
     assert.equal(eventLines(lines, "listing_pay_settled_but_unrecorded").length, 1, "and its one log line");
     assert.equal(count(d1, "listing_payments"), 0);
     assert.equal(oneClaim(d1).state, "settled_unbooked");

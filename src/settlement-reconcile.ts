@@ -44,7 +44,7 @@ import { attemptPending, finishPatronBooking, clipReason, holdSuccessAgainstTerm
 import { finishRegistration } from "./register-gate.ts";
 import { finishListingCreateBooking, finishPayListingBooking } from "./listings.ts";
 import { INVOCATION_SUBREQUEST_BUDGET, FINALISE_RESERVE } from "./maintainer/budget.ts";
-import { acquireLease, intentOf, keyOfRow, markListingNotPaying, releaseLease, CHAIN_SPENT_MARKER, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, type ClaimRow } from "./settlement-claims.ts";
+import { acquireLease, intentOf, keyOfRow, listingReservationState, markListingNotPaying, releaseLease, CHAIN_SPENT_MARKER, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, type ClaimRow } from "./settlement-claims.ts";
 import type { Env } from "./society.ts";
 
 // At most this many rows are worked in one run (a fixed batch).
@@ -210,8 +210,10 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
       // statements than the 16-statement registration the budget is itemised on).
       if (working.route === "listing_pay") {
         const listingId = Number((intentOf(working) as { listing_id?: unknown }).listing_id);
-        const listing = await rowEnv.DB.prepare("SELECT status FROM listings WHERE id = ?").bind(listingId).first<{ status: string }>();
-        if (listing?.status !== "paying") {
+        // H3 (second build): the listing must be 'paying' AND hold THIS claim's reservation (listingReservationState, the one binding the booking INSERT also uses); a replacement
+        // reservation by another payer reads as not-paying here, so the claim is set aside instead of being handed to a booking its INSERT would gate out every run. Still one read.
+        const listing = await listingReservationState(rowEnv, working);
+        if (!listing.bound) {
           const marked = await markListingNotPaying(rowEnv, key, owner, Date.now());
           if (marked) {
             console.log(
@@ -221,7 +223,7 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
                 tx: working.tx,
                 payer: working.payer,
                 listing_id: listingId,
-                listing_status: listing?.status ?? null,
+                listing_status: listing.status,
                 claim_from: working.from_addr,
                 claim_nonce: working.nonce,
                 reason: "the listing this bounty payment was made against is no longer 'paying', so it can never be booked against it; the claim is set aside for the maintainer to decide by hand",

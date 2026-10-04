@@ -270,6 +270,26 @@ export const stepGatedOutByLease = (after: ClaimRow | null, ref: RefName): boole
 
 // ---------- transitions (each conditional on the state it leaves) ----------
 
+// H3 + gate MEDIUM-1 + the booking-reservation-binding deferral (second build; discharged): THE RESERVATION A listing_pay CLAIM OWNS. The binding the code already had is the F2 release's: the listing is
+// 'paying' and unpaid, the reservation records THIS claim's pinned wallet row (id and hash, from the claim's intent), and it was taken no later than the claim was created (a reservation is
+// always taken before its claim in the same request, so a LATER paying_since is another payer's reservation, taken after a release). ONE fragment, on the listings table's own columns,
+// used by everything that must act only on the claim's own reservation: the release (above), the booking INSERT and the listing UPDATE (listings.ts finishPayListing), C5's check
+// (settlement-reconcile.ts) and the pre-re-POST check (x402.ts attemptPending), so they cannot drift. Binds, in order: wallet_row_id, wallet_row_hash, created_at (reservationArgs).
+export const RESERVATION_BOUND =
+  "status = 'paying' AND paid_submission_id IS NULL AND paying_wallet_row_id = ? AND paying_wallet_row_hash = ? AND paying_since IS NOT NULL AND paying_since <= ?";
+export function reservationArgs(row: Pick<ClaimRow, "intent_json" | "created_at">): unknown[] {
+  const i = intentOf(row) as { wallet_row_id: number; wallet_row_hash: string };
+  return [i.wallet_row_id, i.wallet_row_hash, row.created_at];
+}
+// One read: the listing's status (null when there is no such listing) and whether it holds THIS claim's reservation.
+export async function listingReservationState(env: Env, row: ClaimRow): Promise<{ status: string | null; bound: boolean }> {
+  const i = intentOf(row) as { listing_id: number };
+  const r = await env.DB.prepare(`SELECT status, CASE WHEN ${RESERVATION_BOUND} THEN 1 ELSE 0 END AS bound FROM listings WHERE id = ?`)
+    .bind(...reservationArgs(row), i.listing_id)
+    .first<{ status: string; bound: number }>();
+  return { status: r?.status ?? null, bound: r?.bound === 1 };
+}
+
 // pending -> settled_unbooked: the facilitator said settled. False means another
 // worker already moved it (or holds a live lease on it); the caller re-reads and
 // answers from the row. A non-final write that passes RENEWS the lease in the same
@@ -294,12 +314,11 @@ export async function markSettled(env: Env, key: ClaimKey, tx: string, payer: st
 // Never used on pending, on an unknown outcome, or when the chain says the authorisation was spent.
 export function listingReleaseStatement(env: Env, row: ClaimRow): D1PreparedStatement | null {
   if (row.route !== "listing_pay") return null;
-  const i = intentOf(row) as { listing_id: number; wallet_row_id: number; wallet_row_hash: string };
+  const i = intentOf(row) as { listing_id: number };
   return env.DB.prepare(
     `UPDATE listings SET status = 'open', paying_since = NULL, paying_wallet_row_id = NULL, paying_wallet_row_hash = NULL
-     WHERE id = ? AND status = 'paying' AND paid_submission_id IS NULL AND paying_wallet_row_id = ? AND paying_wallet_row_hash = ?
-       AND paying_since IS NOT NULL AND paying_since <= ? AND changes() = 1`,
-  ).bind(i.listing_id, i.wallet_row_id, i.wallet_row_hash, row.created_at);
+     WHERE id = ? AND ${RESERVATION_BOUND} AND changes() = 1`,
+  ).bind(i.listing_id, ...reservationArgs(row));
 }
 
 // Runs the claim's terminal UPDATE, with the listing release (a pay-listing claim passed as `release`) as the second statement of
@@ -545,9 +564,12 @@ export function handleTakenMessage(row: Pick<ClaimRow, "intent_json" | "tx" | "r
 
 // C5: what a funder is told when the reconciler set its bounty payment aside. It never says the reconciler will finish it (it will not) and invites no new signature: the
 // money moved. The way out is the maintainer, by a mention (a pay-listing payer is a citizen).
-export function listingNotPayingMessage(row: Pick<ClaimRow, "intent_json" | "tx" | "route">): string {
+//
+// Gate LOW-2 (second build): the same words are served where the booking has just failed because the listing no longer holds the claim's reservation, BEFORE the reconciler has met the claim
+// (`setAside: "will"`): the reconciler sets it aside when it next meets it, so the tense must not say it already has. A transient failure with the reservation intact keeps RECONCILE_BACKSTOP.
+export function listingNotPayingMessage(row: Pick<ClaimRow, "intent_json" | "tx" | "route">, setAside: "has" | "will" = "has"): string {
   const i = JSON.parse(row.intent_json) as { listing_id?: unknown; amount_cents?: unknown };
-  return `Your ${money(Number(i.amount_cents ?? 0))} payment settled${txPart(row as ClaimRow)}, but the listing it was paid against (listing ${String(i.listing_id)}) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler has set it aside rather than retry it. Do not sign again: this payment has already moved. It is logged for the maintainer to look at by hand; no resolution time is promised. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment).`;
+  return `Your ${money(Number(i.amount_cents ?? 0))} payment settled${txPart(row as ClaimRow)}, but the listing it was paid against (listing ${String(i.listing_id)}) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler ${setAside === "has" ? "has set it aside" : "will set it aside when it next meets it"} rather than retry it. Do not sign again: this payment has already moved. It is logged for the maintainer to look at by hand; no resolution time is promised. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment).`;
 }
 
 // R2-3: what a payer is told about a STOPPED row (a pending claim carrying CHAIN_SPENT_MARKER). It claims only what is established: the chain reads the nonce used

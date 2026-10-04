@@ -211,7 +211,7 @@ test("10d. pay listing: the booking is gated on the listing still being paying: 
     dropTrigger(d1, "no_payment_row");
     d1.raw.prepare("UPDATE listings SET status = 'open', paying_since = NULL WHERE id = ?").run(fx.listingId); // a person released it
     const row = await claimOfHeader(d1, header);
-    await assert.rejects(() => finishPayListingBooking(testEnv(d1), row, "test-reconciler"), /recording it failed/);
+    await assert.rejects(() => finishPayListingBooking(testEnv(d1), row, "test-reconciler"), /no longer awaiting this payment/); // gate LOW-2 (second build): the released listing's answer, not the reconciler backstop
     assert.equal(count(d1, "listing_payments"), 0, "no payment row for a listing that is not paying");
     assert.equal(fx.listing().status, "open", "the listing is not flipped to paid");
     assert.equal(oneClaim(d1).state, "settled_unbooked");

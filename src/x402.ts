@@ -37,7 +37,9 @@ import {
   refsOf,
   releaseLease,
   leaseHeldByAnother,
+  listingReservationState,
   runBookingStep,
+  SETTLEMENT_UNRESOLVED,
   SHOWHOME_REPORT_POINTER,
   sameRequest,
   stepGatedOutByLease,
@@ -595,6 +597,18 @@ export async function payAndSettle(
     try {
       taken = await takeClaim(env, claimId, claim, owner, takenAt);
     } catch (e) {
+      // H3 + gate MEDIUM-1 (second build): a THROWN INSERT does not prove there is no row. D1 can commit and still report an error, and releasing a reservation under a claim that exists re-opens
+      // the listing while the claim is alive: the funder's identical re-send then settles it against a listing nobody holds. So the claim is re-read, and only a PROVEN ABSENCE may release:
+      //   - no row: today's 503 and release (nothing was created);
+      //   - our row (its lease is this request's owner: the INSERT landed): the reservation is KEPT and the answer says the claim exists and nothing was sent;
+      //   - another request's row: answered from it exactly as a key conflict is (the reservation this request took is its own and is released by the pay route as before);
+      //   - the re-read throws too: unknown, so the reservation is KEPT (fail closed) and the answer says the society could not confirm.
+      let landed: ClaimRow | null | undefined;
+      try {
+        landed = await getClaim(env, claimId.key);
+      } catch {
+        landed = undefined;
+      }
       console.log(
         JSON.stringify({
           level: "error",
@@ -603,9 +617,42 @@ export async function payAndSettle(
           amount_atomic: reqs.maxAmountRequired,
           claim_from: claimId.key.from,
           claim_nonce: claimId.key.nonce,
+          claim_row: landed === undefined ? "unknown" : landed === null ? "none" : landed.lease_owner === owner ? "ours" : "other",
           reason: clipReason(e instanceof Error ? e.message : String(e)),
         }),
       );
+      if (landed === undefined) {
+        return {
+          ok: false,
+          keepReservation: true,
+          response: Response.json(
+            {
+              error: `The society could not confirm whether a claim for this payment authorisation was recorded (a database error), so nothing was sent to the facilitator's /settle by this request and it charged nothing.${
+                claim.route === "listing_pay" ? " The listing stays reserved, because releasing it could re-open it under a claim that does exist." : ""
+              } Do not sign again: this is logged for the maintainer to resolve.`,
+              code: "settlement_claim_unavailable",
+            },
+            { status: 503, headers: { "Access-Control-Allow-Origin": "*" } },
+          ),
+        };
+      }
+      if (landed !== null && landed.lease_owner === owner) {
+        await quietly("release_lease", () => releaseLease(env, claimId.key, owner));
+        return {
+          ok: false,
+          keepReservation: true,
+          response: Response.json(
+            {
+              error: `The society recorded a claim for this payment authorisation but could not confirm that it had (a database error). Nothing was sent to the facilitator's /settle by this request, so by this request's own account no money moved. Do not sign again.${
+                claim.route === "listing_pay" ? " The listing stays reserved for this payment until the claim resolves: an authorisation nobody uses lapses within minutes, after which the reconciler can release the listing." : ""
+              } ${reconcileTail(claim.route)}`,
+              code: SETTLEMENT_UNRESOLVED,
+            },
+            { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
+          ),
+        };
+      }
+      if (landed !== null) return { ok: false, response: await respondToExistingClaim(env, landed, landed.route === claim.route && sameRequest(landed, claimId), reqs, claim) };
       return {
         ok: false,
         response: Response.json(
@@ -962,6 +1009,13 @@ export type AttemptOutcome = (
   | { kind: "stopped" }
 ) & { fetches: number };
 
+// C4, option B: stamp the claim (markChainSpent) and say so once, loudly, for the maintainer. `unchanged` when another worker moved the claim first (the stamp wrote nothing).
+async function stopPending(env: Env, row: ClaimRow, owner: string, reason: string, fetches: number): Promise<AttemptOutcome> {
+  if (!(await markChainSpent(env, keyOfRow(row), reason, owner, Date.now()))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
+  console.log(JSON.stringify({ level: "error", event: "settlement_chain_spent_stopped", route: row.route, claim_from: row.from_addr, claim_nonce: row.nonce, reason: clipReason(reason) }));
+  return { kind: "stopped", fetches };
+}
+
 export async function attemptPending(env: Env, row: ClaimRow, owner: string): Promise<AttemptOutcome> {
   if (row.state !== "pending" || row.rpc_body == null) return { kind: "unchanged", detail: "the claim is no longer pending", fetches: 0 };
   // A3: a stopped row is never read, re-POSTed or written again (no fetch, no D1 write); it waits for a person.
@@ -990,6 +1044,24 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
     return { kind: "unchanged", detail: "The authorisation is past its validBefore and unused so far; the society waits out a margin before calling it expired.", fetches: chain.fetches };
   }
 
+  // H3 (second build; gate MEDIUM-1; the booking-reservation-binding deferral, discharged): a listing_pay claim is re-POSTed only while its listing still holds THIS claim's reservation. A claim
+  // stranded after its reservation was released (or replaced by another payer's) could otherwise be re-sent, move money for a listing nobody holds, and only then be noticed by C5. Not bound:
+  // the chain used -> the money moved and nothing here can book it, so the claim is stamped and stopped for a person (C4, option B); the chain unused -> no re-POST, the claim waits for the
+  // expiry proof (a replacement reservation is never released by it: F2's release is bound the same way). One listing read, only for this route; a read that throws is a throw (no re-POST).
+  if (row.route === "listing_pay") {
+    const reservation = await listingReservationState(env, row);
+    if (!reservation.bound) {
+      if (chain.used === true) {
+        return stopPending(env, row, owner, `the chain reads the authorisation used, but the listing (${reservation.status ?? "missing"}) no longer holds this claim's reservation, so the claim was not re-sent`, chain.fetches);
+      }
+      return {
+        kind: "unchanged",
+        detail: `This payment's listing (${reservation.status ?? "missing"}) no longer holds the reservation this claim was made under, so the society does not re-send the authorisation to the facilitator. The claim waits until the chain shows the authorisation used or provably expired.`,
+        fetches: chain.fetches,
+      };
+    }
+  }
+
   const body = JSON.parse(row.rpc_body) as { paymentRequirements: PaymentRequirements };
   let settled: Awaited<ReturnType<typeof settleOrThrow>>;
   try {
@@ -1004,18 +1076,7 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
     if (chain.used === true) {
       // C4, option B: the chain reads the nonce used and the facilitator answers a recorded refusal. The two answers contradict; the claim is STOPPED (stamped, never refused: the
       // money may have moved) for a person to decide. DEFERRED-C4-OPTION-A-RECEIPT: option A (book from the transaction's own receipt) is not built in this wave.
-      if (!(await markChainSpent(env, key, settled.verdict.error, owner, Date.now()))) return { kind: "unchanged", detail: "another worker moved the claim", fetches };
-      console.log(
-        JSON.stringify({
-          level: "error",
-          event: "settlement_chain_spent_stopped",
-          route: row.route,
-          claim_from: row.from_addr,
-          claim_nonce: row.nonce,
-          reason: clipReason(settled.verdict.error),
-        }),
-      );
-      return { kind: "stopped", fetches };
+      return stopPending(env, row, owner, settled.verdict.error, fetches);
     }
     // H2 (CODEX r1 on the M3 brief, replacing L6): a rule-7 refusal on the RE-POST path, while the chain reads the authorisation UNUSED, is not acted on. An earlier attempt's broadcast
     // transfer can be mined after any number of "unused" reads, right up to validBefore, so a refusal written now could be false for money that then moved (and its 402 would invite a
