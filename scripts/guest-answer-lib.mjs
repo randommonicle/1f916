@@ -173,7 +173,7 @@ function htmlBlockKind(node) {
 //    a fence, list, blockquote or HTML block): a quotation can never become a section, and a real one can never be hidden;
 //  - a top-level level-2 heading that reads as a section header but is not a HEADER line (setext, closing hashes);
 //  - a top-level fence still open at the end of the file, or an HTML comment that never closes;
-//  - a raw HTML block other than a comment (`<pre>`, `<details>`, `<?`, `<!DOCTYPE` ...), at any depth: it changes what
+//  - a raw HTML block other than one complete comment standing alone, or any inline HTML (CODEX r8 round 3), at any depth: it changes what
 //    CommonMark treats as a fence or a comment, and over-refusing is acceptable (an ambiguous exchange is answered by hand).
 export function parseSections(text) {
   const body = normaliseBody(text);
@@ -210,11 +210,16 @@ export function parseSections(text) {
   lines.forEach((l, i) => {
     if (HEADER.test(l) && !headingLines.has(i + 1)) ambiguous = true;
   });
+  // CODEX r8 round 3: CommonMark passes raw HTML through to an HTML reader unescaped, so the AST is not what a reader sees
+  // once raw HTML can act: a comment block with more after its `-->` (a second `<!--` there hides everything after it) and
+  // ANY inline HTML (`<script>`, a comment inside a paragraph) make the file ambiguous. Only a complete comment block
+  // standing alone (the transport's note) is allowed.
   const walker = doc.walker();
   for (let ev = walker.next(); ev; ev = walker.next()) {
     if (!ev.entering) continue;
+    if (ev.node.type === "html_inline") ambiguous = true;
     const kind = htmlBlockKind(ev.node);
-    if (kind === "other" || kind === "open") ambiguous = true;
+    if (kind === "other" || kind === "open" || kind === "partial") ambiguous = true;
   }
   return Object.assign(sections, { ambiguous });
 }

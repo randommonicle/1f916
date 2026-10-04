@@ -91,7 +91,7 @@ test("A6 approval (CODEX guest-answer r1 HIGH): a marker inside an HTML comment 
   const hidden = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), seat("CODEX", 1, ["Rejected.", "<!-- a note", ok("CODEX", 2), "-->"])].join("\n");
   assert.match(approvalProblem(hidden, "g7", ANSWER), /ambiguous/);
   const sameLine = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!-- x --> [[CONVERGED]]", "[[END CODEX round 1]]", ""].join("\n");
-  assert.match(approvalProblem(sameLine, "g7", ANSWER), /CODEX's latest section does not converge/, "a line touching a comment is never the verdict");
+  assert.match(approvalProblem(sameLine, "g7", ANSWER), /ambiguous/, "a line touching a comment is never the verdict (CODEX r8 round 3: a comment block with more after its `-->` is ambiguous)");
   const commentThenVerdict = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "<!--", "scratch note", "-->", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "<!-- seat: CODEX | thread: x -->", ""].join("\n");
   assert.equal(approvalProblem(commentThenVerdict, "g7", ANSWER), null, "a closed comment before a real verdict does not block it");
 });
@@ -159,6 +159,20 @@ test("A6 parser (hub r8 round 2, mid-line comment): a `<!--` in the middle of a 
   assert.match(refusal(probe + TRANSPORT), /ambiguous/);
 });
 
+test("A6 parser (CODEX r8 round 3, raw HTML an HTML reader acts on): a comment block with more after its `-->`, or any inline HTML, makes the file ambiguous", () => {
+  // The AST reads these verdicts as top-level paragraphs, but CommonMark passes raw HTML through to an HTML reader, where the
+  // trailing `<!--` or an inline `<script>` hides everything after it. Mutants: accept a 'partial' comment block -> the first
+  // and the hub probe approve; ignore html_inline -> the script and inline-comment probes approve.
+  const partial = withCodex("<!-- note --> <!--", "", "[[CONVERGED]]");
+  assert.match(refusal(partial), /ambiguous/);
+  assert.match(refusal(partial + TRANSPORT), /ambiguous/);
+  assert.match(refusal(withCodex("Rejected. <script>", "", "[[CONVERGED]]")), /ambiguous/);
+  assert.match(refusal(withCodex("Reviewed. <!-- an aside -->", "", "[[CONVERGED]]")), /ambiguous/, "inline HTML of any kind, a comment included: over-refusal is acceptable");
+  const hubFirst = ["# REVIEW", "", hub("g7", ANSWER).replace("Target: g7", "<!-- n --> <!--\n\nTarget: g7"), ok("GEMINI"), ok("CODEX")].join("\n");
+  assert.match(refusal(hubFirst), /ambiguous/, "the same opener before the hub's target would hide the rendered answer");
+  assert.equal(refusal(approved("g7", ANSWER) + TRANSPORT), null, "control: the transport's own comment, a complete block alone on its line, still approves");
+});
+
 test("A6 parser: a blockquoted verdict, or one inside a list item, is not a verdict", () => {
   // Mutant: treat block_quote or list as a paragraph in sectionConverges -> these approve.
   for (const marker of ["> [[CONVERGED]]", "- [[CONVERGED]]", "1. [[CONVERGED]]", "  > [[CONVERGED]]"]) {
@@ -208,7 +222,7 @@ test("A6 parser: a marker CommonMark renders as the marker but the protocol did 
   // Visible text after a closed comment on the same line is part of the HTML block, not a comment: it is content after the verdict.
   // Mutant: ignore a comment block that has text after its --> -> this approves.
   const textAfterComment = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "[[CONVERGED]]", "", "<!-- note --> but the second sentence overclaims", "", "[[END CODEX round 1]]", ""].join("\n");
-  assert.match(refusal(textAfterComment), /CODEX's latest section does not converge/);
+  assert.match(refusal(textAfterComment), /ambiguous/, "CODEX r8 round 3: a comment block with more after its `-->` is ambiguous");
   const afterEnd = ["# REVIEW", "", hub("g7", ANSWER), ok("GEMINI"), "## [CODEX round 1]", "", "[[CONVERGED]]", "", "[[END CODEX round 1]]", "", "One more thing.", ""].join("\n");
   assert.match(refusal(afterEnd), /CODEX's latest section does not converge/, "END is the last node");
 });
