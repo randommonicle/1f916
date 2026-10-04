@@ -39,6 +39,14 @@
 // longer cheap (typically 8-9 against about 4 before), so after one the loop may shed a second row (9 + 18 > 26) until the next run. C5: a listing_pay row pays one listing read
 // before its booking (about 13 in all, well under the registration's 16). A row whose attempt HOLDS a success it could not write (CODEX M3-build r2/r4) books nothing
 // and pays lease 1 + 4 + /settle 1 + markSettled 1 + its read 1 + one more read 1 + the stamp 1 + release 1 = 11.
+//
+// Second build (option B, H2, H3, R2-4; measured through the real reconciler on the worst RPC day, four attempts for a two-RPC quorum, by test/paid-path-m3b-d1.test.ts, which pins every number below):
+// H3 adds ONE D1 read to a pending listing_pay row (the reservation read, before its re-POST; it is a statement, never a fetch, and the expiry branches that carry the 12-fetch worst case return before it,
+// so ATTEMPT_FETCH_WORST_CASE = 12 is unchanged). A listing_pay row is then, through every step: lease 1 + 4 RPC + reservation read 1 + /settle 1 + markSettled 1 + C5's read 1 + the booking batch 3 + the
+// read-back 1 = 13. The stopped shapes are cheaper: unbound with the chain used (lease, 4, read, stamp) 7; a refusal with the chain used (lease, 4, read, /settle, stamp) 8; an H2 refusal with the chain unused
+// (lease, 4, read, /settle, noteUnknown, release) 9; a patron refusal with the chain used 7; a settled_unbooked listing_pay row set aside (lease, read, mark) 3; a listing_pay row that THROWS is priced at its
+// statements (4) plus the 12-fetch worst case = 16. The registration row remains the largest, 16 plus the 2-statement chain-head retry = 18: RECONCILE_ROW_WORST_CASE = 18, the ceiling 26 and the two-row batch
+// stand unchanged. M4's validBefore bound and the stopped-row marker add no statement or fetch to any row (a comparison; a SELECT predicate).
 
 import { attemptPending, finishPatronBooking, clipReason, holdSuccessAgainstTerminal } from "./x402.ts";
 import { finishRegistration } from "./register-gate.ts";

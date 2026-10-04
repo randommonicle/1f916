@@ -50,7 +50,7 @@ import {
   type ClaimRow,
   type ClaimSpec,
 } from "../src/settlement-claims.ts";
-import { runReconciler } from "../src/settlement-reconcile.ts";
+import { RECONCILE_ROW_WORST_CASE, RECONCILE_SELECT_COST, runReconciler } from "../src/settlement-reconcile.ts";
 import { attemptPending } from "../src/x402.ts";
 import { finishPayListingBooking, handlePayListing } from "../src/listings.ts";
 import { SocietyError } from "../src/society.ts";
@@ -1033,4 +1033,142 @@ test("C7: the route is in the discovery ROUTES (public, no auth) and the stopped
     stub.restore();
     d1.close();
   }
+});
+
+
+// The measured cost of ONE row (D1 statements plus RPC and /settle fetches, the select taken off), on the worst RPC day (the plain read's quorum takes four attempts). The ceiling for a row is
+// RECONCILE_ROW_WORST_CASE = 18; none of these needs it raised. Itemised: (a) lease 1 + 4 RPC + reservation read 1 + /settle 1 + markSettled 1 + C5 read 1 + booking batch 3 + read-back 1 = 13;
+// (b) lease 1 + 4 + read 1 + stamp 1 = 7; (c) lease 1 + 4 + read 1 + /settle 1 + stamp 1 = 8; (d) lease 1 + 4 + read 1 + /settle 1 + noteUnknown 1 + release 1 = 9; (e) lease 1 + read 1 + mark 1 = 3;
+// (f) lease 1 + 4 + /settle 1 + stamp 1 = 7; (g) a row that threw is priced at its statements (lease, read, markSettled, release = 4) plus ATTEMPT_FETCH_WORST_CASE (12) = 16.
+const EXPECTED_ROW_COSTS: Record<string, number> = {
+  "pay listing: pending, bound, re-POST settles, booked": 13,
+  "pay listing: pending, unbound, chain used, stamped": 7,
+  "pay listing: pending, bound, chain used, refusal, stamped": 8,
+  "pay listing: pending, bound, chain unused, refusal (H2), noted": 9,
+  "pay listing: settled_unbooked, listing not the claim's, set aside": 3,
+  "patron: pending, chain used, refusal, stamped": 7,
+  "pay listing: pending, bound, markSettled throws, priced at the fetch worst case": 16,
+};
+
+// ---------- R2-4 (and M4's re-measure): the reconciler's per-row worst case under option B, measured through the real reconciler ----------
+
+// The cost the reconciler measured for the ONE row it worked (its meter counts every D1 statement, a batch's statements each, and every RPC and /settle fetch the attempt reports);
+// the select that finds the row is the reconciler's own fixed cost and is taken off.
+// Every even-numbered RPC fetch fails and every odd-numbered one answers: the quorum of two successful RPCs then takes FOUR attempts (src/settlement-chain.ts), the plain read's worst case.
+const worstRpc = (used: boolean) => (url: string, n: number, init?: RequestInit) => (n % 2 === 0 ? null : chainRpc(used)(url, n, init));
+
+async function rowCost(d1: LocalD1): Promise<{ cost: number; out: Awaited<ReturnType<typeof runReconciler>> }> {
+  const out = await runReconciler(eq(d1));
+  assert.equal(out.examined, 1, JSON.stringify(out));
+  return { cost: out.actualCost - RECONCILE_SELECT_COST, out };
+}
+
+test("R2-4: every row shape the second build adds stays inside RECONCILE_ROW_WORST_CASE, and the measured costs are pinned so a statement added later is noticed", async () => {
+  const measured: Record<string, number> = {};
+
+  // (a) a pending listing_pay claim through the new reservation read, the re-POST, markSettled, C5's read and the booking batch
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: worstRpc(false) });
+    try {
+      await pendingPayClaim(d1);
+      const { cost, out } = await rowCost(d1);
+      assert.equal(out.booked, 1, JSON.stringify(out));
+      measured["pay listing: pending, bound, re-POST settles, booked"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (b) the same claim, unbound, chain used: the read, the stamp, nothing else
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => pendingAnswer(), rpc: worstRpc(true) });
+    try {
+      const fx = await pendingPayClaim(d1);
+      reopen(d1, fx.listingId);
+      const { cost, out } = await rowCost(d1);
+      assert.equal(out.stopped, 1, JSON.stringify(out));
+      measured["pay listing: pending, unbound, chain used, stamped"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (c) bound, chain used, the facilitator answers a recorded refusal: the stamp
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: worstRpc(true) });
+    try {
+      await pendingPayClaim(d1);
+      const { cost, out } = await rowCost(d1);
+      assert.equal(out.stopped, 1, JSON.stringify(out));
+      measured["pay listing: pending, bound, chain used, refusal, stamped"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (d) bound, chain unused, the facilitator answers a refusal (H2): the last words are noted, the lease released
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: worstRpc(false) });
+    try {
+      await pendingPayClaim(d1);
+      const { cost, out } = await rowCost(d1);
+      assert.equal(out.unchanged, 1, JSON.stringify(out));
+      measured["pay listing: pending, bound, chain unused, refusal (H2), noted"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (e) a settled_unbooked listing_pay claim whose listing is not the claim's: C5's read, the mark, nothing else
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator();
+    try {
+      const fx = await settledUnbookedPayClaim(d1);
+      reopen(d1, fx.listingId);
+      const { cost, out } = await rowCost(d1);
+      assert.equal(out.unchanged, 1, JSON.stringify(out));
+      measured["pay listing: settled_unbooked, listing not the claim's, set aside"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // (f) a pending patron claim stopped on a refusal with the chain used (no listing read at all)
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : refusedAnswer()), rpc: worstRpc(true) });
+    try {
+      assert.equal((await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1))).status, 502);
+      const { cost, out } = await rowCost(d1);
+      assert.equal(out.stopped, 1, JSON.stringify(out));
+      measured["patron: pending, chain used, refusal, stamped"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+
+  // (g) a pending listing_pay row whose markSettled THROWS after the re-POST: the reconciler prices a row that threw before reporting its fetches at the attempt's fetch worst case
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: (n) => (n === 1 ? pendingAnswer() : settledAnswer()), rpc: worstRpc(false) });
+    try {
+      await pendingPayClaim(d1);
+      d1.raw.exec("CREATE TRIGGER m3b_settled_throws BEFORE UPDATE ON settlement_claims WHEN NEW.state = 'settled_unbooked' BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END;");
+      const { cost, out } = await captureLog(() => rowCost(d1)).then((r) => r.value);
+      assert.equal(out.failed, 1, JSON.stringify(out));
+      measured["pay listing: pending, bound, markSettled throws, priced at the fetch worst case"] = cost;
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+
+  for (const [name, cost] of Object.entries(measured)) assert.ok(cost <= RECONCILE_ROW_WORST_CASE, `${name}: ${cost} is inside RECONCILE_ROW_WORST_CASE (${RECONCILE_ROW_WORST_CASE})`);
+  assert.deepEqual(measured, EXPECTED_ROW_COSTS, "the measured per-row costs (update EXPECTED_ROW_COSTS and the itemised note in settlement-reconcile.ts together)");
 });

@@ -377,3 +377,40 @@ Served text (new): the response's `note` ("The settlement claims a person must l
 content; only the fields listed here are served."), a `markers` object explaining each of the six codes (the meanings are in `ATTENTION_MARKER_MEANINGS`; the chain-spent one says "spent, or cancelled by its signer" and covers both the facilitator
 refusal and the listing that no longer holds the reservation), and the discovery description. No em dashes (a test checks the served JSON). The forbidden-fields test greps the WHOLE response, case-insensitively, for `rpc_body`, `intent_json`,
 `from_addr`, `payer`, `verdict_reason`, a sentinel facilitator refusal, the test payer's address, a sentinel intent handle, `paymentPayload`, `signature` and `commonhold_sk_`; the served note deliberately avoids the word "payer" so that grep can be strict.
+
+## S7. R2-4 (and the M4 re-measure): the reconciler's per-row worst case under option B
+
+What: nothing in the code changes; the measurement is pinned. `test/paid-path-m3b-d1.test.ts` "R2-4" drives seven row shapes through the real `runReconciler` on the worst RPC day (every even-numbered RPC fetch fails, so the plain read's
+two-RPC quorum takes FOUR attempts) and pins each row's measured cost (the select taken off): pay listing pending, bound, re-POST settles, booked 13; unbound with the chain used, stamped 7; bound, chain used, refusal, stamped 8; bound, chain
+unused, H2 refusal, noted 9; settled_unbooked and not the claim's, set aside 3; a patron refusal with the chain used, stamped 7; a pay-listing row whose `markSettled` throws, priced at its 4 statements plus `ATTEMPT_FETCH_WORST_CASE` 12 = 16.
+Every one is inside `RECONCILE_ROW_WORST_CASE = 18`, so no constant changed: 18, the ceiling 26, the two-row batch, `ATTEMPT_FETCH_WORST_CASE = 12`. H3's reservation read is a statement, not a fetch, and it sits AFTER the expiry branches (which
+carry the 12-fetch worst case and return before it). M4's bound is a comparison and the stopped marker is a SELECT predicate: neither adds a statement or a fetch. The registration row (16 + 2 for a chain-head retry) is still the largest. The itemised note
+in `settlement-reconcile.ts` was extended with these numbers.
+
+| mutant | red in |
+|---|---|
+| a duplicate reservation read added to the pre-re-POST check | the pinned costs |
+| `RECONCILE_ROW_WORST_CASE` lowered to 12 | the ceiling assertion |
+| `noteUnknown` dropped from the H2 branch | the H2 tests and the pinned cost |
+
+## Second build: close-out
+
+Commits (oldest first, off `a580b9c3`): S1 `722a350c`, S2 `b2008122`, S3 `e97481ef`, S4 `53874368`, S5 `6ee716f2`, S6 `6f56025d`, S7 (this commit). Suite 1557 -> 1596 (+39 new in `test/paid-path-m3b-d1.test.ts`, 0 removed), tsc 0, no migration.
+D-061 baseline (`secret-literal-guard`): 76 / 23 / 53, unmoved (no PROSE_ALLOW entry re-keyed or added). The non-minting test and the discovery drift guards stayed green.
+
+Deferred flags: planted `DEFERRED-C4-OPTION-A-RECEIPT` (x402.ts `attemptPending`'s stamp, and the marker's definition comment in settlement-claims.ts) and `DEFERRED-DURABLE-HELD-SUCCESS` (x402.ts `holdSuccessAgainstTerminal`, naming R2-2's six
+requirements). Removed `DEFERRED-BOOKING-RESERVATION-BINDING` (listings.ts; discharged in S5; its name no longer appears in src or test).
+
+Existing tests moved on purpose (every other test is untouched): `settlement-replay-reconcile-d1` 7d (refused leg) and 7e (refusal leg counts `stopped`); `settlement-replay-fixes-d1` F2 refused; `settlement-replay-lease-d1` T6 refused;
+`paid-path-m3-d1` "C3 control: PAY LISTING keeps the lease read-back" and `settlement-replay-listings-d1` 10d (the LOW-2 text). Harness: `test/helpers/x402-payload.ts` default `validBefore` is now `now + 300`.
+
+Findings and deviations for the gate:
+1. C4's marker name over-reads for one cause. `chain_spent_facilitator_refused` also stamps "chain used and the listing no longer holds the reservation" (no facilitator refusal; H3 as the commission words it). The allowlist is fixed, so the
+   served text states only what is established (S1, S6); the stored reason after the colon names the real cause. A person reading the list sees one code for two causes.
+2. The takeClaim re-read answers from the claim (the commission's wording) instead of proceeding as the claim's holder (the gate's other option). A pay-listing claim taken this way waits for the expiry proof (and the reconciler's next daily pass) before
+   its listing can be paid again; the answer says so. A route with no reservation lets the payer's identical re-send finish it at once.
+3. The booking `UPDATE listings`' binding cannot be red-proofed on its own (same batch, same condition as the INSERT that guards it through `changes() = 1`); it is defence in depth.
+4. `markRefused`'s `release` parameter has no production caller left (H2 removed the re-send/reconciler refusal). Kept for the tests that drive a refusal by hand (H1) and as a hook; harmless.
+5. M4 bounds NEW claims only. A pending claim admitted before it keeps its far `validBefore`; `pending_aged` (3 days) puts it on the attention list. A claim whose authorisation is valid for years can still wait years for the expiry proof.
+6. `settled_unbooked_aged` lists a secret-mode registration whose payer never came back to re-send (by design it waits for them); after 3 days it is on the maintainer's list. That is the intent of "older than N days", stated because the row is not a fault.
+7. Not done, by instruction: durable success evidence (R2-2), option A's receipt-level Transfer check, any migration.
