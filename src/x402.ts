@@ -771,16 +771,14 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
         const done = await claim.finish(out.row, owner);
         if (done) return done;
       }
-      const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
-      // CODEX M3-build r2 (2), the gate's LOW-1 (severity upgraded): this attempt holds a facilitator SUCCESS it could not write (the claim was pending under
-      // another holder). If that holder has since made the claim refused or expired, the success is not discarded into the terminal row's 402 with fresh
-      // accepts: the row is stamped and the contradiction logged and answered, empty tx included. The reconciler holds the same outcome but serves no answer
-      // (DEFERRED-RECONCILER-HELD-SUCCESS-REREAD in settlement-reconcile.ts).
-      if (out.kind === "unchanged" && out.settledTx !== undefined && (fresh.state === "refused" || fresh.state === "expired")) {
-        await recordContradiction(env, fresh, fresh.state, { tx: out.settledTx, payer: out.settledPayer ?? "" }, reqs);
-        return contradictionResponse(out.settledTx, fresh.state);
+      if (out.kind === "unchanged" && out.held) {
+        // CODEX M3-build r2 (2), the gate's LOW-1 (severity upgraded): a held success is never discarded into a terminal row's 402 (holdSuccessAgainstTerminal).
+        const held = await holdSuccessAgainstTerminal(env, keyOfRow(row), out.held);
+        if (held.contradicted) return contradictionResponse(out.held.tx, held.contradicted);
+        return claimResponse(claimAnswer(held.fresh ?? row, true, reqs, { detail: out.detail, settledTx: out.held.tx }));
       }
-      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail, ...(out.settledTx !== undefined ? { settledTx: out.settledTx } : {}) } : {}));
+      const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
+      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail } : {}));
     } finally {
       await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
     }
@@ -841,6 +839,23 @@ function logSettlementSuccessUnrecorded(row: Pick<ClaimRow, "from_addr" | "nonce
 async function recordContradiction(env: Env, row: ClaimRow, state: string, settled: { tx: string; payer: string }, req: { resource: string; maxAmountRequired: string }): Promise<void> {
   logSettlementContradiction(row, state, settled, req);
   await quietly("mark_contradiction", () => markContradiction(env, keyOfRow(row), settled.tx, Date.now()));
+}
+
+// A facilitator SUCCESS an attempt holds but could not write: the claim was pending under another holder (attemptPending's moved-pending branch).
+export type HeldSuccess = { tx: string; payer: string; req: { resource: string; maxAmountRequired: string } };
+
+// CODEX M3-build r2 (2) and its r4 follow-up (exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): after an attempt that HOLDS a success, the claim is
+// read once more; if the other holder has since made it refused or expired, the success is recorded as the contradiction (log line and stamp) instead of being
+// discarded, so neither this caller nor a later identical replay of the row serves a 402 with fresh accepts. Used by the re-send answer (respondToExistingClaim)
+// and the scheduled reconciler, so the two cannot drift. A window after this read stays open in both; the settlement_success_unrecorded line names the tx.
+// Cost: one read, plus the stamp when terminal (the reconciler's row stays well inside RECONCILE_ROW_WORST_CASE: this branch books nothing).
+export async function holdSuccessAgainstTerminal(env: Env, key: ClaimKey, held: HeldSuccess): Promise<{ contradicted: "refused" | "expired" | null; fresh: ClaimRow | null }> {
+  const fresh = await getClaim(env, key);
+  if (fresh && (fresh.state === "refused" || fresh.state === "expired")) {
+    await recordContradiction(env, fresh, fresh.state, { tx: held.tx, payer: held.payer }, held.req);
+    return { contradicted: fresh.state, fresh };
+  }
+  return { contradicted: null, fresh };
 }
 
 function contradictionResponse(tx: string, state: string): Response {
@@ -908,7 +923,7 @@ export type AttemptOutcome = (
   | { kind: "settled"; row: ClaimRow }
   | { kind: "expired" }
   | { kind: "refused" }
-  | { kind: "unchanged"; detail: string; settledTx?: string; settledPayer?: string }
+  | { kind: "unchanged"; detail: string; held?: HeldSuccess }
   | { kind: "contradiction"; tx: string; state: "refused" | "expired" }
 ) & { fetches: number };
 
@@ -970,7 +985,7 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
       // C2 (re-gate LOW-1(b)): the re-POST answered SUCCESS, another holder holds the still-pending claim, and nothing here may write the tx to it. Logged once and
       // carried in the outcome, so the re-send's answer names it; the reconciler's outcome counts it unchanged, the line already written.
       logSettlementSuccessUnrecorded(moved, { tx, payer }, body.paymentRequirements);
-      return { kind: "unchanged", detail: "", settledTx: tx, settledPayer: payer, fetches };
+      return { kind: "unchanged", detail: "", held: { tx, payer, req: body.paymentRequirements }, fetches };
     }
     return { kind: "unchanged", detail: "another worker moved the claim", fetches };
   }

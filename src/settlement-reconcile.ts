@@ -36,9 +36,10 @@
 // margin) reads the authorisation a second time, at the block each RPC reports as its latest: up to 8 more RPC fetches (a block read and a pinned eth_call per RPC), so an
 // expiry row is at most lease 1 + 4 + 8 + a terminal write of 2 = 15 (test/paid-path-m3-d1.test.ts measures a bad day: 13 for the row, 14 with the select). Its consequence is the ceiling: an expiry row is no
 // longer cheap (typically 8-9 against about 4 before), so after one the loop may shed a second row (9 + 18 > 26) until the next run. C5: a listing_pay row pays one listing read
-// before its booking (about 13 in all, well under the registration's 16).
+// before its booking (about 13 in all, well under the registration's 16). A row whose attempt HOLDS a success it could not write (CODEX M3-build r2/r4) books nothing
+// and pays lease 1 + 4 + /settle 1 + markSettled 1 + its read 1 + one more read 1 + the stamp 1 + release 1 = 11.
 
-import { attemptPending, finishPatronBooking, clipReason } from "./x402.ts";
+import { attemptPending, finishPatronBooking, clipReason, holdSuccessAgainstTerminal } from "./x402.ts";
 import { finishRegistration } from "./register-gate.ts";
 import { finishListingCreateBooking, finishPayListingBooking } from "./listings.ts";
 import { INVOCATION_SUBREQUEST_BUDGET, FINALISE_RESERVE } from "./maintainer/budget.ts";
@@ -187,10 +188,9 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
             out.resolved++;
             needsRelease = false;
           } else if (attempt.kind === "contradiction") out.contradicted++;
-          // DEFERRED-RECONCILER-HELD-SUCCESS-REREAD (CODEX M3-build r2 (2), 4 Oct): an `unchanged` attempt carrying settledTx holds a success it could not write;
-          // the re-send's answer path re-reads and stamps a claim another holder has since made terminal (x402.ts respondToExistingClaim), this loop does
-          // not: it serves no answer, the settlement_success_unrecorded line already names the tx, and the extra read and stamp would re-price the itemised
-          // row worst case above. A later replay of such a row would read its unstamped 402. Lands here, with the budget re-itemised, if the seats want parity.
+          // CODEX M3-build r2 (2) + r4 follow-up: an attempt holding a success it could not write re-reads once more, exactly as the re-send does
+          // (holdSuccessAgainstTerminal), so a claim another holder has since made terminal is stamped and a later replay reads the contradiction, not a 402.
+          else if (attempt.kind === "unchanged" && attempt.held && (await holdSuccessAgainstTerminal(rowEnv, key, attempt.held)).contradicted) out.contradicted++;
           else out.unchanged++;
           continue;
         }

@@ -38,7 +38,7 @@ import {
 import { sha256Hex } from "../src/chain.ts";
 import { finishRegistration } from "../src/register-gate.ts";
 import { attemptPending, finishPatronBooking } from "../src/x402.ts";
-import { runReconciler } from "../src/settlement-reconcile.ts";
+import { runReconciler, RECONCILE_ROW_WORST_CASE } from "../src/settlement-reconcile.ts";
 import { finishListingCreateBooking, finishPayListingBooking, handleCreateListing, handlePayListing, computeListingFeeCents } from "../src/listings.ts";
 import {
   acquireLease,
@@ -1123,3 +1123,76 @@ for (const txv of [TX, ""] as const) {
     }
   });
 }
+
+// (3) CODEX r4 follow-up (exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): the same held success inside the scheduled reconciler. Its re-POST reads
+// SUCCESS while B holds the still-pending claim, and B refuses it before the reconciler's next read. The reconciler re-reads through the shared
+// holdSuccessAgainstTerminal: counted contradicted, row stamped, and a later identical replay answers 500, not a 402. Removing the reconciler branch turns it red
+// (unchanged 1, the replay 402 with accepts).
+test("CODEX r4 (3): reconciler, B refuses the claim after the attempt's held SUCCESS: counted contradicted, stamped, and a later replay answers 500 with no accepts", async () => {
+  const d1 = createLocalD1();
+  let armed = false;
+  let reads = 0;
+  let refusedByB = false;
+  let key: ClaimKey | null = null;
+  const stub = stubFacilitator({
+    settle: async (n) => {
+      if (n === 1) return pendingAnswer();
+      key = await bTakesTheLease(d1);
+      armed = true;
+      return settledAnswer();
+    },
+    rpc: () => authStateAnswer(false),
+  });
+  const base = eq(d1);
+  const db = new Proxy(base.DB as object, {
+    get(t: any, p: string | symbol) {
+      if (p === "prepare") {
+        return (sql: string) => {
+          if (armed && sql.startsWith("SELECT * FROM settlement_claims WHERE") && ++reads === 2) {
+            armed = false;
+            return {
+              bind: (...a: unknown[]) => ({
+                first: async () => {
+                  refusedByB = await markRefused(eq(d1), key as ClaimKey, "The facilitator reports that this settlement failed", "B", Date.now());
+                  return t.prepare(sql).bind(...a).first();
+                },
+              }),
+            };
+          }
+          return t.prepare(sql);
+        };
+      }
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  try {
+    const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+    const first = await callWorker(patronReq("rent", header), eq(d1));
+    assert.equal(first.status, 502);
+    const { value: out, lines } = await captureLog(() => runReconciler({ ...base, DB: db } as unknown as Env));
+    assert.equal(refusedByB, true, "B refused between the attempt's read and the reconciler's next read");
+    assert.equal(eventLines(lines, "settlement_success_unrecorded").length, 1);
+    assert.equal(out.contradicted, 1, JSON.stringify(out));
+    assert.equal(out.unchanged, 0);
+    assert.equal(out.booked, 0);
+    assert.equal(out.failed, 0);
+    assert.ok(out.actualCost <= RECONCILE_ROW_WORST_CASE + 1, `inside one row's worst case plus the select (${out.actualCost})`);
+    const c = eventLines(lines, "settlement_contradiction");
+    assert.equal(c.length, 1, "exactly one contradiction line");
+    assert.equal(c[0].state, "refused");
+    assert.equal(c[0].tx, TX);
+    assert.equal(c[0].payer, TEST_PAYER);
+    const row = oneClaim(d1) as unknown as { state: string; verdict_reason: string | null };
+    assert.equal(row.state, "refused");
+    assert.ok(String(row.verdict_reason).startsWith(`settlement_contradiction:${TX}|`));
+    const replay = await callWorker(patronReq("rent", header), eq(d1));
+    const body = await json(replay);
+    assert.equal(replay.status, 500, JSON.stringify(body));
+    assert.equal(body.accepts, undefined);
+    assert.equal(count(d1, "ledger"), 0);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
