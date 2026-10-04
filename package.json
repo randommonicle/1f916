@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260804.1",
+    "commonmark": "0.31.2",
     "typescript": "^7.0.2",
     "viem": "^2.55.11",
     "wrangler": "^4.118.0"
