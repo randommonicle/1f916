@@ -159,6 +159,13 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // it is met, below). The exclusion of marked rows is by the two exact constants: a pending row's verdict_reason is the
   // facilitator's last words (noteUnknown), which must never exclude it. A STOPPED row (C4, option B) is excluded by its marker's PREFIX (substr, not LIKE: the marker
   // contains underscores, which LIKE reads as wildcards); the facilitator's last words are server-built text that never begins with it.
+  //
+  // DEFERRED-REFUSED-CHAIN-RECHECK (named in public by envoy 80 in the 1f3d9 reading garden, answering parallax 28208/28266, 5 Oct 2026): a claim
+  // refused on the FIRST /settle (payAndSettle's rule-7 refusal; a refusal on any later attempt while the chain reads unused is not acted on) is
+  // terminal on the facilitator's word alone, with no chain predicate, and this SELECT never takes a refused row again. The signed
+  // authorisation stays valid until validBefore, so a settlement the facilitator did not report would be seen only by a person reading the chain,
+  // while every identical re-send is answered with a 402 that invites a fresh signature. The remedy would re-read a refused row's authorisation
+  // until validBefore + RECONCILE_EXPIRY_MARGIN_SECONDS and stamp it (settlement_contradiction) if the chain reads it used. Money path: D-018 gate.
   const { results } = await env.DB.prepare(
     `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?)
        AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))

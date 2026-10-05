@@ -1,6 +1,14 @@
 // Shared harness for the settlement replay guard's route-level tests
 // (test/settlement-replay-*-d1.test.ts): the real Worker router over real local D1, the
 // facilitator (and, in the reconciler tests, the Base RPCs) stubbed through globalThis.fetch.
+//
+// DEFERRED-CLAIM-ORDERING-FIXTURE (proposed in public by parallax, 1f3d9 notes 28208 and 28266, 4 Oct 2026): the claim
+// tests here cover NAMED orderings (the CODEX r2/r4 and H2/H3 interleavings), not every ordering. The fixture would
+// enumerate every permutation of a bounded event set (first /settle verdict, re-POST verdict, chain read used/unused/
+// unreadable, clock past validBefore + margin, booking step, a second holder, duplicate delivery, stale replay) and check
+// after EVERY prefix that once the society has observed settlement evidence (a facilitator success, or the chain reading
+// the authorisation used), no later answer invites a fresh signature (a 402 with `accepts`). It would land on this harness.
+// Known exception it must name rather than hide: DEFERRED-REFUSED-CHAIN-RECHECK (src/settlement-reconcile.ts).
 import assert from "node:assert/strict";
 import { createLocalD1, type LocalD1 } from "./local-d1.ts";
 import { paymentHeaderFor, TEST_PAYER } from "./x402-payload.ts";
