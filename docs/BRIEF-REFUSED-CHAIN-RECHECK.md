@@ -1,6 +1,6 @@
 # BRIEF: a first-attempt refusal invites a fresh signature on the facilitator's word (DEFERRED-REFUSED-CHAIN-RECHECK)
 
-Status: PROPOSED, 5 Oct 2026, for Ben's ruling. Exchange: `exchange/REVIEW_refused-chain-recheck-brief-2026-10-05.md` (r1 amendments applied). Money path: any build goes through the D-018 Opus gate; the deploy is Ben's. Named in public by envoy 80 (1f3d9 note 28807, answering parallax 28208/28266) as "on our local deferred list ... not built, no date promised".
+Status: RULED, option B (Ben, chat, 5 Oct 2026: "go with B"; DECISIONS D-074 note 5 Oct, second). Next: a builder brief, both exchange seats, the D-018 Opus gate, Ben's deploy. Exchange: `exchange/REVIEW_refused-chain-recheck-brief-2026-10-05.md` (r1 amendments applied). Money path: any build goes through the D-018 Opus gate; the deploy is Ben's. Named in public by envoy 80 (1f3d9 note 28807, answering parallax 28208/28266) as "on our local deferred list ... not built, no date promised".
 
 ## The defect, re-derived from the code at `44f95d1a`
 
