@@ -32,7 +32,10 @@
 //   or reconciler pass, or an RPC eth_call answered `used` (counted in the RPC stub: a CHAIN_TRANSFER the code never read is NOT observed).
 //   Once EVIDENCE is true: (I1) no response to the payer is a 402 with `accepts`; (I2) the claim is never `refused` or `expired` without the
 //   contradiction stamp, unless it was already terminal before the evidence was observed. At every step, evidence or not: (I3) a 402 with
-//   `accepts` comes only from a row that is `refused` or `expired` and not contradicted.
+//   `accepts` comes only from a row that is `refused` or `expired` and not contradicted; (I4) the claim reads `refused` only in a trace whose
+//   FIRST step was a refusal (today's single producer is payAndSettle's first /settle: markRefused has one caller). I4 is what catches the H2 fix
+//   undone (a re-POST refusal while the chain reads unused written as `refused`): that branch is reachable only with EVIDENCE false and the row it
+//   wrongly refuses is never re-read, so I1-I3 cannot see it. I4 is a provenance clause about the code's own producers, not about the world.
 //
 // THE KNOWN EXCEPTION is named, not hidden, in the last test: DEFERRED-REFUSED-CHAIN-RECHECK (src/settlement-reconcile.ts).
 //
@@ -115,6 +118,8 @@ interface StepView {
   row: Pick<ClaimRow, "state" | "verdict_reason">;
   evidence: boolean;
   terminalBeforeEvidence: boolean;
+  // The trace's FIRST step was a recorded refusal (the only way a claim may become `refused`).
+  firstWasRefused: boolean;
 }
 // The one definition of the invariants. Pure, so the self-test below can prove each clause can fail.
 function stepViolations(view: StepView): string[] {
@@ -124,6 +129,7 @@ function stepViolations(view: StepView): string[] {
   if (view.evidence && invites) out.push("I1: a 402 with accepts after the society observed settlement evidence");
   if (view.evidence && liveTerminal && !view.terminalBeforeEvidence) out.push(`I2: claim is ${view.row.state} without the contradiction stamp after the society observed settlement evidence`);
   if (invites && !liveTerminal) out.push(`I3: a 402 with accepts from a row that is ${view.row.state}${isContradicted(view.row) ? " (contradicted)" : ""}, not a live refused or expired one`);
+  if (view.row.state === "refused" && !view.firstWasRefused) out.push("I4: claim is refused although the trace's FIRST step was not a refusal (only the first /settle may write refused)");
   return out;
 }
 
@@ -179,6 +185,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
   const violations: string[] = [];
   let evidence = false;
   let terminalBeforeEvidence = false;
+  const firstWasRefused = steps[0].kind === "FIRST" && steps[0].v === "refused";
   let previousTerminal = false;
   let checks = 0;
   try {
@@ -215,7 +222,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
         terminalBeforeEvidence = previousTerminal;
       }
       checks++;
-      for (const found of stepViolations({ response, row, evidence, terminalBeforeEvidence })) {
+      for (const found of stepViolations({ response, row, evidence, terminalBeforeEvidence, firstWasRefused })) {
         violations.push(
           `${traceLabel(steps.slice(0, i + 1))}\n    ${found}\n    response: ${response ? `${response.status} ${JSON.stringify(response.body).slice(0, 240)}` : "(reconciler pass)"}\n    row: state=${row.state} tx=${row.tx} verdict_reason=${String(row.verdict_reason).slice(0, 160)}`,
         );
@@ -334,7 +341,7 @@ test("the invariant can fail: each clause fires on a synthetic step that breaks 
   const row = (state: string, verdict_reason: string | null = null) => ({ state, verdict_reason }) as Pick<ClaimRow, "state" | "verdict_reason">;
   const stamped = "settlement_contradiction:0xabc|insufficient_funds";
   const has = (v: string[], tag: string) => v.some((x) => x.startsWith(tag));
-  const view = (response: StepView["response"], r: ReturnType<typeof row>, evidence: boolean, terminalBeforeEvidence = false): StepView => ({ response, row: r, evidence, terminalBeforeEvidence });
+  const view = (response: StepView["response"], r: ReturnType<typeof row>, evidence: boolean, terminalBeforeEvidence = false, firstWasRefused = true): StepView => ({ response, row: r, evidence, terminalBeforeEvidence, firstWasRefused });
 
   assert.ok(has(stepViolations(view(invite, row("expired"), true)), "I1"));
   assert.ok(has(stepViolations(view(invite, row("expired"), true)), "I2"));
@@ -342,9 +349,13 @@ test("the invariant can fail: each clause fires on a synthetic step that breaks 
   assert.ok(has(stepViolations(view(invite, row("pending"), false)), "I3"));
   assert.ok(has(stepViolations(view(invite, row("expired", stamped), false)), "I3"), "an invitation from a contradicted row is a violation");
   assert.ok(has(stepViolations(view(invite, row("booked"), false)), "I3"));
+  assert.ok(has(stepViolations(view(null, row("refused"), false, false, false)), "I4"), "a refused row in a trace that did not start with a refusal is a violation");
+  assert.ok(has(stepViolations(view(invite, row("refused", stamped), false, false, false)), "I4"), "a stamped refused row still has to come from a first refusal");
 
   assert.deepEqual(stepViolations(view(invite, row("expired"), false)), [], "a live expired row may invite when no evidence was observed");
   assert.deepEqual(stepViolations(view(invite, row("refused"), false)), []);
+  assert.deepEqual(stepViolations(view(null, row("expired"), false, false, false)), [], "I4 is about refused only: an expired row needs no refusal");
+  assert.deepEqual(stepViolations(view(null, row("pending"), true, false, false)), []);
   assert.deepEqual(stepViolations(view({ status: 502, body: { error: "do not sign again" } }, row("pending"), true)), []);
   assert.deepEqual(stepViolations(view({ status: 500, body: {} }, row("expired", stamped), true)), [], "a stamped terminal row after evidence is the correct state");
   assert.deepEqual(stepViolations(view(null, row("refused"), true, true)), [], "terminal before the evidence was observed is exempt from I2");
