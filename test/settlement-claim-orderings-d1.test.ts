@@ -41,21 +41,24 @@
 //
 // THE RIVAL HOLDER (a follow-on, 5 Oct 2026). Without a second holder the contradiction stamp (settlement_contradiction) is unreachable, so the
 // mutations that undo it (claimAnswer ignoring isContradicted; respondToExistingClaim not re-reading a held success) stayed green. A RESEND or
-// RECONCILE step that re-POSTs with v = success may therefore carry a RIVAL, another worker acting on the same claim at a chosen moment, in
-// one of two placements and with one of two ends (expired / refused):
-//   RIVAL_TERMINATES_DURING_SETTLE   while the attempt waits on /settle (the stub's settle callback runs then), the rival writes the terminal
-//                                    state directly into D1, mirroring markExpired / markRefused (state, rpc_body NULL, lease cleared,
-//                                    updated_at moved); the facilitator then answers success. Expected: markSettled changes nothing, the moved row
-//                                    is terminal, the contradiction is logged and stamped, and every later identical re-send gets the contradiction.
-//   RIVAL_HOLDS_THEN_TERMINATES      the rival takes a live lease on the still-pending row (markSettled fails on the lease), and terminates the row
+// RECONCILE step that re-POSTs with v = success may therefore carry a RIVAL: a second holder after the first holder's lease lapsed, acting
+// through the production lease and terminal writes. Inside the facilitator stub's /settle callback (the attempt is waiting there) the fake
+// clock is advanced past CLAIM_LEASE_TTL_MS so the attempt's lease lapses; the rival then takes the lease with acquireLease under its own
+// owner and writes only through markExpired / markRefused under that owner (passing the leased claim row as `release`, as the reconciler
+// does). There is no raw SQL write to settlement_claims anywhere in this file. Two placements, two ends (expired / refused):
+//   RIVAL_TERMINATES_DURING_SETTLE   the rival takes the lapsed lease and terminates the row while the attempt still waits on /settle; the
+//                                    facilitator then answers success. Expected: markSettled changes nothing, the moved row is terminal, the
+//                                    contradiction is logged and stamped, and every later identical re-send gets the contradiction.
+//   RIVAL_HOLDS_THEN_TERMINATES      the rival takes the lapsed lease and KEEPS it (markSettled fails on the live foreign lease), and terminates the row
 //                                    after the attempt's first re-read and before holdSuccessAgainstTerminal's. There is no fetch in that window, so the
-//                                    seam is the D1 BINDING the test passes in env: a wrapper that, after the markSettled UPDATE reports 0 changes,
-//                                    lets the next claim SELECT through and then performs the rival's terminal write. It wraps the database, not
-//                                    one of our modules.
+//                                    seam is the D1 BINDING the test passes in env: a wrapper that writes nothing, only watches: after the markSettled
+//                                    UPDATE reports 0 changes it lets the next claim SELECT through and then runs the rival's production terminal write.
+//                                    It wraps the database, not one of our modules.
 // A rival trace is a DISAGREEMENT world by construction: the facilitator reports a settlement while the society's own record (written by a
 // worker that read the chain unused) says the authorisation is dead. The monotone-chain physics above is not applied to the rival's write; that
 // disagreement is exactly what the contradiction stamp exists for. v is success for every rival step (the designed scenario), and rival steps
-// are only generated at the first RIVAL_MAX_STEP_INDEX steps after FIRST so the enumeration does not multiply.
+// are only generated at the first RIVAL_MAX_STEP_INDEX steps after FIRST so the enumeration does not multiply. The clock advance of a rival
+// step stays in force for the rest of the trace (time does not run backwards).
 // I4 gets one explicit exemption: a `refused` row written by a rival (a second holder's recorded refusal, the one producer I4 cannot see
 // because it is not the claim's first /settle) is not a provenance violation. The exemption starts at the step the rival fires and covers
 // that trace only; every other trace, and M1's branch, are still held to I4.
@@ -82,7 +85,18 @@ import {
   stubFacilitator,
   testEnv,
 } from "./helpers/settlement-harness.ts";
-import { CHAIN_SPENT_MARKER, CLAIM_LEASE_TTL_MS, isContradicted, type ClaimRow } from "../src/settlement-claims.ts";
+import {
+  CHAIN_SPENT_MARKER,
+  CLAIM_LEASE_TTL_MS,
+  acquireLease,
+  isContradicted,
+  keyOfRow,
+  markExpired,
+  markRefused,
+  releaseLease,
+  type ClaimKey,
+  type ClaimRow,
+} from "../src/settlement-claims.ts";
 import { runReconciler } from "../src/settlement-reconcile.ts";
 import { RECONCILE_EXPIRY_MARGIN_SECONDS } from "../src/x402.ts";
 
@@ -198,19 +212,35 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
   const body = { handle: "ordering-seat", model: "m", public_key: publicKey };
   // The rival holder (see THE RIVAL HOLDER above). `active` is the rival the current step carries; `holding` means it has taken the lease on the still-pending row;
   // `armed` means the attempt's markSettled has just changed nothing, so the next claim SELECT is the attempt's re-read; `fired` means the rival's terminal write happened.
-  const rival = { active: null as Rival | null, holding: false, armed: false, fired: false, wroteRefused: false };
-  const rivalTerminate = (end: Rival["end"]): void => {
-    const now = Date.now();
-    const sql =
+  // The rival acts ONLY through the production functions (acquireLease with its own owner, then markExpired / markRefused with that owner), on an env whose DB is NOT the watched wrapper.
+  // `key` and `leased` are the claim's key and the row as the rival's acquireLease returned it.
+  const RIVAL_OWNER = "rival-holder";
+  const rivalEnv = testEnv(d1);
+  const rival = { active: null as Rival | null, holding: false, armed: false, fired: false, wroteRefused: false, key: null as ClaimKey | null, leased: null as ClaimRow | null };
+  // The first holder's lease lapses: the clock moves past CLAIM_LEASE_TTL_MS (the attempt took its lease at the start of the step), then the rival takes the lease through acquireLease,
+  // exactly as a second worker or the reconciler would. Returns false if production refused it (the rival then does nothing).
+  const rivalTakesOver = async (): Promise<boolean> => {
+    clockOffsetMs += CLAIM_LEASE_TTL_MS + 1000;
+    const key = keyOfRow((claimRows(d1) as unknown as ClaimRow[])[0]);
+    const leased = await acquireLease(rivalEnv, key, RIVAL_OWNER, Date.now());
+    if (!leased) return false;
+    rival.key = key;
+    rival.leased = leased;
+    rival.holding = true;
+    return true;
+  };
+  const rivalTerminate = async (end: Rival["end"]): Promise<void> => {
+    const moved =
       end === "expired"
-        ? "UPDATE settlement_claims SET state = 'expired', rpc_body = NULL, verdict_reason = 'authorisation expired unused (on-chain authorizationState is unused after validBefore)', lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE state = 'pending'"
-        : "UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = 'The facilitator recorded a refusal of this settlement (a rival holder): insufficient_funds', lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE state = 'pending'";
-    if (Number(d1.raw.prepare(sql).run(now).changes) !== 1) return;
+        ? await markExpired(rivalEnv, rival.key!, RIVAL_OWNER, Date.now(), rival.leased!)
+        : await markRefused(rivalEnv, rival.key!, "The facilitator recorded a refusal of this settlement (a rival holder): insufficient_funds", RIVAL_OWNER, Date.now(), rival.leased!);
+    if (!moved) return;
     rival.fired = true;
     if (end === "refused") rival.wroteRefused = true;
   };
-  // The seam for RIVAL_HOLDS_THEN_TERMINATES: a wrapper around the D1 BINDING (not one of our modules). After the markSettled UPDATE reports 0 changes it arms; the next claim SELECT
-  // (the attempt's re-read) is let through, and the rival's terminal write lands right after it, before holdSuccessAgainstTerminal's read.
+  // The timing seam for RIVAL_HOLDS_THEN_TERMINATES, and the ONLY thing the D1 wrapper does: a wrapper around the D1 BINDING (not one of our modules, and it writes nothing). After the
+  // markSettled UPDATE reports 0 changes it arms; the next claim SELECT (the attempt's re-read) is let through, and the rival's production terminal write lands right after it, before
+  // holdSuccessAgainstTerminal's read.
   const SETTLED_UPDATE = /^\s*UPDATE settlement_claims SET state = 'settled_unbooked'/;
   const CLAIM_SELECT = /^\s*SELECT \* FROM settlement_claims WHERE/;
   const watch = (stmt: any, sql: string): any => ({
@@ -220,28 +250,23 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
       const r = await stmt.first();
       if (rival.armed && CLAIM_SELECT.test(sql)) {
         rival.armed = false;
-        rivalTerminate(rival.active!.end);
+        await rivalTerminate(rival.active!.end);
       }
       return r;
     },
     run: async () => {
       const r = await stmt.run();
-      if (rival.holding && !rival.fired && SETTLED_UPDATE.test(sql) && r.meta.changes === 0) rival.armed = true;
+      if (rival.holding && !rival.fired && rival.active?.at === "hold" && SETTLED_UPDATE.test(sql) && r.meta.changes === 0) rival.armed = true;
       return r;
     },
   });
   const needsWatchedDb = steps.some((s) => (s.kind === "RESEND" || s.kind === "RECONCILE") && s.rival?.at === "hold");
   const env = needsWatchedDb ? { ...testEnv(d1), DB: { prepare: (sql: string) => watch(d1.DB.prepare(sql), sql), batch: (stmts: any[]) => d1.DB.batch(stmts) } as any } : testEnv(d1);
   const stub = stubFacilitator({
-    settle: () => {
+    settle: async () => {
       const rv = rival.active;
       if (rv && !rival.fired && !rival.holding) {
-        if (rv.at === "settle") rivalTerminate(rv.end);
-        else {
-          const now = Date.now();
-          d1.raw.prepare("UPDATE settlement_claims SET lease_owner = 'rival-holder', leased_until = ?, updated_at = ? WHERE state = 'pending'").run(now + CLAIM_LEASE_TTL_MS, now);
-          rival.holding = true;
-        }
+        if ((await rivalTakesOver()) && rv.at === "settle") await rivalTerminate(rv.end);
       }
       if (dial.v === "success") seen.successes++;
       return FACILITATOR[dial.v]();
@@ -292,7 +317,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
         world.spent = true;
       }
       // A rival that took the lease but never got to terminate (the code never reached the seam) lets go, so later steps meet the claim as the code left it.
-      if (rival.holding && !rival.fired) d1.raw.prepare("UPDATE settlement_claims SET lease_owner = NULL, leased_until = NULL WHERE lease_owner = 'rival-holder'").run();
+      if (rival.holding && !rival.fired) await releaseLease(rivalEnv, rival.key!, RIVAL_OWNER);
       const rivalFired = rival.fired;
       rival.active = null;
       const rpcFetches = seen.rpcFetches - before.rpc;
