@@ -1,8 +1,10 @@
 // A source scan for settlement answers that bypass the served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md A1, A2, T4: "a source scan that fails if a new `code: SETTLEMENT_` body bypasses
-// the identity"). It is not a parser: it blanks comments, skips string and template literals when matching brackets, and applies three rules to the code that is left.
+// the identity"). It is not a parser: it blanks comments, skips string and template literals when matching brackets, and applies four rules to the code that is left.
 //
-//   R1  a body literal `code: <settlement code>` must sit INSIDE the arguments of claimResponse( or claimErrorResponse( (the two helpers that add answered_by), or, in settlement-claims.ts,
-//       inside claimAnswer or contradictionAnswer (which only BUILD a ClaimAnswer; R2 shows nothing else serves one). Anywhere else (a bare Response.json, a json(), a new Response) is a bypass.
+//   R1  a body literal `code: <settlement code>` OR `error: <settlement code>` (CODEX build r1 F1: the pay-listing 502 serves its code as `error`) must sit INSIDE the arguments of claimResponse(
+//       or claimErrorResponse( (the two helpers that add answered_by), or, in settlement-claims.ts, inside claimAnswer or contradictionAnswer (which only BUILD a ClaimAnswer; R2 shows nothing
+//       else serves one), or inside a bare Response.json( whose body object ENDS with `answered_by: answeredBy(codeIdentity(env))` (last, so nothing above it can override it). Anywhere else
+//       (a bare Response.json without the identity, or with it not last, a json(), a new Response) is a bypass.
 //   R2  claimAnswer( and contradictionAnswer( are called, outside settlement-claims.ts, only inside claimResponse(.
 //   R3  `new SocietyError(` naming a settlement code is served by the router (src/index.ts), which adds answered_by for a code on SETTLEMENT_ANSWER_CODES: the code must be on that list.
 //   R4  outside settlement-claims.ts, every claimResponse( and claimErrorResponse( call passes the request's own identity, written `codeIdentity(env)`, as its last argument (a call that
@@ -134,6 +136,39 @@ function bodySpans(masked: string, names: string[]): Span[] {
   return out;
 }
 
+// The body object of a bare Response.json answer ends with the identity, last, so nothing above it in the body can override it (docs/BRIEF-SERVED-CODE-IDENTITY.md A1).
+const IDENTITY_LAST = /answered_by:\s*answeredBy\(codeIdentity\(env\)\),?\s*\}$/;
+
+// Every `{ ... }` in the code, string and template literals skipped (a `${ }` inside a template is part of the template, not an object).
+function objectSpans(masked: string): Span[] {
+  const out: Span[] = [];
+  for (let i = 0; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === '"' || c === "'") {
+      i++;
+      while (i < masked.length && masked[i] !== c) i += masked[i] === "\\" ? 2 : 1;
+    } else if (c === "`") {
+      i++;
+      let depth = 0;
+      while (i < masked.length) {
+        if (masked[i] === "\\") i += 2;
+        else if (masked[i] === "$" && masked[i + 1] === "{") {
+          depth++;
+          i += 2;
+        } else if (masked[i] === "}" && depth > 0) {
+          depth--;
+          i++;
+        } else if (masked[i] === "`" && depth === 0) break;
+        else i++;
+      }
+    } else if (c === "{") {
+      const close = matchingClose(masked, i);
+      if (close > i) out.push({ name: "{", open: i, close });
+    }
+  }
+  return out;
+}
+
 const lineOf = (src: string, idx: number) => src.slice(0, idx).split("\n").length;
 const inner = (spans: Span[], p: number): Span | null => spans.filter((s) => s.open < p && p < s.close).sort((a, b) => b.open - a.open)[0] ?? null;
 
@@ -144,12 +179,17 @@ export function scanForBypasses(file: string, source: string, answerCodes: reado
   const call = callSpans(masked, /\b(claimResponse|claimErrorResponse|Response\.json|new Response|new SocietyError|claimAnswer|contradictionAnswer)\(/g);
   const builders: Span[] = isClaims ? bodySpans(masked, ["claimAnswer", "contradictionAnswer"]) : [];
 
-  // R1: a body literal `code: <settlement code>`
-  for (const m of masked.matchAll(new RegExp(`\\bcode:\\s*(${CODE_NAME.source})`, "g"))) {
+  // R1: a body literal `code: <settlement code>` or `error: <settlement code>` (the pay-listing 502 serves its code as `error`, and scripts/pay-listing.mjs keys on it)
+  const objects = objectSpans(masked);
+  for (const m of masked.matchAll(new RegExp(`\\b(?:code|error):\\s*(${CODE_NAME.source})`, "g"))) {
     const p = m.index!;
     const owner = inner(call, p);
-    const ok = owner !== null ? owner.name === "claimResponse" || owner.name === "claimErrorResponse" || (isClaims && builders.some((b) => b.open < p && p < b.close)) : isClaims && builders.some((b) => b.open < p && p < b.close);
-    if (!ok) found.push({ rule: "R1", file, line: lineOf(masked, p), text: m[0] });
+    const inBuilder = isClaims && builders.some((b) => b.open < p && p < b.close);
+    const viaHelper = owner !== null && (owner.name === "claimResponse" || owner.name === "claimErrorResponse");
+    // A bare Response.json is accepted only when the body object it serves carries the identity as its LAST property, written exactly `answered_by: answeredBy(codeIdentity(env))`.
+    const body = inner(objects, p);
+    const carriesIdentity = owner !== null && owner.name === "Response.json" && body !== null && IDENTITY_LAST.test(masked.slice(body.open, body.close + 1));
+    if (!(viaHelper || inBuilder || carriesIdentity)) found.push({ rule: "R1", file, line: lineOf(masked, p), text: m[0] });
   }
 
   // R2: claimAnswer( / contradictionAnswer( called outside settlement-claims.ts only inside claimResponse(
@@ -163,7 +203,7 @@ export function scanForBypasses(file: string, source: string, answerCodes: reado
   // R4: the identity argument
   if (!isClaims) {
     for (const s of call.filter((c) => c.name === "claimResponse" || c.name === "claimErrorResponse")) {
-      if (masked.slice(Math.max(0, s.open - 40), s.open).match(/functions+w+$/)) continue; // a definition's parameter list
+      if (/function\s+\w+$/.test(masked.slice(Math.max(0, s.open - 40), s.open))) continue; // a definition's parameter list
       if (!masked.slice(s.open + 1, s.close).trimEnd().replace(/,$/, "").trimEnd().endsWith("codeIdentity(env)")) found.push({ rule: "R4", file, line: lineOf(masked, s.open), text: `${s.name}( does not end with codeIdentity(env)` });
     }
   }

@@ -301,6 +301,50 @@ test("T4 (route, router): the listing-no-longer-awaiting answer (a settlement_un
   }
 });
 
+// CODEX build r1 F1: handlePayListing's own 502 (the /settle request was sent and its answer never read as a verdict) is built with a bare Response.json in listings.ts and carries its code in
+// `error`, which scripts/pay-listing.mjs keys on. It is a settlement answer, so it carries answered_by too, LAST, and nothing else about it changes.
+test("F1 (CODEX build r1): the pay-listing 502 settlement_unconfirmed carries answered_by LAST, and its status, error, fields, message and CORS header are exactly as before", async () => {
+  const d1 = createLocalD1();
+  const FUNDER_SECRET = "commonhold_sk_" + "cd".repeat(32);
+  const funderId = insertCitizen(d1, { secret_hash: await sha256Hex(FUNDER_SECRET) });
+  const reviewerId = insertCitizen(d1);
+  const wallet = "0x" + "0a".repeat(20);
+  const pin = await declareTestWallet(d1, reviewerId, wallet);
+  const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1200 });
+  const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+  // a JSON 502 with no success field: not a verdict, so the reservation is kept and the route answers settlement_unconfirmed
+  const stub = stubFacilitator({ settle: () => new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 502, headers: { "content-type": "application/json" } }) });
+  try {
+    const res = await quiet(() =>
+      callWorker(
+        new Request(`https://example.test/api/listing/${listingId}/pay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${FUNDER_SECRET}`, "X-PAYMENT": paymentHeaderFor(wallet, atomicFromCents(1200)) },
+          body: JSON.stringify({ submission_id: submissionId, wallet_row_id: pin.id, wallet_row_hash: pin.hash }),
+        }),
+        stamped(d1),
+      ),
+    );
+    const body = await json(res);
+    assert.equal(res.status, 502, JSON.stringify(body));
+    assert.equal(res.headers.get("access-control-allow-origin"), "*");
+    assert.equal(body.error, "settlement_unconfirmed", "scripts/pay-listing.mjs keys on exactly this");
+    assert.equal(body.listing_id, listingId);
+    assert.equal(body.submission_id, submissionId);
+    assert.equal(typeof body.paying_since, "number");
+    assert.equal(body.wallet_row_id, pin.id);
+    assert.equal(body.wallet_row_hash, pin.hash);
+    assert.ok(String(body.message).startsWith("No settlement verdict was returned for the settle request ("), String(body.message));
+    assert.deepEqual(body.answered_by, EXPECTED);
+    assert.deepEqual(Object.keys(body), ["error", "listing_id", "submission_id", "paying_since", "wallet_row_id", "wallet_row_hash", "message", "answered_by"], "the identity is the LAST property; no other field was added or removed");
+    assert.equal(body.accepts, undefined, "no fresh payment requirements: the money may have moved");
+    assert.equal(d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId)?.status, "paying", "and the reservation is kept, as before");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
 // T4a (A2, A8): the three answers payAndSettle builds directly. Each is driven through the patron route; each keeps its status, its code and its CORS header.
 test("T4a: the claim INSERT commits then throws (a 502 settlement_unresolved built directly in x402.ts): answered_by, status, code and CORS", async () => {
   const d1 = createLocalD1();
@@ -393,4 +437,33 @@ test("T4 scan, positive controls: it fails on a bare Response.json carrying a se
   assert.deepEqual(scan("x402.ts", '// return Response.json({ code: SETTLEMENT_UNRESOLVED });\nreturn 1;'), [], "a comment");
   assert.deepEqual(scan("x402.ts", 'return Response.json({ error: "x", code: PAYMENT_VALID_BEFORE_TOO_FAR }, { status: 402 });'), [], "a code that is not a settlement code");
   assert.deepEqual(scan("listings.ts", "throw new SocietyError(500, msg, SETTLEMENT_UNRESOLVED);"), [], "a listed code thrown as a SocietyError");
+});
+
+test("F1 scan (CODEX build r1): a settlement string served as `error:` is a bypass unless the body ends with the identity; the REAL unfixed listings.ts line goes red, the fixed one green", () => {
+  const list = SETTLEMENT_ANSWER_CODES;
+  const scan = (file: string, src: string) => scanForBypasses(file, src, list, resolveName);
+  const rules = (file: string, src: string) => scan(file, src).map((v) => v.rule);
+  const LAST = "answered_by: answeredBy(codeIdentity(env)),";
+  // positive controls on synthetic text
+  assert.deepEqual(rules("listings.ts", 'return Response.json({ error: "settlement_unconfirmed", listing_id: 1 }, { status: 502 });'), ["R1"], "the string form, as `error`");
+  assert.deepEqual(rules("listings.ts", "return Response.json({ error: SETTLEMENT_UNRESOLVED, listing_id: 1 }, { status: 502 });"), ["R1"], "the constant form, as `error`");
+  assert.deepEqual(rules("index.ts", 'return json({ error: "settlement_unconfirmed" }, 502);'), ["R1"], "through a json()");
+  assert.deepEqual(rules("listings.ts", `return Response.json({ error: "settlement_unconfirmed", ${LAST} }, { status: 502 });`), [], "the identity last: accepted");
+  assert.deepEqual(rules("listings.ts", `return Response.json({\n  error: "settlement_unconfirmed",\n  message: \`a (b) \${reason}\`,\n  ${LAST}\n}, { status: 502 });`), [], "across lines, with a template literal before it");
+  assert.deepEqual(rules("listings.ts", `return Response.json({ ${LAST} error: "settlement_unconfirmed", message: "m" }, { status: 502 });`), ["R1"], "the identity NOT last: a later field could override it");
+  assert.deepEqual(rules("listings.ts", 'return Response.json({ error: "settlement_unconfirmed", answered_by: answeredBy(codeIdentity({})) }, { status: 502 });'), ["R1"], "the wrong env");
+  assert.deepEqual(rules("listings.ts", 'return Response.json({ error: "settlement_unconfirmed", answered_by: someOtherThing }, { status: 502 });'), ["R1"], "some other value under the same key");
+  assert.deepEqual(rules("listings.ts", '// return Response.json({ error: "settlement_unconfirmed" });\nreturn 1;'), [], "a comment");
+  assert.deepEqual(rules("listings.ts", 'return Response.json({ error: "an ordinary message", code: PAYMENT_VALID_BEFORE_TOO_FAR }, { status: 402 });'), [], "not a settlement code");
+  // the real source: green as it is, red with the line removed, red with the identity moved off the end
+  const real = readFileSync(join(SRC, "listings.ts"), "utf8").replace(/\r\n/g, "\n");
+  assert.deepEqual(scan("listings.ts", real), [], "the fixed listings.ts is clean");
+  const line = /^ {8}answered_by: answeredBy\(codeIdentity\(env\)\),\n/m;
+  assert.equal([...real.matchAll(new RegExp(line.source, "gm"))].length, 1, "the identity line is there exactly once");
+  const unfixed = real.replace(line, "");
+  assert.notEqual(unfixed, real);
+  const red = scan("listings.ts", unfixed);
+  assert.deepEqual(red.map((v) => [v.rule, v.text]), [["R1", 'error: "settlement_unconfirmed"']], "the unfixed line is found, by name");
+  const movedUp = real.replace(line, "").replace('        error: "settlement_unconfirmed",\n', `        error: "settlement_unconfirmed",\n        answered_by: answeredBy(codeIdentity(env)),\n`);
+  assert.deepEqual(scan("listings.ts", movedUp).map((v) => v.rule), ["R1"], "and the identity placed before the other fields is refused");
 });
