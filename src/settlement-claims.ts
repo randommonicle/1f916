@@ -16,6 +16,7 @@
 
 import { classifyUniqueViolation, sha256Hex, chainHeadMovedError, type ChainGate, type ChainedTable } from "./chain.ts";
 import { SocietyError, type Env } from "./society.ts";
+import { answeredBy, type CodeIdentity } from "./code-identity.ts";
 import { CHAIN_SPENT_MARKER, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CONTRADICTION_MARKER } from "./settlement-attention.ts";
 
 // C7 (second build): the four markers the claim table carries in `verdict_reason` are DEFINED in settlement-attention.ts (a leaf module, so officialFacts can count the rows the attention list
@@ -73,6 +74,8 @@ export const PAYMENT_AUTHORIZATION_MALFORMED = "payment_authorization_malformed"
 export const SETTLEMENT_CLAIM_CONFLICT = "settlement_claim_conflict";
 export const SETTLEMENT_ALREADY_BOOKED = "settlement_already_booked";
 export const SETTLEMENT_UNRESOLVED = "settlement_unresolved";
+// The society could not record or read back a claim for this authorisation (a database error); nothing was sent to /settle. Served by payAndSettle only (src/x402.ts).
+export const SETTLEMENT_CLAIM_UNAVAILABLE = "settlement_claim_unavailable";
 // R2b (gate C2): the facilitator reported a settlement and the society's own claim for it is refused or expired.
 export const SETTLEMENT_CONTRADICTION = "settlement_contradiction";
 // F1 (hub ruling, 2026-09-30): a registration whose handle was taken by a DIFFERENT seat between settlement and the
@@ -207,6 +210,12 @@ export type TakeResult = { taken: true } | { taken: false; row: ClaimRow; identi
 // SELECT-then-INSERT (check-then-act loses the race under concurrency). The
 // taker holds the lease from the first instant, so a second request or the
 // reconciler cannot start a competing settle while this one is in flight.
+//
+// DEFERRED-CLAIM-ROW-CODE-IDENTITY (errant-hermes, 1f916 95176, 6 Oct 2026; docs/BRIEF-SERVED-CODE-IDENTITY.md): record the commit (and the Worker version id) on the settlement_claims row when
+// the claim is taken here, and accept a re-send only when the tuple matches, so the surviving row names the code that decided it. NOT built: it is a migration on the money-path table and a change to
+// replay semantics. A payer's identical re-send after a deploy must still finish a payment whose money moved (takeClaim creates the row before /settle; a later worker can record settled_unbooked),
+// so "refuse on tuple mismatch" could strand money. Its own brief and the D-018 Opus gate. Until then every claim answer says (answered_by.note, ANSWERED_BY_NOTE) that the claim may have been
+// decided earlier by other code and that the row does not record which.
 export async function takeClaim(env: Env, id: ClaimIdentity, spec: ClaimSpec, owner: string, now: number): Promise<TakeResult> {
   const res = await env.DB.prepare(
     `INSERT INTO settlement_claims (network, asset, from_addr, nonce, route, intent_json, intent_hash, rpc_body, rpc_body_hash, valid_before, state, booked_refs, created_at, updated_at, lease_owner, leased_until)
@@ -740,6 +749,28 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
   }
 }
 
-export function claimResponse(answer: ClaimAnswer): Response {
-  return Response.json(answer.body, { status: answer.status, headers: { "Access-Control-Allow-Origin": "*" } });
+// Served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md A1, A2, A7, A8). The identity is injected HERE, at response construction, and nowhere else: claimAnswer stays pure and its unit tests
+// take no env. `{ ...answer.body, answered_by }` puts the identity LAST, so no field a body carries can override it. `identity` is a REQUIRED parameter, so a call site that forgets it fails
+// typecheck. Status, code and `accepts` are the answer's own, untouched. The headers are exactly what they were (CORS included): the answers x402.ts builds directly (claimErrorResponse) keep theirs.
+export function claimResponse(answer: ClaimAnswer, identity: CodeIdentity): Response {
+  return Response.json({ ...answer.body, answered_by: answeredBy(identity) }, { status: answer.status, headers: { "Access-Control-Allow-Origin": "*" } });
 }
+
+// The settlement answers payAndSettle builds directly, because they are served from inside the claim-taking step (the claim could not be recorded or read back): routed through the same
+// helper so they carry the same field and the same headers (A2, A8). The rule is literal: every response whose body carries a SETTLEMENT_* code or settlement_claim_unavailable carries answered_by.
+export function claimErrorResponse(body: Record<string, unknown>, status: number, identity: CodeIdentity): Response {
+  return claimResponse({ status, body }, identity);
+}
+
+// Every code a settlement-claim answer can carry. The router (src/index.ts) uses it for the claim answers that are THROWN as a SocietyError rather than built by claimResponse: the
+// listing-no-longer-awaiting answer (listings.ts, settlement_unresolved) and the handle-taken answer (register-gate.ts, registration_handle_taken_after_payment). The latter is not a settlement_*
+// code, but claimAnswer serves the same answer on a replay with answered_by, and a first answer and its replay must stay the same answer (test/settlement-replay-fixes-d1.test.ts F1, "the same
+// answer"), so it is on the list. test/code-identity-answers-d1.test.ts scans the source so a new code or a new bypass cannot be added without this list and the scan seeing it.
+export const SETTLEMENT_ANSWER_CODES: readonly string[] = [
+  SETTLEMENT_CLAIM_CONFLICT,
+  SETTLEMENT_ALREADY_BOOKED,
+  SETTLEMENT_UNRESOLVED,
+  SETTLEMENT_CONTRADICTION,
+  SETTLEMENT_CLAIM_UNAVAILABLE,
+  REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT,
+];

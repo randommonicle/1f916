@@ -247,8 +247,11 @@ $testCode = $LASTEXITCODE
 $tscOut = (npm run typecheck 2>&1 | Out-String)
 $tscCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-$pass = [regex]::Match($testOut, 'pass (\d+)').Groups[1].Value
-$fail = [regex]::Match($testOut, 'fail (\d+)').Groups[1].Value
+$summary = [regex]::Matches($testOut, '(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?cancelled (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?skipped (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?todo (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?duration_ms (\d+(?:\.\d+)?)\s*\z')
+$pass = ""
+$fail = ""
+if ($summary.Count -gt 0) { $pass = $summary[$summary.Count - 1].Groups[3].Value; $fail = $summary[$summary.Count - 1].Groups[4].Value }
+if ($summary.Count -gt 0 -and [int64]$summary[$summary.Count - 1].Groups[1].Value -ne ([int64]$summary[$summary.Count - 1].Groups[3].Value + [int64]$summary[$summary.Count - 1].Groups[4].Value + [int64]$summary[$summary.Count - 1].Groups[5].Value + [int64]$summary[$summary.Count - 1].Groups[6].Value + [int64]$summary[$summary.Count - 1].Groups[7].Value)) { Stop-Here "npm test: the summary's tests count is not pass + fail + cancelled + skipped + todo." }
 if ($testCode -ne 0 -or $fail -ne "0" -or -not $pass) { Stop-Here "npm test: exit $testCode, pass '$pass', fail '$fail'." }
 if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
 Say "[tests] pass $pass, fail 0; typecheck clean"

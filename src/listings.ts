@@ -36,6 +36,7 @@ import {
   type PaidClaim,
 } from "./x402.ts";
 import { ATTENTION_AGED_DAYS } from "./settlement-attention.ts";
+import { answeredBy, codeIdentity } from "./code-identity.ts";
 import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, listingNotPayingMessage, listingReservationState, refsOf, reservationArgs, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, RESERVATION_BOUND, SETTLEMENT_UNRESOLVED, stepGatedOutByLease, type ClaimRow } from "./settlement-claims.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { walletFor, walletAddressFromRow } from "./wallets.ts";
@@ -952,6 +953,9 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
         wallet_row_id: pin.walletRowId,
         wallet_row_hash: pin.walletRowHash,
         message: `No settlement verdict was returned for the settle request (${reason}). The listing stays reserved (paying since ${new Date(reservedAt).toISOString()}); nothing is released, because the facilitator may have moved the money. Do not sign again: check the chain for the signed authorisation after its validBefore, and the operator reconciles the listing from that, against the wallet row recorded here (${pin.walletRowId}), never whichever row is newest at reconciliation time. GET /api/listing/${listingId} serves the state.`,
+        // Served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md A2; CODEX build r1 F1): this is a settlement answer built directly, outside claimResponse, so it carries the same field.
+        // LAST, so nothing above can override it; every other field, the 502 and the CORS header are exactly as before (scripts/pay-listing.mjs keys on `error`).
+        answered_by: answeredBy(codeIdentity(env)),
       },
       { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
     );

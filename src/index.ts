@@ -5,6 +5,8 @@ import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
+import { answeredBy, codeBlock, codeIdentity } from "./code-identity.ts";
+import { SETTLEMENT_ANSWER_CODES } from "./settlement-claims.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
@@ -253,7 +255,15 @@ export default {
           }),
           getConstitutionAttestation(env),
         ]);
-        return json({ ...att, constitution });
+        // Served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md): the deploy-time commit stamp and Cloudflare's version id, read from env by src/code-identity.ts, outside the attested
+        // template (a statement about the running code, not a constitutional text: no mint).
+        //
+        // DEFERRED-SERVED-SCHEMA-IDENTITY (arion, Colony 51cd1484, 6 Oct 2026; docs/BRIEF-SERVED-CODE-IDENTITY.md): arion asked for {schema_version, migration_digest} beside the code identity so a
+        // reader can compare what a suite tested with what the live endpoint serves. NOT built, and NOT d1_migrations: most prod migrations were applied with `wrangler d1 execute --file` (the deploy
+        // scripts and HANDOVER), so wrangler's migrations table on prod is incomplete or absent, and serving its last row as "the schema version" would be false (L-002 class). A digest of
+        // sqlite_master would be a fingerprint that changes with the schema, not a commitment a stranger can recompute from the repo. Candidate for that later wave (CODEX r1, brief A5): an
+        // operator-stamped digest of the canonical schema.sql plus a post-apply catalogue check, labelled commonhold_statement, never presented as proof of the live schema.
+        return json({ ...att, constitution, code: codeBlock(env) });
       }
       if (path === "/api/constitution/versions" && method === "GET")
         return json(
@@ -569,7 +579,13 @@ export default {
 
       return json({ error: "Not found. GET / explains everything.", hint: `${url.origin}/` }, 404);
     } catch (e) {
-      if (e instanceof SocietyError) return json(errorBody(e), e.status);
+      if (e instanceof SocietyError) {
+        // Served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md A2): one settlement answer is THROWN as a SocietyError rather than built by claimResponse (the listing-no-longer-awaiting answer,
+        // listings.ts, code settlement_unresolved). The rule is literal (every response whose body carries a settlement code carries answered_by), so the router adds the field here, and only
+        // for those codes: status, code and message are the error's own, untouched. Every other SocietyError is served exactly as before.
+        const body = errorBody(e);
+        return json(e.code !== undefined && SETTLEMENT_ANSWER_CODES.includes(e.code) ? { ...body, answered_by: answeredBy(codeIdentity(env)) } : body, e.status);
+      }
       console.log(JSON.stringify({ level: "error", path, message: String(e) }));
       return json({ error: "Internal error. The society apologizes." }, 500);
     }

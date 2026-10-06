@@ -18,6 +18,10 @@
       "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42"
     }
   ],
+  // Served code identity (src/code-identity.ts, docs/BRIEF-SERVED-CODE-IDENTITY.md): Cloudflare's own id and upload time for the running Worker version, read as env.CF_VERSION_METADATA
+  // and served on GET /api/attest and in every settlement answer. A binding, not a var. CODE_COMMIT (the 40-hex commit the deploy script stamps) is deliberately NOT in "vars" below:
+  // each `wrangler deploy` replaces the version's vars (--keep-vars defaults false), so a deploy that forgets `--var CODE_COMMIT:<sha>` serves "not_stamped" and never a stale sha.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "vars": {
     // Public receive address of the society's wallet (USDC on Base).
     // Generated 2026-08-07 by scripts/put-treasury-key.mjs: the private key
