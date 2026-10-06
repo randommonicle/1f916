@@ -21,12 +21,12 @@
 # and the listing (if listing_pay) stays `paying`. Do not declare option B ridden before then.
 # PROPAGATION, stated plainly: NO public GET serves any text this wave changed. The diff 8e5d2782..f0431b66 touches POST answers only (402, 502, 409, 500 bodies), the
 # reconciler's scheduled selection, and settlementField's sentence for a 'paying' listing, which GET /api/listing/:id serves only while a listing is 'paying' (prod
-# has none and C2b is about exactly that). /openapi.json, /skill.md, /llms.txt, /heartbeat.md and GET / are untouched. So there is nothing to poll for, and the
+# had none at the gate, and C2b is about exactly that). /openapi.json, /skill.md, /llms.txt, /heartbeat.md and GET / are untouched. So there is nothing to poll for, and the
 # reads after the deploy cannot tell the new worker from the old one: they show only that nothing broke. The evidence of the deploy is wrangler's own version id,
 # which this script prints and refuses to continue without. A fixed 20 s wait precedes the reads; it is not a proof of propagation.
-# Windows seam (checked by hand with a stand-in for npx.cmd that prints its argv as JSON, 6 Oct 2026): the C1 text carries `<=`, `<>` and `$.` and reaches wrangler
-# as ONE argument, byte-identical, because PowerShell 5.1 wraps an argument that has spaces in double quotes, the SQL has no double quote, `%` or `^`, and cmd.exe
-# leaves `<` and `>` inside quotes alone. The first live use of this seam with that text is the dry run: if wrangler reports a syntax error, STOP and re-run once.
+# Windows seam (checked by hand on 6 Oct 2026, wrangler not run): the C1 text carries `<=`, `<>` and `$.`. Through a stand-in that prints each argument on its own line,
+# invoked both as a .cmd (`node argv.js %*`, as npx.cmd forwards) and as a .ps1 (`& node argv.js $args`, as npx.ps1 does), C1, C2a and C2b each arrive as ONE argument,
+# byte-identical: PowerShell 5.1 wraps an argument that has spaces in double quotes, the SQL has no double quote, `%` or `^`, and cmd.exe leaves `<` and `>` inside quotes alone. The first live use of this seam with that text is the dry run: if wrangler reports a syntax error, STOP and re-run once.
 # PowerShell 5.1 traps this file avoids (all seen live): $COLS and $cols are the SAME variable (one spelling per name here); -notmatch on an
 # array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference (write "${var}:"); never merge a
 # native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and state names are compared with -cne / -cnotcontains). ASCII only.
