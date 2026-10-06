@@ -88,3 +88,14 @@ success meeting a first-refusal row is held, logged and named; `pending_aged` on
 booking goes first). Red-proofs: E1 ORDER BY back to oldest-first -> the starvation test; E2 `markExpired` without the release row -> both listing_pay tests; E3 the pinned proof without
 `pastTimestamp` -> the trailing-block leg; E4 the margin not waited out -> the early leg; E5 a used-chain refusal not stopped -> the cancellation test; E6 secret-mode settled_unbooked rows
 selected again -> the secret-mode test; E7 a held success not named -> the held-success test.
+
+## 4. The claim-conflict wording says "/settle" (commission item 6, gate L2 class)
+
+`claimAnswer`'s non-identical 409 said "This request sent nothing to the facilitator" and `takeClaim`'s 503 "Nothing was sent to the facilitator". Both can be reached AFTER `/verify`
+(payAndSettle takes the claim at `x402.ts` just before `/settle`, after `/verify` at the top of the function), and the `/verify` body is the full signed authorisation (the L2 note), so
+the sentence was false on that path; it is true only on the consult path (`replayForClaim`, before `/verify`). Both now say "the facilitator's /settle", true on both. I checked the other
+"nothing was sent to the facilitator" sentences against their call sites: `malformed()` (settlement-claims), the three `assertPayloadMatchesRequirements` refusals and the
+`PAYMENT_VALID_BEFORE_TOO_FAR` answer all run before `/verify`, so they stay as they are; the three database-error answers in payAndSettle already said "/settle".
+`test/settlement-conflict-wording-d1.test.ts` drives each path: the consult (no facilitator call at all), the take (the stub's `/verify` hook lands the conflicting claim, so `/verify`
+is called once and `/settle` never), and the 503 (a vanished row is not production-reachable, rows are never deleted, so it is driven through a database that reports a conflict and no
+row). Red-proofs: W1 the 409's old sentence back -> the consult and take tests; W2 the 503's old sentence back -> the 503 test.

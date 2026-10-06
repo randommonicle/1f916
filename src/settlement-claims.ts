@@ -219,7 +219,9 @@ export async function takeClaim(env: Env, id: ClaimIdentity, spec: ClaimSpec, ow
   const row = await getClaim(env, id.key);
   // A row that conflicted cannot have vanished (rows are never deleted); if it
   // somehow has, refuse rather than guess.
-  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator.");
+  // "/settle", not "the facilitator": this runs after /verify (payAndSettle's take is just before /settle), and the /verify body is the full signed authorisation (gate L2). What is
+  // true on every path that reaches this line is that nothing was sent to /settle.
+  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator's /settle.");
   return { taken: false, row, identical: row.route === spec.route && sameRequest(row, id) };
 }
 
@@ -643,10 +645,13 @@ export function contradictionAnswer(tx: string, state: string): ClaimAnswer {
 // holder holds the still-pending row. The answer then names the tx and says what the caller knows, instead of the generic "outcome unknown" answer.
 export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string } = {}): ClaimAnswer {
   if (!identical) {
+    // "/settle", not "the facilitator" (gate L2 class, found 6 Oct 2026): this answer is reached on TWO paths. A request whose header already has a claim is answered by the consult
+    // (replayForClaim), before /verify, where nothing at all was sent; but a conflict found at the claim INSERT (payAndSettle's takeClaim) is reached AFTER /verify, whose body is the full
+    // signed authorisation. The one sentence true on both is that nothing was sent to /settle.
     return {
       status: 409,
       body: {
-        error: `This signed payment authorisation has already been used for a different request (${describeClaim(row)}, state ${row.state}${row.tx ? `, tx ${row.tx}` : ""}). It cannot be reused for this one. This request sent nothing to the facilitator, charged nothing and created nothing.`,
+        error: `This signed payment authorisation has already been used for a different request (${describeClaim(row)}, state ${row.state}${row.tx ? `, tx ${row.tx}` : ""}). It cannot be reused for this one. This request sent nothing to the facilitator's /settle, charged nothing and created nothing.`,
         code: SETTLEMENT_CLAIM_CONFLICT,
       },
     };
