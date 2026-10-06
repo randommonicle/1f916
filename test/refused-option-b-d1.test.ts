@@ -371,3 +371,19 @@ test("no source file writes the `refused` state (no markRefused, no SET state = 
   }
   assert.deepEqual(writers, [], "a writer of the `refused` state has come back");
 });
+
+// DEFERRED-PAY-LISTING-RESEND-REPLAY (commission Q2, both seats agreed): the flag must sit where the deferred work lands, the B4 consult in handlePayListing, which a re-send of a reserved
+// listing never reaches. A grep-able flag that drifts away from its place, or is deleted, is a deferral nobody can find; this keeps it where it says it is.
+test("DEFERRED-PAY-LISTING-RESEND-REPLAY is planted at the pay route's claim consult, and says why a re-send never reaches it", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/listings.ts", import.meta.url)), "utf8");
+  const flag = src.indexOf("DEFERRED-PAY-LISTING-RESEND-REPLAY");
+  assert.ok(flag > 0, "the flag is in src/listings.ts");
+  assert.equal(src.indexOf("DEFERRED-PAY-LISTING-RESEND-REPLAY", flag + 1), -1, "once");
+  const consult = src.indexOf("const replay = await replayForClaim(env, request, reqs, claim);", flag);
+  assert.ok(consult > flag && consult - flag < 1500, "the consult follows the flag within the same comment block");
+  const payRoute = src.indexOf("export async function handlePayListing");
+  assert.ok(payRoute > 0 && payRoute < flag, "and it is inside handlePayListing, not the listing-creation door's consult (which comes first in the file)");
+  const comment = src.slice(flag, consult);
+  assert.match(comment, /loadPayableListing/);
+  assert.match(comment, /is paying, not open/);
+});

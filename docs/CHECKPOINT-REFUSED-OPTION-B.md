@@ -115,3 +115,35 @@ Checked and left unchanged: `register-maintainer.mjs`'s `sendSignedPayment` alre
 refusal on registration now is; `refusedLine`'s "a 402 is the facilitator's own refusal" stays true for the /verify refusals and the expiry 402.
 Red-proofs (`test/pay-listing.test.ts`): P1 the branch removed -> the 502 and 500 tests (the generic path writes `refused`); P2 matching the words instead of the code -> the code-not-words
 test and both others; P3 the 502 story told for every status -> the 500 test; P4 the branch writes `refused` -> the 502 and 500 tests.
+
+## 6. The served-text sweep (L-002 class) and DEFERRED-PAY-LISTING-RESEND-REPLAY
+
+Each surface that tells a payer what a refusal means, or that a 402 follows a failed settlement, was read from the live router (a throwaway scan of `/`, `/llms.txt`, `/skill.md`,
+`/heartbeat.md`, `/api/surface`, `/api/listings/guide`, `/api/listings/security`, `/api/official`, `/api/listings`) and from source. None says a facilitator refusal is answered 402 or
+releases a listing: before B that was true of the code and of nothing served. The list:
+
+- `GET /api/listings/{guide,security}`: checked, UNCHANGED ("a refusal writes nothing public" is about the pin refusals before any payment).
+- `GET /api/listing/:id` (`settlementField`, listings.ts): CHANGED. "...neither open nor paid until the operator reconciles it against the chain" said too little once a refusal routinely ends
+  here: it now says the society's reconciler makes one pass a day at 06:00 UTC (no time promised), releases the listing if the signed authorisation expired unused or books the payment if it
+  settled, and lists a claim it stops, or that stays undecided for `ATTENTION_AGED_DAYS` days, at `GET /api/settlements/attention`. The `pending since` wording is unchanged. The step-0
+  listing_pay answer points the funder at this read. Also `FUNDER_RECORD_NOTE` and the `?status=unresolved` description: checked, true as they stand.
+- `src/doc.ts` / `FRONT_DOOR_TEMPLATE` (hashed): checked, NOT TOUCHED, no mint. Its lines on the 402 describe the unpaid probe, not a refusal.
+- `src/discovery.ts` route notes, `/llms.txt`, `/skill.md`, `/heartbeat.md` (`src/inbox.ts`), `/api/surface`, `src/mcp.ts` and `src/mcp-read.ts` tool descriptions: checked, UNCHANGED (the 402 they
+  describe is the probe; the register tool says the MCP door cannot carry a payment).
+- Code comments: `payAndSettle`'s header (x402.ts), the refusal branch, `attemptPending`'s H2 notes, `answerFromMovedClaim`'s list, `holdSuccessAgainstTerminal`'s residual, the F2 release note,
+  `claimAnswer`'s refused arm and B9 note (settlement-claims.ts), the reconciler's SELECT and header (settlement-reconcile.ts), and the release comment and the `unresolved` field comment
+  (listings.ts): CHANGED, in commits 1-3 and here.
+- `scripts/pay-listing.mjs`: CHANGED (commit 5). `scripts/register-maintainer.mjs` (`sendSignedPayment`, `refusedLine`): checked, UNCHANGED. A first refusal on registration is now a 502, which
+  `sendSignedPayment` already treats as an unknown outcome (the identifiers and the do-not-sign-again warning); `refusedLine`'s "a 402 is the facilitator's own refusal" stays true of a /verify refusal.
+
+`DEFERRED-PAY-LISTING-RESEND-REPLAY` (commission Q2, both seats agreed) is planted at the B4 consult in `handlePayListing` (`replayForClaim`), which a re-send of a reserved listing never
+reaches (`loadPayableListing` refuses it first), and a test keeps it there.
+
+New `test/refused-option-b-served-text-d1.test.ts`: the changed `settlementField` sentence, the listing read a refused funder is pointed to, a sentence-level scan of nine served surfaces for
+the three old claims (402 after a refused settlement; a refused settlement releases the listing; the facilitator's refusal is final), and the scan's own self-test (it fires on each old
+claim and on none of the sentences the surfaces carry). Red-proofs: S1 the old settlementField sentence back -> the field test and the listing-read test; S2/S3 the guide made to claim a
+release, or a 402, after a refused settlement -> the scan; S4 the flag removed -> the flag test.
+
+## Close
+
+Full suite 1819/1819 (baseline 1773), `tsc` 0 errors. `git diff 8e5d2782 -- src/doc.ts migrations schema.sql wrangler.jsonc` is empty: no mint, no migration, no schema or config change.
