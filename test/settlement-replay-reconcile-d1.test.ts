@@ -462,10 +462,11 @@ test("14. a failing row never stops the rows after it: one log line per failure,
     assert.equal(stateOf(c.header), "pending", "rows C and D are beyond this run's batch and untouched");
     assert.equal(stateOf(d.header), "pending");
 
-    // Fairness, as option B left it (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, Q1): a settled_unbooked row (money that moved) is tried BEFORE a pending one, so that refusals, now pending rows owing
-    // an expiry proof, cannot starve bookings. A is settled_unbooked, so it is tried first on every run, takes one of the two slots, and is logged each time; the OTHER slot still goes to the
-    // oldest pending row, so C and D are reached one run apiece rather than being starved. (Before B the failing row went behind the waiting ones: oldest attempt first across both kinds.
-    // Within a kind that rule stands, since the ordering's next keys are updated_at and created_at. DEFERRED-RECONCILE-SLOT-SPLIT in settlement-reconcile.ts names the residual: two such rows.)
+    // Fairness, as option B left it (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, Q1; build review F1): the batch is ONE of each kind when both exist (a UNION ALL of two LIMITed subqueries,
+    // interleaved), so refusals, now pending rows owing an expiry proof, cannot starve bookings and failing settled rows cannot starve refusals. A is the only settled row, so it is tried
+    // on every run, takes one of the two slots, and is logged each time; the OTHER slot goes to the oldest pending row, so C and D are reached one run apiece rather than being starved.
+    // (Before B the failing row went behind the waiting ones: oldest attempt first across both kinds. Within a kind that rule stands, since each subquery orders by updated_at and
+    // created_at: test/refused-option-b-expiry-d1.test.ts pins it for two settled rows, and the starvation of pending rows by failing settled ones for the cross-kind case.)
     const { value: second, lines: secondLines } = await captureLog(() => runReconciler(testEnv(d1)));
     assert.equal(second.failed, 1, "the failing settled row is tried first again: money that moved is never put behind refusals");
     assert.equal(eventLines(secondLines, "settlement_reconcile_row_failed").length, 1, "and it is logged again, so it cannot go unseen");

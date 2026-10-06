@@ -421,15 +421,98 @@ test("starvation: refusals older than a settled-but-unbooked payment cannot take
   }
 });
 
+// ---------- the reconciler's batch: one of each kind when both exist (F1 of the build review) ----------
+//
+// RECONCILE_BATCH_ROWS = 2, and for a listing_pay refusal the reconciler is the ONLY route out (a re-send is refused by the reservation before it reaches the claim). 'settled_unbooked first'
+// alone would let two settled rows that keep failing take both slots every run and strand a refused funder's listing as `paying` without bound; oldest-first alone would let cheap refusals
+// starve the bookings of payments that settled. The SELECT is a UNION ALL of two LIMITed subqueries (no window functions: their support on D1's runtime is unproven), interleaved in
+// TypeScript: first settled, first pending, second settled, second pending, the first two. One of each kind per run when both exist; two of one kind when only that kind does.
 
-// DEFERRED-RECONCILE-SLOT-SPLIT: the trade the ordering makes (a settled_unbooked row that keeps failing is tried first every run, so TWO would starve every pending row, a first-attempt
-// refusal included) is named where the SELECT is, and this keeps the flag there.
-test("DEFERRED-RECONCILE-SLOT-SPLIT is planted above the reconciler's SELECT and names the two-failing-rows residual", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/settlement-reconcile.ts", import.meta.url)), "utf8");
-  const flag = src.indexOf("DEFERRED-RECONCILE-SLOT-SPLIT");
-  assert.ok(flag > 0);
-  assert.equal(src.indexOf("DEFERRED-RECONCILE-SLOT-SPLIT", flag + 1), -1, "once");
-  const select = src.indexOf("ORDER BY CASE state WHEN 'settled_unbooked' THEN 0 ELSE 1 END");
-  assert.ok(select > flag && select - flag < 1200, "the flag sits in the comment block directly above the SELECT it qualifies");
-  assert.match(src.slice(flag, select), /TWO such rows would take both slots every run and starve every pending row/);
+const SETTLED_BOOKING_BREAKS = "CREATE TRIGGER breaks_every_ledger_line BEFORE INSERT ON ledger BEGIN SELECT RAISE(ABORT, 'injected booking failure'); END;";
+// A patron payment that settled and whose booking then failed: a settled_unbooked claim the reconciler will try (and, while the trigger stands, fail) every run.
+async function settledUnbookedPatron(d1: LocalD1, line: string, at: number): Promise<void> {
+  const { patronReq, paymentHeaderFor, TREASURY_ADDRESS } = await import("./helpers/settlement-harness.ts");
+  const res = await callWorker(patronReq(line, paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1));
+  assert.equal(res.status, 500, "the payment settled and its booking failed");
+  // a fixed attempt time, so the order the reconciler takes the rows in is not left to the clock
+  d1.raw.prepare("UPDATE settlement_claims SET created_at = ?, updated_at = ? WHERE rowid = (SELECT MAX(rowid) FROM settlement_claims)").run(at, at);
+}
+
+test("F1: two settled rows that keep failing cannot starve a pending listing_pay refusal: it is worked on the FIRST run and its reservation is released by the expiry batch", async () => {
+  const d1 = createLocalD1();
+  const stub = worldStub({ settle: (n) => (n <= 2 ? settledAnswer() : refusedAnswer()) });
+  try {
+    d1.raw.exec(SETTLED_BOOKING_BREAKS);
+    await settledUnbookedPatron(d1, "first", 1_000);
+    await settledUnbookedPatron(d1, "second", 2_000);
+    assert.equal(count(d1, "settlement_claims WHERE state = 'settled_unbooked'"), 2);
+    const fx = await routeFx(d1, "listing_pay");
+    assert.equal((await fx.send()).status, 502, "the funder's payment was refused: the listing is reserved");
+    assert.equal(fx.listing!().status, "paying");
+    timePasses(d1); // the chain's clock is past validBefore + the margin for the pending claim
+    const { value: out, lines } = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(out.examined, 2, JSON.stringify(out));
+    assert.equal(out.failed, 1, "one of the two failing settled rows was tried");
+    assert.equal(out.resolved, 1, "and the pending refusal was worked on the SAME run: expired by the chain's proof");
+    assert.equal(eventLines(lines, "settlement_reconcile_row_failed").length, 1);
+    const l = fx.listing!();
+    assert.equal(l.status, "open", "the listing was released by the expiry batch on the first run");
+    assert.equal(l.paying_since, null);
+    // with nothing pending left, the next run works the two settled rows (two of the one kind), and they keep failing without hiding anything
+    const second = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(second.value.examined, 2);
+    assert.equal(second.value.failed, 2);
+    assert.equal(count(d1, "settlement_claims WHERE state = 'settled_unbooked'"), 2, "still there for a person");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F1: two pending rows and no settled row: BOTH are worked in one run", async () => {
+  const d1 = createLocalD1();
+  // the chain cannot be read, so each attempt is cheap and changes nothing; what is asserted is who was selected
+  const stub = stubFacilitator({ settle: () => refusedAnswer(), rpc: () => null });
+  try {
+    const a = await routeFx(d1, "patron");
+    const b = await routeFx(d1, "patron");
+    assert.equal((await a.send()).status, 502);
+    assert.equal((await b.send()).status, 502);
+    assert.equal(count(d1, "settlement_claims WHERE state = 'pending'"), 2);
+    const out = await runReconciler(eq(d1));
+    assert.equal(out.examined, 2, JSON.stringify(out));
+    assert.equal(out.unchanged, 2);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("F1: two settled rows and no pending row: BOTH are worked in one run; within a kind a failing row goes to the back", async () => {
+  const d1 = createLocalD1();
+  const stub = worldStub({ settle: () => settledAnswer() });
+  try {
+    d1.raw.exec(SETTLED_BOOKING_BREAKS);
+    await settledUnbookedPatron(d1, "fail-me-1", 1_000);
+    await settledUnbookedPatron(d1, "fail-me-2", 2_000);
+    await settledUnbookedPatron(d1, "good-line", 3_000);
+    // from now on only the two 'fail-me' lines break the booking
+    d1.raw.exec("DROP TRIGGER breaks_every_ledger_line");
+    d1.raw.exec("CREATE TRIGGER breaks_two_lines BEFORE INSERT ON ledger WHEN NEW.description LIKE '%fail-me%' BEGIN SELECT RAISE(ABORT, 'injected booking failure'); END;");
+    assert.equal(count(d1, "settlement_claims WHERE state = 'settled_unbooked'"), 3);
+    const nonceOf = (line: string) => (d1.raw.prepare("SELECT nonce FROM settlement_claims WHERE intent_json LIKE ?").get(`%${line}%`) as { nonce: string }).nonce;
+    const stateOf = (line: string) => (d1.raw.prepare("SELECT state FROM settlement_claims WHERE nonce = ?").get(nonceOf(line)) as { state: string }).state;
+    const first = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(first.value.examined, 2, "two of the one kind");
+    assert.equal(first.value.failed, 2, "the two oldest, both failing");
+    assert.equal(stateOf("good-line"), "settled_unbooked", "the third was beyond the batch");
+    // the two that just failed went to the BACK: the one that has waited is reached next
+    const second = await captureLog(() => runReconciler(eq(d1)));
+    assert.equal(stateOf("good-line"), "booked", "reached on the second run, ahead of the failing rows");
+    assert.equal(second.value.booked, 1);
+    assert.equal(second.value.failed, 1, "and one failing row takes the other slot");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
 });

@@ -151,8 +151,8 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // Never more than the standing ceiling, and never more than is left today.
   const ceiling = Math.min(RECONCILE_SUBREQUEST_CEILING, left);
   const now = Date.now();
-  // Settled-but-unbooked rows first, then oldest attempt first (acquiring a lease moves updated_at, so within a kind a row that keeps failing goes to the
-  // back rather than starving the rest), skipping rows another holder is working and every row this
+  // One of each kind per run when both exist, two of one kind when only that kind does, and within a kind oldest attempt first (acquiring a lease moves updated_at, so a row that keeps
+  // failing goes to the back rather than starving the rest). Rows another holder is working are skipped, as is every row this
   // reconciler can never finish, which would otherwise take one of its two slots every run (C5, first-gate
   // L4): (F1) a registration whose handle another seat took after payment; a secret-mode registration that is
   // settled_unbooked, which waits for the payer's identical re-send BY DESIGN (its secret leaves only in the payer's own
@@ -169,21 +169,37 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // and the authorisation still unused, at a two-RPC quorum, marks it `expired` (and releases a listing_pay reservation in the same batch); the chain reading it used books it or stops
   // it for a person. A pre-B `refused` row is history and is not selected (as before).
   //
-  // ORDER: `settled_unbooked` (money that DID move) before `pending`, then oldest attempt first. Under option B every rule-7 refusal is a pending row owing one expiry proof (up to eight
-  // RPC fetches) from a reconciler that works two rows a day, and refusals are cheap for a stranger to produce on three of the four doors (the patron door has no throttle, registration
-  // and listing creation record an attempt only on success), so oldest-first alone could let refusals starve the bookings of payments that settled. The trade is the reverse risk: a
-  // settled_unbooked row that keeps failing is tried first every run and takes one of the two slots; the permanent cases are excluded above and each failure is logged, so it cannot go unseen.
-  // DEFERRED-RECONCILE-SLOT-SPLIT: TWO such rows would take both slots every run and starve every pending row (a first-attempt refusal included, whose listing_pay reservation only the expiry
-  // batch releases) until a person cleared them. The remedy is a reserved slot (one settled_unbooked, one oldest pending); not built here, because it changes the batch contract.
-  const { results } = await env.DB.prepare(
-    `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?)
+  // ORDER, and why it is two LIMITed subqueries and an interleave rather than one ORDER BY. Under option B every rule-7 refusal is a pending row owing one expiry proof (up to eight RPC
+  // fetches) from a reconciler that works RECONCILE_BATCH_ROWS = 2 rows a day, and for a listing_pay refusal the reconciler is the ONLY route out (a re-send is refused by the
+  // reservation before it reaches the claim), so neither kind may be able to starve the other. Refusals are cheap for a stranger to produce on three of the four doors (the patron door has
+  // no throttle; registration and listing creation record an attempt only on success), so oldest-first alone could let them starve the bookings of payments that settled (the money that DID
+  // move comes first within a pair); and 'settled_unbooked first' alone lets two settled rows that keep failing take both slots every run and starve every pending row, a refused funder's
+  // listing included. So: ONE statement (RECONCILE_SELECT_COST stays 1), a UNION ALL of two subqueries, each the filters above, ORDER BY updated_at, created_at and its own LIMIT (wrapped in
+  // SELECT * FROM (...) so SQLite accepts the inner LIMIT), then the interleave below: first settled, first pending, second settled, second pending, the first RECONCILE_BATCH_ROWS of them.
+  // Window functions (ROW_NUMBER() OVER) would do it in one ORDER BY, but their support on D1's deployed runtime is unproven, so none is used.
+  const ELIGIBLE = `(leased_until IS NULL OR leased_until <= ?)
        AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))
-       AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)
-       AND NOT (route = 'register' AND state = 'settled_unbooked' AND json_extract(intent_json, '$.public_key') IS NULL)
-     ORDER BY CASE state WHEN 'settled_unbooked' THEN 0 ELSE 1 END, updated_at ASC, created_at ASC LIMIT ?`,
+       AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`;
+  const eligibleBinds = [now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER];
+  const { results: fetched } = await env.DB.prepare(
+    `SELECT * FROM (SELECT * FROM settlement_claims WHERE state = 'settled_unbooked' AND ${ELIGIBLE}
+       AND NOT (route = 'register' AND json_extract(intent_json, '$.public_key') IS NULL)
+     ORDER BY updated_at ASC, created_at ASC LIMIT ?)
+     UNION ALL
+     SELECT * FROM (SELECT * FROM settlement_claims WHERE state = 'pending' AND ${ELIGIBLE}
+     ORDER BY updated_at ASC, created_at ASC LIMIT ?)`,
   )
-    .bind(now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, RECONCILE_BATCH_ROWS)
+    .bind(...eligibleBinds, RECONCILE_BATCH_ROWS, ...eligibleBinds, RECONCILE_BATCH_ROWS)
     .all<ClaimRow>();
+  const oldestFirst = (x: ClaimRow, y: ClaimRow): number => x.updated_at - y.updated_at || x.created_at - y.created_at;
+  const settledRows = fetched.filter((r) => r.state === "settled_unbooked").sort(oldestFirst);
+  const pendingRows = fetched.filter((r) => r.state === "pending").sort(oldestFirst);
+  const interleaved: ClaimRow[] = [];
+  for (let i = 0; i < Math.max(settledRows.length, pendingRows.length); i++) {
+    if (i < settledRows.length) interleaved.push(settledRows[i]);
+    if (i < pendingRows.length) interleaved.push(pendingRows[i]);
+  }
+  const results = interleaved.slice(0, RECONCILE_BATCH_ROWS);
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };
   for (const due of results) {

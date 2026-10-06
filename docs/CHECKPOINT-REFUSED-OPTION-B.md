@@ -18,7 +18,7 @@ throwaway script in the scratchpad (not committed). A neighbouring guard turning
 |---|---|---|
 | 1 | `6ca8e9d4` | a first-attempt rule-7 refusal keeps the claim pending: `markFirstRefusal`, `firstRefusalDetail`, `reportPointer`, the branch rewrite, every first-refusal test rewritten, the fixture flipped |
 | 2 | `5a63c39a` | `markRefused` deleted; a scan that nothing writes `refused` |
-| 3 | `18eba064` | reconciler: settled_unbooked first, the expiry/cancellation/booking matrix, `DEFERRED-RECONCILE-SLOT-SPLIT` |
+| 3 | `18eba064` | reconciler: settled_unbooked first (superseded by F1), the expiry/cancellation/booking matrix |
 | 4 | `8e3ed4bc` | the claim-conflict answers say "/settle" (item 6) |
 | 5 | `31ade529` | `pay-listing.mjs` recognises `settlement_unresolved` (item 7) |
 | 6 | `0f8c5dce` | the served-text sweep and `DEFERRED-PAY-LISTING-RESEND-REPLAY` |
@@ -79,14 +79,9 @@ identifier (outside comments), a `SET state = 'refused'` or an UPDATE writing th
 
 ## 3. The reconciler takes money that moved first; how a first-attempt refusal ENDS
 
-`runReconciler`'s SELECT is `ORDER BY CASE state WHEN 'settled_unbooked' THEN 0 ELSE 1 END, updated_at, created_at` (commission Q1, both seats agreed). Under B every rule-7 refusal is a
-pending row owing one expiry proof from a reconciler that works two rows a day, and refusals are unmetered on three doors (patron has no throttle; registration and listing creation
-record an attempt only on success), so oldest-first alone could let refusals starve the bookings of payments that settled. The DEPENDENT FINDING, which the commission did not name: the old
-fairness rule ("a row that keeps failing goes to the back", pinned by `test/settlement-replay-reconcile-d1.test.ts` test 14) now holds only WITHIN a kind. A settled_unbooked row that keeps
-failing is tried first on every run and takes one slot; TWO of them would take both slots and starve every pending row, a first-attempt refusal included (whose pay-listing reservation only
-the expiry batch releases) until a person clears them. The permanent cases are already excluded by the SELECT and every failure is logged. Planted `DEFERRED-RECONCILE-SLOT-SPLIT` (a
-reserved slot: one settled_unbooked, one oldest pending) above the SELECT; not built (it changes the batch contract). Test 14 is rewritten to pin the new trade (a failing settled row costs
-one slot, not the batch), with the reason in its comment. The DEFERRED-REFUSED-CHAIN-RECHECK comment above the SELECT is replaced with what B does.
+**Superseded by fix pass F1 (below):** commit 3 first ordered `settled_unbooked` before `pending` in one `ORDER BY`, which starved pending rows (a refusal's listing_pay reservation only the expiry
+batch releases) behind two failing settled rows, and broke the cross-kind "a failing row goes to the back" rule pinned by test 14. I planted `DEFERRED-RECONCILE-SLOT-SPLIT`; both reviewers
+rated it blocking, and F1 removed it and the flag. The DEFERRED-REFUSED-CHAIN-RECHECK comment above the SELECT is replaced with what B does.
 
 `test/refused-option-b-expiry-d1.test.ts` (20 tests), on the shared fixture `test/helpers/refused-b-fixture.ts` (the four doors driven with an identical request): the expiry proof by the
 payer's re-send (register, patron, listing_create) and by the reconciler (all four), after T at the chain's clock only (the wall clock alone, a trailing RPC, and the margin not yet waited
@@ -142,7 +137,7 @@ releases a listing: before B that was true of the code and of nothing served. Th
   see: before deploy, Ben's prod read `SELECT id, paying_since FROM listings WHERE status = 'paying'` against `SELECT listing_id FROM ...settlement_claims` (the intent's listing_id) settles it.
 - `scripts/post-listing.mjs` (listing_create's payer) and `scripts/pay-x402-claim.mjs`: checked, UNCHANGED. Both treat any non-success leg 2 as an unknown outcome (post-listing: `leg2_not_201`,
   tombstone stays 'signing', `recoveryMessage` says do not re-run and verify on-chain; pay-x402-claim: `unknown(...)`), which is what a first refusal now is. No registry enumerates `DEFERRED-*`
-  flags in `src/` (the guest flags have their own, scoped by name), so the two new flags are planted by comment and pinned by tests (DEFERRED-PAY-LISTING-RESEND-REPLAY has one; DEFERRED-RECONCILE-SLOT-SPLIT has one too, red-proof F2).
+  flags in `src/` (the guest flags have their own, scoped by name), so the new flag is planted by comment and pinned by a test (DEFERRED-PAY-LISTING-RESEND-REPLAY). The slot-split flag planted in commit 3 was removed again by fix pass F1.
 - `src/doc.ts` / `FRONT_DOOR_TEMPLATE` (hashed): checked, NOT TOUCHED, no mint. Its lines on the 402 describe the unpaid probe, not a refusal.
 - `src/discovery.ts` route notes, `/llms.txt`, `/skill.md`, `/heartbeat.md` (`src/inbox.ts`), `/api/surface`, `src/mcp.ts` and `src/mcp-read.ts` tool descriptions: checked, UNCHANGED (the 402 they
   describe is the probe; the register tool says the MCP door cannot carry a payment).
@@ -163,3 +158,20 @@ release, or a 402, after a refused settlement -> the scan; S4 the flag removed -
 ## Close
 
 Full suite 1820/1820 (baseline 1773), `tsc` 0 errors. `git diff 8e5d2782 -- src/doc.ts migrations schema.sql wrangler.jsonc` is empty: no mint, no migration, no schema or config change.
+
+# Fix pass on the build review (`exchange/REVIEW_refused-option-b-build-2026-10-06.md`, CODEX r1 and GEMINI r1)
+
+## F1. The reconciler's batch is one of each kind (both reviewers, blocking)
+
+`runReconciler` fetches in ONE statement (`RECONCILE_SELECT_COST` stays 1): `SELECT * FROM (settled_unbooked subquery ... ORDER BY updated_at, created_at LIMIT ?) UNION ALL SELECT * FROM (pending
+subquery ... LIMIT ?)`, each with the existing filters (the secret-mode exclusion is on the settled subquery only, where it applies). TypeScript sorts each kind oldest-first and interleaves: first
+settled, first pending, second settled, second pending, then takes the first `RECONCILE_BATCH_ROWS`. One of each kind per run when both exist; two of one kind when only that kind does; within
+a kind a failing row still goes to the back (its `updated_at` moves on every lease). No window function (D1's runtime support is unproven; CODEX's probe was local SQLite 3.51.3 only).
+`DEFERRED-RECONCILE-SLOT-SPLIT` and its pinning test are removed. The ordering comment is rewritten with the reasons.
+**Residual, not new:** the loop still sheds a second row whose worst case would pass the ceiling (`actualCost + 18 > 26`), so an expensive failing first row (a public-key registration failing at
+its last step costs up to 16) can still shed the second of the pair. A cheap one (the patron case tested) cannot. Named for the gate, not built (it is the pre-existing C6 consequence).
+Tests (`test/refused-option-b-expiry-d1.test.ts`): two settled rows that keep failing plus a pending listing_pay refusal, and the pending row is worked on the FIRST run and its reservation is
+released by the expiry batch; two pending rows and no settled row are both worked; two settled and no pending are both worked, and a failing settled row goes behind the one that has waited.
+Reconcile test 14 holds unchanged apart from its comment. Red-proofs: G1 back to the settled-first `ORDER BY` -> the two-failing-settled starvation test (for that reason: `resolved 0`, the listing still
+`paying`); G2 back to plain oldest-first -> that test AND the earlier refusals-starve-bookings test; G3 the interleave dropped -> the starvation test; G4 within a kind newest first -> the within-kind test and
+reconcile test 14; G5 one pending row fetched -> "two pending rows"; G6 one settled row fetched -> the settled tests.
