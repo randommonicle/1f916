@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -482,18 +482,29 @@ test("$LIVE_BASE_COMMIT is a full sha, names a commit in this history, and is an
   assert.equal(git("merge-base", "--is-ancestor", d.LIVE_BASE, "HEAD").status, 0, "HEAD descends from the live worker's code");
 });
 
-test("step 0's sentinels each name something the source really has (and the old writer is really gone)", () => {
-  const sentinel = (file: string, text: string): boolean => readFileSync(here(`../${file}`), "utf8").includes(text);
-  assert.ok(sentinel("src/settlement-claims.ts", "export async function markFirstRefusal"), "option B's writer exists");
-  assert.equal(sentinel("src/settlement-claims.ts", "export async function markRefused"), false, "the old writer is gone (the script STOPS if it is still exported)");
-  assert.ok(sentinel("src/society.ts", "export function parseLedgerCursor"), "the treasury pagination");
-  assert.ok(sentinel("src/guest.ts", "export async function postGuestComment"), "the guest voice");
-  assert.ok(readFileSync(here("../src/settlement-attention.ts"), "utf8").length > 0, "M3's attention list");
+test("step 0's sentinels: every one the script checks for is true of this source (the positive ones present, the old writer absent), and none was dropped", () => {
+  const found: Array<{ file: string; pattern: string; positive: boolean }> = [];
+  for (const line of code.split("\n")) {
+    const m = line.match(/Select-String -Path "([^"]+)" -Pattern "([^"]+)" -Quiet/);
+    if (m) found.push({ file: m[1], pattern: m[2], positive: /if \(-not \(Select-String/.test(line) });
+  }
+  assert.deepEqual(
+    found.map((f) => `${f.positive ? "+" : "-"} ${f.file} :: ${f.pattern}`),
+    [
+      "+ src/settlement-claims.ts :: export async function markFirstRefusal",
+      "- src/settlement-claims.ts :: export async function markRefused",
+      "+ src/society.ts :: export function parseLedgerCursor",
+      "+ src/guest.ts :: export async function postGuestComment",
+    ],
+    "the checkout sentinels, in order",
+  );
+  for (const f of found) {
+    const present = new RegExp(f.pattern).test(readFileSync(here(`../${f.file}`), "utf8"));
+    assert.equal(present, f.positive, `${f.file} :: ${f.pattern} must be ${f.positive ? "present" : "absent"} in this source`);
+  }
+  assert.ok(code.includes('if (-not (Test-Path "src/settlement-attention.ts"))') && existsSync(here("../src/settlement-attention.ts")), "M3's attention list");
   assert.ok(readFileSync(here("../src/index.ts"), "utf8").includes('path === "/api/settlements/attention" && method === "GET"'), "the attention route the ride reads is served");
   assert.ok(code.includes('$ATTENTION_URL = "$BASE/api/settlements/attention"'));
-  for (const marker of ["export async function markFirstRefusal", "export async function markRefused", "export function parseLedgerCursor", "export async function postGuestComment"]) {
-    assert.ok(code.includes(marker), `the script checks for: ${marker}`);
-  }
 });
 
 test("the post-deploy reads do not claim to prove propagation, and the header says no marker exists", () => {
