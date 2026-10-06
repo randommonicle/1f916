@@ -5,6 +5,7 @@ import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
 import { declareWallet } from "./wallets.ts";
+import { codeBlock } from "./code-identity.ts";
 import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
@@ -253,7 +254,9 @@ export default {
           }),
           getConstitutionAttestation(env),
         ]);
-        return json({ ...att, constitution });
+        // Served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md): the deploy-time commit stamp and Cloudflare's version id, read from env by src/code-identity.ts, outside the attested
+        // template (a statement about the running code, not a constitutional text: no mint).
+        return json({ ...att, constitution, code: codeBlock(env) });
       }
       if (path === "/api/constitution/versions" && method === "GET")
         return json(
