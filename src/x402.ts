@@ -252,11 +252,16 @@ export type SettleResult =
   | { ok: false; response: Response; keepReservation?: true }
   | { ok: true; payer: string; tx: string; settlement: Record<string, unknown>; claim: ClaimRow | null; owner: string };
 
-// The shared verify+settle core. Returns either a 402 Response to send back
-// as-is (no payment attached, an invalid signature, or a settlement the
-// facilitator reports as failed, classifySettle rule 7), or a successful
-// settlement for the caller to act on. An outcome that is not a verdict is
-// thrown (settleOrThrow), never returned as a 402.
+// The shared verify+settle core. Returns either a Response to send back as-is
+// (a 402 when no payment is attached or the signature is invalid; for a
+// claim-bearing call, whose route is all four in production, the answer to a
+// settlement the facilitator reports as failed, classifySettle rule 7, is NOT a
+// 402 but a 502 settlement_unresolved without `accepts`: option B,
+// docs/BRIEF-REFUSED-CHAIN-RECHECK.md, keeps that claim pending until the chain
+// proves the authorisation dead, and a pay-listing reservation with it; a call
+// WITHOUT a claim has no row to hold the refusal on and keeps the plain 402),
+// or a successful settlement for the caller to act on. An outcome that is not
+// a verdict is thrown (settleOrThrow), never returned as a 402.
 //
 // afterVerify, if given, runs after the signature is confirmed valid but
 // BEFORE the irreversible settle call: the one point in this flow where a
@@ -873,7 +878,7 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
   return claimResponse(claimAnswer(row, true, reqs));
 }
 
-// R2b (gate C2, docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md): this request's own write to the claim (markSettled, or markRefused for a refusal it
+// R2b (gate C2, docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md): this request's own write to the claim (markSettled, or markFirstRefusal for a refusal it
 // read) was refused because the claim moved under it: another holder moved it, or holds a live lease on it. Nothing this request computed is the claim's
 // answer, so it re-reads the claim and answers from its state, as an identical replay would:
 //   - booked, or settled_unbooked: the replay answer (respondToExistingClaim: the booked 409, the handle-taken 409, or, on a settled_unbooked claim whose
@@ -881,7 +886,8 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
 //   - pending: the existing unknown-outcome answer, "do not sign again", under another live lease;
 //   - refused or expired when /settle said SETTLED (`settled` is given): the two records contradict. The money may have moved and no automatic step
 //     resolves a terminal claim, so this is ONE error-level line for the maintainer and an answer that never says nothing was charged;
-//   - refused or expired when this request itself read a refusal: the ordinary replay answer (the claim and the refusal agree).
+//   - refused or expired when this request itself read a refusal: the ordinary replay answer (the claim and the refusal agree). Since option B only `expired` can be reached
+//     by a new claim (nothing writes `refused`), and a pre-B `refused` row is answered the same way.
 // The ONE place the contradiction is logged and answered (gate C2; fix pass 4 H2): the facilitator reported a settlement, and the society's own
 // claim for the same authorisation is refused or expired. Used by payAndSettle (this request's own /settle) and by attemptPending (a re-send's or the
 // reconciler's re-POST), so the two cannot drift. The money may have moved and no automatic step re-examines a terminal claim: ONE error-level line
@@ -938,7 +944,7 @@ export type HeldSuccess = { tx: string; payer: string; req: { resource: string; 
 // Cost: one read, plus the stamp when terminal (the reconciler's row stays well inside RECONCILE_ROW_WORST_CASE: this branch books nothing).
 //
 // DEFERRED-DURABLE-HELD-SUCCESS (brief R2-2; the agreed residual of exchange/REVIEW_paid-path-m3-r4-correctness-2026-10-04.md): a terminal write that lands AFTER the read
-// below and BEFORE the caller releases its lease stays unstamped. The complete remedy is durable success evidence on the PENDING row that markRefused and markExpired respect.
+// below and BEFORE the caller releases its lease stays unstamped. The complete remedy is durable success evidence on the PENDING row that markExpired (and, for a pre-B row, nothing: no writer of `refused` remains) respects.
 // It is its own wave: it needs (1) a migration (a column the held-success path writes; today only markSettled writes tx), (2) an atomic contract for BOTH orderings
 // (evidence first: refusal and expiry write nothing; terminal first: the evidence writer stamps a contradiction and handles zero changes), (3) the empty-tx success
 // (a success whose tx is ""), (4) replay behaviour for a row carrying evidence, (5) migration ordering against the worker deploy, (6) tests for every one of those.
@@ -1001,7 +1007,8 @@ export async function answerFromClaim(env: Env, key: ClaimKey, owner: string): P
 // used or can still be used, re-POST the stored body and classify the answer as the
 // first /settle was: settled books it; anything else leaves it pending. A recorded refusal (rule 7) is NOT honoured on this path (H2): against a spent authorisation the chain
 // says the money moved, so the answers contradict and the claim is stamped and stopped for a person (C4, option B); against an unused one an earlier attempt's transfer may
-// still be mined, so the claim stays pending until the chain shows it used or provably expired. Only payAndSettle's first /settle writes `refused`.
+// still be mined, so the claim stays pending until the chain shows it used or provably expired. Option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md) made the first /settle follow the same rule:
+// NOTHING writes `refused` any more; payAndSettle's first rule-7 refusal leaves the claim pending too (markFirstRefusal), and only the expiry proof below turns it terminal.
 //
 // EXPIRY_MARGIN: `expired` invites a second signature, so it must never be premature. A
 // transfer broadcast just before validBefore can be mined a little after it in wall-clock
@@ -1093,8 +1100,9 @@ export async function attemptPending(env: Env, row: ClaimRow, owner: string): Pr
     // H2 (CODEX r1 on the M3 brief, replacing L6): a rule-7 refusal on the RE-POST path, while the chain reads the authorisation UNUSED, is not acted on. An earlier attempt's broadcast
     // transfer can be mined after any number of "unused" reads, right up to validBefore, so a refusal written now could be false for money that then moved (and its 402 would invite a
     // second signature). The claim stays pending; the facilitator's words are kept as its last words; it resolves through the chain showing the nonce used (booked, or stopped above)
-    // or through C6's pinned unused-after-expiry proof (expired, which releases a pay-listing reservation in the same batch). payAndSettle's FIRST /settle keeps honouring a rule-7
-    // refusal at once: the claim was taken by that very request, so no earlier attempt exists.
+    // or through C6's pinned unused-after-expiry proof (expired, which releases a pay-listing reservation in the same batch). payAndSettle's FIRST /settle follows the same rule since
+    // option B (markFirstRefusal): it used to honour a rule-7 refusal at once on the argument that no earlier attempt exists, but the facilitator's own word is no proof that its own earlier
+    // broadcast, or a retry, cannot still be mined, so the first refusal stays pending too.
     const refusal = settled.verdict.error;
     await quietly("note_unknown", () => noteUnknown(env, key, refusal, owner, Date.now()));
     return {

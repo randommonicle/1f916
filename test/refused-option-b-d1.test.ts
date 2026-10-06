@@ -11,6 +11,8 @@
 // Run: npm test
 
 import test from "node:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { insertCitizen, insertListing, insertSubmission } from "./helpers/local-d1.ts";
 import { declareTestWallet } from "./helpers/wallet-pin.ts";
@@ -453,4 +455,28 @@ test("reportPointer is ONE function for a stopped row and a first refusal: a men
   const stopped = (route: ClaimRoute) => stoppedMessage({ route, nonce, intent_json: JSON.stringify({ handle: "h", listing_id: 3 }) } as unknown as ClaimRow);
   assert.ok(stopped("listing_pay").endsWith(reportPointer({ route: "listing_pay", nonce })), "the stopped message carries the shared pointer, unchanged by the refactor");
   assert.ok(stopped("patron").endsWith(reportPointer({ route: "patron", nonce })));
+});
+
+// No production path writes `refused` for a new claim (the brief: "a test that no production path calls it for a new claim"). The state stays in the type and the CHECK for rows written
+// before B; this scan is what makes "nothing writes it" a build failure rather than a sentence in a comment. It reads the source text of src/ (the one place the writers live).
+test("no source file writes the `refused` state (no markRefused, no SET state = 'refused'): a first-attempt refusal is written by markFirstRefusal only", () => {
+  const root = new URL("../src/", import.meta.url);
+  const files: string[] = [];
+  const walk = (dir: URL) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(new URL(`${entry.name}/`, dir));
+      else if (entry.name.endsWith(".ts")) files.push(fileURLToPath(new URL(entry.name, dir)));
+    }
+  };
+  walk(root);
+  assert.ok(files.length > 20, `the scan covered the source tree (${files.length} files)`);
+  const writers: string[] = [];
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    // the identifier, an UPDATE that sets the state to refused, or an INSERT that creates a row already in it
+    if (/\bmarkRefused\b/.test(text.replace(/\/\/[^\n]*/g, ""))) writers.push(`${file}: markRefused`);
+    if (/SET\s+state\s*=\s*'refused'/i.test(text)) writers.push(`${file}: SET state = 'refused'`);
+    if (/state\s*=\s*"refused"[^;\n]*\bUPDATE\b|\bUPDATE\b[^;\n]*state\s*=\s*"refused"/i.test(text)) writers.push(`${file}: an UPDATE writing "refused"`);
+  }
+  assert.deepEqual(writers, [], "a writer of the `refused` state has come back");
 });

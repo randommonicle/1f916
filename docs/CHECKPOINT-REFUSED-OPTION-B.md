@@ -58,3 +58,12 @@ removed -> the unit test and R2-1; M3 the write sets `state = 'refused'` -> the 
 test and the ordering tests; M5 stopped guard removed -> the unit test's stopped leg; M6/M7 `keepReservation` dropped on either return -> listings-d1, x402-settle-route, wallet-pin-route,
 P-E, M3 HIGH, gate C2, R2-1 (pay listing); M8/M12 T without the margin -> the T assertion on all four routes; M9 pointer swapped -> the pointer assertions; M10 the facilitator's words
 dropped; M11 listing_pay told to re-send; M13 step 0 served when the write changed nothing -> T3c (the new "another attempt is in progress" assertion); M14 a thrown write keeps the lease.
+
+## 2. markRefused deleted
+
+`markRefused` had one production caller (the branch above). It is removed, with its comment moved: the `release` paragraph now sits on `markExpired`, the F2 comment says an expiry is the
+ONLY terminal write with a listing release, `claimAnswer`'s refused arm and the `payAndSettle` header and the `attemptPending` comments say what option B changed. The `refused` state
+stays in `ClaimState` and the table's CHECK; `claimAnswer`'s refused arm, `markContradiction`, `isContradicted`, `holdSuccessAgainstTerminal` and the attention list serve old rows unchanged.
+`test/settlement-claims-d1.test.ts` (the last test that imported it) was rewritten onto `markFirstRefusal`/`markExpired`. New test: a scan of `src/` that no file has a `markRefused`
+identifier (outside comments), a `SET state = 'refused'` or an UPDATE writing the `"refused"` literal. Red-proof: M15 (a `markRefused` stub beside `markExpired`) and M17 (a
+`SET state = 'refused'` string in `settlement-reconcile.ts`) each go red in that test alone; M16 (the B write sets `state = 'refused'`) goes red in it AND in the unit and step-0 tests.

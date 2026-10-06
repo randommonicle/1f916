@@ -21,7 +21,7 @@ import {
   keyArgs,
   KEY_WHERE,
   markExpired,
-  markRefused,
+  markFirstRefusal,
   markSettled,
   refsOf,
   releaseLease,
@@ -137,7 +137,7 @@ test("transitions are conditional on the state they leave; terminal rows hold no
     assert.ok((await getClaim(env(d1), a.key))?.rpc_body, "a pending row keeps the body it may need to re-POST");
     assert.equal(await markSettled(env(d1), a.key, "0xTX", "0xPAYER", "w1", 2_000), true);
     assert.equal(await markSettled(env(d1), a.key, "0xTX2", "0xPAYER", "w1", 2_001), false, "settled_unbooked cannot be settled again");
-    assert.equal(await markRefused(env(d1), a.key, "no", "w1", 2_002), false, "settled_unbooked cannot become refused");
+    assert.equal(await markFirstRefusal(env(d1), a.key, "no", "w1", 2_002, 1_000), false, "a settled_unbooked claim takes no refusal (option B: and nothing can make it refused)");
     assert.equal(await markExpired(env(d1), a.key, "w1", 2_003), false);
     const settled = await getClaim(env(d1), a.key);
     assert.equal(settled?.state, "settled_unbooked");
@@ -145,11 +145,16 @@ test("transitions are conditional on the state they leave; terminal rows hold no
     assert.equal(settled?.payer, "0xPAYER");
 
     const b = await take(d1, SPEC, { nonce: "0x" + "02".repeat(32) });
-    assert.equal(await markRefused(env(d1), b.key, "The facilitator reports that this settlement failed", "w1", 3_000), true);
-    const refused = await getClaim(env(d1), b.key);
-    assert.equal(refused?.state, "refused");
-    assert.equal(refused?.rpc_body, null, "B7: refused clears the authorisation body");
-    assert.equal(await markExpired(env(d1), b.key, "w1", 3_001), false, "a terminal row does not move");
+    // Option B: a first-attempt refusal is recorded on the PENDING claim (the facilitator's words, the lease let go); the claim keeps the authorisation body it needs for the expiry proof.
+    assert.equal(await markFirstRefusal(env(d1), b.key, "The facilitator reports that this settlement failed", "w1", 3_000, 1_000), true);
+    const refusedOnce = await getClaim(env(d1), b.key);
+    assert.equal(refusedOnce?.state, "pending", "never refused");
+    assert.ok(refusedOnce?.rpc_body, "a pending row keeps the body, whatever the facilitator said");
+    assert.equal(refusedOnce?.verdict_reason, "The facilitator reports that this settlement failed");
+    assert.equal(await markExpired(env(d1), b.key, "w1", 3_001), true, "the chain's proof then ends it");
+    assert.equal((await getClaim(env(d1), b.key))?.rpc_body, null, "B7: expired clears the authorisation body");
+    assert.equal(await markExpired(env(d1), b.key, "w1", 3_002), false, "a terminal row does not move");
+    assert.equal(await markFirstRefusal(env(d1), b.key, "late", "w1", 3_003, 3_000), false, "and takes no refusal");
 
     const c = await take(d1, SPEC, { nonce: "0x" + "03".repeat(32) });
     assert.equal(await markExpired(env(d1), c.key, "w1", 4_000), true);
