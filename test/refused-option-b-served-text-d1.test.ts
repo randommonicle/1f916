@@ -10,8 +10,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ATTENTION_AGED_DAYS } from "../src/settlement-attention.ts";
+import { CHAIN_SPENT_MARKER, claimAnswer, type ClaimRow } from "../src/settlement-claims.ts";
 import { UNRESOLVED_AFTER_MS, getListingDetail, listingsGuide, listingsSecurity, settlementField } from "../src/listings.ts";
-import { callWorker, createLocalD1, refusedAnswer, routeFx, stubFacilitator, testEnv } from "./helpers/refused-b-fixture.ts";
+import { TX, callWorker, chainRpc, createLocalD1, refusedAnswer, routeFx, settledAnswer, stubFacilitator, testEnv } from "./helpers/refused-b-fixture.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -112,3 +113,114 @@ test("the scan can fail: it fires on each of the old claims and stays silent on 
   for (const s of innocent) assert.deepEqual(scanServed({ x: s }), [], `the scan fires on a true sentence: ${s}`);
 });
 
+// ---------- the first-refusal answer carries a machine-readable discriminator, and no other answer does (build review F2, CODEX) ----------
+//
+// `settlement_unresolved` is a code several answers share: the first-attempt facilitator refusal kept pending (option B), a re-send's answer on a pending row, a settled-but-unbooked claim, a
+// claim stopped for a person, and a success the facilitator reported that this request could not record (a held success naming the tx). A client that reads the code alone cannot tell the
+// first from the last, and the last means the money may have moved. The B answer ALONE carries `facilitator_refused: true` and `recheck_after` (T, ISO UTC); status 502 and the code are unchanged.
+
+const DISCRIMINATOR = ["facilitator_refused", "recheck_after"] as const;
+const carriesNone = (body: Record<string, unknown>): boolean => DISCRIMINATOR.every((k) => !(k in body));
+
+for (const route of ["register", "patron", "listing_create", "listing_pay"] as const) {
+  test(`discriminator (${route}): the first-attempt refusal answer says facilitator_refused: true and recheck_after = validBefore + the margin; status and code are unchanged`, async () => {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => refusedAnswer() });
+    try {
+      const res = await (await routeFx(d1, route)).send();
+      assert.equal(res.status, 502);
+      assert.equal(res.body.code, "settlement_unresolved", "unchanged, so existing clients are unaffected");
+      assert.equal(res.body.facilitator_refused, true);
+      const validBefore = (d1.raw.prepare("SELECT valid_before FROM settlement_claims").get() as { valid_before: number }).valid_before;
+      assert.equal(res.body.recheck_after, new Date((validBefore + 300) * 1000).toISOString());
+      assert.ok(String(res.body.error).includes(`unused after ${res.body.recheck_after}.`), "the field and the sentence name the same time");
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+test("discriminator: no other settlement_unresolved answer carries it (a re-send on the pending row, a settled-but-unbooked claim, a stopped claim, an unknown first outcome, a held success)", async () => {
+  // a re-send on the refused row, before validBefore: the attempt re-POSTs, is refused again, and answers from the pending row with the attempt's detail
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => refusedAnswer(), rpc: chainRpc(false) });
+    try {
+      const fx = await routeFx(d1, "patron");
+      assert.equal((await fx.send()).body.facilitator_refused, true);
+      const resend = await fx.send();
+      assert.equal(resend.status, 502);
+      assert.equal(resend.body.code, "settlement_unresolved");
+      assert.ok(carriesNone(resend.body), "a re-send's answer is not the first refusal's answer: " + JSON.stringify(Object.keys(resend.body)));
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // stopped for a person: the chain reads the authorisation used while the facilitator refuses again
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => refusedAnswer(), rpc: chainRpc(true) });
+    try {
+      const fx = await routeFx(d1, "patron");
+      await fx.send();
+      const stopped = await fx.send();
+      assert.equal(stopped.status, 500);
+      assert.equal(stopped.body.code, "settlement_unresolved");
+      assert.ok(carriesNone(stopped.body));
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // settled but unbooked: the payment settled and the booking failed
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => settledAnswer() });
+    try {
+      d1.raw.exec("CREATE TRIGGER breaks_ledger BEFORE INSERT ON ledger BEGIN SELECT RAISE(ABORT, 'injected booking failure'); END;");
+      const res = await (await routeFx(d1, "patron")).send();
+      assert.equal(res.status, 500);
+      assert.ok(carriesNone(res.body));
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // an unknown first outcome (settlement_pending): the facilitator did not say refused
+  {
+    const d1 = createLocalD1();
+    const stub = stubFacilitator({ settle: () => new Response(JSON.stringify({ success: false, errorReason: "settlement_pending" }), { status: 200, headers: { "content-type": "application/json" } }) });
+    try {
+      const res = await (await routeFx(d1, "patron")).send();
+      assert.equal(res.status, 502);
+      assert.ok(carriesNone(res.body));
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  }
+  // a held success (the facilitator reported a settlement this request could not record), and the pending/lease-held answers: claimAnswer itself, which builds every one of them
+  const pending = { network: "base", asset: "0x1", from_addr: "0x2", nonce: "0x" + "3".repeat(64), route: "patron", intent_json: "{}", intent_hash: "h", rpc_body: "{}", rpc_body_hash: "h", valid_before: 1_800_000_000, state: "pending", tx: null, payer: null, verdict_reason: null, booked_refs: "{}", created_at: 1, updated_at: 1, lease_owner: null, leased_until: null } as unknown as ClaimRow;
+  for (const [label, opts] of [
+    ["a held success naming the tx", { settledTx: TX }],
+    ["a held success with an empty tx", { settledTx: "" }],
+    ["another attempt in progress", { leaseHeld: true }],
+    ["a re-send's detail", { detail: "x" }],
+    ["no options", {}],
+  ] as const) {
+    const a = claimAnswer(pending, true, {}, opts);
+    assert.ok(carriesNone(a.body), `${label}: no discriminator`);
+  }
+  assert.ok(carriesNone(claimAnswer({ ...pending, state: "settled_unbooked", tx: TX } as ClaimRow, true, {}).body), "a settled-but-unbooked claim's answer");
+  const first = claimAnswer(pending, true, {}, { detail: "x", firstRefusalRecheckAfter: "2027-01-15T08:05:00.000Z" });
+  assert.equal(first.body.facilitator_refused, true);
+  assert.equal(first.body.recheck_after, "2027-01-15T08:05:00.000Z");
+  assert.equal(first.body.code, "settlement_unresolved");
+  assert.equal(first.status, 502);
+  // a stopped row is answered with its own words even if the option is passed (the option never turns a person-must-look answer into the refusal story)
+  const stopped = claimAnswer({ ...pending, verdict_reason: `${CHAIN_SPENT_MARKER}the chain reads it used` } as ClaimRow, true, {}, { firstRefusalRecheckAfter: "2027-01-15T08:05:00.000Z" });
+  assert.ok(carriesNone(stopped.body));
+  assert.equal(stopped.status, 500);
+});

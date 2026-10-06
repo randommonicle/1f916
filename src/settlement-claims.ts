@@ -599,8 +599,17 @@ export function reportPointer(row: Pick<ClaimRow, "route" | "nonce">): string {
 //   - register, patron, listing_create: an identical re-send reaches the claim (replayForClaim runs before any free check), so the text promises the re-send and what it will be told.
 //   - listing_pay: the claim holds a RESERVATION of the listing, and a re-send meets that reservation first (loadPayableListing: "listing N is paying, not open"), before it can reach the claim,
 //     so a "re-send after T" promise would be false. The reconciler's pass decides it instead, and releases the listing in the same step if the authorisation expired unused.
+//
+// The ANSWER also carries a stable machine-readable discriminator (build review F2, CODEX): `facilitator_refused: true` and `recheck_after` (T as an ISO UTC time), added by claimAnswer when the
+// caller passes `firstRefusalRecheckAfter`, and ONLY on this answer. Status 502 and code settlement_unresolved are unchanged, so existing clients are unaffected; but that code is shared by
+// every answer that says "the outcome is not established", including one that means the facilitator ALREADY reported a settlement (a success held against a claim another holder has), and a
+// client that read the code alone would tell that payer to wait for an expiry. The discriminator is what says "this is the facilitator's refusal, kept pending", and nothing else carries it.
+export function firstRefusalRecheckAfter(row: Pick<ClaimRow, "valid_before">, marginSeconds: number): string {
+  return new Date((row.valid_before + marginSeconds) * 1000).toISOString();
+}
+
 export function firstRefusalDetail(verdictError: string, row: Pick<ClaimRow, "route" | "nonce" | "valid_before">, marginSeconds: number): string {
-  const t = new Date((row.valid_before + marginSeconds) * 1000).toISOString();
+  const t = firstRefusalRecheckAfter(row, marginSeconds);
   const lead = `${verdictError} The society does not act on that account alone: the signed authorisation stays valid until its validBefore, so this payment is not treated as refused until the chain shows the authorisation unused after ${t}.`;
   if (row.route === "listing_pay") {
     return `${lead} The listing stays reserved for this payment until then, and while it is reserved a re-send of this request is refused (the listing is paying, not open) before it reaches this claim, so do not re-send. The society's reconciler decides it on a pass after that time and, if the authorisation expired unused, releases the listing in the same step; GET /api/listing/:id serves the listing's state. ${reportPointer(row)}`;
@@ -643,7 +652,7 @@ export function contradictionAnswer(tx: string, state: string): ClaimAnswer {
 // known and invites a second signature ONLY for refused and expired (refused: a pre-B row; since option B only `expired`, the chain's proof, is written).
 // `settledTx` (C2): the caller holds a facilitator SUCCESS verdict for this authorisation naming that tx, but could not write it to the claim because another
 // holder holds the still-pending row. The answer then names the tx and says what the caller knows, instead of the generic "outcome unknown" answer.
-export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string } = {}): ClaimAnswer {
+export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string; firstRefusalRecheckAfter?: string } = {}): ClaimAnswer {
   if (!identical) {
     // "/settle", not "the facilitator" (gate L2 class, found 6 Oct 2026): this answer is reached on TWO paths. A request whose header already has a claim is answered by the consult
     // (replayForClaim), before /verify, where nothing at all was sent; but a conflict found at the claim INSERT (payAndSettle's takeClaim) is reached AFTER /verify, whose body is the full
@@ -706,6 +715,8 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
         body: {
           error: `The outcome of this payment is still unknown${txPart(row)}: whether the money moved is not yet established. Do not sign again. ${rest}`,
           code: SETTLEMENT_UNRESOLVED,
+          // The first-attempt refusal answer ONLY (see firstRefusalRecheckAfter): no other answer carries these two fields.
+          ...(opts.firstRefusalRecheckAfter !== undefined ? { facilitator_refused: true, recheck_after: opts.firstRefusalRecheckAfter } : {}),
         },
       };
     }

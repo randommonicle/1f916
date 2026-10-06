@@ -175,3 +175,16 @@ released by the expiry batch; two pending rows and no settled row are both worke
 Reconcile test 14 holds unchanged apart from its comment. Red-proofs: G1 back to the settled-first `ORDER BY` -> the two-failing-settled starvation test (for that reason: `resolved 0`, the listing still
 `paying`); G2 back to plain oldest-first -> that test AND the earlier refusals-starve-bookings test; G3 the interleave dropped -> the starvation test; G4 within a kind newest first -> the within-kind test and
 reconcile test 14; G5 one pending row fetched -> "two pending rows"; G6 one settled row fetched -> the settled tests.
+
+## F2. The first-refusal answer carries a discriminator; the pay script keys on it (CODEX)
+
+`settlement_unresolved` is shared by every answer that says "the outcome is not established", including a 502 that means the facilitator ALREADY reported a settlement this request could not
+record (`claimAnswer`'s `settledTx` branch, `x402.ts` `answerFromMovedClaim`). The pay script's expiry-and-reopen story is false for that payer. The B first-attempt answer, and only it, now carries
+`facilitator_refused: true` and `recheck_after` (T, ISO UTC, one function `firstRefusalRecheckAfter` shared with `firstRefusalDetail`); status 502 and the code are unchanged. `claimAnswer` adds the two
+fields only when the caller passes `firstRefusalRecheckAfter`; only `payAndSettle`'s first-refusal return does. `scripts/pay-listing.mjs` shows the reservation/expiry message only on
+`facilitator_refused === true` (the boolean, nothing truthy); every other `settlement_unresolved`, 502 or 500, gets "the outcome is NOT established, the money may have moved, DO NOT re-run, the record stays
+`signing`, the operator reconciles from the chain" with no reopen promise. The tombstone keeps `facilitator_refused` and `recheck_after` when the server said them.
+Tests: pay-listing.test.ts (the 502 with the discriminator; the 502 settledTx shape; the 500; the boolean-only rule); the served-text file (the discriminator on all four routes, equal to validBefore + 300,
+and absent from a re-send's answer, a stopped 500, a booking failure, an unknown first outcome, a held success, a settled_unbooked answer and the lease-held answer). Red-proofs: D1 the route passes
+no discriminator -> the four route tests and the "no other" test; D2 the held success carries it -> "no other"; D3 every pending answer carries it -> "no other"; D4 the pay script keys on the code
+again -> the settledTx 502, the 500 and the boolean tests; D5 any truthy value unlocks the story -> the boolean test; D6 `recheck_after` dropped from the record -> the first test.

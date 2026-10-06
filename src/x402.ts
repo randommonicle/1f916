@@ -22,6 +22,7 @@ import {
   claimResponse,
   contradictionAnswer,
   firstRefusalDetail,
+  firstRefusalRecheckAfter,
   getClaim,
   isChainSpent,
   isHandleTaken,
@@ -750,7 +751,13 @@ export async function payAndSettle(
       const now = await getClaim(env, key);
       if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
       if (wrote && now.state === "pending" && !isChainSpent(now)) {
-        return { ok: false, keepReservation: true, response: claimResponse(claimAnswer(now, true, reqs, { detail: firstRefusalDetail(reason, now, RECONCILE_EXPIRY_MARGIN_SECONDS) })) };
+        // The discriminator (facilitator_refused, recheck_after) rides THIS answer only: settlement_unresolved is a code several answers share, one of them for a payment the facilitator has
+        // already settled, so a client needs a field that says "this is the facilitator's refusal, kept pending" (build review F2).
+        return {
+          ok: false,
+          keepReservation: true,
+          response: claimResponse(claimAnswer(now, true, reqs, { detail: firstRefusalDetail(reason, now, RECONCILE_EXPIRY_MARGIN_SECONDS), firstRefusalRecheckAfter: firstRefusalRecheckAfter(now, RECONCILE_EXPIRY_MARGIN_SECONDS) })),
+        };
       }
       // R1: another holder moved the claim (or holds a live lease on it) while this request's /settle was in flight, or the claim moved in the instant after our write. This request's refusal is then
       // not the claim's answer: answer from the claim as an identical replay would, never "sign a fresh one" over a payment another holder may have settled.
