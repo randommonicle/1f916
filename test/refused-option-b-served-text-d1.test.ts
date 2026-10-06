@@ -22,9 +22,12 @@ test("settlementField: an unresolved reservation says who resolves it and what h
   assert.ok(aged.includes("releases the listing if the signed authorisation expired unused or books the payment if it settled"), aged);
   assert.ok(aged.includes(`stays undecided for ${ATTENTION_AGED_DAYS} days, is listed at GET /api/settlements/attention for a person`), aged);
   assert.doesNotMatch(aged, /until the operator reconciles it against the chain/, "the old wording, true only of the by-hand path");
+  // A row with no reservation time pre-dates migration 0014, which pre-dates the claim table (0017): it has NO claim, so the reconciler can never select, release or book it and the attention
+  // list never carries it. The reconciler's sentence would be a promise the code cannot keep there, so that arm keeps the by-hand wording.
   const noTime = settlementField("paying", null, NOW) as string;
   assert.match(noTime, /^unresolved: reservation time unavailable/);
-  assert.ok(noTime.includes("releases the listing if the signed authorisation expired unused"), noTime);
+  assert.ok(noTime.endsWith("neither open nor paid until the operator reconciles it against the chain"), noTime);
+  assert.doesNotMatch(noTime, /reconciler|06:00|attention/, "no promise the code cannot keep for a claimless row");
   const young = settlementField("paying", NOW - 1000, NOW) as string;
   assert.match(young, /^pending since /);
   assert.equal(settlementField("open", null, NOW), undefined);

@@ -11,6 +11,8 @@
 // Run: npm test
 
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import {
   ROUTES,
@@ -419,3 +421,15 @@ test("starvation: refusals older than a settled-but-unbooked payment cannot take
   }
 });
 
+
+// DEFERRED-RECONCILE-SLOT-SPLIT: the trade the ordering makes (a settled_unbooked row that keeps failing is tried first every run, so TWO would starve every pending row, a first-attempt
+// refusal included) is named where the SELECT is, and this keeps the flag there.
+test("DEFERRED-RECONCILE-SLOT-SPLIT is planted above the reconciler's SELECT and names the two-failing-rows residual", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/settlement-reconcile.ts", import.meta.url)), "utf8");
+  const flag = src.indexOf("DEFERRED-RECONCILE-SLOT-SPLIT");
+  assert.ok(flag > 0);
+  assert.equal(src.indexOf("DEFERRED-RECONCILE-SLOT-SPLIT", flag + 1), -1, "once");
+  const select = src.indexOf("ORDER BY CASE state WHEN 'settled_unbooked' THEN 0 ELSE 1 END");
+  assert.ok(select > flag && select - flag < 1200, "the flag sits in the comment block directly above the SELECT it qualifies");
+  assert.match(src.slice(flag, select), /TWO such rows would take both slots every run and starve every pending row/);
+});

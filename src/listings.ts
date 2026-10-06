@@ -280,7 +280,9 @@ const SETTLEMENT_RECONCILED_BY =
   `reconciled against the chain: the society's reconciler makes one pass a day, at 06:00 UTC (no time is promised), and releases the listing if the signed authorisation expired unused or books the payment if it settled; a claim it stops, or that stays undecided for ${ATTENTION_AGED_DAYS} days, is listed at GET /api/settlements/attention for a person`;
 export function settlementField(status: string, payingSince: number | null | undefined, now: number): string | undefined {
   if (status !== "paying") return undefined;
-  if (payingSince == null) return `unresolved: reservation time unavailable (reserved before the column existed); a settlement was attempted and not confirmed; neither open nor paid until ${SETTLEMENT_RECONCILED_BY}`;
+  // A row with no reservation time was reserved before migration 0014, which predates the claim table (0017): it has no claim, so the reconciler can never select, release or book it, and
+  // the attention list never carries it. For THAT row the by-hand sentence is the true one, so the reconciler's is not served here.
+  if (payingSince == null) return "unresolved: reservation time unavailable (reserved before the column existed); a settlement was attempted and not confirmed; neither open nor paid until the operator reconciles it against the chain";
   const iso = new Date(payingSince).toISOString();
   if (payingSince > now - UNRESOLVED_AFTER_MS) return `pending since ${iso}: a payment is being settled; not open for submissions`;
   return `unresolved since ${iso}: a settlement was attempted and not confirmed; neither open nor paid until ${SETTLEMENT_RECONCILED_BY}`;

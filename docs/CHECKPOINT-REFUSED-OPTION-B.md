@@ -22,7 +22,8 @@ throwaway script in the scratchpad (not committed). A neighbouring guard turning
 | 4 | `8e3ed4bc` | the claim-conflict answers say "/settle" (item 6) |
 | 5 | `31ade529` | `pay-listing.mjs` recognises `settlement_unresolved` (item 7) |
 | 6 | `0f8c5dce` | the served-text sweep and `DEFERRED-PAY-LISTING-RESEND-REPLAY` |
-| 7 | this one | an import the refusal branch no longer uses; this table |
+| 7 | `1ff8be50` | an import the refusal branch no longer uses; this table |
+| 8 | this one | `settlementField`: the reconciler's sentence only on the dated arm (a claimless row keeps the by-hand wording); the slot-split flag pinned |
 
 ## 1. The first-attempt refusal stays pending
 
@@ -135,6 +136,13 @@ releases a listing: before B that was true of the code and of nothing served. Th
   here: it now says the society's reconciler makes one pass a day at 06:00 UTC (no time promised), releases the listing if the signed authorisation expired unused or books the payment if it
   settled, and lists a claim it stops, or that stays undecided for `ATTENTION_AGED_DAYS` days, at `GET /api/settlements/attention`. The `pending since` wording is unchanged. The step-0
   listing_pay answer points the funder at this read. Also `FUNDER_RECORD_NOTE` and the `?status=unresolved` description: checked, true as they stand.
+  **The new sentence is served on the DATED arm only (advisor catch, found before the report).** The `paying_since IS NULL` arm is for a row reserved before migration 0014, which
+  predates the claim table (0017): it has no claim, so the reconciler can never select, release or book it and the attention list never carries it. There the old by-hand wording is the
+  true one and is kept (a test pins the split; red-proof S1b). A dated row reserved between 0014 and 0017 would also have no claim; whether prod holds one is a state this worktree cannot
+  see: before deploy, Ben's prod read `SELECT id, paying_since FROM listings WHERE status = 'paying'` against `SELECT listing_id FROM ...settlement_claims` (the intent's listing_id) settles it.
+- `scripts/post-listing.mjs` (listing_create's payer) and `scripts/pay-x402-claim.mjs`: checked, UNCHANGED. Both treat any non-success leg 2 as an unknown outcome (post-listing: `leg2_not_201`,
+  tombstone stays 'signing', `recoveryMessage` says do not re-run and verify on-chain; pay-x402-claim: `unknown(...)`), which is what a first refusal now is. No registry enumerates `DEFERRED-*`
+  flags in `src/` (the guest flags have their own, scoped by name), so the two new flags are planted by comment and pinned by tests (DEFERRED-PAY-LISTING-RESEND-REPLAY has one; DEFERRED-RECONCILE-SLOT-SPLIT has one too, red-proof F2).
 - `src/doc.ts` / `FRONT_DOOR_TEMPLATE` (hashed): checked, NOT TOUCHED, no mint. Its lines on the 402 describe the unpaid probe, not a refusal.
 - `src/discovery.ts` route notes, `/llms.txt`, `/skill.md`, `/heartbeat.md` (`src/inbox.ts`), `/api/surface`, `src/mcp.ts` and `src/mcp-read.ts` tool descriptions: checked, UNCHANGED (the 402 they
   describe is the probe; the register tool says the MCP door cannot carry a payment).
@@ -154,4 +162,4 @@ release, or a 402, after a refused settlement -> the scan; S4 the flag removed -
 
 ## Close
 
-Full suite 1819/1819 (baseline 1773), `tsc` 0 errors. `git diff 8e5d2782 -- src/doc.ts migrations schema.sql wrangler.jsonc` is empty: no mint, no migration, no schema or config change.
+Full suite 1820/1820 (baseline 1773), `tsc` 0 errors. `git diff 8e5d2782 -- src/doc.ts migrations schema.sql wrangler.jsonc` is empty: no mint, no migration, no schema or config change.
