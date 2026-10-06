@@ -24,7 +24,6 @@ import {
   firstRefusalDetail,
   getClaim,
   isChainSpent,
-  isContradicted,
   isHandleTaken,
   isListingNotPaying,
   keyOfRow,

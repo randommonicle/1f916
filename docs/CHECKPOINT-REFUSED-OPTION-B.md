@@ -14,7 +14,15 @@ throwaway script in the scratchpad (not committed). A neighbouring guard turning
 
 ## Commits
 
-(filled in as they land; the hashes are in the report)
+| # | sha | what |
+|---|---|---|
+| 1 | `6ca8e9d4` | a first-attempt rule-7 refusal keeps the claim pending: `markFirstRefusal`, `firstRefusalDetail`, `reportPointer`, the branch rewrite, every first-refusal test rewritten, the fixture flipped |
+| 2 | `5a63c39a` | `markRefused` deleted; a scan that nothing writes `refused` |
+| 3 | `18eba064` | reconciler: settled_unbooked first, the expiry/cancellation/booking matrix, `DEFERRED-RECONCILE-SLOT-SPLIT` |
+| 4 | `8e3ed4bc` | the claim-conflict answers say "/settle" (item 6) |
+| 5 | `31ade529` | `pay-listing.mjs` recognises `settlement_unresolved` (item 7) |
+| 6 | `0f8c5dce` | the served-text sweep and `DEFERRED-PAY-LISTING-RESEND-REPLAY` |
+| 7 | this one | an import the refusal branch no longer uses; this table |
 
 ## 1. The first-attempt refusal stays pending
 
