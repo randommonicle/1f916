@@ -99,3 +99,19 @@ the sentence was false on that path; it is true only on the consult path (`repla
 `test/settlement-conflict-wording-d1.test.ts` drives each path: the consult (no facilitator call at all), the take (the stub's `/verify` hook lands the conflicting claim, so `/verify`
 is called once and `/settle` never), and the 503 (a vanished row is not production-reachable, rows are never deleted, so it is driven through a database that reports a conflict and no
 row). Red-proofs: W1 the 409's old sentence back -> the consult and take tests; W2 the 503's old sentence back -> the 503 test.
+
+## 5. `scripts/pay-listing.mjs` recognises the code (commission item 7, CODEX r1)
+
+A first-attempt refusal is now a 502 `code: "settlement_unresolved"` with the listing kept reserved. The script's generic non-200 branch would have read the nonce as unused, written a local
+`refused` tombstone and promised a re-run after validBefore + the margin, which `loadPayableListing` refuses ("paying, not open") until the reconciler releases the listing. A new branch,
+checked BEFORE the generic one and matching `secondJson.code === "settlement_unresolved"` (the code, never the error text), keeps the tombstone `signing` (rewritten with `from`, `nonce`,
+`valid_before`, the status and the detail), does not consult the chain, and returns reason `leg2_unresolved`. **Scope, a decision the commission left open (the advisor's catch):** the code is
+also what the 500 answers carry (a payment that settled but whose booking is not finished, and a claim stopped for a person), so the branch is not scoped to 502: `signing` is the true state
+for those too, and the message is chosen by status. For a 502 it says the server keeps listing N reserved, a re-run is refused while it is paying, the reconciler decides it after
+validBefore + the margin (the time is printed), releasing the listing in the same step if the authorisation expired unused (`GET /api/listing/:id` then shows it open, and only then is a fresh
+signature safe) or booking it if the facilitator's settlement is confirmed; for any other status it is the do-not-re-run message, with no reservation story. The one existing test that
+pinned the old behaviour ("a 502 settlement_unresolved with the chain unused is recorded 'refused'") is rewritten into the first of three: the 502, the 500, and "the code, not the words".
+Checked and left unchanged: `register-maintainer.mjs`'s `sendSignedPayment` already treats every 502 as an unknown outcome and prints the do-not-sign-again warning, which is what a first
+refusal on registration now is; `refusedLine`'s "a 402 is the facilitator's own refusal" stays true for the /verify refusals and the expiry 402.
+Red-proofs (`test/pay-listing.test.ts`): P1 the branch removed -> the 502 and 500 tests (the generic path writes `refused`); P2 matching the words instead of the code -> the code-not-words
+test and both others; P3 the 502 story told for every status -> the 500 test; P4 the branch writes `refused` -> the 502 and 500 tests.

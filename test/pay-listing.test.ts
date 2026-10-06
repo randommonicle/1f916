@@ -423,21 +423,63 @@ test("execute: a 502 without the settlement_unconfirmed code still takes the gen
   assert.equal(JSON.parse(store()!).status, "refused");
 });
 
-// M3 second build (hub, 4 Oct): the server's 502 settlement_unresolved (a claim exists, its outcome unknown) takes the same branch. The chain
-// reading "unused" NOW is not proof nothing was paid: until validBefore whoever holds the authorisation, the server included, may still
-// execute it. The message must not say "refused" or "Nothing was paid"; the retry gate (after validBefore + margin, chain re-read) is unchanged.
-test("execute: a 502 settlement_unresolved with the chain unused is recorded 'refused' but the message claims neither a refusal nor that nothing was paid", async () => {
-  const { deps, store } = fakeDeps({ second: { status: 502, body: { error: "The society recorded a claim for this payment authorisation but could not confirm that it had. Do not sign again.", code: "settlement_unresolved" } }, nonceUsed: false });
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled 5 Oct 2026; CODEX r1 on its commission). REWRITTEN from "a 502 settlement_unresolved with the chain unused is recorded 'refused'".
+// A first-attempt facilitator refusal is now a 502 `code: "settlement_unresolved"` and the server KEEPS the listing reserved, so a re-run is refused ("paying, not open") until the
+// society's reconciler releases it. The old branch (chain read unused -> 'refused' tombstone -> "a re-run is allowed after validBefore + margin") would promise something false.
+// The code is recognised BEFORE the generic non-200 branch: the record stays 'signing' (which classifyTombstone and recoveryMessage already refuse to re-run), is rewritten with the
+// authorisation's identity, and the chain is not consulted to label it. Red-proof: without the branch this 502 (nonce unused) falls into the generic path and writes 'refused'.
+test("execute: a 502 settlement_unresolved keeps the tombstone 'signing' with the authorisation's identity, never writes 'refused', never consults the chain, and promises no re-run", async () => {
+  const { deps, store, calls } = fakeDeps({ second: { status: 502, body: { error: "The outcome of this payment is still unknown: whether the money moved is not yet established. Do not sign again. The facilitator reports that this settlement failed (HTTP 200, reason: insufficient_funds).", code: "settlement_unresolved" } }, nonceUsed: false });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "leg2_unresolved");
+  const t = JSON.parse(store()!);
+  assert.equal(t.status, "signing", "never 'refused': the server keeps the claim pending and the listing reserved");
+  assert.equal(t.from, PAYER);
+  assert.equal(t.nonce, NONCE);
+  assert.equal(t.valid_before, VALID_BEFORE);
+  assert.equal(t.http_status, 502);
+  assert.match(t.detail, /settlement_unresolved/);
+  assert.ok(!calls.some((c) => c.kind === "authorizationUsed"), "the chain is not consulted to label an unresolved claim");
+  const m = String(r.message);
+  assert.ok(m.startsWith("The server answered HTTP 502, settlement_unresolved"), m);
+  // what is true: the server keeps the listing reserved, a re-run is refused while it is paying, the reconciler releases it if the authorisation expired unused
+  assert.match(m, /keeps listing 3 RESERVED/);
+  assert.match(m, /A re-run is refused while the listing is 'paying'/);
+  assert.match(m, /"paying, not open"/);
+  assert.match(m, /reconciler decides the claim on a pass after the authorisation's validBefore plus its margin/);
+  assert.ok(m.includes(new Date((VALID_BEFORE + RETRY_MARGIN_SECONDS) * 1000).toISOString()), "the time the reconciler can decide it");
+  assert.match(m, /releases the listing in the same step, and GET \/api\/listing\/3 then shows it 'open' again/);
+  assert.match(m, /Do NOT sign again/);
+  // what must NOT be said: a refusal, nothing paid, or a re-run after a time
+  assert.doesNotMatch(m, /Recorded as 'refused'|a re-run is allowed only after|did not take the payment|refused the signed payment|Nothing was paid/);
+  // and the tombstone it left refuses a re-run before any network call
+  const again = fakeDeps({ existing: store()! });
+  const r2 = await payListing({ ...RUN, execute: true }, again.deps);
+  assert.equal(r2.reason, "tombstone_blocks");
+  assert.ok(!again.calls.some((c) => c.kind.startsWith("fetch")), "no network call");
+});
+
+// The same CODE on a 500 (settled but unbooked, or stopped for a person): money moved or may have, 'signing' is the true state, and the message says so rather than the reconciler story.
+test("execute: a 500 settlement_unresolved (money may have moved) keeps 'signing' too, and the message is the do-not-re-run one, not the reservation story", async () => {
+  const { deps, store, calls } = fakeDeps({ second: { status: 500, body: { error: "Your $12.00 payment settled (tx 0xabc) but its booking is not finished. Do not sign again.", code: "settlement_unresolved" } }, nonceUsed: false });
+  const r = await payListing({ ...RUN, execute: true }, deps);
+  assert.equal(r.reason, "leg2_unresolved");
+  assert.equal(JSON.parse(store()!).status, "signing");
+  assert.ok(!calls.some((c) => c.kind === "authorizationUsed"));
+  const m = String(r.message);
+  assert.ok(m.startsWith("The server answered HTTP 500, settlement_unresolved"), m);
+  assert.match(m, /the money may have moved/);
+  assert.match(m, /DO NOT re-run/);
+  assert.doesNotMatch(m, /keeps listing 3 RESERVED|reconciler decides the claim/, "the 502 story is not told for a claim that may have moved money");
+});
+
+// The code, not the error text, decides: the same 502 without the code still takes the generic branch (so the new branch cannot swallow an unrelated 502).
+test("execute: the branch matches the CODE, never the words: a 502 whose text says 'settlement_unresolved' but carries no code takes the generic branch", async () => {
+  const { deps, store } = fakeDeps({ second: { status: 502, body: { error: "settlement_unresolved (this is only text)" } }, nonceUsed: false });
   const r = await payListing({ ...RUN, execute: true }, deps);
   assert.equal(r.reason, "leg2_refused");
   assert.equal(JSON.parse(store()!).status, "refused");
-  assert.doesNotMatch(String(r.message), /refused the signed payment|Nothing was paid/);
-  // hub LOW (CODEX second-build r1): neither a 502 settlement_unresolved nor an unused nonce establishes that the server "did not take" the payment
-  assert.ok(String(r.message).startsWith("The server did not confirm the payment (HTTP 502, settlement_unresolved)"), String(r.message));
-  assert.doesNotMatch(String(r.message), /did not take the payment/);
-  assert.match(String(r.message), /settlement_unresolved/);
-  assert.match(String(r.message), /may still execute it/);
-  assert.match(String(r.message), /only if the chain still shows it unused/);
 });
 
 test("execute: an existing 'signing' tombstone refuses before any network call; a 'settled' one is idempotent success", async () => {
