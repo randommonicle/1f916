@@ -85,3 +85,11 @@ bytes restored and sha256 compared): `claimResponse` drops `answered_by` (9 red)
 `claimResponse` drops CORS (4 red); each of the three direct answers given the wrong env, one at a time (its own T4a test red, plus the scan's R4); the last direct answer reverted to a bare
 `Response.json` (its T4a red, plus the scan's R1); `claimErrorResponse` drops CORS (all three T4a red, A8); the router drops the field (handle-taken and listing tests red); the list loses the handle-taken
 code (handle-taken red, scan R3 red); `contradictionResponse` given the wrong env (scan R4 red); `answerFromClaim` serving the answer raw (scan red); each flag renamed away or its reasoning edited (flag tests red).
+
+### 5. `wrangler.jsonc`: the `version_metadata` binding
+
+`"version_metadata": { "binding": "CF_VERSION_METADATA" }` added after `d1_databases` (key and shape read from the installed `node_modules/wrangler/config-schema.json`, a file read; no `wrangler`
+command was run). `CODE_COMMIT` is deliberately NOT in `vars` (A6): the comment beside the binding says why. `test/code-identity-config.test.ts` (3) pins the binding name against the name `Env` types
+and the code reads, and that `CODE_COMMIT` appears nowhere in the parsed config (comments blanked first, so the explanatory comment does not trip it), with a positive control. Red-proofs: binding
+renamed (red), binding removed (red), a stale stamp written into `vars` (red). Note for the deploy: Cloudflare adds the binding when the Worker version is uploaded; `code.version_id` is `null`
+until the first deploy of this branch, which is what the poll in the new deploy script waits for.
