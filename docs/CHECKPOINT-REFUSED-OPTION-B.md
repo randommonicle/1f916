@@ -203,3 +203,14 @@ past the cooldown (a refusal at /settle was made on an authorisation still valid
 a re-check: C1 refused/expired (re-POST), C2 (re-POST), R2-3, C4-B control, CODEX deploy-script r3, CODEX pending-wording r1, H3/MEDIUM-1 (patron), C7, F4 (register, patron, settled-but-unrecorded),
 H2 re-send refused/expired, CODEX r2 (2) tx-named/empty-tx, 7g, test 8, and the ordering enumeration (3572 traces, each RESEND step an immediate re-send, so it needs a clock step per RESEND, which changes
 what it enumerates). Per the commission the probe was reverted and F3 is reported rather than built; F1 and F2 stand. Nothing in the tree depends on F3.
+
+## F1b and the F3 flag (coordinator follow-ups)
+
+**F1b.** Within each pair (the k-th settled row and the k-th pending row) the row that has waited longest, by `updated_at` then `created_at`, goes first, settled first on a tie. Always settled first
+could shed the pending row on EVERY run when the first row is costly and keeps failing (the loop sheds the second row when `actualCost + 18 > ceiling`); a failing row moves its own `updated_at`
+on every attempt, so next run the waiting row is older and goes first, and the shed can fall on a kind at most on alternate runs. Test: a failing public-key registration booking (6 statements, 7 with the select)
+plus a pending listing_pay refusal on a day with a ceiling of 24 (`runReconciler(env, 24)`, what production hands the reconciler when the sweep and concierge have used the rest): run 1 tries the settled row and
+sheds the refusal, run 2 works the refusal and the expiry batch releases the listing. Honest limit: a failing settled row costs 6 once its earlier steps are booked, so the "costly" row is modelled by the day's
+ceiling, the same arithmetic as a first attempt costing 9 or more against 26. Red-proof H1: the always-settled-first pair order fails that test at run 2 (`resolved 0`, the listing still `paying`) and reconcile
+test 14. Reconcile test 14's runs 2-4 were REVISED, not weakened: A, having just failed, now waits behind the older pending rows (run 2: C booked, A shed loudly; run 3: D booked; run 4: A tried and logged).
+**F3** stays unbuilt: `DEFERRED-RESEND-COOLDOWN` is planted at `respondToExistingClaim`'s pending branch in `x402.ts` (the unbounded re-send window, the prototype and its 20 broken tests, the two seats' positions, the gate decides).

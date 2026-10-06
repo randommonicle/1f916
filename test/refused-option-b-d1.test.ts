@@ -387,3 +387,20 @@ test("DEFERRED-PAY-LISTING-RESEND-REPLAY is planted at the pay route's claim con
   assert.match(comment, /loadPayableListing/);
   assert.match(comment, /is paying, not open/);
 });
+
+// DEFERRED-RESEND-COOLDOWN (build review F3, not built; the D-018 gate decides): planted where the unbounded re-send window is, and pinned there so it cannot drift or be deleted unseen.
+test("DEFERRED-RESEND-COOLDOWN is planted in respondToExistingClaim's pending branch, before the lease is taken, and names the prototype's cost", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/x402.ts", import.meta.url)), "utf8");
+  const flag = src.indexOf("DEFERRED-RESEND-COOLDOWN");
+  assert.ok(flag > 0);
+  assert.equal(src.indexOf("DEFERRED-RESEND-COOLDOWN", flag + 1), -1, "once");
+  const fn = src.indexOf("async function respondToExistingClaim");
+  const lease = src.indexOf("const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());", flag);
+  assert.ok(fn > 0 && fn < flag, "inside respondToExistingClaim");
+  assert.ok(lease > flag && lease - flag < 2200, "directly above the pending branch's acquireLease");
+  const text = src.slice(flag, lease);
+  assert.match(text, /no per-claim bound/);
+  assert.match(text, /C6 expiry proof/);
+  assert.match(text, /broke 20 tests/);
+  assert.match(text, /D-018 gate decides/);
+});

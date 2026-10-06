@@ -516,3 +516,45 @@ test("F1: two settled rows and no pending row: BOTH are worked in one run; withi
     d1.close();
   }
 });
+
+// F1b: a settled row that is costly AND keeps failing must not shed the pending row on EVERY run. The batch is interleaved in pairs, and the loop sheds the second row of a batch whenever the first
+// one's measured cost plus the next worst case (18) would pass the day's ceiling. With the settled row always first, a failing settled row would do that every run, and for a listing_pay refusal the
+// reconciler is the only route out. Within a pair the row that has waited longest goes first: the failing row moves its own updated_at on every attempt, so on the next run the pending row is older.
+//
+// The ceiling here is the one production hands the reconciler on a day the sweep and the concierge have used most of the 50 subrequests: runReconciler's `reservedCost`, which is
+// min(26, 50 - reservedCost - FINALISE_RESERVE). A failing public-key registration booking measures 6 statements plus the select, so 7 + 18 = 25 passes a ceiling of 24: the same arithmetic as a
+// first attempt that costs 9 or more against 26 (a registration's first attempt costs up to 16), reached with a real failing row rather than an invented cost.
+test("F1b: a costly failing settled row sheds the pending listing_pay refusal at most on alternate runs: across two runs the pending row is worked and its reservation released once T has passed", async () => {
+  const d1 = createLocalD1();
+  const stub = worldStub({ settle: (n) => (n === 1 ? settledAnswer() : refusedAnswer()) });
+  const TIGHT_DAY = 24; // reservedCost: the ceiling is then min(26, 50 - 24 - 2) = 24
+  try {
+    d1.raw.exec("CREATE TRIGGER breaks_key BEFORE INSERT ON identity_events WHEN NEW.kind = 'key_registered' BEGIN SELECT RAISE(ABORT, 'injected booking failure'); END;");
+    const seat = await routeFx(d1, "register");
+    assert.equal((await seat.send()).status, 500, "the registration settled and its last booking step failed");
+    assert.equal(count(d1, "settlement_claims WHERE state = 'settled_unbooked'"), 1);
+    // the settled row is the OLDER of the pair, so it goes first on run 1 under any wait-time order
+    d1.raw.prepare("UPDATE settlement_claims SET created_at = 1000, updated_at = 1000 WHERE state = 'settled_unbooked'").run();
+    const fx = await routeFx(d1, "listing_pay");
+    assert.equal((await fx.send()).status, 502, "the funder's payment was refused: the listing is reserved");
+    assert.equal(fx.listing!().status, "paying");
+    timePasses(d1); // the chain's clock is past validBefore + the margin for the pending claim
+
+    const first = await captureLog(() => runReconciler(eq(d1), TIGHT_DAY));
+    assert.equal(first.value.failed, 1, JSON.stringify(first.value));
+    assert.equal(first.value.examined, 1, "the failing settled row went first and its cost left no room for the pending row's worst case");
+    assert.equal(eventLines(first.lines, "settlement_reconcile_shed").length, 1, "the shed is loud");
+    assert.equal(first.value.resolved, 0);
+    assert.equal(fx.listing!().status, "paying", "run 1: the refused funder's listing is still reserved");
+
+    const second = await captureLog(() => runReconciler(eq(d1), TIGHT_DAY));
+    assert.equal(second.value.resolved, 1, `run 2: the pending row has now waited longer than the settled row that just failed, so it goes first: ${JSON.stringify(second.value)}`);
+    const l = fx.listing!();
+    assert.equal(l.status, "open", "and its reservation was released by the expiry batch");
+    assert.equal(l.paying_since, null);
+    assert.equal(count(d1, "settlement_claims WHERE state = 'settled_unbooked'"), 1, "the settled row is still there for a person");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

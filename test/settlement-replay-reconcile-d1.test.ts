@@ -462,19 +462,25 @@ test("14. a failing row never stops the rows after it: one log line per failure,
     assert.equal(stateOf(c.header), "pending", "rows C and D are beyond this run's batch and untouched");
     assert.equal(stateOf(d.header), "pending");
 
-    // Fairness, as option B left it (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, Q1; build review F1): the batch is ONE of each kind when both exist (a UNION ALL of two LIMITed subqueries,
-    // interleaved), so refusals, now pending rows owing an expiry proof, cannot starve bookings and failing settled rows cannot starve refusals. A is the only settled row, so it is tried
-    // on every run, takes one of the two slots, and is logged each time; the OTHER slot goes to the oldest pending row, so C and D are reached one run apiece rather than being starved.
+    // Fairness, as option B left it (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, Q1; build review F1 and F1b): the batch is ONE of each kind when both exist (a UNION ALL of two LIMITed subqueries,
+    // interleaved in PAIRS, and within a pair the row that has waited longest goes first), so refusals, now pending rows owing an expiry proof, cannot starve bookings and failing settled
+    // rows cannot starve refusals. A is the only settled row and it failed on run 1, so its updated_at is now the newest in the table: on run 2 the older pending row C goes first, and C's
+    // booking (a public-key registration, up to 16 subrequests) leaves no room for A's worst case under the 26 ceiling, so A is SHED, not tried. Before F1b A was tried first on every run and
+    // would have shed the pending rows every run if it were the costly one. A is not forgotten: it is reached on the first run the queue ahead of it is empty (run 4), and logged then.
     // (Before B the failing row went behind the waiting ones: oldest attempt first across both kinds. Within a kind that rule stands, since each subquery orders by updated_at and
-    // created_at: test/refused-option-b-expiry-d1.test.ts pins it for two settled rows, and the starvation of pending rows by failing settled ones for the cross-kind case.)
+    // created_at: test/refused-option-b-expiry-d1.test.ts pins it for two settled rows, and the budget case for a costly failing settled row.)
     const { value: second, lines: secondLines } = await captureLog(() => runReconciler(testEnv(d1)));
-    assert.equal(second.failed, 1, "the failing settled row is tried first again: money that moved is never put behind refusals");
-    assert.equal(eventLines(secondLines, "settlement_reconcile_row_failed").length, 1, "and it is logged again, so it cannot go unseen");
-    assert.equal(stateOf(c.header), "booked", "C is reached on the second run, in the other slot");
+    assert.equal(second.failed, 0, "A, which just failed, waits behind the older pending row C");
+    assert.equal(second.examined, 1, "and is shed by C's cost rather than tried");
+    assert.equal(eventLines(secondLines, "settlement_reconcile_shed").length, 1, "loudly");
+    assert.equal(stateOf(c.header), "booked", "C is reached on the second run, first in its pair");
     assert.equal(stateOf(d.header), "pending");
     await runReconciler(testEnv(d1));
-    assert.equal(stateOf(d.header), "booked", "and D on the next: a single failing row costs one slot, it does not starve the rest");
-    assert.equal(stateOf(a.header), "settled_unbooked", "and A is still there for a person");
+    assert.equal(stateOf(d.header), "booked", "and D on the third: nothing starves behind the failing row");
+    assert.equal(stateOf(a.header), "settled_unbooked", "A is still there for a person");
+    const { value: fourth, lines: fourthLines } = await captureLog(() => runReconciler(testEnv(d1)));
+    assert.equal(fourth.failed, 1, "and once nothing older waits ahead of it, it is tried again");
+    assert.equal(eventLines(fourthLines, "settlement_reconcile_row_failed").length, 1, "and logged again, so it cannot go unseen");
   } finally {
     stub.restore();
     d1.close();

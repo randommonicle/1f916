@@ -859,6 +859,12 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
     // is asked (two RPCs must agree) and, if the authorisation moved money or may still
     // move it, the stored body is re-POSTed to /settle, as PayAI's own documentation
     // prescribes for learning an outcome. It never asks the payer to sign again.
+    //
+    // DEFERRED-RESEND-COOLDOWN (option B build review, CODEX F3; 6 Oct 2026): each identical re-send of a pending claim can take the lease, read the chain (up to 4 RPC fetches, 8 more for the expiry
+    // proof) and re-POST /settle, with no per-claim bound. For a first-attempt refusal that window lasts until the C6 expiry proof: validBefore is at most ~360 s after signing (this server bounds
+    // it at now + 300 + 60), plus the 300 s margin. A 60 s cooldown on the claim's updated_at (an answer from the row alone, no lease, no RPC, no /settle, this path only, never the reconciler)
+    // was PROTOTYPED and not kept: it broke 20 tests that were already in the suite, plus the ordering fixture's immediate re-send steps. CODEX holds the bound is required; GEMINI that the cost
+    // is acceptable (a pending claim from an unknown outcome already costs the same per re-send, and a listing_pay re-send never reaches this line). The D-018 gate decides.
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
     if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));

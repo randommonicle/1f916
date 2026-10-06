@@ -175,7 +175,9 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // no throttle; registration and listing creation record an attempt only on success), so oldest-first alone could let them starve the bookings of payments that settled (the money that DID
   // move comes first within a pair); and 'settled_unbooked first' alone lets two settled rows that keep failing take both slots every run and starve every pending row, a refused funder's
   // listing included. So: ONE statement (RECONCILE_SELECT_COST stays 1), a UNION ALL of two subqueries, each the filters above, ORDER BY updated_at, created_at and its own LIMIT (wrapped in
-  // SELECT * FROM (...) so SQLite accepts the inner LIMIT), then the interleave below: first settled, first pending, second settled, second pending, the first RECONCILE_BATCH_ROWS of them.
+  // SELECT * FROM (...) so SQLite accepts the inner LIMIT), then the interleave below: the k-th settled and the k-th pending row as a PAIR, the one that has waited longest first (settled on a
+  // tie), pairs in order, the first RECONCILE_BATCH_ROWS of them. Wait-time order within a pair, not always settled first, because the loop sheds a second row whose worst case would pass the
+  // ceiling: a costly settled row that keeps failing would otherwise shed the pending row every run. It moves its own updated_at each attempt, so next run the waiting row is older and goes first.
   // Window functions (ROW_NUMBER() OVER) would do it in one ORDER BY, but their support on D1's deployed runtime is unproven, so none is used.
   const ELIGIBLE = `(leased_until IS NULL OR leased_until <= ?)
        AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))
@@ -194,10 +196,16 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   const oldestFirst = (x: ClaimRow, y: ClaimRow): number => x.updated_at - y.updated_at || x.created_at - y.created_at;
   const settledRows = fetched.filter((r) => r.state === "settled_unbooked").sort(oldestFirst);
   const pendingRows = fetched.filter((r) => r.state === "pending").sort(oldestFirst);
+  // The k-th settled and the k-th pending row go in PAIRS, and within a pair the one that has waited longest (updated_at, then created_at) goes first, settled first on a tie (money that DID
+  // move). Not always settled first: the loop below sheds the second row of a batch when the first one's measured cost plus the worst case for the next would pass the day's ceiling, so a
+  // settled row that is costly AND keeps failing, tried first every run, would shed the pending row every run (budget starvation, not slot starvation). A failing row moves its own
+  // updated_at on every attempt (acquireLease), so on the next run the waiting row is the older of the pair and goes first: the shed can fall on the same kind at most on alternate runs.
   const interleaved: ClaimRow[] = [];
   for (let i = 0; i < Math.max(settledRows.length, pendingRows.length); i++) {
-    if (i < settledRows.length) interleaved.push(settledRows[i]);
-    if (i < pendingRows.length) interleaved.push(pendingRows[i]);
+    const s = settledRows[i];
+    const p = pendingRows[i];
+    if (s && p) interleaved.push(...(oldestFirst(p, s) < 0 ? [p, s] : [s, p]));
+    else interleaved.push((s ?? p) as ClaimRow);
   }
   const results = interleaved.slice(0, RECONCILE_BATCH_ROWS);
 
