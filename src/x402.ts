@@ -13,12 +13,14 @@
 
 import { appendChained, appendChainedStmt, type ChainRow } from "./chain.ts";
 import { type Env, SocietyError } from "./society.ts";
+import { codeIdentity } from "./code-identity.ts";
 import { readAuthorizationState } from "./settlement-chain.ts";
 import {
   acquireLease,
   claimAnswer,
   claimIdentity,
   claimKeyFromPayload,
+  claimErrorResponse,
   claimResponse,
   contradictionAnswer,
   firstRefusalDetail,
@@ -40,6 +42,7 @@ import {
   leaseHeldByAnother,
   listingReservationState,
   runBookingStep,
+  SETTLEMENT_CLAIM_UNAVAILABLE,
   SETTLEMENT_UNRESOLVED,
   SHOWHOME_REPORT_POINTER,
   sameRequest,
@@ -631,14 +634,15 @@ export async function payAndSettle(
         return {
           ok: false,
           keepReservation: true,
-          response: Response.json(
+          response: claimErrorResponse(
             {
               error: `The society could not confirm whether a claim for this payment authorisation was recorded (a database error), so nothing was sent to the facilitator's /settle by this request and it charged nothing.${
                 claim.route === "listing_pay" ? " The listing stays reserved, because releasing it could re-open it under a claim that does exist." : ""
               } Do not sign again: this is logged for the maintainer to resolve.`,
-              code: "settlement_claim_unavailable",
+              code: SETTLEMENT_CLAIM_UNAVAILABLE,
             },
-            { status: 503, headers: { "Access-Control-Allow-Origin": "*" } },
+            503,
+            codeIdentity(env),
           ),
         };
       }
@@ -647,14 +651,15 @@ export async function payAndSettle(
         return {
           ok: false,
           keepReservation: true,
-          response: Response.json(
+          response: claimErrorResponse(
             {
               error: `The society recorded a claim for this payment authorisation but could not confirm that it had (a database error). Nothing was sent to the facilitator's /settle by this request, so by this request's own account no money moved. Do not sign again.${
                 claim.route === "listing_pay" ? " The listing stays reserved for this payment until the claim resolves: an authorisation nobody uses lapses within minutes, after which the reconciler can release the listing." : ""
               } ${reconcileTail(claim.route)}`,
               code: SETTLEMENT_UNRESOLVED,
             },
-            { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
+            502,
+            codeIdentity(env),
           ),
         };
       }
@@ -667,13 +672,14 @@ export async function payAndSettle(
       if (landed !== null) return { ok: false, response: await respondToExistingClaim(env, landed, false, reqs, claim) };
       return {
         ok: false,
-        response: Response.json(
+        response: claimErrorResponse(
           {
             error:
               "The society could not record a claim for this payment (a database error), so nothing was sent to the facilitator's /settle and nothing was charged. Nothing was reserved or created by this request. Try again later: the same signed authorisation has not been used.",
-            code: "settlement_claim_unavailable",
+            code: SETTLEMENT_CLAIM_UNAVAILABLE,
           },
-          { status: 503, headers: { "Access-Control-Allow-Origin": "*" } },
+          503,
+          codeIdentity(env),
         ),
       };
     }
@@ -756,7 +762,7 @@ export async function payAndSettle(
         return {
           ok: false,
           keepReservation: true,
-          response: claimResponse(claimAnswer(now, true, reqs, { detail: firstRefusalDetail(reason, now, RECONCILE_EXPIRY_MARGIN_SECONDS), firstRefusalRecheckAfter: firstRefusalRecheckAfter(now, RECONCILE_EXPIRY_MARGIN_SECONDS) })),
+          response: claimResponse(claimAnswer(now, true, reqs, { detail: firstRefusalDetail(reason, now, RECONCILE_EXPIRY_MARGIN_SECONDS), firstRefusalRecheckAfter: firstRefusalRecheckAfter(now, RECONCILE_EXPIRY_MARGIN_SECONDS) }), codeIdentity(env)),
         };
       }
       // R1: another holder moved the claim (or holds a live lease on it) while this request's /settle was in flight, or the claim moved in the instant after our write. This request's refusal is then
@@ -838,21 +844,21 @@ async function quietly(step: string, fn: () => Promise<unknown>): Promise<void> 
 // settled_unbooked claim the route's own `finish` completes the booking under a
 // lease (B5); a live lease held by another worker is named, not raced.
 async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolean, reqs: PaymentRequirements, claim: PaidClaim): Promise<Response> {
-  if (!identical) return claimResponse(claimAnswer(row, false, reqs));
+  if (!identical) return claimResponse(claimAnswer(row, false, reqs), codeIdentity(env));
   // F1: a registration whose handle was taken after payment is answered, never re-attempted (no retry can book it). C5: so is a bounty payment whose listing is no longer
   // 'paying'. C4 (option B): so is a STOPPED claim (the chain reads its authorisation used and a person must look), before any lease is taken or any fetch is made.
-  if (isHandleTaken(row) || isListingNotPaying(row) || isChainSpent(row)) return claimResponse(claimAnswer(row, true, reqs));
+  if (isHandleTaken(row) || isListingNotPaying(row) || isChainSpent(row)) return claimResponse(claimAnswer(row, true, reqs), codeIdentity(env));
   if (row.state === "settled_unbooked") {
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
-    if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+    if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }), codeIdentity(env));
     try {
       const done = await claim.finish(leased, owner);
       if (done) return done;
     } finally {
       await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
     }
-    return claimResponse(claimAnswer((await getClaim(env, keyOfRow(row))) ?? row, true, reqs));
+    return claimResponse(claimAnswer((await getClaim(env, keyOfRow(row))) ?? row, true, reqs), codeIdentity(env));
   }
   if (row.state === "pending") {
     // B6: the payer's identical re-send may take the lease and run ONE attempt: the chain
@@ -875,10 +881,10 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
     // late success is still seen, through the chain reading the authorisation used, which delays it without losing it. Its test: an immediate replay makes zero RPC and zero facilitator calls.
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
-    if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));
+    if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }), codeIdentity(env));
     try {
       const out = await attemptPending(env, leased, owner);
-      if (out.kind === "contradiction") return contradictionResponse(out.tx, out.state);
+      if (out.kind === "contradiction") return contradictionResponse(env, out.tx, out.state);
       if (out.kind === "settled") {
         const done = await claim.finish(out.row, owner);
         if (done) return done;
@@ -886,16 +892,16 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
       if (out.kind === "unchanged" && out.held) {
         // CODEX M3-build r2 (2), the gate's LOW-1 (severity upgraded): a held success is never discarded into a terminal row's 402 (holdSuccessAgainstTerminal).
         const held = await holdSuccessAgainstTerminal(env, keyOfRow(row), out.held);
-        if (held.contradicted) return contradictionResponse(out.held.tx, held.contradicted);
-        return claimResponse(claimAnswer(held.fresh ?? row, true, reqs, { detail: out.detail, settledTx: out.held.tx }));
+        if (held.contradicted) return contradictionResponse(env, out.held.tx, held.contradicted);
+        return claimResponse(claimAnswer(held.fresh ?? row, true, reqs, { detail: out.detail, settledTx: out.held.tx }), codeIdentity(env));
       }
       const fresh = (await getClaim(env, keyOfRow(row))) ?? row;
-      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail } : {}));
+      return claimResponse(claimAnswer(fresh, true, reqs, out.kind === "unchanged" ? { detail: out.detail } : {}), codeIdentity(env));
     } finally {
       await quietly("release_lease", () => releaseLease(env, keyOfRow(row), owner));
     }
   }
-  return claimResponse(claimAnswer(row, true, reqs));
+  return claimResponse(claimAnswer(row, true, reqs), codeIdentity(env));
 }
 
 // R2b (gate C2, docs/REVIEW-SETTLEMENT-REPLAY-GUARD-GATE-2026-09-30.md): this request's own write to the claim (markSettled, or markFirstRefusal for a refusal it
@@ -977,8 +983,8 @@ export async function holdSuccessAgainstTerminal(env: Env, key: ClaimKey, held: 
   return { contradicted: null, fresh };
 }
 
-function contradictionResponse(tx: string, state: string): Response {
-  return claimResponse(contradictionAnswer(tx, state));
+function contradictionResponse(env: Env, tx: string, state: string): Response {
+  return claimResponse(contradictionAnswer(tx, state), codeIdentity(env));
 }
 
 async function answerFromMovedClaim(
@@ -993,7 +999,7 @@ async function answerFromMovedClaim(
 ): Promise<Response> {
   if (settled && (row.state === "refused" || row.state === "expired")) {
     await recordContradiction(env, row, row.state, settled, reqs);
-    return contradictionResponse(settled.tx, row.state);
+    return contradictionResponse(env, settled.tx, row.state);
   }
   if (row.state === "pending") {
     // C2 (re-gate LOW-1(b)): this request's /settle said SUCCESS but the claim is pending under another holder, so nothing here records the tx. It is
@@ -1001,9 +1007,9 @@ async function answerFromMovedClaim(
     // of `tx`, and the holder that has the lease will either book (the facilitator's cached success) or meet C1.
     if (settled) {
       logSettlementSuccessUnrecorded(row, settled, reqs);
-      return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true, settledTx: settled.tx }));
+      return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true, settledTx: settled.tx }), codeIdentity(env));
     }
-    return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: owner === undefined ? true : leaseHeldByAnother(row, owner, Date.now()) }));
+    return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: owner === undefined ? true : leaseHeldByAnother(row, owner, Date.now()) }), codeIdentity(env));
   }
   return respondToExistingClaim(env, row, true, reqs, claim);
 }
@@ -1017,7 +1023,7 @@ export async function answerFromClaim(env: Env, key: ClaimKey, owner: string): P
   await quietly("release_lease", () => releaseLease(env, key, owner));
   const row = await getClaim(env, key);
   if (!row) throw new SocietyError(503, "The payment claim could not be read back. Do not sign again: this payment may already have moved.");
-  return claimResponse(claimAnswer(row, true, undefined));
+  return claimResponse(claimAnswer(row, true, undefined), codeIdentity(env));
 }
 
 // B6, one attempt on a `pending` claim by a holder of its lease. Order matters and "the chain
