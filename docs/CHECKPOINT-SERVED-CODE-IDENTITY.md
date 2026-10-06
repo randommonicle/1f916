@@ -93,3 +93,43 @@ command was run). `CODE_COMMIT` is deliberately NOT in `vars` (A6): the comment 
 and the code reads, and that `CODE_COMMIT` appears nowhere in the parsed config (comments blanked first, so the explanatory comment does not trip it), with a positive control. Red-proofs: binding
 renamed (red), binding removed (red), a stale stamp written into `vars` (red). Note for the deploy: Cloudflare adds the binding when the Worker version is uploaded; `code.version_id` is `null`
 until the first deploy of this branch, which is what the poll in the new deploy script waits for.
+
+### 6. `scripts/deploy-code-identity.ps1`, its test, and the test-count regex fix
+
+Pattern: `scripts/deploy-refused-option-b.ps1` and its test, both read in full. Same `-ExpectedCommit` / `-DryRun` contract, ASCII only, the 5.1 trap list. **What differs, deliberately:**
+it reads NOTHING from prod D1 (the option B script's C1/C2 prod checks were that wave's gate conditions) and its only wrangler call is the deploy, so `-DryRun` never calls wrangler; step 0 pins
+`$LIVE_BASE_COMMIT` to `1e4ae4bf...` (main at the option B deploy, per the HANDOVER note in the brief's context), still STOPs on any move under `migrations/`, `schema.sql` or `src/doc.ts`; the
+reviewed-source base is ONE constant, `$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"`, and the script STOPS while it holds that text (a second constant, `$REVIEWED_COMMIT_PLACEHOLDER`, is what it is compared with, so
+setting the first leaves the guard intact), and STOPS if it is set to anything but 40 lower-case hex; HEAD may then differ from it only in `scripts/deploy-code-identity.ps1`, its test and `docs/`.
+Before the deploy it STOPS if `wrangler.jsonc` lacks the `version_metadata` binding or configures a `"CODE_COMMIT"` var, and if `GET /api/attest` already serves this commit's `code.commit`
+(an already-deployed wave cannot be shown propagating). The deploy is `npx wrangler deploy --var "CODE_COMMIT:$headSha"` (the full sha; `$headSha` is checked to be 40 lower-case hex first).
+
+**The propagation poll** (`Wait-CodeIdentity`, 12 tries, 5 s apart, constants `$POLL_TRIES` / `$POLL_DELAY_SECONDS`): each try reads `GET /api/attest` WITHOUT stopping (a failed read, a non-JSON body and the old
+worker's missing `code` block all just mean "not yet"), and `Test-CodeIdentityServed` requires `commit_status` `stamped`, `code.commit` equal to the pinned sha (case-sensitive), `version_status` `available` and
+`code.version_id` equal to wrangler's `Current Version ID` (compared lower-cased on both sides). A deploy that never shows its own id STOPS with the rollback line (A4). After the poll the script re-runs the v5 and
+chain assertions, checks the served `provenance` labels, rides the same 13 public reads and the attention/official equality as the older scripts.
+
+**Test-count regex: a difference from the brief's example.** The brief suggested `(?m)^\W*pass (\d+)\s*$`, last match. I did not use it: PowerShell 5.1 decodes node's UTF-8 with the console code page, and under
+CP437/850 the info mark (U+2139) becomes `Gamma a-umlaut box` (letters), which `\W*` refuses, so the script would STOP on a green run on Ben's own console (the harness tool here runs UTF-8, so this was reasoned
+from the encodings, not seen live: the test feeds that mangled prefix in as a data file). Instead the pattern anchors on the PAIR node prints on consecutive lines, `pass N` then `fail M`, each after at most one
+prefix token: `(?m)^(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$`, last pair, so a test title ("pass 5 (0.4ms)") is never a match and the `fail` count is read from the same pair (the old
+`'fail (\d+)'` had the same first-anywhere defect). `Get-TestSummary` returns `$null` when there is no pair, and the gates block STOPS on a null summary, on a non-zero npm exit, on `fail` not 0 and on a failing
+typecheck, each judged separately. **The same pattern replaces the old lines in `scripts/deploy-refused-option-b.ps1` (was :250) and `scripts/deploy-m3-treasury.ps1` (was :124): no test pinned the old text**
+(grep over `test/` for the pattern and for `$testOut` found nothing), and a test asserts both files carry exactly the new script's pattern string and take the last pair. Six further older scripts carry the same
+unanchored line (`deploy-composition-split`, `deploy-guest-voice`, `deploy-heartbeat-inbox`, `deploy-mcp-listing-ready`, `deploy-settlement-replay-guard`, `deploy-x402-settle-honesty`); the commission named two, so
+those six are untouched (they are retired deploys; copying one forward as a template would carry the defect).
+
+`test/deploy-code-identity-script.test.ts` (26): parse and ASCII; one spelling per variable, no stderr merge under Stop, `npx wrangler` called only for the deploy, no D1 or write SQL; step order and the dry run's
+exit; every judged git read checks its exit code; the definitions region runs nothing; the deploy line's exact arguments (`wrangler|deploy|--var|CODE_COMMIT:<sha>`, run against a stand-in for npx); the poll against a
+stand-in for `Get-Text` (ten mismatch shapes each STOP after exactly 12 reads with the rollback line; a slow propagation passes on the first matching read; wrangler failing or printing no id STOPs before any poll);
+the summary on a sample containing a test titled "pass 5" (1860, and the old pattern's 5 shown), on CRLF and on mangled prefixes; the gates block run with a stand-in for `npm`; the reviewed-source block run for real
+against a throwaway git repository (placeholder, malformed values, allowed paths, eight disallowed shapes including a rename out of `src/`, a HEAD that lacks the reviewed commit); the allowlist constant; the constants
+pinned (v5 hash from `computeLiveConstitutionPair`, the live base a commit in history whose subject is the option B deploy script and an ancestor of HEAD); the sentinels; the header's honesty lines.
+
+Red-proofs (28 mutants of the script and the two older scripts, each exact-once, the test file run alone, bytes restored and sha256 compared): the stamp a fixed word; `--var` forgotten; commit not compared; version id
+not compared; commit compared case-insensitively; commit_status unchecked; 3 tries not 12; a mismatch that returns quietly; rollback line dropped; first read taken as proof; placeholder guard removed; placeholder
+compared case-insensitively; malformed reviewed commit accepted; `src/` on the allowlist; changes since review unread; the old unanchored pattern; the brief's `\W*` prefix; the dry run exiting 3; the configured-stamp
+sentinel dropped; the live base another commit; the reviewed commit "abc123"; the v5 hash wrong; a non-ASCII character; a second wrangler call (a d1 read); each older script reverted. **26 of 28 went red the first
+time; two survived and were real gaps in my test, found by this step: "a failing summary no longer stops" and "no summary no longer stops" were masked because every failing fixture also set npm's exit code, and the
+two clauses were redundant with each other. Fixed by splitting the script's check into a null-summary STOP and a separate exit-code/fail/pass STOP, and adding the fixtures that isolate each; the four gates mutants
+(failing summary, null summary, npm exit code, typecheck) are now each red.** Suite after this step: 1921/1921, tsc 0.

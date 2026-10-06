@@ -121,8 +121,10 @@ $testCode = $LASTEXITCODE
 $tscOut = (npm run typecheck 2>&1 | Out-String)
 $tscCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-$pass = [regex]::Match($testOut, 'pass (\d+)').Groups[1].Value
-$fail = [regex]::Match($testOut, 'fail (\d+)').Groups[1].Value
+$summary = [regex]::Matches($testOut, '(?m)^(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$')
+$pass = ""
+$fail = ""
+if ($summary.Count -gt 0) { $pass = $summary[$summary.Count - 1].Groups[1].Value; $fail = $summary[$summary.Count - 1].Groups[2].Value }
 if ($testCode -ne 0 -or $fail -ne "0" -or -not $pass) { Stop-Here "npm test: exit $testCode, pass '$pass', fail '$fail'." }
 if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
 Say "[tests] pass $pass, fail 0; typecheck clean"
