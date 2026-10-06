@@ -467,7 +467,11 @@ test("$LIVE_BASE_COMMIT is a full sha, names a commit in this history, and is an
   const d = definitions(t);
   if (!d) return;
   assert.match(d.LIVE_BASE, /^[0-9a-f]{40}$/);
-  assert.ok(d.LIVE_BASE.startsWith("7a1432a9"), "the worker serving before option B was built from 7a1432a9 (M3 + treasury, 4 Oct 2026)");
+  // The committed record of what the live worker was built from (the M3 second gate's deploy line): the script's base and its rollback hint both come from it.
+  const deployed = readFileSync(here("../docs/REVIEW-PAID-PATH-M3-SECOND-GATE-2026-10-04.md"), "utf8").match(/Deployed as worker `([0-9a-f-]{36})` at main `([0-9a-f]{8})`/);
+  assert.ok(deployed, "the M3 gate record names the deployed worker and main");
+  assert.ok(d.LIVE_BASE.startsWith(deployed[2]), `the live base commit is the one the record says was deployed (${deployed[2]})`);
+  assert.ok(script.includes(`should be ${deployed[1].slice(0, 8)} per HANDOVER`), "the rollback hint names the worker version the record says was live");
   const git = (...args: string[]) => spawnSync("git", ["-C", here(".."), ...args], { encoding: "utf8" });
   // Skip ONLY when this checkout cannot answer (no git, or a shallow clone); a sha that a full history does not contain is a failure, never a skip.
   const head = git("rev-parse", "HEAD");
