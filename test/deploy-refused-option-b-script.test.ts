@@ -9,9 +9,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parsePowerShellFile } from "./helpers/ps-parse.ts";
@@ -36,6 +36,7 @@ const code = script
 const DEFS_END = "# END-OF-DEFINITIONS";
 const defs = script.slice(script.indexOf('$ErrorActionPreference = "Stop"'), script.indexOf(DEFS_END));
 const checksBlock = script.slice(script.indexOf("# BEGIN-PROD-CHECKS"), script.indexOf("# END-PROD-CHECKS"));
+const reviewedBlock = script.slice(script.indexOf("# BEGIN-REVIEWED-SOURCE-CHECK"), script.indexOf("# END-REVIEWED-SOURCE-CHECK"));
 
 type PsRun = { code: number | null; out: string };
 function runPs(lines: string[]): PsRun | null {
@@ -143,6 +144,13 @@ test("deploy-refused-option-b.ps1: the steps are in the load-bearing order", () 
     "git status --porcelain",
     "git merge-base --is-ancestor $LIVE_BASE_COMMIT HEAD",
     "git diff --name-only $LIVE_BASE_COMMIT HEAD -- migrations schema.sql src/doc.ts",
+    "# BEGIN-REVIEWED-SOURCE-CHECK",
+    "git merge-base --is-ancestor $REVIEWED_CODE_COMMIT $REVIEWED_COMMIT",
+    "git diff --name-only --no-renames $REVIEWED_CODE_COMMIT $REVIEWED_COMMIT",
+    "git merge-base --is-ancestor $REVIEWED_COMMIT HEAD",
+    "git diff --name-only --no-renames $REVIEWED_COMMIT HEAD",
+    "Get-DisallowedPaths $afterReview",
+    "# END-REVIEWED-SOURCE-CHECK",
     "export async function markFirstRefusal",
     "npm test",
     "$attBefore = Read-Attest",
@@ -484,6 +492,241 @@ test("$LIVE_BASE_COMMIT is a full sha, names a commit in this history, and is an
   assert.equal(kind.status, 0, `${d.LIVE_BASE} is not an object in this repository`);
   assert.equal(kind.stdout.trim(), "commit");
   assert.equal(git("merge-base", "--is-ancestor", d.LIVE_BASE, "HEAD").status, 0, "HEAD descends from the live worker's code");
+});
+
+// ---------- the reviewed source (CODEX deploy-script r1, HIGH): what ships is the reviewed code plus only allowlisted paths ----------
+
+const git = (cwd: string, ...args: string[]) => spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+const lines = (s: string): string[] => s.split(/\r?\n/).filter((l) => l.length > 0);
+
+test("the reviewed pair is pinned to history: c93150ea is the option B merge, f0431b66 follows it, and between them ONLY docs/ changed", (t) => {
+  const d = definitions(t);
+  if (!d) return;
+  const text = `${script}`;
+  const consts = Object.fromEntries([...text.matchAll(/^\$(REVIEWED_CODE_COMMIT|REVIEWED_COMMIT) = "([0-9a-f]{40})"$/gm)].map((m) => [m[1], m[2]]));
+  assert.ok(consts.REVIEWED_CODE_COMMIT?.startsWith("c93150ea") && consts.REVIEWED_COMMIT?.startsWith("f0431b66"), "the two reviewed commits are full shas");
+  const root = here("..");
+  const head = git(root, "rev-parse", "HEAD");
+  const shallow = git(root, "rev-parse", "--is-shallow-repository");
+  if (head.error || head.status !== 0 || shallow.error || shallow.status !== 0 || shallow.stdout.trim() !== "false") {
+    t.skip("this checkout has no full git history to check the reviewed pair against");
+    return;
+  }
+  assert.equal(git(root, "cat-file", "-t", consts.REVIEWED_CODE_COMMIT).stdout.trim(), "commit");
+  assert.equal(git(root, "cat-file", "-t", consts.REVIEWED_COMMIT).stdout.trim(), "commit");
+  assert.match(git(root, "log", "-1", "--format=%s", consts.REVIEWED_CODE_COMMIT).stdout, /option B/, "the reviewed code commit is the option B merge");
+  assert.equal(git(root, "merge-base", "--is-ancestor", consts.REVIEWED_CODE_COMMIT, consts.REVIEWED_COMMIT).status, 0);
+  const between = lines(git(root, "diff", "--name-only", "--no-renames", consts.REVIEWED_CODE_COMMIT, consts.REVIEWED_COMMIT).stdout);
+  assert.ok(between.length >= 1, "something changed between them (else this pin proves nothing)");
+  assert.deepEqual(between.filter((p) => !p.startsWith("docs/")), [], "the reviewed code is the option B merge's tree: nothing but docs/ changed after it");
+  assert.equal(git(root, "merge-base", "--is-ancestor", consts.REVIEWED_COMMIT, "HEAD").status, 0, "HEAD descends from the reviewed commit");
+});
+
+test("the allowlist is one constant of exactly this script, its test, and docs/; every other tracked path is refused", (t) => {
+  const root = here("..");
+  const listed = git(root, "ls-files");
+  if (listed.error || listed.status !== 0) {
+    t.skip("git is not available here");
+    return;
+  }
+  const allowedConst = code.match(/\$ALLOWED_PATHS_AFTER_REVIEW = @\(([^)]*)\)/);
+  assert.ok(allowedConst, "the allowlist is one constant");
+  assert.deepEqual([...allowedConst[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]), ["scripts/deploy-refused-option-b.ps1", "test/deploy-refused-option-b-script.test.ts", "docs/"]);
+  assert.equal([...code.matchAll(/\$ALLOWED_PATHS_AFTER_REVIEW = /g)].length, 1, "stated once");
+  assert.ok(existsSync(here("../scripts/deploy-refused-option-b.ps1")) && existsSync(here("../test/deploy-refused-option-b-script.test.ts")));
+  const tracked = lines(listed.stdout);
+  assert.ok(tracked.length > 100, "the whole tree is listed");
+  const dir = mkdtempSync(join(tmpdir(), "deploy-b-paths-"));
+  try {
+    const named = ["src/x402.ts", "src/doc.ts", "migrations/0099_x.sql", "schema.sql", "package.json", "package-lock.json", "wrangler.jsonc", "tsconfig.json", ".claude/skills/x.md", "README.md",
+      "docs", "docsx/a.md", "Docs/a.md", "scripts/deploy-refused-option-b.ps1.bak", "scripts/deploy-m3-treasury.ps1", "test/deploy-refused-option-b-script.test.ts/x", "test/other.test.ts", '"docs/odd\\"name.md"'];
+    const allowed = ["docs/BRIEF-REFUSED-CHAIN-RECHECK.md", "docs/a/b/c.md", "docs/new.md", "scripts/deploy-refused-option-b.ps1", "test/deploy-refused-option-b-script.test.ts"];
+    const input = join(dir, "paths.txt");
+    writeFileSync(input, [...tracked, ...named, "---", ...allowed].join("\n"));
+    const r = runPs([
+      "$ErrorActionPreference = 'Stop'",
+      ...THROWING_STUBS,
+      defs,
+      `$all = @(Get-Content '${input}')`,
+      "$cut = [array]::IndexOf($all, '---')",
+      "$toCheck = @($all[0..($cut - 1)])",
+      "$ok = @($all[($cut + 1)..($all.Count - 1)])",
+      "$bad = @(Get-DisallowedPaths $toCheck)",
+      'Write-Output ("REFUSED=" + $bad.Count)',
+      "Write-Output (\"ALLOWEDREFUSED=\" + @(Get-DisallowedPaths $ok).Count)",
+      "$bad | ForEach-Object { Write-Output (\"BAD:\" + $_) }",
+    ]);
+    if (!r) {
+      t.skip("powershell is not available on this machine");
+      return;
+    }
+    assert.equal(r.code, 0, r.out);
+    const shouldAllow = (p: string) => p === "scripts/deploy-refused-option-b.ps1" || p === "test/deploy-refused-option-b-script.test.ts" || p.startsWith("docs/");
+    const expectRefused = [...tracked, ...named].filter((p) => !shouldAllow(p));
+    const refused = new Set([...r.out.matchAll(/^BAD:(.*)$/gm)].map((m) => m[1].replace(/\r$/, "")));
+    assert.deepEqual(
+      expectRefused.filter((p) => !refused.has(p)),
+      [],
+      "every tracked or named path outside the allowlist is refused",
+    );
+    assert.match(r.out, /ALLOWEDREFUSED=0/, "the allowed paths (this script, its test, anything under docs/) are not refused");
+    assert.equal(Number(r.out.match(/REFUSED=(\d+)/)?.[1]), expectRefused.length, "and nothing allowed was refused along the way");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Step 0's reviewed-source block, run for real in PowerShell against a throwaway git repository whose history has the same shape as this one:
+// R (the reviewed code), A (docs only on top of it: the reviewed commit), then HEAD = A plus whatever the case changes.
+type Repo = { dir: string; code: string; reviewed: string; side: string };
+function makeRepo(opts: { reviewedChangesSrc?: boolean } = {}): Repo {
+  const dir = mkdtempSync(join(tmpdir(), "deploy-b-repo-"));
+  const g = (...a: string[]) => {
+    const r = spawnSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", ...a], { encoding: "utf8" });
+    assert.equal(r.status, 0, `git ${a.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const put = (p: string, text: string) => {
+    mkdirSync(dirname(join(dir, p)), { recursive: true });
+    writeFileSync(join(dir, p), text);
+  };
+  g("init", "-q", "-b", "main");
+  put("src/x402.ts", "export const a = 1;\n");
+  put("wrangler.jsonc", "{}\n");
+  put("docs/a.md", "a\n");
+  put("scripts/deploy-refused-option-b.ps1", "# script\n");
+  put("test/deploy-refused-option-b-script.test.ts", "// test\n");
+  g("add", "-A");
+  g("commit", "-q", "-m", "merge: option B");
+  const code = g("rev-parse", "HEAD");
+  g("branch", "side");
+  put("docs/a.md", "a, status line\n");
+  if (opts.reviewedChangesSrc) put("src/x402.ts", "export const a = 2;\n");
+  g("commit", "-qam", "docs(brief): status");
+  const reviewed = g("rev-parse", "HEAD");
+  g("checkout", "-q", "side");
+  put("docs/side.md", "side\n");
+  g("add", "-A");
+  g("commit", "-q", "-m", "side branch without the reviewed commit");
+  const side = g("rev-parse", "HEAD");
+  g("checkout", "-q", "main");
+  return { dir, code, reviewed, side };
+}
+function onTop(repo: Repo, change: (put: (p: string, text: string) => void, g: (...a: string[]) => void) => void): void {
+  const put = (p: string, text: string) => {
+    mkdirSync(dirname(join(repo.dir, p)), { recursive: true });
+    writeFileSync(join(repo.dir, p), text);
+  };
+  const g = (...a: string[]) => {
+    const r = spawnSync("git", ["-C", repo.dir, "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", ...a], { encoding: "utf8" });
+    assert.equal(r.status, 0, `git ${a.join(" ")}: ${r.stderr}`);
+  };
+  change(put, g);
+  g("add", "-A");
+  g("commit", "-q", "--allow-empty", "-m", "after review");
+}
+function runReviewed(repo: Repo, overrides: { code?: string; reviewed?: string } = {}): PsRun | null {
+  return runPs([
+    "$ErrorActionPreference = 'Stop'",
+    `Set-Location '${repo.dir}'`,
+    defs,
+    `$REVIEWED_CODE_COMMIT = '${overrides.code ?? repo.code}'`,
+    `$REVIEWED_COMMIT = '${overrides.reviewed ?? repo.reviewed}'`,
+    reviewedBlock,
+    'Write-Host "REACHED-END"',
+    "exit 0",
+  ]);
+}
+const gone = (dir: string) => {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  } catch {
+    /* a read-only git object on Windows; the temp folder is the OS's to clear */
+  }
+};
+
+test("step 0 reviewed-source check: HEAD = the reviewed commit plus only this script, its test and docs/ passes (and HEAD = the reviewed commit itself)", (t) => {
+  const exact = makeRepo();
+  const withAllowed = makeRepo();
+  try {
+    onTop(withAllowed, (put) => {
+      put("docs/new.md", "new\n");
+      put("docs/sub/deep.md", "deep\n");
+      put("scripts/deploy-refused-option-b.ps1", "# script, edited\n");
+      put("test/deploy-refused-option-b-script.test.ts", "// test, edited\n");
+    });
+    const a = runReviewed(exact);
+    if (!a) return t.skip("powershell is not available on this machine");
+    assert.equal(a.code, 0, a.out);
+    assert.match(a.out, /HEAD differs from [0-9a-f]{8} in 0 path\(s\)/);
+    const b = runReviewed(withAllowed);
+    assert.ok(b);
+    assert.equal(b.code, 0, b.out);
+    assert.match(b.out, /in 4 path\(s\), all on the allowlist/);
+    assert.match(b.out, /REACHED-END/);
+  } finally {
+    gone(exact.dir);
+    gone(withAllowed.dir);
+  }
+});
+
+test("step 0 reviewed-source check: a path outside the allowlist STOPS, naming it (src/, config, package files, a rename out of src/, one bad path among good ones)", (t) => {
+  const cases: Record<string, { change: (put: (p: string, text: string) => void, g: (...a: string[]) => void) => void; names: string[] }> = {
+    "src/x402.ts edited": { change: (put) => put("src/x402.ts", "export const a = 3;\n"), names: ["src/x402.ts"] },
+    "the wrangler config edited": { change: (put) => put("wrangler.jsonc", '{"vars":{}}\n'), names: ["wrangler.jsonc"] },
+    "package-lock.json added": { change: (put) => put("package-lock.json", "{}\n"), names: ["package-lock.json"] },
+    "a new migration": { change: (put) => put("migrations/0099_x.sql", "SELECT 1;\n"), names: ["migrations/0099_x.sql"] },
+    "src/x402.ts renamed into docs/ (both paths must be seen)": { change: (_p, g) => g("mv", "src/x402.ts", "docs/x402.md"), names: ["src/x402.ts"] },
+    "one bad path among allowed ones": {
+      change: (put) => {
+        put("docs/new.md", "new\n");
+        put("test/deploy-refused-option-b-script.test.ts", "// edited\n");
+        put("src/sneaky.ts", "export {};\n");
+      },
+      names: ["src/sneaky.ts"],
+    },
+  };
+  for (const [name, c] of Object.entries(cases)) {
+    const repo = makeRepo();
+    try {
+      onTop(repo, c.change);
+      const r = runReviewed(repo);
+      if (!r) return t.skip("powershell is not available on this machine");
+      assert.equal(r.code, 1, `${name}: ${r.out}`);
+      assert.match(r.out, /\[STOP\] these paths changed since the reviewed commit/, name);
+      for (const p of c.names) assert.ok(r.out.includes(p), `${name}: the STOP names ${p}: ${r.out}`);
+      assert.doesNotMatch(r.out, /REACHED-END/, name);
+    } finally {
+      gone(repo.dir);
+    }
+  }
+});
+
+test("step 0 reviewed-source check: HEAD without the reviewed commit, a reviewed pair that changed src, and a pair out of order each STOP", (t) => {
+  const repo = makeRepo();
+  const bad = makeRepo({ reviewedChangesSrc: true });
+  try {
+    const notContained = runReviewed(repo, { reviewed: repo.side });
+    if (!notContained) return t.skip("powershell is not available on this machine");
+    // HEAD (main) does not contain `side`, which here plays the reviewed commit.
+    assert.equal(notContained.code, 1, notContained.out);
+    assert.match(notContained.out, /\[STOP\] .*(is not an ancestor of|does not contain the reviewed commit)/);
+    const pairChangesSrc = runReviewed(bad);
+    assert.ok(pairChangesSrc);
+    assert.equal(pairChangesSrc.code, 1, pairChangesSrc.out);
+    assert.match(pairChangesSrc.out, /were to change docs\/ only, but changed: src\/x402\.ts/);
+    const reversed = runReviewed(repo, { code: repo.reviewed, reviewed: repo.code });
+    assert.ok(reversed);
+    assert.equal(reversed.code, 1, reversed.out);
+    assert.match(reversed.out, /is not an ancestor of/);
+    const unknown = runReviewed(repo, { reviewed: "0".repeat(40) });
+    assert.ok(unknown);
+    assert.equal(unknown.code, 1, unknown.out);
+    assert.match(unknown.out, /\[STOP\]/);
+  } finally {
+    gone(repo.dir);
+    gone(bad.dir);
+  }
 });
 
 test("step 0's sentinels: every one the script checks for is true of this source (the positive ones present, the old writer absent), and none was dropped", () => {

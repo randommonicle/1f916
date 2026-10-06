@@ -9,6 +9,8 @@
 # NON-MINTING, NO MIGRATION: option B changes four files under src/ (listings, settlement-claims, settlement-reconcile, x402) and scripts/pay-listing.mjs, and nothing in
 # migrations/, schema.sql or src/doc.ts. This script STOPS if any of those three moved since the live worker's code (7a1432a9), and after the deploy it STOPS if the
 # constitution is not still v5 with its template hash. Every stop before "wrangler deploy" leaves the live worker exactly as it was.
+# REVIEWED SOURCE ONLY: step 0 also STOPS unless HEAD is the commit the exchange reviewed (f0431b66, whose code is the option B merge c93150ea; only docs/ moved between them,
+# proved from git) plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/). Any other changed path, src/ or config included, is printed and STOPS.
 # Pattern: scripts/deploy-m3-treasury.ps1 (L-046, L-069: one fail-fast script). Run from society/ on main, after the merge and the push:
 #   cd "C:\Users\bengr\Projects\AI domain and social network\society"
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-refused-option-b.ps1 -ExpectedCommit <sha> -DryRun   # every check and the read-only prod queries, nothing deployed
@@ -40,6 +42,14 @@ $BASE = "https://commonhold.randommonicle.workers.dev"
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 # The live worker's code before this wave (the M3 + treasury deploy of 4 Oct, docs on top). Step 0 proves nothing under migrations/ or src/doc.ts moved since.
 $LIVE_BASE_COMMIT = "7a1432a92a91e5dde45ceb898501f4063bcff2f9"
+# THE REVIEWED SOURCE (CODEX deploy-script r1, HIGH: step 0 must constrain what ships to the code that was reviewed, not merely descend from the live base).
+# $REVIEWED_CODE_COMMIT is main at the option B merge: its tree is what both exchange seats and the D-018 gate passed. $REVIEWED_COMMIT is main after the brief's
+# status line (docs/BRIEF-REFUSED-CHAIN-RECHECK.md only, proved below). HEAD may differ from $REVIEWED_COMMIT ONLY in $ALLOWED_PATHS_AFTER_REVIEW: this script, its test,
+# and anything under docs/ (an entry ending in "/" is a directory prefix, any other entry an exact path). A change anywhere else (src/, migrations/, schema.sql,
+# package.json, package-lock.json, wrangler.jsonc, tsconfig.json, .claude/, any other path) STOPS step 0 and the paths are printed: that code was not reviewed.
+$REVIEWED_CODE_COMMIT = "c93150ea1ec8e1c156364161c933a0684899eade"
+$REVIEWED_COMMIT = "f0431b665e49f6d63bc88f068d17953f8b0c2098"
+$ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-refused-option-b.ps1", "test/deploy-refused-option-b-script.test.ts", "docs/")
 $ATTENTION_URL = "$BASE/api/settlements/attention"
 # The five states migrations/0017's CHECK allows and ClaimState names (the test compares all three). Any other state on prod STOPS the deploy.
 $CLAIM_STATES = @("pending", "settled_unbooked", "booked", "refused", "expired")
@@ -54,6 +64,19 @@ $C1_NOW_SENTINEL = "9999999999999"
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
+# The paths in $paths that are NOT on $ALLOWED_PATHS_AFTER_REVIEW (ordinal, case-sensitive; an empty list in is an empty list out).
+function Get-DisallowedPaths($paths) {
+  $bad = @()
+  foreach ($p in @($paths)) {
+    $ok = $false
+    foreach ($entry in $ALLOWED_PATHS_AFTER_REVIEW) {
+      if ($entry.EndsWith("/")) { if ($p.StartsWith($entry, [System.StringComparison]::Ordinal)) { $ok = $true } }
+      elseif ($p -ceq $entry) { $ok = $true }
+    }
+    if (-not $ok) { $bad += $p }
+  }
+  return $bad
+}
 function Compress-Sql($sql) { return ([regex]::Replace([string]$sql, '\s+', ' ')).Trim() }
 
 # C1: the reconciler's selection (runReconciler's ELIGIBLE fragment twice inside two LIMITed subqueries joined by UNION ALL), whitespace-collapsed, wrapped in a count.
@@ -192,6 +215,24 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.
 $schemaMoves = @(git diff --name-only $LIVE_BASE_COMMIT HEAD -- migrations schema.sql src/doc.ts)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-migration check cannot be read." }
 if ($schemaMoves.Count -gt 0) { Stop-Here ("option B was to carry no migration and no constitution change, but these moved since " + $LIVE_BASE_COMMIT.Substring(0, 8) + ": " + ($schemaMoves -join ", ") + ". Not this script's deploy.") }
+# BEGIN-REVIEWED-SOURCE-CHECK
+# (a) the reviewed pair is what this script says it is: the option B merge, then docs only up to the commit the exchange reviewed. No rename detection anywhere below:
+# a rename out of src/ into docs/ must list BOTH paths, not only the new one.
+git merge-base --is-ancestor $REVIEWED_CODE_COMMIT $REVIEWED_COMMIT
+if ($LASTEXITCODE -ne 0) { Stop-Here "$($REVIEWED_CODE_COMMIT.Substring(0, 8)) is not an ancestor of $($REVIEWED_COMMIT.Substring(0, 8)): the reviewed pair this script pins is wrong." }
+$reviewedMoves = @(git diff --name-only --no-renames $REVIEWED_CODE_COMMIT $REVIEWED_COMMIT)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the reviewed-pair check cannot be read." }
+$reviewedOffenders = @($reviewedMoves | Where-Object { -not $_.StartsWith("docs/", [System.StringComparison]::Ordinal) })
+if ($reviewedOffenders.Count -gt 0) { Stop-Here ("the commits from " + $REVIEWED_CODE_COMMIT.Substring(0, 8) + " (the reviewed code) to " + $REVIEWED_COMMIT.Substring(0, 8) + " were to change docs/ only, but changed: " + ($reviewedOffenders -join ", ")) }
+# (b) HEAD is the reviewed commit plus only the allowlisted paths
+git merge-base --is-ancestor $REVIEWED_COMMIT HEAD
+if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain the reviewed commit $($REVIEWED_COMMIT.Substring(0, 8)): this is not the code that was reviewed." }
+$afterReview = @(git diff --name-only --no-renames $REVIEWED_COMMIT HEAD)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the changes since the reviewed commit cannot be read." }
+$unreviewed = @(Get-DisallowedPaths $afterReview)
+if ($unreviewed.Count -gt 0) { Stop-Here ("these paths changed since the reviewed commit " + $REVIEWED_COMMIT.Substring(0, 8) + " and are not on the allowlist (" + ($ALLOWED_PATHS_AFTER_REVIEW -join ", ") + "), so what would ship was not reviewed: " + ($unreviewed -join ", ")) }
+Say ("[git] reviewed source: " + $REVIEWED_CODE_COMMIT.Substring(0, 8) + " -> " + $REVIEWED_COMMIT.Substring(0, 8) + " is docs only; HEAD differs from " + $REVIEWED_COMMIT.Substring(0, 8) + " in " + $afterReview.Count + " path(s), all on the allowlist")
+# END-REVIEWED-SOURCE-CHECK
 if (-not (Select-String -Path "src/settlement-claims.ts" -Pattern "export async function markFirstRefusal" -Quiet)) { Stop-Here "src/settlement-claims.ts has no markFirstRefusal: this checkout is not option B." }
 if (Select-String -Path "src/settlement-claims.ts" -Pattern "export async function markRefused" -Quiet) { Stop-Here "src/settlement-claims.ts still exports markRefused (the old writer of the refused state): this checkout is not option B." }
 if (-not (Test-Path "src/settlement-attention.ts")) { Stop-Here "src/settlement-attention.ts is missing: this checkout would drop M3." }
