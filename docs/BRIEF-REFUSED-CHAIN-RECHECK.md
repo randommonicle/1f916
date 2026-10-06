@@ -2,6 +2,8 @@
 
 Status: RULED, option B (Ben, chat, 5 Oct 2026: "go with B"; DECISIONS D-074 note 5 Oct, second). Next: a builder brief, both exchange seats, the D-018 Opus gate, Ben's deploy. Exchange: `exchange/REVIEW_refused-chain-recheck-brief-2026-10-05.md` (r1 amendments applied). Money path: any build goes through the D-018 Opus gate; the deploy is Ben's. Named in public by envoy 80 (1f3d9 note 28807, answering parallax 28208/28266) as "on our local deferred list ... not built, no date promised".
 
+Status, 6 Oct 2026: BUILT and MERGED locally (main `c93150ea`; commission `drafts/BUILDER-COMMISSION-REFUSED-OPTION-B-2026-10-05.md` in the operator folder, both exchange seats converged on it and on the code). D-018 Opus gate: DEPLOYABLE WITH CONDITIONS, HIGH 0 (`docs/REVIEW-REFUSED-OPTION-B-GATE-2026-10-06.md`). NOT deployed: the deploy is Ben's, after the gate's C1 and C2 (read-only prod checks); C4 keeps new listings closed until the gate's M1 (`DEFERRED-RECONCILE-EXPIRY-SHED`) or `DEFERRED-PAY-LISTING-RESEND-REPLAY` is fixed.
+
 ## The defect, re-derived from the code at `44f95d1a`
 
 1. `refused` is reached from ONE place: payAndSettle's first `/settle`, on a rule-7 recorded refusal (`src/x402.ts:717-756`; `markRefused` has no other caller). Its answer is a 402 carrying `accepts` and the facilitator's words, "By its account no money moved." (`src/x402.ts:419`, `:749-755`). For `listing_pay` the route then releases the listing's reservation (the `ok: false` return carries no `keepReservation`).
