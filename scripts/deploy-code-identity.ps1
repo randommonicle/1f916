@@ -47,10 +47,13 @@ $ATTENTION_URL = "$BASE/api/settlements/attention"
 # The propagation poll (brief: "bounded: e.g. 12 tries, 5 s apart").
 $POLL_TRIES = 12
 $POLL_DELAY_SECONDS = 5
-# node's test summary is a BLOCK of consecutive lines, "tests N", "suites N", "pass N", "fail N", each after at most one prefix token (an info mark, or whatever the console's code page makes of it) and
-# followed by nothing but whitespace. Anchoring on all four means test TITLES can never be taken for it, not even two consecutive titles "pass 5" and "fail 0" with no duration suffix (CODEX build r1 F2),
-# and the LAST block is the summary. The older scripts took the first "pass (\d+)" anywhere.
-$TEST_SUMMARY_PATTERN = '(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$'
+# node's test summary is the LAST thing npm test prints on a run that finishes cleanly: eight consecutive lines, "tests N", "suites N", "pass N", "fail N", "cancelled N", "skipped N", "todo N" and
+# "duration_ms N.N", each after at most one prefix token (an info mark, or whatever the console's code page makes of it), with nothing after the last but whitespace. The pattern matches that whole block
+# ANCHORED AT THE END of the output (\z), so test TITLES, which node prints before the summary, are never it: not a pass/fail pair, and not four titles shaped like the first four lines (CODEX build
+# r1 F2 and r2). The script also requires tests == pass + fail + cancelled + skipped + todo. What this does NOT claim: on a FAILING run node prints the failure detail AFTER the summary, so the
+# pattern finds no block and the script STOPs ("does not END with node's summary") instead of reading counts, which is the safe direction; and eight lines shaped exactly like the summary at the END
+# of the output, written by something other than node, are out of reach of any parser. The older scripts took the first "pass (\d+)" anywhere.
+$TEST_SUMMARY_PATTERN = '(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?cancelled (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?skipped (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?todo (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?duration_ms (\d+(?:\.\d+)?)\s*\z'
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
@@ -67,12 +70,13 @@ function Get-DisallowedPaths($paths) {
   }
   return $bad
 }
-# The pass and fail counts of the LAST "tests / suites / pass / fail" block in $testOut, as @{ Pass; Fail }, or $null when there is none.
+# The counts in the eight-line summary block at the END of $testOut, as @{ Tests; Pass; Fail; Cancelled; Skipped; Todo; SumOk } (Pass and Fail as strings), or $null when the output does not end with one.
 function Get-TestSummary($testOut) {
   $found = [regex]::Matches([string]$testOut, $TEST_SUMMARY_PATTERN)
   if ($found.Count -lt 1) { return $null }
   $last = $found[$found.Count - 1]
-  return @{ Pass = $last.Groups[3].Value; Fail = $last.Groups[4].Value }
+  $counts = @(1..7 | ForEach-Object { [int64]$last.Groups[$_].Value })
+  return @{ Tests = $counts[0]; Pass = $last.Groups[3].Value; Fail = $last.Groups[4].Value; Cancelled = $counts[4]; Skipped = $counts[5]; Todo = $counts[6]; SumOk = ($counts[0] -eq ($counts[2] + $counts[3] + $counts[4] + $counts[5] + $counts[6])) }
 }
 function Test-Number($v) { return ($v -is [int] -or $v -is [long] -or $v -is [decimal] -or $v -is [double]) }
 function Get-Text($url, $maxTime) {
@@ -214,7 +218,8 @@ $tscOut = (npm run typecheck 2>&1 | Out-String)
 $tscCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 $summary = Get-TestSummary $testOut
-if ($null -eq $summary) { Stop-Here "npm test: exit $testCode, no pass/fail summary found (the run did not reach its summary)." }
+if ($null -eq $summary) { Stop-Here "npm test: exit $testCode, the output does not END with node's eight-line summary (tests, suites, pass, fail, cancelled, skipped, todo, duration_ms): the run did not finish, or failure detail was printed after the summary. Read the output by hand." }
+if (-not $summary.SumOk) { Stop-Here ("npm test: the summary's tests count (" + $summary.Tests + ") is not pass + fail + cancelled + skipped + todo (" + $summary.Pass + " + " + $summary.Fail + " + " + $summary.Cancelled + " + " + $summary.Skipped + " + " + $summary.Todo + ").") }
 if ($testCode -ne 0 -or $summary.Fail -ne "0" -or -not $summary.Pass) { Stop-Here ("npm test: exit " + $testCode + ", pass '" + $summary.Pass + "', fail '" + $summary.Fail + "'.") }
 if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
 Say ("[tests] pass " + $summary.Pass + ", fail 0; typecheck clean")

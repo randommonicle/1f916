@@ -20,7 +20,8 @@ Base: 1860/1860 (`npm test`), measured in the worktree before any edit.
 | 7-8 | `23df5e47` | red-proof summary, the close, served sentences, points for the hub |
 | 9a | `be1dcfe6` | fix pass F1: the pay-listing 502 `settlement_unconfirmed` carries `answered_by`; the scan catches `error:` |
 | 9b | `98e00768` | fix pass F2: the test summary is the tests/suites/pass/fail block (three scripts) |
-| 9c | this commit | the fix pass's checkpoint notes |
+| 9c | `c7da5878` | the fix pass's checkpoint notes (F1, F2) |
+| 9d | this commit | F2b: the eight-line summary block anchored at the END of the output, with the sum check (three scripts), note 9d |
 
 ## Notes (one per commit, newest last)
 
@@ -222,3 +223,27 @@ pass number; pass read from the tests group; fail read from the suites group (th
 fixture); each older script reverted or reading the wrong groups.
 
 Suite after the fix pass: 1924/1924 (+3: the F1 route test, the F1 scan test, the F2 test), `tsc` exit 0.
+
+### F2b. The summary is node's eight-line block at the END of the output (CODEX build round 2)
+
+CODEX r2 showed four consecutive titles "tests 5 / suites 0 / pass 5 / fail 0" still match the four-line block by shape. The hub's capture of a real `npm test` here ends with node's eight-line summary, so the
+pattern is now that whole block, each line after at most one prefix token, the last a decimal, ANCHORED AT THE END of the whole output with `\s*\z` (no `(?m)` involved in that anchor; `(?m)` stays only for the
+line-start `^`):
+`(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?cancelled (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?skipped (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?todo (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?duration_ms (\d+(?:\.\d+)?)\s*\z`.
+`pass` is group 3 and `fail` group 4. Forged titles are printed before the real summary, so they can never be the block at the end. `Get-TestSummary` also returns the other counts and `SumOk`, and the gates block STOPS
+unless tests == pass + fail + cancelled + skipped + todo (own message, separate from the null-summary STOP and from the exit-code/fail STOP). The header comment was rewritten to claim only what is now true: titles
+come before the summary and so are never it; and two limits stated plainly, namely that on a FAILING run node prints the failure detail after the summary, so the pattern finds no block and the script STOPs with
+"does not END with node's eight-line summary" (the safe direction, a less specific message), and that eight lines shaped like the summary at the very end, written by something other than node, are out of reach of any parser.
+**The same pattern and the same sum check are in `deploy-refused-option-b.ps1` and `deploy-m3-treasury.ps1`** (inline; the static test pins the pattern string and the check, and a new test extracts each script's inline
+lines and RUNS them in PowerShell against the fixtures below, for both scripts).
+
+Fixtures (`deploy-code-identity-script.test.ts`): the CODEX four-title block followed by a real block: the real one wins (also with the info mark, and with a forged EIGHT-line block before it); the four-title block
+alone at the end, with and without durations: no match, and the gates block STOPs; a real block followed by a stray line, a title, node's failure heading or a stray character: no match; the lines in the wrong order,
+seven of the eight lines, a non-numeric duration, the first four lines only: no match; a sum mismatch (tests one too many, one too few, a cancelled, skipped or todo count not in tests): `SumOk` false and the gates
+block STOPs with the sum in its message; all five terms in a valid sum. The final newline is optional; blank lines after the block are allowed.
+
+Red-proofs (15 mutants, each red, each restored byte-identical): the end anchor dropped; the end anchor a line end instead of the end of the output; the previous four-line pattern returns; the duration an integer only;
+SumOk always true; the sum without todo, without cancelled, without skipped; the gate not STOPping on a sum mismatch; the gate not STOPping on a missing block; pass read from the tests group; and, in each older script,
+the end anchor dropped, the sum check inverted or dropped.
+
+Checked against this suite's own real output: the pattern, run in PowerShell on a captured `npm test` log, matches exactly once (tests 1927 = pass 1927 + 0 + 0 + 0 + 0, decimal duration). Suite after F2b: 1927/1927, `tsc` exit 0 (+3 tests: F2b block at the end, F2b sums, the older scripts' inline lines run for real).

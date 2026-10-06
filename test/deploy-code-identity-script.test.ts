@@ -294,9 +294,9 @@ const SAMPLE = (prefix: string, eol: string) =>
     "",
   ].join(eol);
 
-const summaryOf = (sample: string, t: { skip: (m: string) => void }): { pass: string; fail: string; old: string } | null => {
+const summaryOf = (sample: string, t: { skip: (m: string) => void }): { pass: string; fail: string; old: string; sumOk: string } | null => {
   const r = runPs(
-    [...PS_DEFS, "$out = Get-Content -Raw -Encoding UTF8 '@DIR@\\sample.txt'", 'if ($null -eq $out) { $out = "" }', "$s = Get-TestSummary $out", 'if ($null -eq $s) { Write-Output "NONE" } else { Write-Output ("PASS=" + $s.Pass + " FAIL=" + $s.Fail) }', "Write-Output (\"OLD=\" + [regex]::Match([string]$out, 'pass (\\d+)').Groups[1].Value)"],
+    [...PS_DEFS, "$out = Get-Content -Raw -Encoding UTF8 '@DIR@\\sample.txt'", 'if ($null -eq $out) { $out = "" }', "$s = Get-TestSummary $out", 'if ($null -eq $s) { Write-Output "NONE" } else { Write-Output ("PASS=" + $s.Pass + " FAIL=" + $s.Fail + " SUMOK=" + $s.SumOk) }', "Write-Output (\"OLD=\" + [regex]::Match([string]$out, 'pass (\\d+)').Groups[1].Value)"],
     { "sample.txt": `﻿${sample}` },
   );
   if (!r) {
@@ -304,8 +304,22 @@ const summaryOf = (sample: string, t: { skip: (m: string) => void }): { pass: st
     return null;
   }
   assert.equal(r.code, 0, r.out);
-  return { pass: r.out.match(/PASS=(\d*)/)?.[1] ?? "NONE", fail: r.out.match(/FAIL=(\d*)/)?.[1] ?? "NONE", old: r.out.match(/OLD=(\d*)/)?.[1] ?? "" };
+  return { pass: r.out.match(/PASS=(\d*)/)?.[1] ?? "NONE", fail: r.out.match(/FAIL=(\d*)/)?.[1] ?? "NONE", sumOk: r.out.match(/SUMOK=(\w+)/)?.[1] ?? "NONE", old: r.out.match(/OLD=(\d*)/)?.[1] ?? "" };
 };
+
+// node's summary block as the hub captured it from a real `npm test` here, where it ENDS the output: eight lines, the last a decimal.
+const BLOCK8 = (tests: number, pass: number, fail: number, others: { cancelled?: number; skipped?: number; todo?: number } = {}, prefix = "ℹ", eol = "\n") =>
+  [
+    `${prefix} tests ${tests}`,
+    `${prefix} suites 0`,
+    `${prefix} pass ${pass}`,
+    `${prefix} fail ${fail}`,
+    `${prefix} cancelled ${others.cancelled ?? 0}`,
+    `${prefix} skipped ${others.skipped ?? 0}`,
+    `${prefix} todo ${others.todo ?? 0}`,
+    `${prefix} duration_ms 50020.1725`,
+    "",
+  ].join(eol);
 
 test("T6: the anchored summary takes 1860 from npm output that also contains a test titled 'pass 5' (the unanchored pattern the older scripts carry takes 5)", (t) => {
   const r = summaryOf(SAMPLE("ℹ", "\n"), t);
@@ -321,41 +335,91 @@ test("T6: the summary survives CRLF line endings and the info mark mangled by a 
   const mangled = summaryOf(SAMPLE("Γä╣", "\r\n"), t);
   assert.ok(mangled);
   assert.deepEqual([mangled.pass, mangled.fail], ["1860", "0"], "CP437 mojibake of the U+2139 mark: letters in the prefix, which a \\W* anchor would refuse");
-  const bare = summaryOf("tests 12\nsuites 0\npass 12\nfail 0\n", t);
+  const bare = summaryOf("tests 12\nsuites 0\npass 12\nfail 0\ncancelled 0\nskipped 0\ntodo 0\nduration_ms 5\n", t);
   assert.ok(bare);
-  assert.deepEqual([bare.pass, bare.fail], ["12", "0"], "no prefix at all");
-  const trailing = summaryOf("ℹ tests 12\nℹ suites 0\nℹ pass 12 (ms)\nℹ fail 0\n", t);
+  assert.deepEqual([bare.pass, bare.fail], ["12", "0"], "no prefix at all, and an integer duration");
+  const trailing = summaryOf(BLOCK8(12, 12, 0).replace("pass 12", "pass 12 (ms)"), t);
   assert.ok(trailing);
   assert.equal(trailing.pass, "NONE", "anything after the number but whitespace is not the summary");
+  const noTrailingNewline = summaryOf(BLOCK8(12, 12, 0).trimEnd(), t);
+  assert.ok(noTrailingNewline);
+  assert.deepEqual([noTrailingNewline.pass, noTrailingNewline.fail], ["12", "0"], "the final newline is not required");
+  const blankLinesAfter = summaryOf(BLOCK8(12, 12, 0) + "\n\n  \n", t);
+  assert.ok(blankLinesAfter);
+  assert.deepEqual([blankLinesAfter.pass, blankLinesAfter.fail], ["12", "0"], "only whitespace may follow");
 });
 
-test("F2 (CODEX build r1): test TITLES can never be taken for the summary: consecutive titles 'pass 5' and 'fail 0' (with or without durations) are no summary, and the real tests/suites/pass/fail block wins over them wherever they sit", (t) => {
+test("F2 (CODEX build r1): test TITLES are never the summary: consecutive titles 'pass 5' and 'fail 0' (with or without durations), the old pair and broken blocks are no summary", (t) => {
   const title = (eol: string, durations: boolean) => ["✔ pass 5" + (durations ? " (0.4ms)" : ""), "✔ fail 0" + (durations ? " (0.1ms)" : "")].join(eol);
-  const block = (n: string, f: string) => ["ℹ tests " + (Number(n) + Number(f)), "ℹ suites 0", "ℹ pass " + n, "ℹ fail " + f, "ℹ cancelled 0"].join("\n");
-  // the titles alone: no summary (CODEX's reproduction, and the same with durations, and CRLF)
   for (const [name, text] of [
     ["no durations", title("\n", false) + "\n"],
     ["durations", title("\n", true) + "\n"],
     ["no durations, CRLF", title("\r\n", false) + "\r\n"],
     ["the old pair with no tests/suites lines above it", "ℹ pass 1860\nℹ fail 0\n"],
     ["a pair with a suites line but no tests line", "ℹ suites 0\nℹ pass 1860\nℹ fail 0\n"],
-    ["a block with a line between its lines", "ℹ tests 7\nℹ suites 0\nsomething\nℹ pass 7\nℹ fail 0\n"],
+    ["a block with a line between its lines", "ℹ tests 7\nℹ suites 0\nsomething\nℹ pass 7\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1.5\n"],
+    ["the first four lines only (no cancelled/skipped/todo/duration_ms)", "ℹ tests 7\nℹ suites 0\nℹ pass 7\nℹ fail 0\n"],
+    ["seven of the eight lines (no duration_ms)", BLOCK8(7, 7, 0).replace(/ℹ duration_ms .*\n/, "")],
+    ["a non-numeric duration", BLOCK8(7, 7, 0).replace("50020.1725", "fast")],
   ] as const) {
     const r = summaryOf(text, t);
     if (!r) return;
     assert.equal(r.pass, "NONE", `${name}: not a summary`);
   }
-  // the titles above the real block, and the real block with titles BELOW it (the failure detail node prints after the summary): the block is read either way
-  const above = summaryOf(title("\n", false) + "\n" + block("1860", "0") + "\n", t);
-  assert.ok(above);
-  assert.deepEqual([above.pass, above.fail], ["1860", "0"], "titles above the block");
-  const below = summaryOf(block("1860", "0") + "\n" + title("\n", false) + "\n", t);
-  assert.ok(below);
-  assert.deepEqual([below.pass, below.fail], ["1860", "0"], "titles below the block");
-  // a title block that LOOKS like a summary and sits before the real one loses to it (last block wins)
-  const forged = summaryOf(["ℹ tests 5", "ℹ suites 0", "ℹ pass 5", "ℹ fail 0"].join("\n") + "\n" + block("1860", "0") + "\n", t);
-  assert.ok(forged);
-  assert.deepEqual([forged.pass, forged.fail], ["1860", "0"], "the last block wins");
+});
+
+test("F2b (CODEX build r2): the summary is the full eight-line block at the END of the output: four forged titles shaped like its first four lines, wherever they sit, are never it", (t) => {
+  const FORGED = ["✔ tests 5", "✔ suites 0", "✔ pass 5", "✔ fail 0"].join("\n") + "\n";
+  // the CODEX four-title block followed by a real block: the real one is read
+  const before = summaryOf(FORGED + BLOCK8(1860, 1860, 0), t);
+  if (!before) return;
+  assert.deepEqual([before.pass, before.fail, before.sumOk], ["1860", "0", "True"], "forged titles before the real block lose to it");
+  const titlesAndPrefixed = summaryOf(["ℹ tests 5", "ℹ suites 0", "ℹ pass 5", "ℹ fail 0"].join("\n") + "\n" + BLOCK8(1860, 1860, 0), t);
+  assert.ok(titlesAndPrefixed);
+  assert.deepEqual([titlesAndPrefixed.pass, titlesAndPrefixed.fail], ["1860", "0"], "the same with the info mark");
+  // the four-title block ALONE at the end, with no real summary: no match (the script STOPs)
+  const alone = summaryOf("ℹ some earlier output\n" + FORGED, t);
+  assert.ok(alone);
+  assert.equal(alone.pass, "NONE", "four forged titles at the end are not the eight-line block");
+  const aloneWithDurations = summaryOf(["✔ tests 5 (0.1ms)", "✔ suites 0 (0.1ms)", "✔ pass 5 (0.1ms)", "✔ fail 0 (0.1ms)"].join("\n") + "\n", t);
+  assert.ok(aloneWithDurations);
+  assert.equal(aloneWithDurations.pass, "NONE");
+  // a forged EIGHT-line block before the real one still loses to it (only the block that ends the output counts)
+  const eightForged = summaryOf(BLOCK8(5, 5, 0) + BLOCK8(1860, 1860, 0), t);
+  assert.ok(eightForged);
+  assert.deepEqual([eightForged.pass, eightForged.fail], ["1860", "0"]);
+  // a real block followed by a stray non-whitespace line: no match (node prints failure detail after the summary of a FAILING run, so this is also what that looks like)
+  for (const [name, tail] of [
+    ["a stray line", "stray\n"],
+    ["a title", "✔ pass 5 (0.4ms)\n"],
+    ["node's failure heading", "✖ failing tests:\n"],
+    ["a stray character on the last line", "x"],
+  ] as const) {
+    const r = summaryOf(BLOCK8(1860, 1860, 0) + tail, t);
+    assert.ok(r);
+    assert.equal(r.pass, "NONE", `${name} after the block: no match`);
+  }
+  // the real block with the number-bearing lines in the wrong order is no block
+  const swapped = summaryOf(BLOCK8(1860, 1860, 0).replace("ℹ pass 1860\nℹ fail 0\n", "ℹ fail 0\nℹ pass 1860\n"), t);
+  assert.ok(swapped);
+  assert.equal(swapped.pass, "NONE", "the order of the lines is part of the block");
+});
+
+test("F2b: the counts must add up: tests == pass + fail + cancelled + skipped + todo (a sum that does not is reported, never read as a pass)", (t) => {
+  const ok = summaryOf(BLOCK8(1865, 1860, 2, { cancelled: 1, skipped: 1, todo: 1 }), t);
+  if (!ok) return;
+  assert.deepEqual([ok.pass, ok.fail, ok.sumOk], ["1860", "2", "True"], "all five terms are in the sum");
+  for (const [name, text] of [
+    ["tests is one too many", BLOCK8(1861, 1860, 0)],
+    ["tests is one too few", BLOCK8(1859, 1860, 0)],
+    ["a cancelled count not in tests", BLOCK8(1860, 1860, 0, { cancelled: 1 })],
+    ["a skipped count not in tests", BLOCK8(1860, 1860, 0, { skipped: 1 })],
+    ["a todo count not in tests", BLOCK8(1860, 1860, 0, { todo: 1 })],
+  ] as const) {
+    const r = summaryOf(text, t);
+    assert.ok(r);
+    assert.equal(r.sumOk, "False", `${name}: the sum does not hold`);
+  }
 });
 
 test("T6: a failing run is read as failing, and output with no summary is read as no summary (never as a pass)", (t) => {
@@ -389,8 +453,12 @@ test("T6: step 1 (the gates block), run for real with a stand-in for npm: it rep
     ["a failing run", run(SAMPLE("ℹ", "\n").replace("pass 1860", "pass 1858").replace(/(\S+) fail 0/, "$1 fail 2"), 1), /\[STOP\] npm test: exit 1, pass '1858', fail '2'/],
     ["a failing summary although npm's exit code is 0 (the summary is judged on its own)", run(SAMPLE("ℹ", "\n").replace("pass 1860", "pass 1858").replace(/(\S+) fail 0/, "$1 fail 2"), 0), /\[STOP\] npm test: exit 0, pass '1858', fail '2'/],
     ["npm's exit code is non-zero although the summary says fail 0", run(SAMPLE("ℹ", "\n"), 1), /\[STOP\] npm test: exit 1/],
-    ["no summary", run("✔ pass 5 (0.4ms)\nsomething else\n", 0), /\[STOP\] npm test: exit 0, no pass\/fail summary found/],
-    ["no summary and a non-zero exit", run("Error: cannot find module\n", 1), /\[STOP\] npm test: exit 1, no pass\/fail summary found/],
+    ["no summary", run("✔ pass 5 (0.4ms)\nsomething else\n", 0), /\[STOP\] npm test: exit 0, the output does not END with node's eight-line summary/],
+    ["no summary and a non-zero exit", run("Error: cannot find module\n", 1), /\[STOP\] npm test: exit 1, the output does not END with node's eight-line summary/],
+    ["CODEX r2: four forged titles alone at the end, no real summary", run("ℹ earlier output\n✔ tests 5\n✔ suites 0\n✔ pass 5\n✔ fail 0\n", 0), /\[STOP\] npm test: exit 0, the output does not END with node's eight-line summary/],
+    ["a real summary followed by a stray line (what a failing run's detail looks like)", run(BLOCK8(1858, 1856, 2) + "✖ failing tests:\n", 1), /\[STOP\] npm test: exit 1, the output does not END with node's eight-line summary/],
+    ["a sum mismatch (tests is not pass + fail + cancelled + skipped + todo)", run(BLOCK8(1861, 1860, 0), 0), /\[STOP\] npm test: the summary's tests count \(1861\) is not pass \+ fail \+ cancelled \+ skipped \+ todo \(1860 \+ 0 \+ 0 \+ 0 \+ 0\)/],
+    ["a sum mismatch through a cancelled count", run(BLOCK8(1860, 1860, 0, { cancelled: 1 }), 0), /\[STOP\] npm test: the summary's tests count \(1860\) is not pass \+ fail \+ cancelled \+ skipped \+ todo \(1860 \+ 0 \+ 1 \+ 0 \+ 0\)/],
     ["a failing typecheck", run(SAMPLE("ℹ", "\n"), 0, 2), /\[STOP\] typecheck failed: tsc output/],
   ];
   for (const [name, r, expected] of cases) {
@@ -410,6 +478,7 @@ test("T6: the two older scripts carry the SAME anchored pattern (unless their te
     const text = readFileSync(here(`../scripts/${f}`), "utf8").replace(/\r\n/g, "\n");
     assert.ok(text.includes(`[regex]::Matches($testOut, '${pattern}')`), `${f} carries the anchored pattern`);
     assert.equal(text.includes("[regex]::Match($testOut, 'pass (\\d+)')"), false, `${f} no longer takes the first 'pass N' anywhere`);
+    assert.match(text, /if \(\$summary\.Count -gt 0 -and \[int64\]\$summary\[\$summary\.Count - 1\]\.Groups\[1\]\.Value -ne \(/, `${f} carries the tests == pass + fail + cancelled + skipped + todo check`);
     assert.match(text, /if \(\$summary\.Count -gt 0\) \{ \$pass = \$summary\[\$summary\.Count - 1\]\.Groups\[3\]\.Value; \$fail = \$summary\[\$summary\.Count - 1\]\.Groups\[4\]\.Value \}/, `${f} takes pass and fail from the LAST block`);
   }
 });
@@ -687,4 +756,30 @@ test("the header says what the script proves and what it does not: the answered_
   assert.match(script, /Nothing served proves the running bytes were built from the commit/);
   assert.match(script, /it never calls wrangler/);
   assert.match(script, /NO MIGRATION, NON-MINTING/);
+});
+
+test("F2b: the older scripts' inline summary lines, extracted and run for real, read the block at the END, STOP on a sum mismatch, and read nothing from forged titles or a stray tail", (t) => {
+  const outputs: Array<[string, string, RegExp]> = [
+    ["the real block", BLOCK8(1860, 1860, 0), /PASS=1860 FAIL=0$/m],
+    ["four forged titles then the real block", "✔ tests 5\n✔ suites 0\n✔ pass 5\n✔ fail 0\n" + BLOCK8(1860, 1860, 0), /PASS=1860 FAIL=0$/m],
+    ["four forged titles alone at the end", "✔ tests 5\n✔ suites 0\n✔ pass 5\n✔ fail 0\n", /PASS= FAIL=$/m],
+    ["the real block then a stray line", BLOCK8(1860, 1860, 0) + "stray\n", /PASS= FAIL=$/m],
+    ["a sum mismatch", BLOCK8(1861, 1860, 0), /\[STOP\] npm test: the summary's tests count is not pass \+ fail \+ cancelled \+ skipped \+ todo\./],
+  ];
+  for (const f of ["deploy-refused-option-b.ps1", "deploy-m3-treasury.ps1"]) {
+    const text = readFileSync(here(`../scripts/${f}`), "utf8").replace(/\r\n/g, "\n");
+    const start = text.indexOf("$summary = [regex]::Matches($testOut,");
+    const endLine = text.indexOf("\n", text.indexOf("if ($summary.Count -gt 0 -and "));
+    assert.ok(start > 0 && endLine > start, `${f}: the inline summary lines are found`);
+    const chunk = text.slice(start, endLine);
+    assert.ok(chunk.split("\n").length <= 6, `${f}: the extracted chunk is only the summary lines`);
+    for (const [name, out, expected] of outputs) {
+      const r = runPs(
+        ["$ErrorActionPreference = 'Stop'", 'function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }', "$testOut = Get-Content -Raw -Encoding UTF8 '@DIR@\\out.txt'", chunk, 'Write-Output ("PASS=" + $pass + " FAIL=" + $fail)'],
+        { "out.txt": `\uFEFF${out}` },
+      );
+      if (!r) return skipNoPs(t);
+      assert.match(r.out.replace(/\r/g, ""), expected, `${f}: ${name}: ${r.out}`);
+    }
+  }
 });
