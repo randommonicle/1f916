@@ -17,7 +17,10 @@ Base: 1860/1860 (`npm test`), measured in the worktree before any edit.
 | 4 | `0ffb18a1` | `answered_by` in every settlement answer (`claimResponse(answer, identity)`, the three direct answers, the router's SocietyError path), the two DEFERRED flags, the bypass scan, T4, T4a, T4b, T4c, T5 |
 | 5 | `4ce56923` | the `version_metadata` binding in `wrangler.jsonc`, `CODE_COMMIT` kept out of `vars` |
 | 6 | `07ce8de8` | `scripts/deploy-code-identity.ps1` and its test, the anchored test-count regex in three scripts |
-| 7-8 | this commit | red-proof summary, the close, served sentences, points for the hub |
+| 7-8 | `23df5e47` | red-proof summary, the close, served sentences, points for the hub |
+| 9a | `be1dcfe6` | fix pass F1: the pay-listing 502 `settlement_unconfirmed` carries `answered_by`; the scan catches `error:` |
+| 9b | `98e00768` | fix pass F2: the test summary is the tests/suites/pass/fail block (three scripts) |
+| 9c | this commit | the fix pass's checkpoint notes |
 
 ## Notes (one per commit, newest last)
 
@@ -176,3 +179,46 @@ written to a network; no `wrangler` command and no deploy script (not even `-Dry
 6. **`$REVIEWED_COMMIT`** is `TO-BE-SET-BY-HUB`: the script is unusable, `-DryRun` included, until the hub sets it to the full sha the code exchange converged on. Setting it (and the commit that does) is a path the allowlist
    permits (this script).
 7. **The rollback hint** names worker `a672490d` from the HANDOVER note quoted in the brief's context; nothing in the repository records it, so the test pins only that the text and the constant agree.
+
+## 9. Fix pass after the code exchange (CODEX build round 1, both findings verified by the hub)
+
+### F1. The pay-listing 502 `settlement_unconfirmed` carried no `answered_by` (commit `be1dcfe6`)
+
+`handlePayListing`'s catch (`listings.ts`, the /settle request was sent and its answer never read as a verdict) builds its 502 with a bare `Response.json`, and serves its code in `error`, not `code`, which is why
+my scan (R1 looked for `code:` only) never saw it. It is a settlement answer, so the body now ends with `answered_by: answeredBy(codeIdentity(env))`, LAST; the status 502, the CORS header and every other field are
+as before. `scripts/pay-listing.mjs` still keys on `secondJson.error === "settlement_unconfirmed"` (:607, untouched), and `test/pay-listing.test.ts` and the five route suites that exercise this branch pass unchanged
+(168 tests run alone, then the full suite).
+
+**Scan, extended (`test/helpers/answer-scan.ts`).** R1 now matches `error:` as well as `code:` followed by any settlement code (the `SETTLEMENT_` prefix, `REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT`, or a `"settlement_..."`
+string). A bare `Response.json` is accepted only when the body object it serves ENDS with `answered_by: answeredBy(codeIdentity(env))` (so a field after it, the wrong env, or another value under the same key is refused);
+`claimResponse`/`claimErrorResponse` and the `claimAnswer`/`contradictionAnswer` bodies are accepted as before. While in the file I fixed a latent defect of mine in R4: the "skip a function definition" regex had lost
+its backslashes (`/functions+w+$/`) and could never match; it is `/function\s+\w+$/` now (no source line was affected: the definitions are in settlement-claims.ts, where R4 does not run).
+**Proved red on the unfixed line, green after:** a test reads the REAL `listings.ts`, asserts it scans clean, removes the one `answered_by` line and asserts the scan then reports exactly
+`R1 error: "settlement_unconfirmed"`, and moves the identity off the end and asserts R1 again; ten synthetic controls cover the string and constant forms, a `json()`, the accepted shape across lines with a template
+literal before it, the identity first, the wrong env, another value, a comment and a non-settlement code.
+
+**Route test** (`code-identity-answers-d1.test.ts`): through the real router with a funder bearer, a facilitator JSON 502 with no `success` field gives 502, CORS `*`, `error === "settlement_unconfirmed"`,
+`listing_id`, `submission_id`, `paying_since` (a number), `wallet_row_id`, `wallet_row_hash`, a `message` starting "No settlement verdict was returned for the settle request (", `answered_by` equal to the stamped
+identity, `Object.keys(body)` exactly the seven prior keys then `answered_by`, no `accepts`, and the listing still `paying`.
+
+Red-proofs (exact-once mutants, bytes restored, sha256 compared): the unfixed line (answered_by removed): route test, the source scan and the real-file scan test red; identity placed first: route test (key order) and
+real-file scan test red; wrong env: route test, source scan and real-file test red; the 502 without its CORS header: route test red; the scan reverted to `code:` only: the real-file scan test red.
+
+### F2. The test summary is the `tests / suites / pass / fail` BLOCK (commit `98e00768`)
+
+CODEX showed two consecutive test titles "pass 5" and "fail 0" with no duration suffix can supply my `pass`/`fail` PAIR. The pattern now needs node's whole summary block, four consecutive lines, each after at most one
+prefix token and followed by nothing but whitespace: `(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$`; last
+match wins; pass is group 3 and fail group 4. A set of four consecutive TITLES laid out exactly like the block is indistinguishable from it by shape; the last-match rule means the real summary, printed last, still wins
+over such titles (tested), and the gates block still checks npm's exit code and the typecheck separately. **The same block anchor is applied to `deploy-refused-option-b.ps1` and `deploy-m3-treasury.ps1`**: nothing
+needed beyond the static test that asserts both carry the new script's exact pattern string and read groups 3 and 4 of the last match (neither script's inline lines can be run without npm; the new script's
+`Get-TestSummary` carries the behavioural tests).
+
+New test `F2`: consecutive titles with no durations, with durations and with CRLF are no summary; the old pass/fail pair with no tests/suites lines above it, a pair with a suites line but no tests line, and a block with a
+stray line inside it are no summary; the real block is read with titles above it, with titles below it (where node prints failure detail) and with a forged four-title block before it. The earlier "bare" fixture now
+needs the whole block, and a trailing "(ms)" after the pass number is refused.
+
+Red-proofs (nine mutants, each red, restored byte-identical): the previous pair pattern returns; the `tests` line optional; the `tests` and `suites` lines both optional; the FIRST block wins; text allowed after the
+pass number; pass read from the tests group; fail read from the suites group (these last two needed a fixture whose tests count differs from pass and whose suites count differs from fail: the failing-run
+fixture); each older script reverted or reading the wrong groups.
+
+Suite after the fix pass: 1924/1924 (+3: the F1 route test, the F1 scan test, the F2 test), `tsc` exit 0.
