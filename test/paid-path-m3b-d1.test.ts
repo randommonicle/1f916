@@ -40,7 +40,7 @@ import {
   keyOfRow,
   listingReservationState,
   markChainSpent,
-  markRefused,
+  markFirstRefusal,
   noteUnknown,
   takeClaim,
   KEY_WHERE,
@@ -418,15 +418,22 @@ test("H2: the reconciler counts the row unchanged (not resolved), and it resolve
   }
 });
 
-test("H2 control: payAndSettle's FIRST /settle still honours a rule-7 refusal at once (402 with accepts, the claim refused)", async () => {
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md), rewritten from "H2 control: payAndSettle's FIRST /settle still honours a rule-7 refusal at once (402 with accepts, the claim refused)".
+// The H2 reasoning (an earlier attempt's transfer may still be mined, so a refusal is not acted on while the chain reads the authorisation unused) now holds on the first attempt too.
+test("H2 control (option B): payAndSettle's FIRST /settle no longer honours a rule-7 refusal at once: 502 settlement_unresolved without accepts, the claim stays pending with the facilitator's words and its body", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: () => refusedAnswer() });
   try {
     const res = await callWorker(patronReq("rent", paymentHeaderFor(TREASURY_ADDRESS, "1000000")), eq(d1));
     const body = await json(res);
-    assert.equal(res.status, 402, JSON.stringify(body));
-    assert.ok(Array.isArray(body.accepts));
-    assert.equal(claimDetail(d1).state, "refused");
+    assert.equal(res.status, 502, JSON.stringify(body));
+    assert.equal(body.code, "settlement_unresolved");
+    assert.equal(body.accepts, undefined, "no invitation to sign again");
+    const row = claimDetail(d1);
+    assert.equal(row.state, "pending", "never `refused`");
+    assert.notEqual(row.rpc_body, null, "the authorisation body is kept: the expiry proof needs it");
+    assert.match(String(row.verdict_reason), new RegExp(REFUSAL_SENTINEL), "the facilitator's words are its last words");
+    assert.equal(row.lease_owner, null, "the lease is let go so an identical re-send can reconcile at once");
   } finally {
     stub.restore();
     d1.close();
@@ -489,16 +496,17 @@ test("R2-1 (pay listing): the same interleaving keeps the listing's reservation 
   }
 });
 
-test("R2-1: markRefused bound to a take time writes only while updated_at still equals it; unbound it behaves as before", async () => {
+// OPTION B: rewritten from "markRefused bound to a take time writes only while updated_at still equals it; unbound it behaves as before". markFirstRefusal has no unbound form.
+test("R2-1: markFirstRefusal bound to a take time writes only while updated_at still equals it (and for the strict holder); the claim stays pending", async () => {
   const d1 = createLocalD1();
   try {
     const key = await seedClaim(d1, { route: "patron", intent: { line: "r21" }, updatedAt: 5_000 });
-    assert.equal(await markRefused(eq(d1), key, "r", "A", Date.now(), undefined, 4_999), false, "another holder moved updated_at: nothing written");
-    assert.equal(claimDetail(d1).state, "pending");
-    assert.equal(await markRefused(eq(d1), key, "r", "A", Date.now(), undefined, 5_000), true, "updated_at is still the take time");
-    assert.equal(claimDetail(d1).state, "refused");
-    const other = await seedClaim(d1, { route: "patron", intent: { line: "r21 unbound" }, updatedAt: 6_000 });
-    assert.equal(await markRefused(eq(d1), other, "r", "A", Date.now()), true, "unbound (every other caller): as before");
+    d1.raw.prepare(`UPDATE settlement_claims SET lease_owner = 'A', leased_until = ${Date.now() + 100_000} WHERE ${KEY_WHERE}`).run(...(keyArgs(key) as never[]));
+    assert.equal(await markFirstRefusal(eq(d1), key, "r", "A", Date.now(), 4_999), false, "another holder moved updated_at: nothing written");
+    assert.equal(claimDetail(d1).verdict_reason, null);
+    assert.equal(await markFirstRefusal(eq(d1), key, "r", "A", Date.now(), 5_000), true, "updated_at is still the take time");
+    assert.equal(claimDetail(d1).state, "pending", "never refused");
+    assert.equal(claimDetail(d1).verdict_reason, "r");
   } finally {
     d1.close();
   }

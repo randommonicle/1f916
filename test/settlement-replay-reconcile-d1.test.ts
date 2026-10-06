@@ -36,6 +36,7 @@ import {
   type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
+import { seedPreBRefused } from "./helpers/pre-b-refused.ts";
 import { claimAnswer, claimKeyFromPayload, getClaim, acquireLease, CLAIM_LEASE_TTL_MS, type ClaimRow } from "../src/settlement-claims.ts";
 import {
   runReconciler,
@@ -372,7 +373,10 @@ test("11. rpc_body is NULL on every terminal row and appears in NO route's respo
     const seatA = await pendingRegistration(d1, { handle: "s-pending" });
     assert.equal((await seatA.send()).status, 502);
     const seatB = await pendingRegistration(d1, { handle: "s-refused" });
-    assert.equal((await seatB.send()).status, 402);
+    // Option B: a first-attempt refusal is answered 502 and leaves the claim PENDING. The walk still has to cover a `refused` row (the claimAnswer arm and the replay answers still serve it), and a
+    // pre-B refused row is production-reachable only as history (L-126), so seat B's row is moved to it the way the old markRefused wrote it.
+    assert.equal((await seatB.send()).status, 502);
+    assert.equal(seedPreBRefused(d1, claimKeyFromPayload(JSON.parse(atob(seatB.header)), REQS).key, "The facilitator reports that this settlement failed (HTTP 200, reason: insufficient_funds). By its account no money moved."), true);
     const seatC = await pendingRegistration(d1, { handle: "s-booked" });
     assert.equal((await seatC.send()).status, 201);
     const seatD = await pendingRegistration(d1, { handle: "s-expired", validBefore: "1000" });
@@ -426,7 +430,7 @@ test("11. rpc_body is NULL on every terminal row and appears in NO route's respo
 
 // ---------- 14. a failing row never stops later rows; the fixed batch; fairness ----------
 
-test("14. a failing row never stops the rows after it: one log line per failure, a fixed batch of RECONCILE_BATCH_ROWS, and the failing row goes to the back", async () => {
+test("14. a failing row never stops the rows after it: one log line per failure, a fixed batch of RECONCILE_BATCH_ROWS, and a failing settled row costs one slot, not the batch", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: (n) => (n <= 4 ? pendingAnswer() : settledAnswer()), rpc: bothRpcs(true) });
   try {
@@ -458,14 +462,25 @@ test("14. a failing row never stops the rows after it: one log line per failure,
     assert.equal(stateOf(c.header), "pending", "rows C and D are beyond this run's batch and untouched");
     assert.equal(stateOf(d.header), "pending");
 
-    // Fairness: A was just attempted, so it is behind C and D. Oldest-by-creation would pick A again (and fail again) ahead of them.
+    // Fairness, as option B left it (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, Q1; build review F1 and F1b): the batch is ONE of each kind when both exist (a UNION ALL of two LIMITed subqueries,
+    // interleaved in PAIRS, and within a pair the row that has waited longest goes first), so refusals, now pending rows owing an expiry proof, cannot starve bookings and failing settled
+    // rows cannot starve refusals. A is the only settled row and it failed on run 1, so its updated_at is now the newest in the table: on run 2 the older pending row C goes first, and C's
+    // booking (a public-key registration, up to 16 subrequests) leaves no room for A's worst case under the 26 ceiling, so A is SHED, not tried. Before F1b A was tried first on every run and
+    // would have shed the pending rows every run if it were the costly one. A is not forgotten: it is reached on the first run the queue ahead of it is empty (run 4), and logged then.
+    // (Before B the failing row went behind the waiting ones: oldest attempt first across both kinds. Within a kind that rule stands, since each subquery orders by updated_at and
+    // created_at: test/refused-option-b-expiry-d1.test.ts pins it for two settled rows, and the budget case for a costly failing settled row.)
     const { value: second, lines: secondLines } = await captureLog(() => runReconciler(testEnv(d1)));
-    assert.equal(second.failed, 0, "the row that keeps failing was not retried ahead of the rows that have waited");
-    assert.equal(eventLines(secondLines, "settlement_reconcile_row_failed").length, 0);
-    assert.equal(stateOf(c.header), "booked", "C is reached on the second run");
+    assert.equal(second.failed, 0, "A, which just failed, waits behind the older pending row C");
+    assert.equal(second.examined, 1, "and is shed by C's cost rather than tried");
+    assert.equal(eventLines(secondLines, "settlement_reconcile_shed").length, 1, "loudly");
+    assert.equal(stateOf(c.header), "booked", "C is reached on the second run, first in its pair");
+    assert.equal(stateOf(d.header), "pending");
     await runReconciler(testEnv(d1));
-    assert.equal(stateOf(d.header), "booked", "and D on the next: nothing starves behind the failing row");
-    assert.equal(stateOf(a.header), "settled_unbooked", "and A is still there for a person");
+    assert.equal(stateOf(d.header), "booked", "and D on the third: nothing starves behind the failing row");
+    assert.equal(stateOf(a.header), "settled_unbooked", "A is still there for a person");
+    const { value: fourth, lines: fourthLines } = await captureLog(() => runReconciler(testEnv(d1)));
+    assert.equal(fourth.failed, 1, "and once nothing older waits ahead of it, it is tried again");
+    assert.equal(eventLines(fourthLines, "settlement_reconcile_row_failed").length, 1, "and logged again, so it cannot go unseen");
   } finally {
     stub.restore();
     d1.close();

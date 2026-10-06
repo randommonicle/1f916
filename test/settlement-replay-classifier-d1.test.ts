@@ -117,14 +117,16 @@ test("L2. no /verify message says 'nothing that could settle was sent'; each say
 
 // ---------- 4. every classifier outcome maps to its claim state, through the real route ----------
 
-type Case = { name: string; settle: () => Response | Promise<Response>; state: "booked" | "refused" | "pending"; status: number };
+// `refusal` marks a rule-7 recorded refusal on the claim's FIRST /settle. OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): that is no longer `refused` (402 with accepts) but a PENDING claim
+// answered 502 settlement_unresolved, carrying the facilitator's reason and no `accepts`. The two rows were `state: "refused", status: 402` before B.
+type Case = { name: string; settle: () => Response | Promise<Response>; state: "booked" | "refused" | "pending"; status: number; refusal?: string };
 const j = (status: number, body: unknown) => () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 const CASES: Case[] = [
   { name: "rule 4 settled", settle: j(200, { success: true, payer: TEST_PAYER, transaction: TX }), state: "booked", status: 201 },
   { name: "rule 4, success on a non-2xx", settle: j(403, { success: true }), state: "pending", status: 502 },
-  { name: "rule 7, a recorded failure at 200", settle: j(200, { success: false, errorReason: "insufficient_funds" }), state: "refused", status: 402 },
-  { name: "rule 7, a policy refusal at 403", settle: j(403, { success: false, errorReason: "policy" }), state: "refused", status: 402 },
+  { name: "rule 7, a recorded failure at 200", settle: j(200, { success: false, errorReason: "insufficient_funds" }), state: "pending", status: 502, refusal: "insufficient_funds" },
+  { name: "rule 7, a policy refusal at 403", settle: j(403, { success: false, errorReason: "policy" }), state: "pending", status: 502, refusal: "policy" },
   { name: "rule 1, a 5xx", settle: j(503, { success: true, transaction: TX }), state: "pending", status: 502 },
   { name: "rule 2, a 409", settle: j(409, { success: false, errorReason: "duplicate_settlement" }), state: "pending", status: 502 },
   { name: "rule 3, no boolean success", settle: j(200, {}), state: "pending", status: 502 },
@@ -149,7 +151,17 @@ for (const c of CASES) {
       assert.equal(res.status, c.status, JSON.stringify(body));
       const row = oneClaim(d1);
       assert.equal(row.state, c.state, `the claim is ${c.state}`);
-      if (c.state === "pending") {
+      if (c.refusal !== undefined) {
+        assert.equal(body.code, "settlement_unresolved");
+        assert.equal(body.accepts, undefined, "no invitation to sign: the facilitator's word alone does not make the authorisation dead");
+        assert.ok(String(body.error).includes(`reason: ${c.refusal})`), "the facilitator's reason, attributed to it");
+        assert.match(String(body.error), /Do not sign again\./);
+        assert.ok(row.rpc_body, "the body is kept: the expiry proof needs it");
+        const lastWords = (d1.raw.prepare("SELECT verdict_reason FROM settlement_claims").get() as { verdict_reason: string | null }).verdict_reason;
+        assert.ok(String(lastWords).includes(`reason: ${c.refusal})`), "and the facilitator's words are the claim's last words");
+        assert.equal(count(d1, "citizens"), 0);
+        assert.equal(count(d1, "ledger"), 0);
+      } else if (c.state === "pending") {
         assert.match(String(body.error), DO_NOT_SIGN, "L3: an unknown outcome ends with 'do not sign again'");
         assert.ok(row.rpc_body, "a pending claim keeps its body for reconciliation");
         assert.equal(count(d1, "citizens"), 0, "nothing is booked on an unknown outcome");

@@ -219,7 +219,9 @@ export async function takeClaim(env: Env, id: ClaimIdentity, spec: ClaimSpec, ow
   const row = await getClaim(env, id.key);
   // A row that conflicted cannot have vanished (rows are never deleted); if it
   // somehow has, refuse rather than guess.
-  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator.");
+  // "/settle", not "the facilitator": this runs after /verify (payAndSettle's take is just before /settle), and the /verify body is the full signed authorisation (gate L2). What is
+  // true on every path that reaches this line is that nothing was sent to /settle.
+  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator's /settle.");
   return { taken: false, row, identical: row.route === spec.route && sameRequest(row, id) };
 }
 
@@ -306,8 +308,9 @@ export async function markSettled(env: Env, key: ClaimKey, tx: string, payer: st
 }
 
 // F2 (hub ruling, 2026-09-30): when the reconciler moves a listing_pay claim to a terminal state that proves no money moved
-// (expired: the chain shows the authorisation unused after validBefore; refused: a recorded rule-7 refusal), the listing's
-// reservation goes back to open IN THE SAME BATCH as the claim's terminal update. The release is one conditional UPDATE:
+// (expired: the chain shows the authorisation unused after validBefore), the listing's reservation goes back to open IN THE SAME
+// BATCH as the claim's terminal update. Since option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md) that is the ONLY terminal state with a release: a first-attempt
+// rule-7 refusal no longer writes `refused` and no longer releases anything, so a refused listing payment holds its listing until this proof. The release is one conditional UPDATE:
 //   - changes() = 1 ties it to THIS batch's claim update, so a worker that lost the race to move the claim releases nothing;
 //   - status = 'paying' and paid_submission_id IS NULL: a listing already paid (or withdrawn, or expired) is never touched;
 //   - the pinned wallet row the reservation recorded (paying_wallet_row_id/hash) must be this claim's pin, and paying_since
@@ -332,26 +335,33 @@ async function terminate(env: Env, claimUpdate: D1PreparedStatement, release?: C
   return (out[0] as { meta: { changes: number } }).meta.changes === 1;
 }
 
-// pending -> refused (classifier rule 7 only): terminal, the authorisation body is cleared. Pass `release` (the claim row) from the
-// reconciler and the re-send so a listing_pay reservation is released in the same batch (F2); the pay route's own request path
-// releases its reservation itself and passes nothing.
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled by Ben 5 Oct 2026): payAndSettle's FIRST /settle, when it answers a rule-7 recorded refusal, no longer writes `refused`. The refusal
+// is the facilitator's word alone, and the signed authorisation stays valid until validBefore, so a settlement the facilitator did not report could still be mined after the society
+// had invited a fresh signature. The claim stays `pending`: the facilitator's words become its last words (verdict_reason, as noteUnknown records them) and the lease is let go so an
+// identical re-send can run the expiry proof at once. `state` and `rpc_body` are left alone (the re-send's and the reconciler's attemptPending refuse a pending row whose body was
+// cleared, so clearing it would make the row unable to ever expire). The row then resolves exactly as every other pending row does: the chain reads the nonce used (booked, or stamped
+// and stopped for a person) or provably unused past validBefore + margin (`expired`, which invites the fresh signature with the chain's proof behind it and releases a listing_pay
+// reservation in the same batch).
 //
-// R2-1 (CODEX r2 HIGH, second build): `takenAt` binds the write to the claim's TAKE time. HOLDS_LEASE accepts a NULL or lapsed lease, so a first attempt whose refusal write is delayed past its
-// lease could land after another holder (B) acquired the lapsed lease, re-POSTed, met an unknown outcome and cleared the lease again (noteUnknown): the 402 it then answers, with fresh
-// `accepts`, invites a second signature while B's transfer can still mine. Every other holder's attempt MOVES updated_at (acquireLease and noteUnknown both set it, and acquireLease acts only
-// after the lease lapsed), so `updated_at = takenAt` proves no other attempt started since this request took the claim. payAndSettle's first-attempt refusal passes it; a write that
-// changes nothing is re-read and answered from the claim, never as a 402.
-export async function markRefused(env: Env, key: ClaimKey, reason: string, owner: string, now: number, release?: ClaimRow, takenAt?: number): Promise<boolean> {
-  return terminate(
-    env,
-    env.DB.prepare(
-      `UPDATE settlement_claims SET state = 'refused', rpc_body = NULL, verdict_reason = ?, lease_owner = NULL, leased_until = NULL, updated_at = ? WHERE ${KEY_WHERE} AND state = 'pending' AND ${HOLDS_LEASE}${takenAt === undefined ? "" : " AND updated_at = ?"}`,
-    ).bind(reason, now, ...keyArgs(key), ...holdsLeaseArgs(owner, now), ...(takenAt === undefined ? [] : [takenAt])),
-    release,
-  );
+// The write is bound the way R2-1 bound the old refusal write: STRICT holder (`lease_owner = owner`, as noteUnknown; a holder whose lease was released or taken writes nothing) AND
+// `updated_at = takenAt` (every other holder's attempt, acquireLease and noteUnknown, MOVES updated_at, so a late refusal never lands over an attempt that started since this request took
+// the claim). Never over a stopped row (CHAIN_SPENT_MARKER). It returns whether it wrote; a caller that did not write re-reads the claim and answers from its state.
+//
+// DELETED WITH THIS CHANGE: markRefused, the writer of the old terminal state. It had one production caller (this branch of payAndSettle), and a writer kept for nobody invites reuse. The
+// `refused` state stays in ClaimState and the table's CHECK for the rows already written, and claimAnswer's refused arm, markContradiction, isContradicted, holdSuccessAgainstTerminal and
+// the attention list's contradiction marker keep serving them unchanged: a `refused` row is production-reachable only as HISTORY (test/helpers/pre-b-refused.ts seeds one).
+export async function markFirstRefusal(env: Env, key: ClaimKey, reason: string, owner: string, now: number, takenAt: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL
+     WHERE ${KEY_WHERE} AND state = 'pending' AND lease_owner = ? AND updated_at = ? AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`,
+  )
+    .bind(reason.slice(0, 400), now, ...keyArgs(key), owner, takenAt, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER)
+    .run();
+  return r.meta.changes === 1;
 }
 
-// pending -> expired: the chain proved the authorisation unused AFTER valid_before (plus the margin). See markRefused for `release`.
+// pending -> expired: the chain proved the authorisation unused AFTER valid_before (plus the margin). Pass `release` (the claim row) from the reconciler and the re-send so a listing_pay
+// reservation is released in the same batch (F2); the pay route's own request path releases nothing here.
 export async function markExpired(env: Env, key: ClaimKey, owner: string, now: number, release?: ClaimRow): Promise<boolean> {
   return terminate(
     env,
@@ -540,15 +550,15 @@ export function describeClaim(row: ClaimRow): string {
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 const txPart = (row: ClaimRow) => (row.tx ? ` (tx ${row.tx})` : "");
 
-// What the reconciler really does (B6a, hub ruling F4): ONE pass a day, at 06:00 UTC, and it works a limited number of unresolved payments per
-// pass, oldest attempt first, and only what the concierge and the clerk leave room for that day (scheduled(), F3), so a payment can wait MORE than
-// one day. It promises no deadline. A secret-mode registration that is settled_unbooked gets no deadline at all (B6b).
+// What the reconciler really does (B6a, hub ruling F4; reworded for fix passes F1/F1b of option B): ONE pass a day, at 06:00 UTC, and it works a limited number of unresolved payments per
+// pass, taking settled-but-unbooked payments and still-unresolved ones in turn, the longest-waiting first within each kind, and only what the concierge and the clerk leave room for that day
+// (scheduled(), F3), so a payment can wait MORE than one day. It promises no deadline. A secret-mode registration that is settled_unbooked gets no deadline at all (B6b).
 export const RECONCILE_BACKSTOP =
-  "The society's reconciler makes one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, oldest attempt first, so a payment can wait more than one day.";
+  "The society's reconciler makes one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, taking settled-but-unbooked payments and still-unresolved ones in turn, longest-waiting first within each, so a payment can wait more than one day.";
 
 // Appended ONLY where an identical re-send really re-checks or finishes the claim (registration, the patron door, listing creation). NOT on a
-// listing_pay answer (the pay route's reservation answers a re-send first, so repeating does nothing) and NOT on the handle-taken answer (F1:
-// no retry can book it). Each place it is served has a test that follows it.
+// listing_pay answer (the pay route's reservation answers a re-send first, so repeating does nothing), NOT on the handle-taken answer (F1:
+// no retry can book it), and NOT on the first-refusal answer (L3: it says "re-send after T", and the clause would invite the re-sends before T). Each place it is served has a test that follows it.
 export const RECONCILE_REPEAT_CLAUSE = "Repeating this identical request re-checks it sooner.";
 
 export function reconcileTail(route: ClaimRoute): string {
@@ -573,14 +583,45 @@ export function listingNotPayingMessage(row: Pick<ClaimRow, "intent_json" | "tx"
   return `Your ${money(Number(i.amount_cents ?? 0))} payment settled${txPart(row as ClaimRow)}, but the listing it was paid against (listing ${String(i.listing_id)}) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler ${setAside === "has" ? "has set it aside" : "will set it aside when it next meets it"} rather than retry it. Do not sign again: this payment has already moved. It is logged for the maintainer to look at by hand; no resolution time is promised. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment).`;
 }
 
+// Where a payer whose money may have moved anyway can say so, for a claim that has no tx to name (a STOPPED row, a first-attempt refusal): the authorisation's NONCE is its identity. A
+// register, patron or listing_create payer need not be a citizen, so the way in is a free showhome note; a listing_pay payer is a citizen (the funder), so a mention of
+// @commonhold-agent. ONE function: stoppedMessage and firstRefusalDetail both serve it, so the two cannot drift. (SHOWHOME_REPORT_POINTER names a tx instead, for a payment that settled.)
+export function reportPointer(row: Pick<ClaimRow, "route" | "nonce">): string {
+  return row.route === "listing_pay"
+    ? `To add your own report, mention @commonhold-agent in a comment naming this nonce (${row.nonce}) (POST /api/comment).`
+    : `To add your own report, leave a free showhome note naming this nonce (${row.nonce}): POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
+}
+
+// Option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): what a payer is told when the FIRST /settle of a claim answered a rule-7 recorded refusal and the claim was kept pending (markFirstRefusal).
+// It is the `detail` claimAnswer's pending branch serves after "Do not sign again.": the facilitator's own words, attributed to it (classifySettle rule 7's text, verbatim), then why the society
+// does not act on them alone, then the time before which nothing can be decided. `marginSeconds` is RECONCILE_EXPIRY_MARGIN_SECONDS (x402.ts owns it; this module imports no route or facilitator
+// module, so the caller passes it): T = valid_before + the margin is the earliest moment the expiry proof (C6) can mark the claim `expired`, which is what invites a fresh signature.
+//   - register, patron, listing_create: an identical re-send reaches the claim (replayForClaim runs before any free check), so the text promises the re-send and what it will be told.
+//   - listing_pay: the claim holds a RESERVATION of the listing, and a re-send meets that reservation first (loadPayableListing: "listing N is paying, not open"), before it can reach the claim,
+//     so a "re-send after T" promise would be false. The reconciler's pass decides it instead, and releases the listing in the same step if the authorisation expired unused.
+//
+// The ANSWER also carries a stable machine-readable discriminator (build review F2, CODEX): `facilitator_refused: true` and `recheck_after` (T as an ISO UTC time), added by claimAnswer when the
+// caller passes `firstRefusalRecheckAfter`, and ONLY on this answer. Status 502 and code settlement_unresolved are unchanged, so existing clients are unaffected; but that code is shared by
+// every answer that says "the outcome is not established", including one that means the facilitator ALREADY reported a settlement (a success held against a claim another holder has), and a
+// client that read the code alone would tell that payer to wait for an expiry. The discriminator is what says "this is the facilitator's refusal, kept pending", and nothing else carries it.
+export function firstRefusalRecheckAfter(row: Pick<ClaimRow, "valid_before">, marginSeconds: number): string {
+  return new Date((row.valid_before + marginSeconds) * 1000).toISOString();
+}
+
+export function firstRefusalDetail(verdictError: string, row: Pick<ClaimRow, "route" | "nonce" | "valid_before">, marginSeconds: number): string {
+  const t = firstRefusalRecheckAfter(row, marginSeconds);
+  const lead = `${verdictError} The society does not act on that account alone: the signed authorisation stays valid until its validBefore, so this payment is not treated as refused until the chain shows the authorisation unused after ${t}.`;
+  if (row.route === "listing_pay") {
+    return `${lead} The listing stays reserved for this payment until then, and while it is reserved a re-send of this request is refused (the listing is paying, not open) before it reaches this claim, so do not re-send. The society's reconciler decides it on a pass after that time and, if the authorisation expired unused, releases the listing in the same step; GET /api/listing/:id serves the listing's state. ${reportPointer(row)}`;
+  }
+  return `${lead} Re-send this identical request after that time and you will be told whether it expired unused (then sign a fresh one), settled, or is still unresolved. ${reportPointer(row)}`;
+}
+
 // R2-3: what a payer is told about a STOPPED row (a pending claim carrying CHAIN_SPENT_MARKER). It claims only what is established: the chain reads the nonce used
 // (authorizationState is true for a spent AND a cancelled authorisation), the society stopped retrying, and a person will look. It never says the reconciler will finish
 // it, never says repeating the request does anything, never says nothing was charged, never invites a signature, and never quotes the facilitator.
 export function stoppedMessage(row: ClaimRow): string {
-  const pointer =
-    row.route === "listing_pay"
-      ? `To add your own report, mention @commonhold-agent in a comment naming this nonce (${row.nonce}) (POST /api/comment).`
-      : `To add your own report, leave a free showhome note naming this nonce (${row.nonce}): POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
+  const pointer = reportPointer(row);
   return `The chain shows the signed authorisation for ${describeClaim(row)} was used (spent, or cancelled by its signer), so the money may have moved: whether it did is not established, and the society cannot tell which transaction used it. The society has stopped retrying this payment automatically. A person will check it against the chain by hand; no resolution time is promised. It is listed at GET /api/settlements/attention. Do not sign again. ${pointer}`;
 }
 
@@ -608,15 +649,18 @@ export function contradictionAnswer(tx: string, state: string): ClaimAnswer {
 // The answer for a request that matched (or collided with) an existing claim and
 // that no route finisher took over. `reqs` is only for the 402 shapes that invite
 // a fresh signature (refused, expired). B9: every answer names the tx when one is
-// known and invites a second signature ONLY for refused and expired.
+// known and invites a second signature ONLY for refused and expired (refused: a pre-B row; since option B only `expired`, the chain's proof, is written).
 // `settledTx` (C2): the caller holds a facilitator SUCCESS verdict for this authorisation naming that tx, but could not write it to the claim because another
 // holder holds the still-pending row. The answer then names the tx and says what the caller knows, instead of the generic "outcome unknown" answer.
-export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string } = {}): ClaimAnswer {
+export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, opts: { leaseHeld?: boolean; detail?: string; settledTx?: string; firstRefusalRecheckAfter?: string } = {}): ClaimAnswer {
   if (!identical) {
+    // "/settle", not "the facilitator" (gate L2 class, found 6 Oct 2026): this answer is reached on TWO paths. A request whose header already has a claim is answered by the consult
+    // (replayForClaim), before /verify, where nothing at all was sent; but a conflict found at the claim INSERT (payAndSettle's takeClaim) is reached AFTER /verify, whose body is the full
+    // signed authorisation. The one sentence true on both is that nothing was sent to /settle.
     return {
       status: 409,
       body: {
-        error: `This signed payment authorisation has already been used for a different request (${describeClaim(row)}, state ${row.state}${row.tx ? `, tx ${row.tx}` : ""}). It cannot be reused for this one. This request sent nothing to the facilitator, charged nothing and created nothing.`,
+        error: `This signed payment authorisation has already been used for a different request (${describeClaim(row)}, state ${row.state}${row.tx ? `, tx ${row.tx}` : ""}). It cannot be reused for this one. This request sent nothing to the facilitator's /settle, charged nothing and created nothing.`,
         code: SETTLEMENT_CLAIM_CONFLICT,
       },
     };
@@ -631,6 +675,8 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       }
       return { status: 409, body: { error: `This payment${txPart(row)} was already used for ${describeClaim(row)}; nothing was charged again and nothing new was created.`, code: SETTLEMENT_ALREADY_BOOKED } };
     case "refused":
+      // HISTORY ONLY since option B: nothing writes this state any more (a first-attempt refusal stays pending, answered below), so only a row written before B reaches this arm. It is
+      // served exactly as it always was.
       // C1: a claim that met a settlement_contradiction is stamped, and its replays are answered with the contradiction, never this 402 with accepts.
       if (isContradicted(row)) return contradictionAnswer(contradictionTx(row), row.state);
       return {
@@ -651,7 +697,10 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       // R2-3: a STOPPED row (C4, option B) is answered with its own words, below the success-in-hand case (a caller that knows the tx says so) and never with the reconciler's tail.
       if (opts.settledTx === undefined && isChainSpent(row)) return { status: 500, body: { error: stoppedMessage(row), code: SETTLEMENT_UNRESOLVED } };
       const heldClause = opts.leaseHeld ? (row.route === "listing_pay" ? "Another attempt to resolve it is in progress. " : "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. ") : "";
-      const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`;
+      // L3 (D-018 gate on option B): the first-refusal answer tells the payer to re-send AFTER T, so it must not also say "Repeating this identical request re-checks it sooner" (true, but together
+      // the two sentences invite exactly the pre-T re-sends DEFERRED-RESEND-COOLDOWN is about). It carries the backstop alone; every other pending answer keeps the clause where a re-send re-checks.
+      const tail = opts.firstRefusalRecheckAfter !== undefined ? RECONCILE_BACKSTOP : reconcileTail(row.route);
+      const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${tail}`;
       // C2 (re-gate LOW-1(b)): this request holds a success verdict naming the tx. The claim is still pending because another attempt held it when this request
       // tried to write, so the payer is told what this request KNOWS (the facilitator's account, the tx) and what it does not (that the society has recorded it).
       // CODEX M3-build r1 MEDIUM: the success is the fact, the tx string is detail; a success reported with an empty tx is still a success.
@@ -669,6 +718,8 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
         body: {
           error: `The outcome of this payment is still unknown${txPart(row)}: whether the money moved is not yet established. Do not sign again. ${rest}`,
           code: SETTLEMENT_UNRESOLVED,
+          // The first-attempt refusal answer ONLY (see firstRefusalRecheckAfter): no other answer carries these two fields.
+          ...(opts.firstRefusalRecheckAfter !== undefined ? { facilitator_refused: true, recheck_after: opts.firstRefusalRecheckAfter } : {}),
         },
       };
     }

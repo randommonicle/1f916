@@ -16,6 +16,7 @@
 //   EXPIRE            from here the wall clock and the chain's block timestamps are past validBefore + RECONCILE_EXPIRY_MARGIN_SECONDS.
 //   CHAIN_TRANSFER    from here the chain reads the authorisation USED; nobody tells the society.
 //   v in { success, refused (a rule-7 recorded refusal), unknown (settlement_pending) }; c in { used, unused, unreadable (every RPC fails) }.
+//   A FIRST(refused) leaves the claim PENDING with the facilitator's words (option B); it is answered 502 with no `accepts`.
 //
 // PHYSICS the enumeration respects (an unconstrained product would manufacture violations in worlds that cannot exist):
 //   - the chain is monotone: an authorisation that reads used stays used (EIP-3009's nonce state never reverts), so a later `unused` is pruned
@@ -32,20 +33,24 @@
 //   or reconciler pass, or an RPC eth_call answered `used` (counted in the RPC stub: a CHAIN_TRANSFER the code never read is NOT observed).
 //   Once EVIDENCE is true: (I1) no response to the payer is a 402 with `accepts`; (I2) the claim is never `refused` or `expired` without the
 //   contradiction stamp, unless it was already terminal before the evidence was observed. At every step, evidence or not: (I3) a 402 with
-//   `accepts` comes only from a row that is `refused` or `expired` and not contradicted; (I4) the claim reads `refused` only in a trace whose
-//   FIRST step was a refusal (today's single producer is payAndSettle's first /settle: markRefused has one caller). I4 is what catches the H2 fix
-//   undone (a re-POST refusal while the chain reads unused written as `refused`): that branch is reachable only with EVIDENCE false and the row it
-//   wrongly refuses is never re-read, so I1-I3 cannot see it. I4 is a provenance clause about the code's own producers, not about the world.
+//   `accepts` comes only from a row that is `refused` or `expired` and not contradicted; (I4) NO TRACE PRODUCES `refused`. Since option B
+//   (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled 5 Oct 2026) nothing writes that state: payAndSettle's first /settle keeps a rule-7 refusal PENDING (markFirstRefusal),
+//   and a re-POST refusal while the chain reads unused was never written as `refused` (H2). Before B, I4 allowed `refused` after a first-step refusal and exempted
+//   a rival's `refused`; the `refused` rows production still holds are pre-B history, and this fixture starts from an empty table, so none can appear. I4 is what catches
+//   either producer coming back (H2 undone, or a first refusal written terminal again): a refused row is never re-read, so I1-I3 cannot see it. It is a provenance
+//   clause about the code's own producers, not about the world.
 //
-// THE KNOWN EXCEPTION is named, not hidden, in the last test: DEFERRED-REFUSED-CHAIN-RECHECK (src/settlement-reconcile.ts).
+// THE FORMER KNOWN EXCEPTION (DEFERRED-REFUSED-CHAIN-RECHECK) IS CLOSED by option B: the last test pins what it became, "after a first-attempt refusal: no `accepts` on any answer
+// until the C6 expiry proof marks the claim `expired`", through the three paths that can resolve the row (the payer's re-send, the reconciler, and a transfer that was mined).
 //
 // THE RIVAL HOLDER (a follow-on, 5 Oct 2026). Without a second holder the contradiction stamp (settlement_contradiction) is unreachable, so the
 // mutations that undo it (claimAnswer ignoring isContradicted; respondToExistingClaim not re-reading a held success) stayed green. A RESEND or
 // RECONCILE step that re-POSTs with v = success may therefore carry a RIVAL: a second holder after the first holder's lease lapsed, acting
 // through the production lease and terminal writes. Inside the facilitator stub's /settle callback (the attempt is waiting there) the fake
 // clock is advanced past CLAIM_LEASE_TTL_MS so the attempt's lease lapses; the rival then takes the lease with acquireLease under its own
-// owner and writes only through markExpired / markRefused under that owner (passing the leased claim row as `release`, as the reconciler
-// does). There is no raw SQL write to settlement_claims anywhere in this file. Two placements, two ends (expired / refused):
+// owner and writes only through markExpired under that owner (passing the leased claim row as `release`, as the reconciler
+// does). There is no raw SQL write to settlement_claims anywhere in this file. Two placements. The rival's end is always `expired`: before option B it could
+// also write `refused` (a second holder's recorded refusal), but nothing writes that state now, so a rival `refused` would be a state production cannot reach (L-126).
 //   RIVAL_TERMINATES_DURING_SETTLE   the rival takes the lapsed lease and terminates the row while the attempt still waits on /settle; the
 //                                    facilitator then answers success. Expected: markSettled changes nothing, the moved row is terminal, the
 //                                    contradiction is logged and stamped, and every later identical re-send gets the contradiction.
@@ -59,9 +64,6 @@
 // disagreement is exactly what the contradiction stamp exists for. v is success for every rival step (the designed scenario), and rival steps
 // are only generated at the first RIVAL_MAX_STEP_INDEX steps after FIRST so the enumeration does not multiply. The clock advance of a rival
 // step stays in force for the rest of the trace (time does not run backwards).
-// I4 gets one explicit exemption: a `refused` row written by a rival (a second holder's recorded refusal, the one producer I4 cannot see
-// because it is not the claim's first /settle) is not a provenance violation. The exemption starts at the step the rival fires and covers
-// that trace only; every other trace, and M1's branch, are still held to I4.
 //
 // NOT COVERED (so the harness flag stays): booking-step failure (a public-key registration books in the same request), duplicate delivery,
 // stale replay, and a rival at FIRST or at the booking step. At most one rival acts per trace in practice: it leaves the row terminal, and a terminal
@@ -92,7 +94,6 @@ import {
   isContradicted,
   keyOfRow,
   markExpired,
-  markRefused,
   releaseLease,
   type ClaimKey,
   type ClaimRow,
@@ -102,10 +103,9 @@ import { RECONCILE_EXPIRY_MARGIN_SECONDS } from "../src/x402.ts";
 
 type Verdict = "success" | "refused" | "unknown";
 type Read = "used" | "unused" | "unreadable";
-// A rival holder: where it acts (see THE RIVAL HOLDER above) and the terminal state it writes.
+// A rival holder: where it acts (see THE RIVAL HOLDER above). It always terminates the row as `expired`.
 interface Rival {
   at: "settle" | "hold";
-  end: "expired" | "refused";
 }
 type Step =
   | { kind: "FIRST"; v: Verdict }
@@ -114,7 +114,7 @@ type Step =
   | { kind: "CHAIN_TRANSFER" };
 
 const VERDICTS: Verdict[] = ["success", "refused", "unknown"];
-const rivalLabel = (r: Rival): string => `+${r.at === "settle" ? "RIVAL_TERMINATES_DURING_SETTLE" : "RIVAL_HOLDS_THEN_TERMINATES"}(${r.end})`;
+const rivalLabel = (r: Rival): string => `+${r.at === "settle" ? "RIVAL_TERMINATES_DURING_SETTLE" : "RIVAL_HOLDS_THEN_TERMINATES"}`;
 const stepLabel = (s: Step): string =>
   s.kind === "FIRST" ? `FIRST(${s.v})` : s.kind === "RESEND" || s.kind === "RECONCILE" ? `${s.kind}(${s.v},${s.c})${s.rival ? rivalLabel(s.rival) : ""}` : s.kind;
 const traceLabel = (t: Step[]): string => t.map(stepLabel).join(" > ");
@@ -124,9 +124,11 @@ const MAX_AFTER_FIRST = 3;
 // A rival step is generated only as one of the first RIVAL_MAX_STEP_INDEX steps after FIRST (index 1 is the first step after FIRST), so it does not multiply every trace.
 const RIVAL_MAX_STEP_INDEX = 2;
 // A refactor that silently enumerates nothing (or a fraction) goes red. Floors sit a little below what the enumeration measured when written
-// (the main test writes the measured numbers in one log line).
-const MIN_TRACES = 2000;
-const MIN_STEP_CHECKS = 7500;
+// (the main test writes the measured numbers in one log line). Re-set for option B (6 Oct 2026): a first-attempt refusal now leaves a PENDING row that the re-send and the reconciler can work,
+// so the enumeration grew. Measured before: 2266 traces (792 with a rival), 8612 step checks, floors 2000 / 7500 / 700. Measured after: 3572 traces (792 with a rival, the rival now ending
+// `expired` only), 13672 step checks; floors 3150 / 12000 / 700 (each about 88% of the measure, the ratio the old floors kept).
+const MIN_TRACES = 3150;
+const MIN_STEP_CHECKS = 12000;
 const MIN_RIVAL_TRACES = 700;
 
 // ---------- the facilitator's three answers ----------
@@ -163,10 +165,6 @@ interface StepView {
   row: Pick<ClaimRow, "state" | "verdict_reason">;
   evidence: boolean;
   terminalBeforeEvidence: boolean;
-  // The trace's FIRST step was a recorded refusal (the only way a claim may become `refused`).
-  firstWasRefused: boolean;
-  // A rival holder has already written `refused` in this trace (a second holder's recorded refusal: the one producer I4 cannot see, because it is not the claim's first /settle).
-  rivalWroteRefused: boolean;
 }
 // The one definition of the invariants. Pure, so the self-test below can prove each clause can fail.
 function stepViolations(view: StepView): string[] {
@@ -176,7 +174,7 @@ function stepViolations(view: StepView): string[] {
   if (view.evidence && invites) out.push("I1: a 402 with accepts after the society observed settlement evidence");
   if (view.evidence && liveTerminal && !view.terminalBeforeEvidence) out.push(`I2: claim is ${view.row.state} without the contradiction stamp after the society observed settlement evidence`);
   if (invites && !liveTerminal) out.push(`I3: a 402 with accepts from a row that is ${view.row.state}${isContradicted(view.row) ? " (contradicted)" : ""}, not a live refused or expired one`);
-  if (view.row.state === "refused" && !view.firstWasRefused && !view.rivalWroteRefused) out.push("I4: claim is refused although the trace's FIRST step was not a refusal (only the first /settle may write refused)");
+  if (view.row.state === "refused") out.push("I4: claim is refused, but since option B no production path writes `refused` (a first-attempt refusal stays pending; a re-POST refusal while the chain reads unused is not acted on)");
   return out;
 }
 
@@ -216,7 +214,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
   // `key` and `leased` are the claim's key and the row as the rival's acquireLease returned it.
   const RIVAL_OWNER = "rival-holder";
   const rivalEnv = testEnv(d1);
-  const rival = { active: null as Rival | null, holding: false, armed: false, fired: false, wroteRefused: false, key: null as ClaimKey | null, leased: null as ClaimRow | null };
+  const rival = { active: null as Rival | null, holding: false, armed: false, fired: false, key: null as ClaimKey | null, leased: null as ClaimRow | null };
   // The first holder's lease lapses: the clock moves past CLAIM_LEASE_TTL_MS (the attempt took its lease at the start of the step), then the rival takes the lease through acquireLease,
   // exactly as a second worker or the reconciler would. Returns false if production refused it (the rival then does nothing).
   const rivalTakesOver = async (): Promise<boolean> => {
@@ -229,14 +227,9 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
     rival.holding = true;
     return true;
   };
-  const rivalTerminate = async (end: Rival["end"]): Promise<void> => {
-    const moved =
-      end === "expired"
-        ? await markExpired(rivalEnv, rival.key!, RIVAL_OWNER, Date.now(), rival.leased!)
-        : await markRefused(rivalEnv, rival.key!, "The facilitator recorded a refusal of this settlement (a rival holder): insufficient_funds", RIVAL_OWNER, Date.now(), rival.leased!);
-    if (!moved) return;
+  const rivalTerminate = async (): Promise<void> => {
+    if (!(await markExpired(rivalEnv, rival.key!, RIVAL_OWNER, Date.now(), rival.leased!))) return;
     rival.fired = true;
-    if (end === "refused") rival.wroteRefused = true;
   };
   // The timing seam for RIVAL_HOLDS_THEN_TERMINATES, and the ONLY thing the D1 wrapper does: a wrapper around the D1 BINDING (not one of our modules, and it writes nothing). After the
   // markSettled UPDATE reports 0 changes it arms; the next claim SELECT (the attempt's re-read) is let through, and the rival's production terminal write lands right after it, before
@@ -250,7 +243,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
       const r = await stmt.first();
       if (rival.armed && CLAIM_SELECT.test(sql)) {
         rival.armed = false;
-        await rivalTerminate(rival.active!.end);
+        await rivalTerminate();
       }
       return r;
     },
@@ -266,7 +259,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
     settle: async () => {
       const rv = rival.active;
       if (rv && !rival.fired && !rival.holding) {
-        if ((await rivalTakesOver()) && rv.at === "settle") await rivalTerminate(rv.end);
+        if ((await rivalTakesOver()) && rv.at === "settle") await rivalTerminate();
       }
       if (dial.v === "success") seen.successes++;
       return FACILITATOR[dial.v]();
@@ -289,7 +282,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
   const violations: string[] = [];
   let evidence = false;
   let terminalBeforeEvidence = false;
-  const firstWasRefused = steps[0].kind === "FIRST" && steps[0].v === "refused";
+
   let previousTerminal = false;
   let checks = 0;
   try {
@@ -334,7 +327,7 @@ async function runTrace(steps: Step[], publicKey: string): Promise<TraceResult> 
         terminalBeforeEvidence = previousTerminal;
       }
       checks++;
-      for (const found of stepViolations({ response, row, evidence, terminalBeforeEvidence, firstWasRefused, rivalWroteRefused: rival.wroteRefused })) {
+      for (const found of stepViolations({ response, row, evidence, terminalBeforeEvidence })) {
         violations.push(
           `${traceLabel(steps.slice(0, i + 1))}\n    ${found}\n    response: ${response ? `${response.status} ${JSON.stringify(response.body).slice(0, 240)}` : "(reconciler pass)"}\n    row: state=${row.state} tx=${row.tx} verdict_reason=${String(row.verdict_reason).slice(0, 160)}`,
         );
@@ -388,7 +381,7 @@ function record(tally: Tally, r: TraceResult): void {
     if (rec.settleCalls > 0 && rec.step.kind === "RECONCILE") bump(tally.coverage, "reconciler-repost");
     if (rec.settleCalls > 0 && rec.step.kind === "RESEND") bump(tally.coverage, "resend-repost");
     if ((rec.step.kind === "RESEND" || rec.step.kind === "RECONCILE") && rec.step.rival) {
-      const tag = `${rec.step.kind}:${rec.step.rival.at}:${rec.step.rival.end}`;
+      const tag = `${rec.step.kind}:${rec.step.rival.at}`;
       if (rec.rivalFired) bump(tally.coverage, `rival-fired ${tag}`);
       // The rival's write must have led to the contradiction stamp: that is the branch the rival exists to reach.
       if (rec.rivalFired && isContradicted(rec.row)) bump(tally.coverage, `rival-stamped ${tag}`);
@@ -415,7 +408,7 @@ async function enumerate(publicKey: string, maxAfterFirst: number): Promise<Tall
         if (rec.settleCalls > 0) for (const v of VERDICTS.filter((x) => x !== "unknown")) await visit([...steps, { kind, v, c }]);
         // The rival holder: only where the attempt re-POSTs (it waits on /settle there), only with v = success (the designed disagreement), only early in the trace.
         if (rec.settleCalls > 0 && steps.length <= RIVAL_MAX_STEP_INDEX) {
-          for (const at of ["settle", "hold"] as const) for (const end of ["expired", "refused"] as const) await visit([...steps, { kind, v: "success", c, rival: { at, end } }]);
+          for (const at of ["settle", "hold"] as const) await visit([...steps, { kind, v: "success", c, rival: { at } }]);
         }
       }
     }
@@ -456,14 +449,15 @@ test("every ordering of FIRST / RESEND / RECONCILE / EXPIRE / CHAIN_TRANSFER kee
   assert.ok(tally.traces >= MIN_TRACES, `only ${tally.traces} traces ran (floor ${MIN_TRACES}): the enumeration shrank`);
   assert.ok(tally.checks >= MIN_STEP_CHECKS, `only ${tally.checks} step checks ran (floor ${MIN_STEP_CHECKS})`);
   assert.equal(tally.maxLength, MAX_AFTER_FIRST + 1, "the longest trace reaches the bound");
-  for (const state of ["booked", "refused", "expired", "pending", "pending(stopped)"]) assert.ok((tally.finalStates.get(state) ?? 0) > 0, `no trace ended ${state}: the enumeration does not reach it`);
+  for (const state of ["booked", "expired", "pending", "pending(stopped)"]) assert.ok((tally.finalStates.get(state) ?? 0) > 0, `no trace ended ${state}: the enumeration does not reach it`);
+  assert.equal(tally.finalStates.get("refused") ?? 0, 0, "no trace ended refused: since option B nothing writes that state (I4 checks it after every step)");
   for (const k of ["resend-invitation", "resend-do-not-sign-again", "reconciler-repost", "resend-repost"]) assert.ok((tally.coverage[k] ?? 0) > 0, `coverage: ${k} never happened`);
   assert.ok(tally.evidenceTraces > 0, "no trace observed evidence");
-  // The rival traces must really have run and really have reached the contradiction stamp, for both placements, both ends and both kinds of attempt.
+  // The rival traces must really have run and really have reached the contradiction stamp, for both placements and both kinds of attempt.
   assert.ok(tally.rivalTraces >= MIN_RIVAL_TRACES, `only ${tally.rivalTraces} rival traces ran (floor ${MIN_RIVAL_TRACES})`);
-  for (const kind of ["RESEND", "RECONCILE"]) for (const at of ["settle", "hold"]) for (const end of ["expired", "refused"]) {
-    assert.ok((tally.coverage[`rival-fired ${kind}:${at}:${end}`] ?? 0) > 0, `coverage: the rival never fired for ${kind}:${at}:${end}`);
-    assert.ok((tally.coverage[`rival-stamped ${kind}:${at}:${end}`] ?? 0) > 0, `coverage: no rival trace of ${kind}:${at}:${end} reached the contradiction stamp`);
+  for (const kind of ["RESEND", "RECONCILE"]) for (const at of ["settle", "hold"]) {
+    assert.ok((tally.coverage[`rival-fired ${kind}:${at}`] ?? 0) > 0, `coverage: the rival never fired for ${kind}:${at}`);
+    assert.ok((tally.coverage[`rival-stamped ${kind}:${at}`] ?? 0) > 0, `coverage: no rival trace of ${kind}:${at} reached the contradiction stamp`);
   }
 });
 
@@ -472,7 +466,7 @@ test("the invariant can fail: each clause fires on a synthetic step that breaks 
   const row = (state: string, verdict_reason: string | null = null) => ({ state, verdict_reason }) as Pick<ClaimRow, "state" | "verdict_reason">;
   const stamped = "settlement_contradiction:0xabc|insufficient_funds";
   const has = (v: string[], tag: string) => v.some((x) => x.startsWith(tag));
-  const view = (response: StepView["response"], r: ReturnType<typeof row>, evidence: boolean, terminalBeforeEvidence = false, firstWasRefused = true, rivalWroteRefused = false): StepView => ({ response, row: r, evidence, terminalBeforeEvidence, firstWasRefused, rivalWroteRefused });
+  const view = (response: StepView["response"], r: ReturnType<typeof row>, evidence: boolean, terminalBeforeEvidence = false): StepView => ({ response, row: r, evidence, terminalBeforeEvidence });
 
   assert.ok(has(stepViolations(view(invite, row("expired"), true)), "I1"));
   assert.ok(has(stepViolations(view(invite, row("expired"), true)), "I2"));
@@ -480,56 +474,93 @@ test("the invariant can fail: each clause fires on a synthetic step that breaks 
   assert.ok(has(stepViolations(view(invite, row("pending"), false)), "I3"));
   assert.ok(has(stepViolations(view(invite, row("expired", stamped), false)), "I3"), "an invitation from a contradicted row is a violation");
   assert.ok(has(stepViolations(view(invite, row("booked"), false)), "I3"));
-  assert.ok(has(stepViolations(view(null, row("refused"), false, false, false)), "I4"), "a refused row in a trace that did not start with a refusal is a violation");
-  assert.ok(has(stepViolations(view(invite, row("refused", stamped), false, false, false)), "I4"), "a stamped refused row still has to come from a first refusal");
+  // I4 (option B): no trace produces `refused`, whatever came before it, stamped or not, after evidence or not.
+  assert.ok(has(stepViolations(view(null, row("refused"), false)), "I4"), "a refused row is a violation: nothing writes that state any more");
+  assert.ok(has(stepViolations(view(invite, row("refused", stamped), false)), "I4"), "a stamped refused row is one too");
+  assert.ok(has(stepViolations(view(null, row("refused", stamped), true, true)), "I4"), "and I4 has no exemption for terminal-before-evidence");
 
   assert.deepEqual(stepViolations(view(invite, row("expired"), false)), [], "a live expired row may invite when no evidence was observed");
-  assert.deepEqual(stepViolations(view(invite, row("refused"), false)), []);
-  assert.deepEqual(stepViolations(view(null, row("expired"), false, false, false)), [], "I4 is about refused only: an expired row needs no refusal");
-  assert.deepEqual(stepViolations(view(null, row("refused", stamped), true, false, false, true)), [], "a refusal written by a rival holder is exempt from I4 (and, stamped, from I2)");
-  assert.ok(has(stepViolations(view(null, row("refused"), true, false, false, true)), "I2"), "the I4 exemption does not excuse an unstamped refusal after evidence (I2)");
-  assert.deepEqual(stepViolations(view(null, row("pending"), true, false, false)), []);
+  assert.deepEqual(stepViolations(view(null, row("expired"), false)), [], "I4 is about refused only: an expired row is the production terminal state");
+  assert.deepEqual(stepViolations(view(null, row("pending"), true)), []);
+  assert.deepEqual(stepViolations(view(null, row("booked"), true)), []);
   assert.deepEqual(stepViolations(view({ status: 502, body: { error: "do not sign again" } }, row("pending"), true)), []);
   assert.deepEqual(stepViolations(view({ status: 500, body: {} }, row("expired", stamped), true)), [], "a stamped terminal row after evidence is the correct state");
-  assert.deepEqual(stepViolations(view(null, row("refused"), true, true)), [], "terminal before the evidence was observed is exempt from I2");
+  assert.deepEqual(stepViolations(view(null, row("expired"), true, true)), [], "terminal before the evidence was observed is exempt from I2");
 });
 
-test("DEFERRED-REFUSED-CHAIN-RECHECK: a refused claim is never re-read, so an unreported on-chain transfer still gets a 402 with accepts", async () => {
-  // THIS TEST ASSERTS TODAY'S KNOWN GAP AND IS EXPECTED TO GO RED WHEN THE REMEDY LANDS (src/settlement-reconcile.ts, DEFERRED-REFUSED-CHAIN-RECHECK:
-  // re-read a refused row's authorisation until validBefore + RECONCILE_EXPIRY_MARGIN_SECONDS and stamp it settlement_contradiction if the chain reads it used).
-  // Whoever lands that remedy flips this test: the re-send after CHAIN_TRANSFER must then NOT be a 402 with accepts. It does not violate the enumeration's invariant
-  // (the society never observed the transfer); it is the gap a ground-truth version of the invariant would catch.
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled 5 Oct 2026), flipped from "DEFERRED-REFUSED-CHAIN-RECHECK: a refused claim is never re-read, so an unreported on-chain transfer still
+// gets a 402 with accepts". That test pinned today's known gap and said it would go red when the remedy landed; it has. A first-attempt refusal is now a PENDING claim (the facilitator's word
+// alone does not prove the authorisation can no longer move money), so NO answer carries `accepts` until the C6 expiry proof marks the claim `expired`. Three paths can resolve it; each is
+// pinned below on the real router and the real reconciler.
+async function quietTrace(steps: Step[]): Promise<TraceResult> {
   const publicKey = await realPublicKey();
-  const log = console.log;
-  console.log = () => {};
-  let r: TraceResult;
-  try {
-    r = await runTrace(
-      [
-        { kind: "FIRST", v: "refused" },
-        { kind: "CHAIN_TRANSFER" },
-        { kind: "RESEND", v: "success", c: "used" },
-        { kind: "RECONCILE", v: "success", c: "used" },
-      ],
-      publicKey,
-    );
-  } finally {
-    console.log = log;
-  }
+  return quietWithFakeClock(() => runTrace(steps, publicKey));
+}
+const hasAccepts = (rec: StepRecord): boolean => Array.isArray(rec.body?.accepts);
+
+test("after a first-attempt refusal: an unreported on-chain transfer is BOOKED by the payer's re-send (no accepts, the money is not stranded), and the reconciler has nothing left to do", async () => {
+  const r = await quietTrace([
+    { kind: "FIRST", v: "refused" },
+    { kind: "CHAIN_TRANSFER" },
+    { kind: "RESEND", v: "success", c: "used" },
+    { kind: "RECONCILE", v: "success", c: "used" },
+  ]);
   const [first, transfer, resend, reconcile] = r.records;
-  assert.equal(first.status, 402, "the first /settle was a recorded refusal");
-  assert.equal(first.row.state, "refused");
-  assert.equal(transfer.row.state, "refused");
-  assert.equal(resend.status, 402, "the re-send after an unreported transfer is still told to sign again");
-  assert.ok(Array.isArray(resend.body?.accepts) && resend.body.accepts.length === 1, "with an invitation to sign: `accepts`");
-  assert.equal(resend.row.state, "refused");
-  assert.equal(isContradicted(resend.row), false);
-  assert.equal(resend.rpcFetches, 0, "nothing re-read the chain for the refused row");
-  assert.equal(resend.settleCalls, 0, "and nothing re-POSTed the authorisation");
-  assert.equal(reconcile.rpcFetches, 0, "the reconciler never selects a refused row");
+  assert.equal(first.status, 502, "the first /settle was a recorded refusal, answered as an unresolved payment");
+  assert.equal(hasAccepts(first), false, "no invitation to sign");
+  assert.equal(first.row.state, "pending");
+  assert.notEqual(first.row.rpc_body, null, "the authorisation body is kept for the expiry proof");
+  assert.match(String(first.row.verdict_reason), /insufficient_funds/, "the facilitator's words are the claim's last words");
+  assert.equal(transfer.row.state, "pending", "an unreported transfer changes nothing the society can see");
+  assert.equal(resend.status, 201, "the re-send read the chain used, re-POSTed, was told settled and booked it");
+  assert.equal(resend.row.state, "booked");
+  assert.ok(resend.rpcFetches > 0 && resend.settleCalls === 1, "it re-read the chain and re-POSTed the stored authorisation");
+  assert.equal(reconcile.row.state, "booked");
+  assert.equal(reconcile.rpcFetches, 0, "nothing for the reconciler to select");
   assert.equal(reconcile.settleCalls, 0);
-  assert.equal(reconcile.row.state, "refused");
-  assert.equal(r.world.spent, true, "while the chain reads the authorisation used");
-  assert.equal(r.evidence, false, "the society never observed it");
-  assert.deepEqual(r.violations, [], "so the enumeration's invariant is not broken by this trace");
+  assert.equal(r.world.spent, true);
+  assert.deepEqual(r.violations, [], "and the enumeration's invariant holds on this trace");
+});
+
+test("after a first-attempt refusal: no accepts on any answer before the expiry proof, and the payer's re-send after the proof is the 402 that invites a fresh signature", async () => {
+  const r = await quietTrace([
+    { kind: "FIRST", v: "refused" },
+    { kind: "RESEND", v: "refused", c: "unused" },
+    { kind: "RECONCILE", v: "refused", c: "unused" },
+    { kind: "EXPIRE" },
+    { kind: "RESEND", v: "unknown", c: "unused" },
+  ]);
+  const [first, beforeExpiry, reconcileBefore, expire, afterExpiry] = r.records;
+  assert.equal(first.status, 502);
+  assert.equal(hasAccepts(first), false);
+  assert.equal(beforeExpiry.status, 502, "a re-send before validBefore + margin: the chain reads unused, the re-POST is refused again (H2), nothing is decided");
+  assert.equal(hasAccepts(beforeExpiry), false, "still no invitation to sign");
+  assert.equal(beforeExpiry.row.state, "pending");
+  assert.equal(beforeExpiry.settleCalls, 1);
+  assert.equal(reconcileBefore.row.state, "pending", "the reconciler's pass before the expiry decides nothing either");
+  assert.equal(expire.row.state, "pending", "time passing is not a decision");
+  assert.equal(afterExpiry.status, 402, "after the chain's own clock is past validBefore + margin and the authorisation reads unused, the claim expires");
+  assert.equal(hasAccepts(afterExpiry), true, "and only then does an answer carry `accepts`");
+  assert.equal(afterExpiry.row.state, "expired");
+  assert.equal(afterExpiry.row.rpc_body, null, "the body is cleared with the terminal state");
+  assert.equal(afterExpiry.settleCalls, 0, "the expiry proof re-POSTs nothing");
+  assert.deepEqual(r.violations, []);
+});
+
+test("after a first-attempt refusal: the reconciler's pass after the expiry proof expires the claim, and the next re-send is the invitation (the second resolving path)", async () => {
+  const r = await quietTrace([
+    { kind: "FIRST", v: "refused" },
+    { kind: "EXPIRE" },
+    { kind: "RECONCILE", v: "unknown", c: "unused" },
+    { kind: "RESEND", v: "unknown", c: "unused" },
+  ]);
+  const [first, expire, reconcile, resend] = r.records;
+  assert.equal(hasAccepts(first), false);
+  assert.equal(expire.row.state, "pending");
+  assert.equal(reconcile.row.state, "expired", "the daily pass resolved it by the C6 proof");
+  assert.equal(reconcile.settleCalls, 0);
+  assert.equal(resend.status, 402);
+  assert.equal(hasAccepts(resend), true, "an expired claim invites the fresh signature, with the chain's proof behind it");
+  assert.equal(resend.row.state, "expired");
+  assert.deepEqual(r.violations, []);
 });

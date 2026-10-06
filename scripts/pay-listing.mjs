@@ -616,6 +616,37 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
     return { ...base, ok: false, exitCode: 1, reason: "leg2_unconfirmed", message: `The server did not receive a settlement verdict from the facilitator (HTTP ${second.status}, settlement_unconfirmed); it keeps the listing reserved and so does this record. Outcome AMBIGUOUS: the money may or may not have moved. DO NOT re-run. After the authorization's validBefore${ident.valid_before ? ` (${new Date((ident.valid_before + RETRY_MARGIN_SECONDS) * 1000).toISOString()} with the ${RETRY_MARGIN_SECONDS}s margin)` : ""}, the operator checks authorizationState(from, nonce) on two RPCs and reconciles the listing from that, against the wallet row the server recorded at the reservation (the 502 body's wallet_row_id, served on GET /api/listing/${listingId} while unresolved), never whichever row is newest at reconciliation time; the identity is in the 'signing' record.\n${recoveryMessage(tombPath)}`, detail: secondText };
   }
 
+  // OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled 5 Oct 2026; CODEX r1 on the commission): a first-attempt facilitator refusal is no longer a 402 that releases the listing. The
+  // server keeps the claim PENDING and the listing RESERVED and answers 502 with `code: "settlement_unresolved"` (the same code every unresolved-claim answer carries). Left to the generic
+  // non-200 branch below, the script would read the nonce as unused, write a local 'refused' tombstone and promise a re-run after validBefore + the margin; but a re-run is refused by the
+  // server while the listing is 'paying' (loadPayableListing: "listing N is paying, not open", before any 402), so the promise is false until the society's reconciler has released it.
+  // So the CODE (never the error text) is recognised BEFORE that branch: the tombstone stays 'signing' (classifyTombstone/recoveryMessage refuse to re-run it), is REWRITTEN with the
+  // authorisation's identity and the answer, and the chain is not consulted to label it. It also catches the code's 500 shapes (settled but unbooked, stopped for a person): there the
+  // money moved or may have, and 'signing' is likewise the true state; the message below says which it is by status.
+  if (secondJson && secondJson.code === "settlement_unresolved") {
+    let ident = {};
+    try {
+      const sent = decodeSentAuthorization(paymentHeader);
+      ident = { from: sent.from, nonce: sent.nonce, valid_before: sent.validBefore };
+    } catch {
+      // keep going: the tombstone still records the status and the detail
+    }
+    // THE DISCRIMINATOR (build review F2, CODEX). The code settlement_unresolved is shared by every answer that says "the outcome is not established": the server's first-attempt facilitator
+    // refusal, kept pending (option B), but ALSO a settled-but-unbooked claim, a claim stopped for a person, and a success the facilitator reported that this request could not record (a 502
+    // that names the tx). The expiry-and-release story below is true ONLY of the first; told to the others it would send a payer who may already have paid to wait for an expiry. The first
+    // answer alone carries `facilitator_refused: true` (and `recheck_after`, the time its expiry proof can first decide), so the story is keyed on that field and on nothing else.
+    const refusedFirst = secondJson.facilitator_refused === true;
+    const recheckAfter = typeof secondJson.recheck_after === "string" && !Number.isNaN(Date.parse(secondJson.recheck_after)) ? new Date(Date.parse(secondJson.recheck_after)).toISOString() : null;
+    deps.writeAtomic(tombPath, JSON.stringify({ status: "signing", key, target, ...purchase, ...ident, http_status: second.status, unresolved_at: deps.nowSeconds(), ...(refusedFirst ? { facilitator_refused: true } : {}), ...(recheckAfter ? { recheck_after: recheckAfter } : {}), detail: secondText.slice(0, 2000) }, null, 2));
+    const decidedAfter = recheckAfter ?? (ident.valid_before ? new Date((ident.valid_before + RETRY_MARGIN_SECONDS) * 1000).toISOString() : null);
+    const message = refusedFirst
+      ? `The server answered HTTP ${second.status}, settlement_unresolved, and says the facilitator REFUSED this payment: it holds the claim for this signed authorisation pending, because the facilitator's word alone is not proof the authorisation can no longer move money (it stays valid until its validBefore). It keeps listing ${listingId} RESERVED, and so does this record: it stays 'signing', with the authorisation's identity. Do NOT sign again and do not delete it yet. A re-run is refused while the listing is 'paying' (the server answers "paying, not open"). The society's reconciler decides the claim on a pass after the authorisation's validBefore plus its margin${decidedAfter ? ` (${decidedAfter})` : ""}: if the authorisation expired unused it releases the listing in the same step, and GET /api/listing/${listingId} then shows it 'open' again (only then is a fresh signature safe: delete this record and re-run); if the facilitator's settlement is confirmed it books the payment instead. If the listing stays 'paying' beyond that, the operator checks authorizationState(from, nonce) on two RPCs, from the identity in this record, and reconciles from that.
+${recoveryMessage(tombPath)}`
+      : `The server answered HTTP ${second.status}, settlement_unresolved: the outcome of this payment is NOT established. It holds a claim for this signed authorisation that it could not complete or decide, and its own answer says do not sign again; the money may have moved (the facilitator may already have reported a settlement that the server could not record, a booking may be unfinished, or the claim may be stopped for a person). The record stays 'signing', with the authorisation's identity. DO NOT re-run. The operator reconciles from the chain${decidedAfter ? `: after ${decidedAfter}` : ""}, authorizationState(from, nonce) on two RPCs from the identity in this record, then GET /api/listing/${listingId} and GET /api/settlements/attention; nothing here says the listing will reopen.
+${recoveryMessage(tombPath)}`;
+    return { ...base, ok: false, exitCode: 1, reason: "leg2_unresolved", message, detail: secondText };
+  }
+
   // The server's own settled-but-unrecorded case is a 500 carrying the tx and
   // a listing left 'paying': money moved. That is exactly the case the
   // tombstone must stay 'signing' for, so it is not special-cased here.
@@ -629,8 +660,8 @@ export async function payListing({ listingId, submissionId, payee, amountCents, 
       const used = await deps.authorizationUsed(sent.from, sent.nonce);
       if (used === false) {
         deps.writeAtomic(tombPath, JSON.stringify({ status: "refused", key, target, ...purchase, from: sent.from, nonce: sent.nonce, valid_before: sent.validBefore, http_status: second.status, refused_at: deps.nowSeconds(), detail: secondText.slice(0, 2000) }, null, 2));
-        // M3 second build (hub, 4 Oct): a non-200 is not always a refusal (the server's 502 settlement_unresolved means a claim exists with
-        // its outcome unknown), and "unused" now is not "never executed": until validBefore whoever holds the authorization may still run it.
+        // M3 second build (hub, 4 Oct): a non-200 is not always a refusal, and "unused" now is not "never executed": until validBefore whoever holds the authorization may still run it.
+        // (The server's settlement_unresolved, a claim that exists with its outcome unknown, no longer reaches here: option B recognises its code above and keeps 'signing'.)
         const code = secondJson && typeof secondJson.code === "string" ? `, ${secondJson.code}` : "";
         return { ...base, ok: false, exitCode: 1, reason: "leg2_refused", message: `The server did not confirm the payment (HTTP ${second.status}${code}), and the chain shows the authorization not executed as of this check. Until its validBefore (${new Date(sent.validBefore * 1000).toISOString()}) whoever holds it, the server included, may still execute it, so this is not yet proof that nothing was paid. Recorded as 'refused'; a re-run is allowed only after ${new Date((sent.validBefore + RETRY_MARGIN_SECONDS) * 1000).toISOString()} (validBefore plus a ${RETRY_MARGIN_SECONDS}s clock-skew margin), and only if the chain still shows it unused then.`, detail: secondText };
       }

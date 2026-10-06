@@ -1254,9 +1254,10 @@ test("handlePayListing: a /verify whose answer cannot be read throws the facilit
   }
 });
 
-// The ordinary release path and the paid path both clear paying_since, so a
-// stale timestamp can never sit on an open or paid row.
-test("handlePayListing: paying_since is cleared on a refused settle (release) and on a successful one (paid)", async () => {
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): a first-attempt rule-7 refusal no longer releases the reservation (the claim stays pending: the facilitator's word alone does not
+// prove the authorisation can no longer move money), so paying_since is KEPT with it; only the paid path clears it here, and the expiry batch is the only thing that releases a refused
+// payment's listing (test/refused-option-b-d1.test.ts). Rewritten from "paying_since is cleared on a refused settle (release)".
+test("handlePayListing: paying_since is KEPT on a refused first settle (the reservation stands, 502 settlement_unresolved) and cleared on a successful one (paid)", async () => {
   const d1 = createLocalD1();
   const original = globalThis.fetch;
   let refuse = true;
@@ -1280,18 +1281,24 @@ test("handlePayListing: paying_since is cleared on a refused settle (release) an
     const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
 
     const refused = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
-    assert.equal(refused.status, 402);
+    assert.equal(refused.status, 502, "a first-attempt refusal is an unresolved payment, never a 402 that invites a second signature");
+    const refusedBody = (await refused.json()) as { code?: string; accepts?: unknown };
+    assert.equal(refusedBody.code, "settlement_unresolved");
+    assert.equal(refusedBody.accepts, undefined, "no invitation to sign");
     let row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
-    assert.equal(row.status, "open", "a refused settle is an answer: released");
-    assert.equal(row.paying_since, null, "and the reservation time goes with it");
+    assert.equal(row.status, "paying", "the reservation is kept: the claim is pending and the money may yet move");
+    assert.ok(typeof row.paying_since === "number", "and the reservation time stays with it");
 
+    // The success path, on a fresh listing (the first is held until its claim's expiry proof releases it).
     refuse = false;
-    const paid = await handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId);
+    const secondListingId = insertListing(d1, { funder_citizen_id: funderId, expires_at: Date.now() + 60_000 });
+    const secondSubmissionId = insertSubmission(d1, { listing_id: secondListingId, citizen_id: reviewerId });
+    const paid = await handlePayListing(payRequest(d1, secondListingId, secondSubmissionId), env, funder, secondListingId);
     assert.equal(paid.status, 200);
-    row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(listingId) as { status: string; paying_since: number | null };
+    row = d1.raw.prepare("SELECT status, paying_since FROM listings WHERE id = ?").get(secondListingId) as { status: string; paying_since: number | null };
     assert.equal(row.status, "paid");
     assert.equal(row.paying_since, null, "paid clears it too");
-    assert.equal((await getListingDetail(env, listingId)).listing.settlement, undefined, "no settlement field on a paid row");
+    assert.equal((await getListingDetail(env, secondListingId)).listing.settlement, undefined, "no settlement field on a paid row");
   } finally {
     globalThis.fetch = original;
     d1.close();
@@ -1561,7 +1568,10 @@ test("handlePayListing: a second pay attempt against an already-'paid' listing i
   }
 });
 
-test("handlePayListing: a settle failure after a successful reserve releases the listing back to 'open' -- retryable, never permanently stuck", async () => {
+// OPTION B: rewritten from "a settle failure after a successful reserve releases the listing back to 'open'". A recorded refusal on the first /settle is not proof that the signed
+// authorisation can no longer move money, so the listing is NOT released by the request: it stays reserved for this payment, the claim stays pending (rpc_body kept, the facilitator's words
+// its last words), and the answer is a 502 settlement_unresolved with no `accepts`. What releases it, and when, is test/refused-option-b-d1.test.ts (the expiry batch, after T).
+test("handlePayListing: a recorded refusal after a successful reserve KEEPS the reservation, answers 502 settlement_unresolved without accepts, and leaves the claim pending", async () => {
   const d1 = createLocalD1();
   try {
     const env = testEnv(d1);
@@ -1594,10 +1604,18 @@ test("handlePayListing: a settle failure after a successful reserve releases the
     } finally {
       globalThis.fetch = original;
     }
-    assert.equal(res.status, 402, "a failed settlement is the ordinary x402 402 response, not a 500 and not a silent success");
+    assert.equal(res.status, 502, "a first-attempt refusal is an unresolved payment (the facilitator's word alone is not proof), not a 402 that invites a second signature");
+    const body = (await res.json()) as { code?: string; accepts?: unknown; error?: string };
+    assert.equal(body.code, "settlement_unresolved");
+    assert.equal(body.accepts, undefined, "no `accepts`: nothing invites a fresh signature before the chain proves the first can no longer move money");
+    assert.match(String(body.error), /insufficient_funds/, "the facilitator's own words, attributed to it");
 
     const listingRow = d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string };
-    assert.equal(listingRow.status, "open", "the reserve must be RELEASED on a settle failure -- the funder can retry, never permanently locked out by our own reservation");
+    assert.equal(listingRow.status, "paying", "the reservation is KEPT: its claim is pending, and the only thing that releases it is the claim's expiry batch");
+    const claim = d1.raw.prepare("SELECT state, rpc_body, verdict_reason FROM settlement_claims").get() as { state: string; rpc_body: string | null; verdict_reason: string | null };
+    assert.equal(claim.state, "pending");
+    assert.ok(claim.rpc_body !== null, "rpc_body is kept: the expiry proof needs the stored body");
+    assert.match(String(claim.verdict_reason), /insufficient_funds/);
 
     const paymentCount = d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments WHERE listing_id = ?").get(listingId) as { n: number };
     assert.equal(paymentCount.n, 0);

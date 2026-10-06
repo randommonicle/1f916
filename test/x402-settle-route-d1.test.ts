@@ -172,7 +172,9 @@ test("B2 rule 5 on the pay route: settlement_pending on a 400 or a 403 also keep
   }
 });
 
-test("B2 on the pay route: a recorded failure (HTTP 200) and a documented refusal (400, 401, 403) RELEASE the listing and answer 402 naming the facilitator's status and reason", async () => {
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): rewritten from "... RELEASE the listing and answer 402 naming the facilitator's status and reason". The facilitator's own words are still
+// served (verbatim, attributed to it), but as a 502 settlement_unresolved without `accepts`, and the reservation is KEPT: the claim is pending until the chain proves the authorisation dead.
+test("B2 on the pay route: a recorded failure (HTTP 200) and a documented refusal (400, 401, 403) KEEP the listing and answer 502 settlement_unresolved naming the facilitator's status and reason, without accepts", async () => {
   for (const c of [
     { status: 200, reason: "insufficient_funds" },
     { status: 400, reason: "policy" },
@@ -184,14 +186,15 @@ test("B2 on the pay route: a recorded failure (HTTP 200) and a documented refusa
     const stub = stubFacilitator({ settle: { status: c.status, body: { success: false, errorReason: c.reason } } });
     try {
       const res = await handlePayListing(payReq(f), f.env, f.funder, f.listingId);
-      assert.equal(res.status, 402, `${label}: a refusal is a 402`);
-      const body = (await res.json()) as { error: string; accepts: { payTo: string }[] };
-      assert.equal(body.error, hubRefusal(c.status, c.reason), label);
-      assert.equal(body.accepts[0].payTo, WALLET_A, label);
+      assert.equal(res.status, 502, `${label}: a first-attempt refusal is an unresolved payment`);
+      const body = (await res.json()) as { error: string; code: string; accepts?: unknown };
+      assert.ok(body.error.includes(hubRefusal(c.status, c.reason)), `${label}: the facilitator's own words, verbatim`);
+      assert.equal(body.code, "settlement_unresolved", label);
+      assert.equal(body.accepts, undefined, `${label}: no invitation to sign`);
       const l = listingRow(f);
-      assert.equal(l.status, "open", `${label}: released`);
-      assert.equal(l.paying_since, null, label);
-      assert.equal(l.paying_wallet_row_id, null, `${label}: the pair is cleared`);
+      assert.equal(l.status, "paying", `${label}: kept`);
+      assert.ok(l.paying_since !== null, label);
+      assert.ok(l.paying_wallet_row_id !== null, `${label}: the pair stays`);
       assert.equal(count(f.d1, `listing_payments WHERE listing_id = ${f.listingId}`), 0, label);
       assert.equal(stub.calls.settle, 1, label);
     } finally {
@@ -227,14 +230,18 @@ test("B2 on the register route: a settlement_pending /settle answers 502 with th
   }
 });
 
-test("B2 on the register route: a recorded failure answers 402 naming the facilitator's status and reason, and nothing is written", async () => {
+// OPTION B: rewritten from "a recorded failure answers 402 naming the facilitator's status and reason". Now 502 settlement_unresolved carrying the same words, no accepts.
+test("B2 on the register route: a recorded failure answers 502 naming the facilitator's status and reason, without accepts, and nothing is written", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: { status: 200, body: { success: false, errorReason: "insufficient_funds" } } });
   try {
     const before = { citizens: count(d1, "citizens"), ledger: count(d1, "ledger"), reg: count(d1, "reg_log") };
     const res = await callWorker(registerReq("refused-payer"), testEnv(d1));
-    assert.equal(res.status, 402);
-    assert.equal(((await res.json()) as { error: string }).error, hubRefusal(200, "insufficient_funds"));
+    assert.equal(res.status, 502);
+    const body = (await res.json()) as { error: string; accepts?: unknown; code?: string };
+    assert.ok(body.error.includes(hubRefusal(200, "insufficient_funds")));
+    assert.equal(body.code, "settlement_unresolved");
+    assert.equal(body.accepts, undefined);
     assert.deepEqual({ citizens: count(d1, "citizens"), ledger: count(d1, "ledger"), reg: count(d1, "reg_log") }, before, "nothing is written");
   } finally {
     stub.restore();

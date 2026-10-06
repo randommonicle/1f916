@@ -7,7 +7,9 @@
 //                        documentation prescribes; a settled answer makes the row settled_unbooked;
 //                        unused past validBefore (+ margin) makes it expired; a recorded refusal is
 //                        NOT honoured here (H2: unused, it stays pending; used, it is stamped and
-//                        stopped, C4 option B); anything else changes nothing.
+//                        stopped, C4 option B); anything else changes nothing. Since option B a
+//                        FIRST-attempt refusal is a pending row too (markFirstRefusal), so it is
+//                        worked like any other and ends only through the chain.
 //   settled_unbooked  -> the route's own booking (the same code the paid request and the payer's
 //                        re-send run), skipping whatever booked_refs already records.
 //
@@ -22,7 +24,7 @@
 // claim on a tight day, and the reconciler, a daily backstop that can wait, is handed only what is left after
 // the sweep, the concierge's ACTUAL cost and the clerk's reserved minimum; with too little for one worst-case
 // row it works none and logs `settlement_reconcile_deferred`. The reconciler works at most
-// RECONCILE_BATCH_ROWS rows, oldest attempt first. It MEASURES what each row
+// RECONCILE_BATCH_ROWS rows, one of each kind in turn, longest-waiting first within a kind. It MEASURES what each row
 // really spends (every D1 statement through a metered DB, every RPC and /settle fetch as the attempt
 // reports them), starts a row only if the row's WORST case still fits under
 // RECONCILE_SUBREQUEST_CEILING, and returns the measured total so the wake sheds against it. One
@@ -149,8 +151,8 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // Never more than the standing ceiling, and never more than is left today.
   const ceiling = Math.min(RECONCILE_SUBREQUEST_CEILING, left);
   const now = Date.now();
-  // Oldest attempt first (acquiring a lease moves updated_at, so a row that keeps failing goes to the
-  // back rather than starving the rest), skipping rows another holder is working and every row this
+  // One of each kind per run when both exist, two of one kind when only that kind does, and within a kind the longest-waiting first (acquiring a lease moves updated_at, so a row that keeps
+  // failing goes to the back rather than starving the rest). Rows another holder is working are skipped, as is every row this
   // reconciler can never finish, which would otherwise take one of its two slots every run (C5, first-gate
   // L4): (F1) a registration whose handle another seat took after payment; a secret-mode registration that is
   // settled_unbooked, which waits for the payer's identical re-send BY DESIGN (its secret leaves only in the payer's own
@@ -160,24 +162,63 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // facilitator's last words (noteUnknown), which must never exclude it. A STOPPED row (C4, option B) is excluded by its marker's PREFIX (substr, not LIKE: the marker
   // contains underscores, which LIKE reads as wildcards); the facilitator's last words are server-built text that never begins with it.
   //
-  // DEFERRED-REFUSED-CHAIN-RECHECK (named in public by envoy 80 in the 1f3d9 reading garden, answering parallax 28208/28266, 5 Oct 2026): a claim
-  // refused on the FIRST /settle (payAndSettle's rule-7 refusal; a refusal on any later attempt while the chain reads unused is not acted on) is
-  // terminal on the facilitator's word alone, with no chain predicate, and this SELECT never takes a refused row again. The signed
-  // authorisation stays valid until validBefore, so a settlement the facilitator did not report would be seen only by a person reading the chain,
-  // while every identical re-send is answered with a 402 that invites a fresh signature. The remedy would re-read a refused row's authorisation
-  // until validBefore + RECONCILE_EXPIRY_MARGIN_SECONDS and stamp it (settlement_contradiction) if the chain reads it used. Money path: D-018 gate.
-  const { results } = await env.DB.prepare(
-    `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?)
+  // DEFERRED-REFUSED-CHAIN-RECHECK, CLOSED by option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled by Ben 5 Oct 2026; named in public by envoy 80 in the 1f3d9 reading garden,
+  // answering parallax 28208/28266). A claim whose FIRST /settle answered a rule-7 refusal used to be written `refused` on the facilitator's word alone, was never selected again, and
+  // every identical re-send was answered with a 402 inviting a fresh signature while the signed authorisation could still be mined. Now that refusal leaves the claim `pending`
+  // (markFirstRefusal), so this SELECT takes it like any pending row, and the one chain proof that ends it is attemptPending's C6: the chain's own clock past validBefore + the margin
+  // and the authorisation still unused, at a two-RPC quorum, marks it `expired` (and releases a listing_pay reservation in the same batch); the chain reading it used books it or stops
+  // it for a person. A pre-B `refused` row is history and is not selected (as before).
+  //
+  // ORDER, and why it is two LIMITed subqueries and an interleave rather than one ORDER BY. Under option B every rule-7 refusal is a pending row owing one expiry proof (up to eight RPC
+  // fetches) from a reconciler that works RECONCILE_BATCH_ROWS = 2 rows a day, and for a listing_pay refusal the reconciler is the ONLY route out (a re-send is refused by the
+  // reservation before it reaches the claim), so neither kind may be able to starve the other. Refusals are cheap for a stranger to produce on three of the four doors (the patron door has
+  // no throttle; registration and listing creation record an attempt only on success), so oldest-first alone could let them starve the bookings of payments that settled (the money that DID
+  // move comes first within a pair); and 'settled_unbooked first' alone lets two settled rows that keep failing take both slots every run and starve every pending row, a refused funder's
+  // listing included. So: ONE statement (RECONCILE_SELECT_COST stays 1), a UNION ALL of two subqueries, each the filters above, ORDER BY updated_at, created_at and its own LIMIT (wrapped in
+  // SELECT * FROM (...) so SQLite accepts the inner LIMIT), then the interleave below: the k-th settled and the k-th pending row as a PAIR, the one that has waited longest first (settled on a
+  // tie), pairs in order, the first RECONCILE_BATCH_ROWS of them. Wait-time order within a pair, not always settled first, because the loop sheds a second row whose worst case would pass the
+  // ceiling: a costly settled row that keeps failing would otherwise shed the pending row every run. It moves its own updated_at each attempt, so next run the waiting row is older and goes first.
+  // Window functions (ROW_NUMBER() OVER) would do it in one ORDER BY, but their support on D1's deployed runtime is unproven, so none is used.
+  const ELIGIBLE = `(leased_until IS NULL OR leased_until <= ?)
        AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))
-       AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)
-       AND NOT (route = 'register' AND state = 'settled_unbooked' AND json_extract(intent_json, '$.public_key') IS NULL)
-     ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
+       AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`;
+  const eligibleBinds = [now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER];
+  const { results: fetched } = await env.DB.prepare(
+    `SELECT * FROM (SELECT * FROM settlement_claims WHERE state = 'settled_unbooked' AND ${ELIGIBLE}
+       AND NOT (route = 'register' AND json_extract(intent_json, '$.public_key') IS NULL)
+     ORDER BY updated_at ASC, created_at ASC LIMIT ?)
+     UNION ALL
+     SELECT * FROM (SELECT * FROM settlement_claims WHERE state = 'pending' AND ${ELIGIBLE}
+     ORDER BY updated_at ASC, created_at ASC LIMIT ?)`,
   )
-    .bind(now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, RECONCILE_BATCH_ROWS)
+    .bind(...eligibleBinds, RECONCILE_BATCH_ROWS, ...eligibleBinds, RECONCILE_BATCH_ROWS)
     .all<ClaimRow>();
+  const oldestFirst = (x: ClaimRow, y: ClaimRow): number => x.updated_at - y.updated_at || x.created_at - y.created_at;
+  const settledRows = fetched.filter((r) => r.state === "settled_unbooked").sort(oldestFirst);
+  const pendingRows = fetched.filter((r) => r.state === "pending").sort(oldestFirst);
+  // The k-th settled and the k-th pending row go in PAIRS, and within a pair the one that has waited longest (updated_at, then created_at) goes first, settled first on a tie (money that DID
+  // move). Not always settled first: the loop below sheds the second row of a batch when the first one's measured cost plus the worst case for the next would pass the day's ceiling, so a
+  // settled row that is costly AND keeps failing, tried first every run, would shed the pending row every run (budget starvation, not slot starvation). A failing row moves its own
+  // updated_at on every attempt (acquireLease), so on the next run the waiting row is the older of the pair and goes first: the shed can fall on the same kind at most on alternate runs.
+  const interleaved: ClaimRow[] = [];
+  for (let i = 0; i < Math.max(settledRows.length, pendingRows.length); i++) {
+    const s = settledRows[i];
+    const p = pendingRows[i];
+    if (s && p) interleaved.push(...(oldestFirst(p, s) < 0 ? [p, s] : [s, p]));
+    else interleaved.push((s ?? p) as ClaimRow);
+  }
+  const results = interleaved.slice(0, RECONCILE_BATCH_ROWS);
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };
   for (const due of results) {
+    // DEFERRED-RECONCILE-EXPIRY-SHED (D-018 gate on option B, M1, 6 Oct 2026): the second row of a pass is shed whenever the first is an EXPIRY PROOF. A refusal that is past T takes the C6
+    // proof (the chain's own clock, two RPC quorums), which measures 8 with its lease and terminal write, 9 with the select, and 9 + 18 > 26, so nothing fits behind it: one aged pending row is cleared
+    // per pass, whatever sits behind it. Under option B every refusal a payer does not re-send after T becomes such a row (before B a refusal cost the reconciler nothing), so a settled-but-unbooked
+    // payment waits N+1 passes behind N older aged refusals and a listing_pay refusal behind N older ones is released on pass N+1; for listing_pay that is the funder's only exit (a re-send is
+    // refused by the reservation, and no operator lever fires the reconciler). Money never moves wrongly and a row older than three days surfaces as pending_aged, so this is liveness, not safety.
+    // Pinned as it is by test/refused-option-b-expiry-d1.test.ts (probes A and B), so a fix changes a number there on purpose. REMEDY SHAPES: price the next row by its own route and kind instead of
+    // the global RECONCILE_ROW_WORST_CASE (an expiry row is cheap to START, 8, and only a registration's first attempt needs 18), or let a listing_pay re-send reach its claim
+    // (DEFERRED-PAY-LISTING-RESEND-REPLAY, listings.ts), which removes the funder's dependence on the pass.
     if (out.actualCost + RECONCILE_ROW_WORST_CASE > ceiling) {
       console.log(JSON.stringify({ level: "warn", event: "settlement_reconcile_shed", remaining_rows: results.length - out.examined, reason: "the next row's worst case would pass the ceiling; it waits for the next run" }));
       break;

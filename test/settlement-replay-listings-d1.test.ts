@@ -169,7 +169,7 @@ test("10c. pay listing: a recording failure is finished exactly once from the cl
     const first = await fx.pay(header);
     assert.equal(first.status, 500, JSON.stringify(first.body));
     assert.match(String(first.body.error), /payment settled \(tx 0xabab.*recording it failed/i);
-    assert.match(String(first.body.error), /one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, oldest attempt first, so a payment can wait more than one day/, "the daily, limited pass is named (B6a, F4)");
+    assert.match(String(first.body.error), /one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, taking settled-but-unbooked payments and still-unresolved ones in turn, longest-waiting first within each, so a payment can wait more than one day/, "the daily, limited pass is named (B6a, F4)");
     assert.doesNotMatch(String(first.body.error), /Repeating this identical request/, "F4: a pay-listing answer never tells the funder to repeat: the reservation answers a re-send first");
     assert.equal(oneClaim(d1).state, "settled_unbooked");
     assert.equal(fx.listing().status, "paying", "the reservation stays: a tombstone no retry can pass");
@@ -260,7 +260,7 @@ test("listing create: one claim, one fee line, one listing; a failure after sett
     const b = await send();
     assert.equal(b.status, 500);
     assert.match(String(b.body.error), /posting fee settled .* but the listing failed to save/);
-    assert.match(String(b.body.error), /one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, oldest attempt first, so a payment can wait more than one day/, "the daily, limited pass is named (B6a, F4)");
+    assert.match(String(b.body.error), /one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, taking settled-but-unbooked payments and still-unresolved ones in turn, longest-waiting first within each, so a payment can wait more than one day/, "the daily, limited pass is named (B6a, F4)");
     assert.match(String(b.body.error), /Repeating this identical request re-checks it sooner\./, "listing creation's re-send really finishes it, and the next request below proves it");
     assert.equal(count(d1, "ledger"), 1, "the fee line was booked by the re-send, once");
     assert.equal(count(d1, "listings"), 0);

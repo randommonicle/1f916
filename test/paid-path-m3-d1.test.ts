@@ -36,6 +36,7 @@ import {
   type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
+import { seedPreBRefused } from "./helpers/pre-b-refused.ts";
 import { sha256Hex } from "../src/chain.ts";
 import {
   acquireLease,
@@ -47,7 +48,6 @@ import {
   markContradiction,
   markExpired,
   markListingNotPaying,
-  markRefused,
   runBookingStep,
   stepGatedOutByLease,
   takeClaim,
@@ -87,7 +87,7 @@ const B_REFUSAL = "The facilitator reports that this settlement failed";
 // B (a second worker) makes the claim terminal-without-money.
 async function bTerminates(d1: LocalD1, kind: "refused" | "expired") {
   const key = await bTakesTheLease(d1);
-  const moved = kind === "refused" ? await markRefused(eq(d1), key, B_REFUSAL, "B", Date.now()) : await markExpired(eq(d1), key, "B", Date.now());
+  const moved = kind === "refused" ? seedPreBRefused(d1, key, B_REFUSAL) : await markExpired(eq(d1), key, "B", Date.now());
   assert.equal(moved, true);
 }
 
@@ -195,14 +195,18 @@ for (const kind of ["refused", "expired"] as const) {
   });
 }
 
-test("C1 control: an UNSTAMPED refused claim still answers a replay with the 402 and accepts, and an unstamped expired one with the expiry 402", async () => {
-  // refused, by a plain recorded refusal (no contradiction anywhere)
+test("C1 control: an UNSTAMPED pre-B refused claim still answers a replay with the 402 and accepts (a first-attempt refusal no longer reaches that state), and an unstamped expired one with the expiry 402", async () => {
+  // refused: option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md) keeps a first-attempt refusal PENDING, so the route cannot build this row any more. A pre-B row is production-reachable only as
+  // history (L-126); it is seeded the way the old markRefused wrote it, and the answer the unchanged claimAnswer arm serves for it is what this control pins.
   {
     const d1 = createLocalD1();
     const stub = stubFacilitator({ settle: () => new Response(JSON.stringify({ success: false, errorReason: "insufficient_funds" }), { status: 200, headers: { "content-type": "application/json" } }) });
     try {
       const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
-      assert.equal((await callWorker(patronReq("rent", header), eq(d1))).status, 402);
+      const first = await callWorker(patronReq("rent", header), eq(d1));
+      assert.equal(first.status, 502, "option B: a first-attempt refusal is an unresolved payment, not a 402");
+      assert.equal(claimDetail(d1).state, "pending");
+      assert.equal(seedPreBRefused(d1, keyOfRow(theClaim(d1)), "The facilitator reports that this settlement failed (HTTP 200, reason: insufficient_funds). By its account no money moved."), true);
       const replay = await callWorker(patronReq("rent", header), eq(d1));
       const body = await json(replay);
       assert.equal(replay.status, 402, JSON.stringify(body));
