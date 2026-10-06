@@ -469,11 +469,15 @@ test("$LIVE_BASE_COMMIT is a full sha, names a commit in this history, and is an
   assert.match(d.LIVE_BASE, /^[0-9a-f]{40}$/);
   assert.ok(d.LIVE_BASE.startsWith("7a1432a9"), "the worker serving before option B was built from 7a1432a9 (M3 + treasury, 4 Oct 2026)");
   const git = (...args: string[]) => spawnSync("git", ["-C", here(".."), ...args], { encoding: "utf8" });
-  const kind = git("cat-file", "-t", d.LIVE_BASE);
-  if (kind.error || kind.status !== 0) {
-    t.skip("this checkout has no git history that contains the live base commit");
+  // Skip ONLY when this checkout cannot answer (no git, or a shallow clone); a sha that a full history does not contain is a failure, never a skip.
+  const head = git("rev-parse", "HEAD");
+  const shallow = git("rev-parse", "--is-shallow-repository");
+  if (head.error || head.status !== 0 || shallow.error || shallow.status !== 0 || shallow.stdout.trim() !== "false") {
+    t.skip("this checkout has no full git history to check the live base commit against");
     return;
   }
+  const kind = git("cat-file", "-t", d.LIVE_BASE);
+  assert.equal(kind.status, 0, `${d.LIVE_BASE} is not an object in this repository`);
   assert.equal(kind.stdout.trim(), "commit");
   assert.equal(git("merge-base", "--is-ancestor", d.LIVE_BASE, "HEAD").status, 0, "HEAD descends from the live worker's code");
 });
