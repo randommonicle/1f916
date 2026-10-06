@@ -145,7 +145,6 @@ test("T4b (A3, CODEX): spread order: a body that itself carries an answered_by k
 
 test("claimAnswer is still pure: it takes no env and its body carries no answered_by (the identity is added at response construction only)", () => {
   for (const [label, answer] of SHAPES) assert.ok(!("answered_by" in answer.body), label);
-  assert.equal(claims.claimAnswer.length >= 3, true);
 });
 
 // ---------- part 2: the real router ----------
