@@ -67,3 +67,24 @@ stays in `ClaimState` and the table's CHECK; `claimAnswer`'s refused arm, `markC
 `test/settlement-claims-d1.test.ts` (the last test that imported it) was rewritten onto `markFirstRefusal`/`markExpired`. New test: a scan of `src/` that no file has a `markRefused`
 identifier (outside comments), a `SET state = 'refused'` or an UPDATE writing the `"refused"` literal. Red-proof: M15 (a `markRefused` stub beside `markExpired`) and M17 (a
 `SET state = 'refused'` string in `settlement-reconcile.ts`) each go red in that test alone; M16 (the B write sets `state = 'refused'`) goes red in it AND in the unit and step-0 tests.
+
+## 3. The reconciler takes money that moved first; how a first-attempt refusal ENDS
+
+`runReconciler`'s SELECT is `ORDER BY CASE state WHEN 'settled_unbooked' THEN 0 ELSE 1 END, updated_at, created_at` (commission Q1, both seats agreed). Under B every rule-7 refusal is a
+pending row owing one expiry proof from a reconciler that works two rows a day, and refusals are unmetered on three doors (patron has no throttle; registration and listing creation
+record an attempt only on success), so oldest-first alone could let refusals starve the bookings of payments that settled. The DEPENDENT FINDING, which the commission did not name: the old
+fairness rule ("a row that keeps failing goes to the back", pinned by `test/settlement-replay-reconcile-d1.test.ts` test 14) now holds only WITHIN a kind. A settled_unbooked row that keeps
+failing is tried first on every run and takes one slot; TWO of them would take both slots and starve every pending row, a first-attempt refusal included (whose pay-listing reservation only
+the expiry batch releases) until a person clears them. The permanent cases are already excluded by the SELECT and every failure is logged. Planted `DEFERRED-RECONCILE-SLOT-SPLIT` (a
+reserved slot: one settled_unbooked, one oldest pending) above the SELECT; not built (it changes the batch contract). Test 14 is rewritten to pin the new trade (a failing settled row costs
+one slot, not the batch), with the reason in its comment. The DEFERRED-REFUSED-CHAIN-RECHECK comment above the SELECT is replaced with what B does.
+
+`test/refused-option-b-expiry-d1.test.ts` (20 tests), on the shared fixture `test/helpers/refused-b-fixture.ts` (the four doors driven with an identical request): the expiry proof by the
+payer's re-send (register, patron, listing_create) and by the reconciler (all four), after T at the chain's clock only (the wall clock alone, a trailing RPC, and the margin not yet waited
+out each leave the claim pending with no `accepts`); a listing_pay reservation released only in the expiry batch, and a re-send of a reserved listing refused by "paying, not open" before
+it reaches the claim; cancellation (the chain reads used while the facilitator refuses again: stopped, never refused or expired, never selected again, listed on the attention list);
+success after the refusal (booked once, by the re-send on three doors, by the reconciler's re-POST on listing_pay); secret-mode registration keeps its identical re-send requirement; a held
+success meeting a first-refusal row is held, logged and named; `pending_aged` on the attention list; and the starvation regression (three older refusals, one settled-unbooked payment: the
+booking goes first). Red-proofs: E1 ORDER BY back to oldest-first -> the starvation test; E2 `markExpired` without the release row -> both listing_pay tests; E3 the pinned proof without
+`pastTimestamp` -> the trailing-block leg; E4 the margin not waited out -> the early leg; E5 a used-chain refusal not stopped -> the cancellation test; E6 secret-mode settled_unbooked rows
+selected again -> the secret-mode test; E7 a held success not named -> the held-success test.

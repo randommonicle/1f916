@@ -430,7 +430,7 @@ test("11. rpc_body is NULL on every terminal row and appears in NO route's respo
 
 // ---------- 14. a failing row never stops later rows; the fixed batch; fairness ----------
 
-test("14. a failing row never stops the rows after it: one log line per failure, a fixed batch of RECONCILE_BATCH_ROWS, and the failing row goes to the back", async () => {
+test("14. a failing row never stops the rows after it: one log line per failure, a fixed batch of RECONCILE_BATCH_ROWS, and a failing settled row costs one slot, not the batch", async () => {
   const d1 = createLocalD1();
   const stub = stubFacilitator({ settle: (n) => (n <= 4 ? pendingAnswer() : settledAnswer()), rpc: bothRpcs(true) });
   try {
@@ -462,13 +462,17 @@ test("14. a failing row never stops the rows after it: one log line per failure,
     assert.equal(stateOf(c.header), "pending", "rows C and D are beyond this run's batch and untouched");
     assert.equal(stateOf(d.header), "pending");
 
-    // Fairness: A was just attempted, so it is behind C and D. Oldest-by-creation would pick A again (and fail again) ahead of them.
+    // Fairness, as option B left it (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, Q1): a settled_unbooked row (money that moved) is tried BEFORE a pending one, so that refusals, now pending rows owing
+    // an expiry proof, cannot starve bookings. A is settled_unbooked, so it is tried first on every run, takes one of the two slots, and is logged each time; the OTHER slot still goes to the
+    // oldest pending row, so C and D are reached one run apiece rather than being starved. (Before B the failing row went behind the waiting ones: oldest attempt first across both kinds.
+    // Within a kind that rule stands, since the ordering's next keys are updated_at and created_at. DEFERRED-RECONCILE-SLOT-SPLIT in settlement-reconcile.ts names the residual: two such rows.)
     const { value: second, lines: secondLines } = await captureLog(() => runReconciler(testEnv(d1)));
-    assert.equal(second.failed, 0, "the row that keeps failing was not retried ahead of the rows that have waited");
-    assert.equal(eventLines(secondLines, "settlement_reconcile_row_failed").length, 0);
-    assert.equal(stateOf(c.header), "booked", "C is reached on the second run");
+    assert.equal(second.failed, 1, "the failing settled row is tried first again: money that moved is never put behind refusals");
+    assert.equal(eventLines(secondLines, "settlement_reconcile_row_failed").length, 1, "and it is logged again, so it cannot go unseen");
+    assert.equal(stateOf(c.header), "booked", "C is reached on the second run, in the other slot");
+    assert.equal(stateOf(d.header), "pending");
     await runReconciler(testEnv(d1));
-    assert.equal(stateOf(d.header), "booked", "and D on the next: nothing starves behind the failing row");
+    assert.equal(stateOf(d.header), "booked", "and D on the next: a single failing row costs one slot, it does not starve the rest");
     assert.equal(stateOf(a.header), "settled_unbooked", "and A is still there for a person");
   } finally {
     stub.restore();

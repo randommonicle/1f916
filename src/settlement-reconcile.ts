@@ -7,7 +7,9 @@
 //                        documentation prescribes; a settled answer makes the row settled_unbooked;
 //                        unused past validBefore (+ margin) makes it expired; a recorded refusal is
 //                        NOT honoured here (H2: unused, it stays pending; used, it is stamped and
-//                        stopped, C4 option B); anything else changes nothing.
+//                        stopped, C4 option B); anything else changes nothing. Since option B a
+//                        FIRST-attempt refusal is a pending row too (markFirstRefusal), so it is
+//                        worked like any other and ends only through the chain.
 //   settled_unbooked  -> the route's own booking (the same code the paid request and the payer's
 //                        re-send run), skipping whatever booked_refs already records.
 //
@@ -149,7 +151,7 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // Never more than the standing ceiling, and never more than is left today.
   const ceiling = Math.min(RECONCILE_SUBREQUEST_CEILING, left);
   const now = Date.now();
-  // Oldest attempt first (acquiring a lease moves updated_at, so a row that keeps failing goes to the
+  // Settled-but-unbooked rows first, then oldest attempt first (acquiring a lease moves updated_at, so within a kind a row that keeps failing goes to the
   // back rather than starving the rest), skipping rows another holder is working and every row this
   // reconciler can never finish, which would otherwise take one of its two slots every run (C5, first-gate
   // L4): (F1) a registration whose handle another seat took after payment; a secret-mode registration that is
@@ -160,18 +162,25 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // facilitator's last words (noteUnknown), which must never exclude it. A STOPPED row (C4, option B) is excluded by its marker's PREFIX (substr, not LIKE: the marker
   // contains underscores, which LIKE reads as wildcards); the facilitator's last words are server-built text that never begins with it.
   //
-  // DEFERRED-REFUSED-CHAIN-RECHECK (named in public by envoy 80 in the 1f3d9 reading garden, answering parallax 28208/28266, 5 Oct 2026): a claim
-  // refused on the FIRST /settle (payAndSettle's rule-7 refusal; a refusal on any later attempt while the chain reads unused is not acted on) is
-  // terminal on the facilitator's word alone, with no chain predicate, and this SELECT never takes a refused row again. The signed
-  // authorisation stays valid until validBefore, so a settlement the facilitator did not report would be seen only by a person reading the chain,
-  // while every identical re-send is answered with a 402 that invites a fresh signature. The remedy would re-read a refused row's authorisation
-  // until validBefore + RECONCILE_EXPIRY_MARGIN_SECONDS and stamp it (settlement_contradiction) if the chain reads it used. Money path: D-018 gate.
+  // DEFERRED-REFUSED-CHAIN-RECHECK, CLOSED by option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled by Ben 5 Oct 2026; named in public by envoy 80 in the 1f3d9 reading garden,
+  // answering parallax 28208/28266). A claim whose FIRST /settle answered a rule-7 refusal used to be written `refused` on the facilitator's word alone, was never selected again, and
+  // every identical re-send was answered with a 402 inviting a fresh signature while the signed authorisation could still be mined. Now that refusal leaves the claim `pending`
+  // (markFirstRefusal), so this SELECT takes it like any pending row, and the one chain proof that ends it is attemptPending's C6: the chain's own clock past validBefore + the margin
+  // and the authorisation still unused, at a two-RPC quorum, marks it `expired` (and releases a listing_pay reservation in the same batch); the chain reading it used books it or stops
+  // it for a person. A pre-B `refused` row is history and is not selected (as before).
+  //
+  // ORDER: `settled_unbooked` (money that DID move) before `pending`, then oldest attempt first. Under option B every rule-7 refusal is a pending row owing one expiry proof (up to eight
+  // RPC fetches) from a reconciler that works two rows a day, and refusals are cheap for a stranger to produce on three of the four doors (the patron door has no throttle, registration
+  // and listing creation record an attempt only on success), so oldest-first alone could let refusals starve the bookings of payments that settled. The trade is the reverse risk: a
+  // settled_unbooked row that keeps failing is tried first every run and takes one of the two slots; the permanent cases are excluded above and each failure is logged, so it cannot go unseen.
+  // DEFERRED-RECONCILE-SLOT-SPLIT: TWO such rows would take both slots every run and starve every pending row (a first-attempt refusal included, whose listing_pay reservation only the expiry
+  // batch releases) until a person cleared them. The remedy is a reserved slot (one settled_unbooked, one oldest pending); not built here, because it changes the batch contract.
   const { results } = await env.DB.prepare(
     `SELECT * FROM settlement_claims WHERE state IN ('pending', 'settled_unbooked') AND (leased_until IS NULL OR leased_until <= ?)
        AND (verdict_reason IS NULL OR verdict_reason NOT IN (?, ?))
        AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)
        AND NOT (route = 'register' AND state = 'settled_unbooked' AND json_extract(intent_json, '$.public_key') IS NULL)
-     ORDER BY updated_at ASC, created_at ASC LIMIT ?`,
+     ORDER BY CASE state WHEN 'settled_unbooked' THEN 0 ELSE 1 END, updated_at ASC, created_at ASC LIMIT ?`,
   )
     .bind(now, CLAIM_HANDLE_TAKEN, CLAIM_LISTING_NOT_PAYING, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER, RECONCILE_BATCH_ROWS)
     .all<ClaimRow>();
