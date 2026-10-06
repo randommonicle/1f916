@@ -860,11 +860,19 @@ async function respondToExistingClaim(env: Env, row: ClaimRow, identical: boolea
     // move it, the stored body is re-POSTed to /settle, as PayAI's own documentation
     // prescribes for learning an outcome. It never asks the payer to sign again.
     //
-    // DEFERRED-RESEND-COOLDOWN (option B build review, CODEX F3; 6 Oct 2026): each identical re-send of a pending claim can take the lease, read the chain (up to 4 RPC fetches, 8 more for the expiry
-    // proof) and re-POST /settle, with no per-claim bound. For a first-attempt refusal that window lasts until the C6 expiry proof: validBefore is at most ~360 s after signing (this server bounds
-    // it at now + 300 + 60), plus the 300 s margin. A 60 s cooldown on the claim's updated_at (an answer from the row alone, no lease, no RPC, no /settle, this path only, never the reconciler)
-    // was PROTOTYPED and not kept: it broke 20 tests that were already in the suite, plus the ordering fixture's immediate re-send steps. CODEX holds the bound is required; GEMINI that the cost
-    // is acceptable (a pending claim from an unknown outcome already costs the same per re-send, and a listing_pay re-send never reaches this line). The D-018 gate decides.
+    // DEFERRED-RESEND-COOLDOWN (option B build review, CODEX F3; RULED (a), ACCEPTABLE TO DEPLOY WITH THIS FLAG, by the D-018 Opus gate on 6 Oct 2026, docs/REVIEW-REFUSED-OPTION-B-GATE-2026-10-06.md Q7).
+    // Each identical re-send of a pending claim can take the lease, read the chain (up to 4 RPC fetches, 8 more for the expiry proof) and re-POST /settle, with no per-claim bound. For a first-attempt
+    // refusal that window lasts until the C6 expiry proof: validBefore is at most ~360 s after signing (this server bounds it at now + 300 + 60), plus the 300 s margin. Why the gate accepted it:
+    // (1) no money consequence: every re-send outcome fails closed (an unreadable chain means no re-POST, an unknown /settle leaves the row pending, and the 180 s lease serialises attempts per claim);
+    // (2) bounded per authorisation: while the chain reads unused, /settle is re-POSTed only before validBefore (attemptPending), then come at most 300 s of chain reads and one expiry proof, and then
+    // the answer comes from the row; (3) the same resources are already reachable at the same order per request (unauthenticated GET /treasury makes up to four uncached fetches to the same RPCs,
+    // and the patron door sends any well-formed signature to PayAI /verify with no throttle): what is new is about two D1 UPDATEs per re-send; (4) holding B for a cost bound would keep the
+    // double-payment window open. A 60 s cooldown on the claim's updated_at was PROTOTYPED on 6 Oct and not kept: it broke 20 pre-existing tests plus the ordering fixture's immediate re-send steps.
+    // CODEX holds the bound is required, GEMINI that it is acceptable.
+    // UN-DEFER TRIGGERS (any one): evidence that PayAI meters or rate-limits /settle per call; the first production first-attempt refusal, or logs showing repeated re-sends of one claim; outreach that
+    // drives paid traffic. THE FIX SHAPE NEEDS NO MIGRATION: a pending row whose verdict_reason carries classifySettle's rule-7 prefix ("The facilitator reports that this settlement failed"),
+    // re-sent before its T (valid_before + RECONCILE_EXPIRY_MARGIN_SECONDS), is answered from the row (no lease, no RPC, no /settle) without the repeat clause; after T the row runs as now, and a
+    // late success is still seen, through the chain reading the authorisation used, which delays it without losing it. Its test: an immediate replay makes zero RPC and zero facilitator calls.
     const owner = crypto.randomUUID();
     const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());
     if (!leased) return claimResponse(claimAnswer(row, true, reqs, { leaseHeld: true }));

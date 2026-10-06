@@ -41,6 +41,8 @@ import {
   keyArgs,
   keyOfRow,
   markFirstRefusal,
+  RECONCILE_BACKSTOP,
+  RECONCILE_REPEAT_CLAUSE,
   releaseLease,
   reportPointer,
   stoppedMessage,
@@ -198,9 +200,10 @@ for (const route of ROUTES) {
         assert.doesNotMatch(text, /Repeating this identical request re-checks it sooner/, "and the repeat clause is omitted exactly where it is false");
       } else {
         assert.ok(text.includes("Re-send this identical request after that time and you will be told whether it expired unused (then sign a fresh one), settled, or is still unresolved."));
-        assert.ok(text.includes("Repeating this identical request re-checks it sooner."), "the repeat clause is true on this route");
+        // L3 (D-018 gate): the clause is true of a re-send, but beside "after that time" it invites the re-sends before T that DEFERRED-RESEND-COOLDOWN is about
+        assert.doesNotMatch(text, /Repeating this identical request re-checks it sooner/, "the first-refusal answer says 're-send after T' and does not also say 'repeat it sooner'");
       }
-      assert.ok(text.includes("The society's reconciler makes one pass a day, at 06:00 UTC"), "the reconciler's backstop wording is the tail on every route");
+      assert.ok(text.endsWith(RECONCILE_BACKSTOP), "the reconciler's backstop wording, and nothing after it, is the tail on every route");
     } finally {
       stub.restore();
       d1.close();
@@ -397,10 +400,65 @@ test("DEFERRED-RESEND-COOLDOWN is planted in respondToExistingClaim's pending br
   const fn = src.indexOf("async function respondToExistingClaim");
   const lease = src.indexOf("const leased = await acquireLease(env, keyOfRow(row), owner, Date.now());", flag);
   assert.ok(fn > 0 && fn < flag, "inside respondToExistingClaim");
-  assert.ok(lease > flag && lease - flag < 2200, "directly above the pending branch's acquireLease");
-  const text = src.slice(flag, lease);
+  assert.ok(lease > flag && lease - flag < 3800, "directly above the pending branch's acquireLease");
+  const text = src.slice(flag, lease).replace(/\r?\n\s*\/\/\s*/g, " "); // the comment wraps; compare it as one run of words
+  assert.match(text, /RULED \(a\), ACCEPTABLE TO DEPLOY WITH THIS FLAG, by the D-018 Opus gate on 6 Oct 2026/, "the gate's ruling and its date");
   assert.match(text, /no per-claim bound/);
   assert.match(text, /C6 expiry proof/);
-  assert.match(text, /broke 20 tests/);
-  assert.match(text, /D-018 gate decides/);
+  assert.match(text, /broke 20 pre-existing tests/);
+  assert.match(text, /CODEX holds the bound is required, GEMINI that it is acceptable/);
+  assert.match(text, /UN-DEFER TRIGGERS \(any one\): evidence that PayAI meters or rate-limits \/settle per call; the first production first-attempt refusal/);
+  assert.match(text, /outreach that drives paid traffic/, "the third trigger");
+  assert.match(text, /NEEDS NO MIGRATION: a pending row whose verdict_reason carries classifySettle's rule-7 prefix/);
+  assert.match(text, /answered from the row \(no lease, no RPC, no \/settle\) without the repeat clause/);
+});
+
+// L3 (D-018 gate on option B): the repeat clause leaves the first-refusal answer ONLY. Every other pending answer on register, patron and listing_create keeps it, because there a re-send
+// really re-checks the claim; listing_pay never carries it (the reservation answers a re-send first).
+test("L3: the first-refusal answer does not carry the repeat clause; every other pending answer on register, patron and listing_create keeps it, and listing_pay's never does", () => {
+  const pending = (route: ClaimRoute) => ({ network: "base", asset: "0x1", from_addr: "0x2", nonce: "0x" + "3".repeat(64), route, intent_json: "{}", intent_hash: "h", rpc_body: "{}", rpc_body_hash: "h", valid_before: 1_800_000_000, state: "pending", tx: null, payer: null, verdict_reason: null, booked_refs: "{}", created_at: 1, updated_at: 1, lease_owner: null, leased_until: null }) as unknown as ClaimRow;
+  for (const route of ["register", "patron", "listing_create"] as const) {
+    const first = claimAnswer(pending(route), true, {}, { detail: "d", firstRefusalRecheckAfter: "2027-01-15T08:05:00.000Z" });
+    assert.ok(!String(first.body.error).includes(RECONCILE_REPEAT_CLAUSE), `${route}: the first-refusal answer`);
+    assert.ok(String(first.body.error).endsWith(RECONCILE_BACKSTOP), `${route}: it ends on the backstop alone`);
+    for (const [label, opts] of [["a re-send's detail", { detail: "d" }], ["another attempt in progress", { leaseHeld: true }], ["a held success", { settledTx: TX }], ["no options", {}]] as const) {
+      assert.ok(String(claimAnswer(pending(route), true, {}, opts).body.error).includes(RECONCILE_REPEAT_CLAUSE), `${route}, ${label}: keeps the clause`);
+    }
+  }
+  for (const [label, opts] of [["first refusal", { detail: "d", firstRefusalRecheckAfter: "2027-01-15T08:05:00.000Z" }], ["a re-send's detail", { detail: "d" }], ["no options", {}]] as const) {
+    assert.ok(!String(claimAnswer(pending("listing_pay"), true, {}, opts).body.error).includes(RECONCILE_REPEAT_CLAUSE), `listing_pay, ${label}: never`);
+  }
+});
+
+// D-018 gate on option B, L2 and L4: two deferrals planted where the work lands, and a comment corrected. Pinned so a flag cannot drift off its place or be deleted unseen.
+test("DEFERRED-DATED-PAYING-NO-CLAIM is planted in settlementField's dated arm and names the double failure that can leave a listing with no claim", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/listings.ts", import.meta.url)), "utf8");
+  const flag = src.indexOf("DEFERRED-DATED-PAYING-NO-CLAIM");
+  assert.ok(flag > 0);
+  assert.equal(src.indexOf("DEFERRED-DATED-PAYING-NO-CLAIM", flag + 1), -1, "once");
+  const fn = src.indexOf("export function settlementField");
+  const arm = src.indexOf("const iso = new Date(payingSince).toISOString();", flag);
+  assert.ok(fn > 0 && fn < flag && arm > flag && arm - flag < 2200, "inside settlementField, directly above the dated arm");
+  const text = src.slice(flag, arm).replace(/\r?\n\s*\/\/\s*/g, " ");
+  assert.match(text, /settlement_claim_unavailable/);
+  assert.match(text, /the re-read of the claim throws too/);
+  assert.match(text, /the reservation is KEPT whether or not the INSERT landed/);
+  assert.match(text, /nothing releases it \(the reconciler selects claims, not listings\)/);
+  assert.match(text, /anti-join/);
+});
+
+test("DEFERRED-LISTING-CREATE-THROTTLE-RESEND is planted at the creation throttle, above the consult it precedes, and the pay route's release comment no longer names a /verify refusal after the reservation", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/listings.ts", import.meta.url)), "utf8");
+  const flag = src.indexOf("DEFERRED-LISTING-CREATE-THROTTLE-RESEND");
+  assert.ok(flag > 0);
+  assert.equal(src.indexOf("DEFERRED-LISTING-CREATE-THROTTLE-RESEND", flag + 1), -1, "once");
+  const throttle = src.indexOf("await assertListingCreateNotThrottled(env, citizen.id, ip);", flag);
+  assert.ok(throttle > flag && throttle - flag < 2000, "directly above the creation throttle");
+  assert.ok(src.indexOf("const replay = await replayForClaim(env, request, reqs, claim);", throttle) > throttle, "which runs before the claim consult");
+  const text = src.slice(flag, throttle).replace(/\r?\n\s*\/\/\s*/g, " ");
+  assert.match(text, /a funder at the daily limit, or on a throttled IP, is refused before an identical re-send can reach its claim/);
+  assert.match(text, /True since M2/);
+  // the corrected comment (the gate's L4 nit): a /verify refusal cannot reach the release after a reservation
+  assert.ok(!/and a \/verify refusal after the reservation\. A conflict is/.test(src), "the wrong sentence is gone");
+  assert.ok(/A \/verify refusal cannot reach here after a reservation/.test(src.replace(/\r?\n\s*\/\/\s*/g, " ")), "and says why");
 });

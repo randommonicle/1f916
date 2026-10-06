@@ -283,6 +283,11 @@ export function settlementField(status: string, payingSince: number | null | und
   // A row with no reservation time was reserved before migration 0014, which predates the claim table (0017): it has no claim, so the reconciler can never select, release or book it, and
   // the attention list never carries it. For THAT row the by-hand sentence is the true one, so the reconciler's is not served here.
   if (payingSince == null) return "unresolved: reservation time unavailable (reserved before the column existed); a settlement was attempted and not confirmed; neither open nor paid until the operator reconciles it against the chain";
+  // DEFERRED-DATED-PAYING-NO-CLAIM (D-018 gate on option B, L2, 6 Oct 2026): this dated arm promises the reconciler, but a dated 'paying' listing can still have NO claim. When payAndSettle's claim
+  // INSERT throws and the re-read of the claim throws too (x402.ts, the settlement_claim_unavailable answer), the reservation is KEPT whether or not the INSERT landed, so a reservation with no claim
+  // can be made after deploy, and nothing releases it (the reconciler selects claims, not listings). Before option B the by-hand wording was the true one for such a row. Ben's pre-deploy anti-join
+  // (every 'paying' listing against the claims' listing_id) covers the rows that exist at deploy; this flag is for the ones that double failure can still make. REMEDY SHAPES: a listing reaper (a
+  // 'paying' listing with no claim older than UNRESOLVED_AFTER_MS goes back to open), or releasing in that double-failure path only when a read proves no claim row exists.
   const iso = new Date(payingSince).toISOString();
   if (payingSince > now - UNRESOLVED_AFTER_MS) return `pending since ${iso}: a payment is being settled; not open for submissions`;
   return `unresolved since ${iso}: a settlement was attempted and not confirmed; neither open nor paid until ${SETTLEMENT_RECONCILED_BY}`;
@@ -390,6 +395,10 @@ export async function handleCreateListing(request: Request, env: Env, citizen: C
     throw new SocietyError(400, `listing refused: ${denyReason}`);
   }
   const ip = request.headers.get("CF-Connecting-IP");
+  // DEFERRED-LISTING-CREATE-THROTTLE-RESEND (D-018 gate on option B, L4, 6 Oct 2026): this throttle and the free checks above run BEFORE the B4 consult (replayForClaim, below), so a funder at the daily
+  // limit, or on a throttled IP, is refused before an identical re-send can reach its claim. On this door the repeat clause ("Repeating this identical request re-checks it sooner") and a first
+  // refusal's "re-send after that time" can therefore be false for such a funder. True since M2 (the clause already existed); option B adds one more way to be in that state. REMEDY: consult the
+  // claim first, as register-gate.ts does for its free checks, or exempt a re-send whose header already has a claim from the throttle. Not built.
   await assertListingCreateNotThrottled(env, citizen.id, ip);
 
   // Step 2: the posting fee, computed server-side from the just-validated
@@ -953,12 +962,13 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
     // before afterVerify), reservedByMe is false and we must NOT touch the
     // row: another request may legitimately hold 'paying' and be mid-settle
     // right now. If we did reserve and then were refused, release our OWN
-    // lock so the funder can retry. What reaches here WITHOUT keepReservation is a
-    // CLAIM CONFLICT (since the settlement-claim wave) -- this signed authorisation
-    // already belongs to another request (B3: the reservation and the claim succeed
-    // or fail together) -- and a /verify refusal after the reservation. A conflict is
-    // returned, never thrown, so it lands here and cannot strand the listing in
-    // 'paying'; no /settle was sent for it. A recorded facilitator refusal (classifySettle's
+    // lock so the funder can retry. What reaches here WITHOUT keepReservation, after a reservation, is
+    // a CLAIM CONFLICT (since the settlement-claim wave) -- this signed authorisation
+    // already belongs to another request, found at the claim INSERT (B3: the reservation and the claim
+    // succeed or fail together) -- and the 503 "could not record a claim" when the INSERT failed and a
+    // re-read proved no claim row exists. (A /verify refusal cannot reach here after a reservation: the
+    // reservation is made in afterVerify, after /verify has answered.) Both are returned, never thrown, so
+    // they land here and cannot strand the listing in 'paying'; no /settle was sent for either. A recorded facilitator refusal (classifySettle's
     // rule 7) NO LONGER lands here to be released: since option B
     // (docs/BRIEF-REFUSED-CHAIN-RECHECK.md) it leaves the claim pending and returns with
     // keepReservation, because the facilitator's word alone does not prove the signed

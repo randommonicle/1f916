@@ -550,15 +550,15 @@ export function describeClaim(row: ClaimRow): string {
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 const txPart = (row: ClaimRow) => (row.tx ? ` (tx ${row.tx})` : "");
 
-// What the reconciler really does (B6a, hub ruling F4): ONE pass a day, at 06:00 UTC, and it works a limited number of unresolved payments per
-// pass, oldest attempt first, and only what the concierge and the clerk leave room for that day (scheduled(), F3), so a payment can wait MORE than
-// one day. It promises no deadline. A secret-mode registration that is settled_unbooked gets no deadline at all (B6b).
+// What the reconciler really does (B6a, hub ruling F4; reworded for fix passes F1/F1b of option B): ONE pass a day, at 06:00 UTC, and it works a limited number of unresolved payments per
+// pass, taking settled-but-unbooked payments and still-unresolved ones in turn, the longest-waiting first within each kind, and only what the concierge and the clerk leave room for that day
+// (scheduled(), F3), so a payment can wait MORE than one day. It promises no deadline. A secret-mode registration that is settled_unbooked gets no deadline at all (B6b).
 export const RECONCILE_BACKSTOP =
-  "The society's reconciler makes one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, oldest attempt first, so a payment can wait more than one day.";
+  "The society's reconciler makes one pass a day, at 06:00 UTC, and works a limited number of unresolved payments per pass, taking settled-but-unbooked payments and still-unresolved ones in turn, longest-waiting first within each, so a payment can wait more than one day.";
 
 // Appended ONLY where an identical re-send really re-checks or finishes the claim (registration, the patron door, listing creation). NOT on a
-// listing_pay answer (the pay route's reservation answers a re-send first, so repeating does nothing) and NOT on the handle-taken answer (F1:
-// no retry can book it). Each place it is served has a test that follows it.
+// listing_pay answer (the pay route's reservation answers a re-send first, so repeating does nothing), NOT on the handle-taken answer (F1:
+// no retry can book it), and NOT on the first-refusal answer (L3: it says "re-send after T", and the clause would invite the re-sends before T). Each place it is served has a test that follows it.
 export const RECONCILE_REPEAT_CLAUSE = "Repeating this identical request re-checks it sooner.";
 
 export function reconcileTail(route: ClaimRoute): string {
@@ -697,7 +697,10 @@ export function claimAnswer(row: ClaimRow, identical: boolean, reqs: unknown, op
       // R2-3: a STOPPED row (C4, option B) is answered with its own words, below the success-in-hand case (a caller that knows the tx says so) and never with the reconciler's tail.
       if (opts.settledTx === undefined && isChainSpent(row)) return { status: 500, body: { error: stoppedMessage(row), code: SETTLEMENT_UNRESOLVED } };
       const heldClause = opts.leaseHeld ? (row.route === "listing_pay" ? "Another attempt to resolve it is in progress. " : "Another attempt to resolve it is in progress; repeat this identical request in a few minutes. ") : "";
-      const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${reconcileTail(row.route)}`;
+      // L3 (D-018 gate on option B): the first-refusal answer tells the payer to re-send AFTER T, so it must not also say "Repeating this identical request re-checks it sooner" (true, but together
+      // the two sentences invite exactly the pre-T re-sends DEFERRED-RESEND-COOLDOWN is about). It carries the backstop alone; every other pending answer keeps the clause where a re-send re-checks.
+      const tail = opts.firstRefusalRecheckAfter !== undefined ? RECONCILE_BACKSTOP : reconcileTail(row.route);
+      const rest = `${heldClause}${opts.detail ? `${opts.detail} ` : ""}${tail}`;
       // C2 (re-gate LOW-1(b)): this request holds a success verdict naming the tx. The claim is still pending because another attempt held it when this request
       // tried to write, so the payer is told what this request KNOWS (the facilitator's account, the tx) and what it does not (that the society has recorded it).
       // CODEX M3-build r1 MEDIUM: the success is the fact, the tx string is detail; a success reported with an empty tx is still a success.

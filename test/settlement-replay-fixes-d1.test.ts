@@ -360,10 +360,11 @@ function claimFixtureRow(route: "register" | "patron" | "listing_create" | "list
   };
 }
 
-test("F4: the backstop states a daily pass at 06:00 UTC that works a limited number of rows, oldest attempt first, so a row can wait more than one day; it promises no deadline", () => {
+test("F4: the backstop states a daily pass at 06:00 UTC that works a limited number of rows, settled-but-unbooked and still-unresolved in turn, longest-waiting first within each, so a row can wait more than one day; it promises no deadline", () => {
   assert.match(RECONCILE_BACKSTOP, /one pass a day, at 06:00 UTC/);
-  assert.match(RECONCILE_BACKSTOP, /limited number of unresolved payments per pass, oldest attempt first/);
+  assert.match(RECONCILE_BACKSTOP, /limited number of unresolved payments per pass, taking settled-but-unbooked payments and still-unresolved ones in turn, longest-waiting first within each/);
   assert.match(RECONCILE_BACKSTOP, /can wait more than one day/);
+  assert.doesNotMatch(RECONCILE_BACKSTOP, /oldest attempt first/, "the old words described one ORDER BY; since F1/F1b the batch takes one of each kind and orders each by wait time");
   assert.doesNotMatch(RECONCILE_BACKSTOP, /at the latest|next one|resolves by/i, "the old promise is gone");
   assert.equal(RECONCILE_REPEAT_CLAUSE, REPEAT);
 });
