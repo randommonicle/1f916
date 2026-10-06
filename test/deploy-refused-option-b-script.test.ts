@@ -538,7 +538,7 @@ test("the allowlist is one constant of exactly this script, its test, and docs/;
   assert.ok(tracked.length > 100, "the whole tree is listed");
   const dir = mkdtempSync(join(tmpdir(), "deploy-b-paths-"));
   try {
-    const named = ["src/x402.ts", "src/doc.ts", "migrations/0099_x.sql", "schema.sql", "package.json", "package-lock.json", "wrangler.jsonc", "tsconfig.json", ".claude/skills/x.md", "README.md",
+    const named = ["src/x402.ts", "src/docs/evil.ts", "src/doc.ts", "migrations/0099_x.sql", "schema.sql", "package.json", "package-lock.json", "wrangler.jsonc", "tsconfig.json", ".claude/skills/x.md", "README.md",
       "docs", "docsx/a.md", "Docs/a.md", "scripts/deploy-refused-option-b.ps1.bak", "scripts/deploy-m3-treasury.ps1", "test/deploy-refused-option-b-script.test.ts/x", "test/other.test.ts", '"docs/odd\\"name.md"'];
     const allowed = ["docs/BRIEF-REFUSED-CHAIN-RECHECK.md", "docs/a/b/c.md", "docs/new.md", "scripts/deploy-refused-option-b.ps1", "test/deploy-refused-option-b-script.test.ts"];
     const input = join(dir, "paths.txt");
