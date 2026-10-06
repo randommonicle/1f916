@@ -23,7 +23,10 @@ throwaway script in the scratchpad (not committed). A neighbouring guard turning
 | 5 | `31ade529` | `pay-listing.mjs` recognises `settlement_unresolved` (item 7) |
 | 6 | `0f8c5dce` | the served-text sweep and `DEFERRED-PAY-LISTING-RESEND-REPLAY` |
 | 7 | `1ff8be50` | an import the refusal branch no longer uses; this table |
-| 8 | this one | `settlementField`: the reconciler's sentence only on the dated arm (a claimless row keeps the by-hand wording); the slot-split flag pinned |
+| 8 | `35853c27` | `settlementField`: the reconciler's sentence only on the dated arm (a claimless row keeps the by-hand wording); the slot-split flag pinned |
+| F1 | `27d7c655` | the reconciler batch is one of each kind (UNION ALL of two LIMITed subqueries, interleaved in TypeScript); the slot-split flag removed |
+| F2 | `77574a98` | `facilitator_refused` / `recheck_after` on the first-refusal answer only; the pay script keys on it |
+| F3 | not built | stopped at the churn threshold: 20 base tests, see the F3 section; the probe was reverted |
 
 ## 1. The first-attempt refusal stays pending
 
@@ -188,3 +191,15 @@ Tests: pay-listing.test.ts (the 502 with the discriminator; the 502 settledTx sh
 and absent from a re-send's answer, a stopped 500, a booking failure, an unknown first outcome, a held success, a settled_unbooked answer and the lease-held answer). Red-proofs: D1 the route passes
 no discriminator -> the four route tests and the "no other" test; D2 the held success carries it -> "no other"; D3 every pending answer carries it -> "no other"; D4 the pay script keys on the code
 again -> the settledTx 502, the 500 and the boolean tests; D5 any truthy value unlocks the story -> the boolean test; D6 `recheck_after` dropped from the record -> the first test.
+
+## F3. The re-send cooldown: NOT BUILT, stopped at the churn threshold (as commissioned)
+
+Built to the commission as a probe, not committed: `RESEND_COOLDOWN_MS = 60_000` exported from `x402.ts`; in `respondToExistingClaim`'s pending branch, before `acquireLease`, `if (Date.now() - row.updated_at <
+RESEND_COOLDOWN_MS)` answers `claimAnswer(row, true, reqs, { detail })` from the row (no lease, no RPC, no /settle), the detail naming the last attempt and `updated_at + cooldown` as ISO UTC; the reconciler is
+untouched. The served-sentence check held: `RECONCILE_REPEAT_CLAUSE` ("re-checks it sooner") stays true, the held-lease "repeat in a few minutes" stays true, and `firstRefusalDetail`'s "after T" is
+past the cooldown (a refusal at /settle was made on an authorisation still valid at /verify, so T = validBefore + 300 s is more than 200 s after the refusal).
+
+**The churn: 33 tests failed, 20 of them present at the base commit (more than the commission's limit of about 12), 13 written in this branch.** The 20 are the tests that replay immediately and expect
+a re-check: C1 refused/expired (re-POST), C2 (re-POST), R2-3, C4-B control, CODEX deploy-script r3, CODEX pending-wording r1, H3/MEDIUM-1 (patron), C7, F4 (register, patron, settled-but-unrecorded),
+H2 re-send refused/expired, CODEX r2 (2) tx-named/empty-tx, 7g, test 8, and the ordering enumeration (3572 traces, each RESEND step an immediate re-send, so it needs a clock step per RESEND, which changes
+what it enumerates). Per the commission the probe was reverted and F3 is reported rather than built; F1 and F2 stand. Nothing in the tree depends on F3.
