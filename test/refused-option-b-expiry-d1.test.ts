@@ -383,7 +383,9 @@ test("attention: an old first-attempt-refusal row is listed as pending_aged, and
 
 // ---------- the reconciler takes money that moved ahead of refusals ----------
 
-test("starvation: refusals older than a settled-but-unbooked payment cannot take both of the reconciler's two daily slots; the booking goes first", async () => {
+// WHAT THIS COVERS: refusals that are NOT yet past T (valid_before is still in the future), which take the cheap path: a re-POST that is refused again, 7 subrequests with the select, leaving room
+// for a second row in the same pass. Refusals already past T take the expiry-proof path and shed the second row: see DEFERRED-RECONCILE-EXPIRY-SHED below, which this test does not exercise.
+test("starvation (refusals NOT yet past T, the cheap re-POST path): refusals older than a settled-but-unbooked payment cannot take both of the reconciler's two daily slots; the booking goes in the same pass", async () => {
   const d1 = createLocalD1();
   const stub = worldStub({ settle: (n) => (n === 4 ? settledAnswer() : refusedAnswer()) });
   try {
@@ -538,6 +540,9 @@ test("F1b: a costly failing settled row sheds the pending listing_pay refusal at
     const fx = await routeFx(d1, "listing_pay");
     assert.equal((await fx.send()).status, 502, "the funder's payment was refused: the listing is reserved");
     assert.equal(fx.listing!().status, "paying");
+    // The pair's order is by updated_at, and two timestamps taken in the same millisecond would tie (settled first), so the refusal's attempt time is fixed: later than the settled row's 1000, earlier
+    // than anything run 1 writes. created_at is left alone: the release is bound to a reservation taken no later than the claim's creation.
+    d1.raw.prepare("UPDATE settlement_claims SET updated_at = 2000 WHERE route = 'listing_pay'").run();
     timePasses(d1); // the chain's clock is past validBefore + the margin for the pending claim
 
     const first = await captureLog(() => runReconciler(eq(d1), TIGHT_DAY));
@@ -557,4 +562,86 @@ test("F1b: a costly failing settled row sheds the pending listing_pay refusal at
     stub.restore();
     d1.close();
   }
+});
+
+// ---------- DEFERRED-RECONCILE-EXPIRY-SHED (D-018 gate on option B, M1): refusals PAST T, the expiry-proof path ----------
+//
+// The test above covers refusals that are NOT yet past T: each takes the cheap H2 path (a re-POST that is refused again, 7 with the select), which leaves room for a second row. A refusal
+// whose T has passed takes the EXPIRY PROOF instead (the chain's own clock, two RPC quorums: 8 with its lease and terminal write, 9 with the select), and 9 + RECONCILE_ROW_WORST_CASE (18) passes the
+// ceiling of 26, so the loop SHEDS the second row of that pass. One aged pending row is therefore cleared per pass, whatever sits behind it. These two tests pin that behaviour as it is, honestly
+// (the gate's probes A and B), so a fix changes a number here on purpose and nothing changes it by accident.
+
+// Refusals older than every other row, in order, all PAST T at the chain's clock (valid_before is backdated as well as updated_at, which is what takes the expiry-proof path).
+async function agedRefusals(d1: LocalD1, n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    const fx = await routeFx(d1, "patron");
+    assert.equal((await fx.send()).status, 502);
+  }
+  const rows = d1.raw.prepare("SELECT rowid AS rid FROM settlement_claims WHERE state = 'pending' ORDER BY rowid").all() as { rid: number }[];
+  rows.forEach((r, i) => d1.raw.prepare("UPDATE settlement_claims SET created_at = ?, updated_at = ? WHERE rowid = ?").run(1000 + i, 1000 + i, r.rid));
+}
+const passesUntil = async (d1: LocalD1, done: () => boolean, max = 8): Promise<{ passes: number; resolvedPerPass: number[] }> => {
+  const resolvedPerPass: number[] = [];
+  for (let pass = 1; pass <= max; pass++) {
+    const { value } = await captureLog(() => runReconciler(eq(d1)));
+    resolvedPerPass.push(value.resolved);
+    if (done()) return { passes: pass, resolvedPerPass };
+  }
+  return { passes: -1, resolvedPerPass };
+};
+
+test("DEFERRED-RECONCILE-EXPIRY-SHED (probe A): a settled-but-unbooked payment behind N older refusals that are PAST T is booked on pass N+1: one aged refusal is cleared per pass", async () => {
+  const d1 = createLocalD1();
+  const stub = worldStub({ settle: (n) => (n === 4 ? settledAnswer() : refusedAnswer()) });
+  const N = 3;
+  try {
+    await agedRefusals(d1, N);
+    d1.raw.exec(SETTLED_BOOKING_BREAKS);
+    await settledUnbookedPatron(d1, "waits-behind-refusals", 10_000);
+    d1.raw.exec("DROP TRIGGER breaks_every_ledger_line");
+    timePasses(d1); // every claim is now past validBefore + the margin at the chain's clock
+    const booked = () => count(d1, "settlement_claims WHERE state = 'booked'") === 1;
+    const { passes, resolvedPerPass } = await passesUntil(d1, booked);
+    assert.deepEqual(resolvedPerPass.slice(0, N), [1, 1, 1], "each of the first N passes clears exactly ONE aged refusal (its expiry proof) and sheds the second row");
+    assert.equal(passes, N + 1, `the payment that settled is booked on pass N+1, not on pass 1: ${JSON.stringify(resolvedPerPass)}`);
+    assert.equal(count(d1, "settlement_claims WHERE state = 'expired'"), N, "the N refusals were all expired by then");
+    assert.equal(count(d1, "ledger"), 1, "and the payment is booked once");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("DEFERRED-RECONCILE-EXPIRY-SHED (probe B): a listing_pay refusal behind four older refusals that are PAST T is released on pass 5: the funder has no other exit", async () => {
+  const d1 = createLocalD1();
+  const stub = worldStub();
+  try {
+    await agedRefusals(d1, 4);
+    const fx = await routeFx(d1, "listing_pay");
+    assert.equal((await fx.send()).status, 502, "the funder's payment was refused, and a re-send is refused by the reservation before it reaches the claim");
+    assert.equal((await fx.send()).status, 409);
+    timePasses(d1);
+    const released = () => fx.listing!().status === "open";
+    const { passes, resolvedPerPass } = await passesUntil(d1, released);
+    assert.deepEqual(resolvedPerPass.slice(0, 4), [1, 1, 1, 1], "one aged refusal is cleared per pass");
+    assert.equal(passes, 5, `the listing is released on pass 5, behind the four older refusals: ${JSON.stringify(resolvedPerPass)}`);
+    assert.equal(fx.listing!().paying_since, null);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("DEFERRED-RECONCILE-EXPIRY-SHED is planted above the reconciler's shed check, with the cost arithmetic and the remedy shapes", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/settlement-reconcile.ts", import.meta.url)), "utf8");
+  const flag = src.indexOf("DEFERRED-RECONCILE-EXPIRY-SHED");
+  assert.ok(flag > 0);
+  assert.equal(src.indexOf("DEFERRED-RECONCILE-EXPIRY-SHED", flag + 1), -1, "once");
+  const shed = src.indexOf("if (out.actualCost + RECONCILE_ROW_WORST_CASE > ceiling) {");
+  assert.ok(shed > flag && shed - flag < 2500, "directly above the shed check it qualifies");
+  const text = src.slice(flag, shed).replace(/\r?\n\s*\/\/\s*/g, " "); // the comment wraps; compare it as one run of words
+  assert.match(text, /9 \+ 18 > 26/, "the arithmetic");
+  assert.match(text, /one aged pending row is cleared per pass/);
+  assert.match(text, /price the next row by its own route and kind/);
+  assert.match(text, /DEFERRED-PAY-LISTING-RESEND-REPLAY/);
 });

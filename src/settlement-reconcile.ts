@@ -24,7 +24,7 @@
 // claim on a tight day, and the reconciler, a daily backstop that can wait, is handed only what is left after
 // the sweep, the concierge's ACTUAL cost and the clerk's reserved minimum; with too little for one worst-case
 // row it works none and logs `settlement_reconcile_deferred`. The reconciler works at most
-// RECONCILE_BATCH_ROWS rows, oldest attempt first. It MEASURES what each row
+// RECONCILE_BATCH_ROWS rows, one of each kind in turn, longest-waiting first within a kind. It MEASURES what each row
 // really spends (every D1 statement through a metered DB, every RPC and /settle fetch as the attempt
 // reports them), starts a row only if the row's WORST case still fits under
 // RECONCILE_SUBREQUEST_CEILING, and returns the measured total so the wake sheds against it. One
@@ -151,7 +151,7 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
   // Never more than the standing ceiling, and never more than is left today.
   const ceiling = Math.min(RECONCILE_SUBREQUEST_CEILING, left);
   const now = Date.now();
-  // One of each kind per run when both exist, two of one kind when only that kind does, and within a kind oldest attempt first (acquiring a lease moves updated_at, so a row that keeps
+  // One of each kind per run when both exist, two of one kind when only that kind does, and within a kind the longest-waiting first (acquiring a lease moves updated_at, so a row that keeps
   // failing goes to the back rather than starving the rest). Rows another holder is working are skipped, as is every row this
   // reconciler can never finish, which would otherwise take one of its two slots every run (C5, first-gate
   // L4): (F1) a registration whose handle another seat took after payment; a secret-mode registration that is
@@ -211,6 +211,14 @@ export async function runReconciler(env: Env, reservedCost = 0): Promise<Reconci
 
   const out: ReconcileResult = { ...NOTHING, actualCost: RECONCILE_SELECT_COST };
   for (const due of results) {
+    // DEFERRED-RECONCILE-EXPIRY-SHED (D-018 gate on option B, M1, 6 Oct 2026): the second row of a pass is shed whenever the first is an EXPIRY PROOF. A refusal that is past T takes the C6
+    // proof (the chain's own clock, two RPC quorums), which measures 8 with its lease and terminal write, 9 with the select, and 9 + 18 > 26, so nothing fits behind it: one aged pending row is cleared
+    // per pass, whatever sits behind it. Under option B every refusal a payer does not re-send after T becomes such a row (before B a refusal cost the reconciler nothing), so a settled-but-unbooked
+    // payment waits N+1 passes behind N older aged refusals and a listing_pay refusal behind N older ones is released on pass N+1; for listing_pay that is the funder's only exit (a re-send is
+    // refused by the reservation, and no operator lever fires the reconciler). Money never moves wrongly and a row older than three days surfaces as pending_aged, so this is liveness, not safety.
+    // Pinned as it is by test/refused-option-b-expiry-d1.test.ts (probes A and B), so a fix changes a number there on purpose. REMEDY SHAPES: price the next row by its own route and kind instead of
+    // the global RECONCILE_ROW_WORST_CASE (an expiry row is cheap to START, 8, and only a registration's first attempt needs 18), or let a listing_pay re-send reach its claim
+    // (DEFERRED-PAY-LISTING-RESEND-REPLAY, listings.ts), which removes the funder's dependence on the pass.
     if (out.actualCost + RECONCILE_ROW_WORST_CASE > ceiling) {
       console.log(JSON.stringify({ level: "warn", event: "settlement_reconcile_shed", remaining_rows: results.length - out.examined, reason: "the next row's worst case would pass the ceiling; it waits for the next run" }));
       break;
