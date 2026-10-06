@@ -2,6 +2,7 @@
 
 import { appendChained, appendChainedStmt, attest, sha256Hex, type WitnessParams } from "./chain.ts";
 import { attentionTotal } from "./settlement-attention.ts";
+import type { VersionMetadata } from "./code-identity.ts";
 import {
   ASSERTION_WINDOW_MS,
   DEFAULT_AUDIENCE,
@@ -60,6 +61,11 @@ export interface Env {
   // parity with the duty-officer's warden script (design doc S11) and
   // manual operations, which do go over HTTP as the maintainer citizen.
   MAINTAINER_SECRET?: string;
+  // Served code identity (src/code-identity.ts, docs/BRIEF-SERVED-CODE-IDENTITY.md). CODE_COMMIT is the 40-hex commit the deploy script stamps with
+  // `wrangler deploy --var CODE_COMMIT:<sha>`; it is NOT in wrangler.jsonc, so a deploy that forgets the flag serves "not_stamped". CF_VERSION_METADATA is Cloudflare's
+  // version_metadata binding (wrangler.jsonc). Both optional: absent means null + a status, never a default.
+  CODE_COMMIT?: string;
+  CF_VERSION_METADATA?: VersionMetadata;
 }
 
 // B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, Ben's ruling of 2026-09-30): secret mode stays (a product
