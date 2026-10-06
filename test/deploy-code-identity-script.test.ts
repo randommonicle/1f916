@@ -321,9 +321,41 @@ test("T6: the summary survives CRLF line endings and the info mark mangled by a 
   const mangled = summaryOf(SAMPLE("Γä╣", "\r\n"), t);
   assert.ok(mangled);
   assert.deepEqual([mangled.pass, mangled.fail], ["1860", "0"], "CP437 mojibake of the U+2139 mark: letters in the prefix, which a \\W* anchor would refuse");
-  const bare = summaryOf("pass 12\nfail 0\n", t);
+  const bare = summaryOf("tests 12\nsuites 0\npass 12\nfail 0\n", t);
   assert.ok(bare);
   assert.deepEqual([bare.pass, bare.fail], ["12", "0"], "no prefix at all");
+  const trailing = summaryOf("ℹ tests 12\nℹ suites 0\nℹ pass 12 (ms)\nℹ fail 0\n", t);
+  assert.ok(trailing);
+  assert.equal(trailing.pass, "NONE", "anything after the number but whitespace is not the summary");
+});
+
+test("F2 (CODEX build r1): test TITLES can never be taken for the summary: consecutive titles 'pass 5' and 'fail 0' (with or without durations) are no summary, and the real tests/suites/pass/fail block wins over them wherever they sit", (t) => {
+  const title = (eol: string, durations: boolean) => ["✔ pass 5" + (durations ? " (0.4ms)" : ""), "✔ fail 0" + (durations ? " (0.1ms)" : "")].join(eol);
+  const block = (n: string, f: string) => ["ℹ tests " + (Number(n) + Number(f)), "ℹ suites 0", "ℹ pass " + n, "ℹ fail " + f, "ℹ cancelled 0"].join("\n");
+  // the titles alone: no summary (CODEX's reproduction, and the same with durations, and CRLF)
+  for (const [name, text] of [
+    ["no durations", title("\n", false) + "\n"],
+    ["durations", title("\n", true) + "\n"],
+    ["no durations, CRLF", title("\r\n", false) + "\r\n"],
+    ["the old pair with no tests/suites lines above it", "ℹ pass 1860\nℹ fail 0\n"],
+    ["a pair with a suites line but no tests line", "ℹ suites 0\nℹ pass 1860\nℹ fail 0\n"],
+    ["a block with a line between its lines", "ℹ tests 7\nℹ suites 0\nsomething\nℹ pass 7\nℹ fail 0\n"],
+  ] as const) {
+    const r = summaryOf(text, t);
+    if (!r) return;
+    assert.equal(r.pass, "NONE", `${name}: not a summary`);
+  }
+  // the titles above the real block, and the real block with titles BELOW it (the failure detail node prints after the summary): the block is read either way
+  const above = summaryOf(title("\n", false) + "\n" + block("1860", "0") + "\n", t);
+  assert.ok(above);
+  assert.deepEqual([above.pass, above.fail], ["1860", "0"], "titles above the block");
+  const below = summaryOf(block("1860", "0") + "\n" + title("\n", false) + "\n", t);
+  assert.ok(below);
+  assert.deepEqual([below.pass, below.fail], ["1860", "0"], "titles below the block");
+  // a title block that LOOKS like a summary and sits before the real one loses to it (last block wins)
+  const forged = summaryOf(["ℹ tests 5", "ℹ suites 0", "ℹ pass 5", "ℹ fail 0"].join("\n") + "\n" + block("1860", "0") + "\n", t);
+  assert.ok(forged);
+  assert.deepEqual([forged.pass, forged.fail], ["1860", "0"], "the last block wins");
 });
 
 test("T6: a failing run is read as failing, and output with no summary is read as no summary (never as a pass)", (t) => {
@@ -378,7 +410,7 @@ test("T6: the two older scripts carry the SAME anchored pattern (unless their te
     const text = readFileSync(here(`../scripts/${f}`), "utf8").replace(/\r\n/g, "\n");
     assert.ok(text.includes(`[regex]::Matches($testOut, '${pattern}')`), `${f} carries the anchored pattern`);
     assert.equal(text.includes("[regex]::Match($testOut, 'pass (\\d+)')"), false, `${f} no longer takes the first 'pass N' anywhere`);
-    assert.match(text, /if \(\$summary\.Count -gt 0\) \{ \$pass = \$summary\[\$summary\.Count - 1\]\.Groups\[1\]\.Value; \$fail = \$summary\[\$summary\.Count - 1\]\.Groups\[2\]\.Value \}/, `${f} takes the LAST pair`);
+    assert.match(text, /if \(\$summary\.Count -gt 0\) \{ \$pass = \$summary\[\$summary\.Count - 1\]\.Groups\[3\]\.Value; \$fail = \$summary\[\$summary\.Count - 1\]\.Groups\[4\]\.Value \}/, `${f} takes pass and fail from the LAST block`);
   }
 });
 

@@ -47,9 +47,10 @@ $ATTENTION_URL = "$BASE/api/settlements/attention"
 # The propagation poll (brief: "bounded: e.g. 12 tries, 5 s apart").
 $POLL_TRIES = 12
 $POLL_DELAY_SECONDS = 5
-# node's test summary prints "pass N" then "fail M" on consecutive lines, each after one prefix token (an info mark, or whatever the console's code page makes of it). Anchoring on the PAIR means
-# a test title that contains "pass 5" (never followed by a fail line) cannot be taken for the summary, and the LAST pair is the summary. The older scripts took the first "pass (\d+)" anywhere.
-$TEST_SUMMARY_PATTERN = '(?m)^(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$'
+# node's test summary is a BLOCK of consecutive lines, "tests N", "suites N", "pass N", "fail N", each after at most one prefix token (an info mark, or whatever the console's code page makes of it) and
+# followed by nothing but whitespace. Anchoring on all four means test TITLES can never be taken for it, not even two consecutive titles "pass 5" and "fail 0" with no duration suffix (CODEX build r1 F2),
+# and the LAST block is the summary. The older scripts took the first "pass (\d+)" anywhere.
+$TEST_SUMMARY_PATTERN = '(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$'
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
@@ -66,12 +67,12 @@ function Get-DisallowedPaths($paths) {
   }
   return $bad
 }
-# The pass and fail counts of the LAST "pass N / fail M" pair in $testOut, as @{ Pass; Fail }, or $null when there is none.
+# The pass and fail counts of the LAST "tests / suites / pass / fail" block in $testOut, as @{ Pass; Fail }, or $null when there is none.
 function Get-TestSummary($testOut) {
   $found = [regex]::Matches([string]$testOut, $TEST_SUMMARY_PATTERN)
   if ($found.Count -lt 1) { return $null }
   $last = $found[$found.Count - 1]
-  return @{ Pass = $last.Groups[1].Value; Fail = $last.Groups[2].Value }
+  return @{ Pass = $last.Groups[3].Value; Fail = $last.Groups[4].Value }
 }
 function Test-Number($v) { return ($v -is [int] -or $v -is [long] -or $v -is [decimal] -or $v -is [double]) }
 function Get-Text($url, $maxTime) {
