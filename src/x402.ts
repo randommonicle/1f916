@@ -21,6 +21,7 @@ import {
   claimKeyFromPayload,
   claimResponse,
   contradictionAnswer,
+  firstRefusalDetail,
   getClaim,
   isChainSpent,
   isContradicted,
@@ -30,7 +31,7 @@ import {
   markChainSpent,
   markContradiction,
   markExpired,
-  markRefused,
+  markFirstRefusal,
   markSettled,
   noteUnknown,
   reconcileTail,
@@ -715,36 +716,41 @@ export async function payAndSettle(
     throw e;
   }
   if (settled.verdict.kind === "refused") {
-    // Rule 7, a recorded refusal: terminal, and the authorisation body is cleared (B7).
+    // Rule 7, a recorded refusal, on this claim's FIRST /settle. OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled by Ben 5 Oct 2026): it is NOT written as `refused`. The facilitator's word is
+    // the only evidence, and the signed authorisation stays valid until validBefore, so a settlement it did not report could still be mined after a 402 had invited a fresh signature (both
+    // could then move money). The claim stays `pending`, with the facilitator's words as its last words and `rpc_body` intact (markFirstRefusal), exactly as a refusal on any later attempt
+    // already leaves it (H2, attemptPending). The answer is the one an identical replay of that pending row gets, with the facilitator's account and the earliest re-send time added
+    // (firstRefusalDetail): a 502 settlement_unresolved, no `accepts`, "do not sign again". The row resolves through the chain: used (booked, or stopped for a person) or provably unused past
+    // validBefore + margin (`expired`, the only state that invites the fresh signature, and the one that releases a listing_pay reservation, in the same batch). EVERY answer on this branch
+    // keeps a pay-listing reservation: the claim is pending, so the money may yet move, and the reconciler's expiry batch is the only thing that releases it.
+    //
+    // The route never passes a null claim in production (register, patron, listing_create and listing_pay all do). A call WITHOUT a claim has no row to hold the refusal on, so it keeps the
+    // answer it always had, a plain 402 (test/x402.test.ts calls payAndSettle that way).
     if (claimId) {
       const key = claimId.key;
       const reason = settled.verdict.error;
       let wrote = false;
       let threw = false;
       try {
-        // R2-1: bound to the take time. Any other holder's attempt since (acquireLease, noteUnknown) moved updated_at, so a refusal that is late past its lease writes nothing and
-        // is answered from the claim below, never as a 402 over a transfer another attempt may still mine.
-        wrote = await markRefused(env, key, reason, owner, Date.now(), undefined, takenAt);
+        // R2-1: bound to the take time and to this request as strict holder. Any other holder's attempt since (acquireLease, noteUnknown) moved updated_at, so a refusal that is late past its lease
+        // writes nothing and is answered from the claim below, never over a transfer another attempt may still mine.
+        wrote = await markFirstRefusal(env, key, reason, owner, Date.now(), takenAt);
       } catch (e) {
         threw = true;
-        console.log(JSON.stringify({ level: "error", event: "settlement_claim_write_failed", step: "mark_refused", reason: clipReason(e instanceof Error ? e.message : String(e)) }));
+        console.log(JSON.stringify({ level: "error", event: "settlement_claim_write_failed", step: "mark_first_refusal", reason: clipReason(e instanceof Error ? e.message : String(e)) }));
       }
-      if (!wrote || threw) {
-        // R1: another holder moved the claim, or holds a live lease on it, while this request's /settle was in flight. This request's refusal is
-        // then not the claim's answer: answer from the claim, never "refused, sign a fresh one" over a payment another holder may have settled.
-        // CODEX M3-build r1 HIGH (pre-existing since M2): a THROWN markRefused is no refusal recorded either. It used to skip this re-read and
-        // fall through to the 402 below, which releases pay listing's reservation, so a refusal could re-open a listing whose claim another
-        // holder had settled. Now it is re-read like any unwritten refusal; a re-read that throws, or finds no row, is an unknown outcome
-        // (thrown, so pay listing keeps its reservation: settlement_unconfirmed); only a claim that reads `refused` lets the 402 stand.
-        // CODEX M3-build r2 (1): ...and only an UNSTAMPED one. A refused claim stamped with a settlement contradiction (another holder's re-POST read a
-        // success after the refusal) is answered from the claim, the contradiction's 500, and pay listing keeps its reservation: the money may have moved.
-        if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
-        const now = await getClaim(env, key);
-        if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
-        if (now.state !== "refused" || isContradicted(now)) {
-          return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null, owner) };
-        }
+      // A write that threw may or may not have landed: let go of our own lease (a no-op if it did) so no answer says "another attempt is in progress" for a request that has answered.
+      if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
+      // CODEX M3-build r1 HIGH (pre-existing since M2): a refusal write that did not apply is no refusal recorded. Re-read the claim; a re-read that throws, or finds no row, is an unknown
+      // outcome (thrown, so pay listing keeps its reservation: settlement_unconfirmed).
+      const now = await getClaim(env, key);
+      if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
+      if (wrote && now.state === "pending" && !isChainSpent(now)) {
+        return { ok: false, keepReservation: true, response: claimResponse(claimAnswer(now, true, reqs, { detail: firstRefusalDetail(reason, now, RECONCILE_EXPIRY_MARGIN_SECONDS) })) };
       }
+      // R1: another holder moved the claim (or holds a live lease on it) while this request's /settle was in flight, or the claim moved in the instant after our write. This request's refusal is then
+      // not the claim's answer: answer from the claim as an identical replay would, never "sign a fresh one" over a payment another holder may have settled.
+      return { ok: false, keepReservation: true, response: await answerFromMovedClaim(env, now, reqs, claim as PaidClaim, null, owner) };
     }
     return {
       ok: false,

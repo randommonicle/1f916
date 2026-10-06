@@ -36,6 +36,7 @@ import {
   type Env,
   type LocalD1,
 } from "./helpers/settlement-harness.ts";
+import { seedPreBRefused } from "./helpers/pre-b-refused.ts";
 import { claimAnswer, claimKeyFromPayload, getClaim, acquireLease, CLAIM_LEASE_TTL_MS, type ClaimRow } from "../src/settlement-claims.ts";
 import {
   runReconciler,
@@ -372,7 +373,10 @@ test("11. rpc_body is NULL on every terminal row and appears in NO route's respo
     const seatA = await pendingRegistration(d1, { handle: "s-pending" });
     assert.equal((await seatA.send()).status, 502);
     const seatB = await pendingRegistration(d1, { handle: "s-refused" });
-    assert.equal((await seatB.send()).status, 402);
+    // Option B: a first-attempt refusal is answered 502 and leaves the claim PENDING. The walk still has to cover a `refused` row (the claimAnswer arm and the replay answers still serve it), and a
+    // pre-B refused row is production-reachable only as history (L-126), so seat B's row is moved to it the way the old markRefused wrote it.
+    assert.equal((await seatB.send()).status, 502);
+    assert.equal(seedPreBRefused(d1, claimKeyFromPayload(JSON.parse(atob(seatB.header)), REQS).key, "The facilitator reports that this settlement failed (HTTP 200, reason: insufficient_funds). By its account no money moved."), true);
     const seatC = await pendingRegistration(d1, { handle: "s-booked" });
     assert.equal((await seatC.send()).status, 201);
     const seatD = await pendingRegistration(d1, { handle: "s-expired", validBefore: "1000" });

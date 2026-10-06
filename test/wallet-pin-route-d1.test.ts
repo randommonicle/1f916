@@ -313,7 +313,7 @@ test("A5: the reservation statement's placeholders and its bind arguments are bo
   assert.deepEqual(binds, ["at", "pin.walletRowId", "pin.walletRowHash", "listingId", "at", "submissionId", "pin.walletRowId", "submission.citizen_id", "pin.walletRowHash", "submission.citizen_id", "pin.walletRowId"]);
 });
 
-test("test 10, the pay-route half (A6): a /settle whose answer cannot be read -> the 502 carries the pair and the listing KEEPS it; a refused /settle releases the listing and clears it", async () => {
+test("test 10, the pay-route half (A6): a /settle whose answer cannot be read -> the 502 carries the pair and the listing KEEPS it; a refused /settle (option B) KEEPS the listing and its pair too", async () => {
   {
     const f = await fixture();
     const stub = stubFacilitator({ settle: "unreadable" });
@@ -338,12 +338,13 @@ test("test 10, the pay-route half (A6): a /settle whose answer cannot be read ->
     const f = await fixture();
     const stub = stubFacilitator({ settle: "refused" });
     try {
+      // OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): a first-attempt refusal is a pending claim, so the reservation is KEPT with its checked pair (it was released and cleared before B).
       const res = await handlePayListing(payReq(f, pinOf(f.row)), f.env, f.funder, f.listingId);
-      assert.equal(res.status, 402);
+      assert.equal(res.status, 502);
       const l = listingRow(f);
-      assert.equal(l.status, "open", "released");
-      assert.equal(l.paying_wallet_row_id, null, "the pair is cleared with paying_since");
-      assert.equal(l.paying_wallet_row_hash, null);
+      assert.equal(l.status, "paying", "kept: the claim is pending, only its expiry batch releases the listing");
+      assert.equal(l.paying_wallet_row_id, f.row.id, "the pair stays with the reservation");
+      assert.equal(l.paying_wallet_row_hash, f.row.hash);
     } finally {
       stub.restore();
       f.d1.close();

@@ -8,7 +8,7 @@
 // unreadable, clock past validBefore + margin, booking step, a second holder, duplicate delivery, stale replay) and check
 // after EVERY prefix that once the society has observed settlement evidence (a facilitator success, or the chain reading
 // the authorisation used), no later answer invites a fresh signature (a 402 with `accepts`). It would land on this harness.
-// Known exception it must name rather than hide: DEFERRED-REFUSED-CHAIN-RECHECK (src/settlement-reconcile.ts).
+// The known exception it had to name (DEFERRED-REFUSED-CHAIN-RECHECK) is CLOSED by option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): a first-attempt refusal stays pending.
 // PARTLY BUILT (5 Oct 2026): test/settlement-claim-orderings-d1.test.ts enumerates first /settle verdict, re-POST verdict, chain read used/unused/unreadable, clock past validBefore + margin and an unreported chain transfer over one public-key registration, plus a RIVAL holder (RIVAL_TERMINATES_DURING_SETTLE, RIVAL_HOLDS_THEN_TERMINATES) that reaches the contradiction stamp. STILL OPEN here: booking-step failure, duplicate delivery, stale replay (a rival at FIRST or at the booking step is not enumerated either).
 import assert from "node:assert/strict";
 import { createLocalD1, type LocalD1 } from "./local-d1.ts";

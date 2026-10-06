@@ -351,6 +351,27 @@ export async function markRefused(env: Env, key: ClaimKey, reason: string, owner
   );
 }
 
+// OPTION B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md, ruled by Ben 5 Oct 2026): payAndSettle's FIRST /settle, when it answers a rule-7 recorded refusal, no longer writes `refused`. The refusal
+// is the facilitator's word alone, and the signed authorisation stays valid until validBefore, so a settlement the facilitator did not report could still be mined after the society
+// had invited a fresh signature. The claim stays `pending`: the facilitator's words become its last words (verdict_reason, as noteUnknown records them) and the lease is let go so an
+// identical re-send can run the expiry proof at once. `state` and `rpc_body` are left alone (the re-send's and the reconciler's attemptPending refuse a pending row whose body was
+// cleared, so clearing it would make the row unable to ever expire). The row then resolves exactly as every other pending row does: the chain reads the nonce used (booked, or stamped
+// and stopped for a person) or provably unused past validBefore + margin (`expired`, which invites the fresh signature with the chain's proof behind it and releases a listing_pay
+// reservation in the same batch).
+//
+// The write is bound the way R2-1 bound the old refusal write: STRICT holder (`lease_owner = owner`, as noteUnknown; a holder whose lease was released or taken writes nothing) AND
+// `updated_at = takenAt` (every other holder's attempt, acquireLease and noteUnknown, MOVES updated_at, so a late refusal never lands over an attempt that started since this request took
+// the claim). Never over a stopped row (CHAIN_SPENT_MARKER). It returns whether it wrote; a caller that did not write re-reads the claim and answers from its state.
+export async function markFirstRefusal(env: Env, key: ClaimKey, reason: string, owner: string, now: number, takenAt: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE settlement_claims SET verdict_reason = ?, updated_at = ?, lease_owner = NULL, leased_until = NULL
+     WHERE ${KEY_WHERE} AND state = 'pending' AND lease_owner = ? AND updated_at = ? AND (verdict_reason IS NULL OR substr(verdict_reason, 1, ?) <> ?)`,
+  )
+    .bind(reason.slice(0, 400), now, ...keyArgs(key), owner, takenAt, CHAIN_SPENT_MARKER.length, CHAIN_SPENT_MARKER)
+    .run();
+  return r.meta.changes === 1;
+}
+
 // pending -> expired: the chain proved the authorisation unused AFTER valid_before (plus the margin). See markRefused for `release`.
 export async function markExpired(env: Env, key: ClaimKey, owner: string, now: number, release?: ClaimRow): Promise<boolean> {
   return terminate(
@@ -573,14 +594,36 @@ export function listingNotPayingMessage(row: Pick<ClaimRow, "intent_json" | "tx"
   return `Your ${money(Number(i.amount_cents ?? 0))} payment settled${txPart(row as ClaimRow)}, but the listing it was paid against (listing ${String(i.listing_id)}) is no longer awaiting this payment, so the society cannot record it against that listing, and its reconciler ${setAside === "has" ? "has set it aside" : "will set it aside when it next meets it"} rather than retry it. Do not sign again: this payment has already moved. It is logged for the maintainer to look at by hand; no resolution time is promised. To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment).`;
 }
 
+// Where a payer whose money may have moved anyway can say so, for a claim that has no tx to name (a STOPPED row, a first-attempt refusal): the authorisation's NONCE is its identity. A
+// register, patron or listing_create payer need not be a citizen, so the way in is a free showhome note; a listing_pay payer is a citizen (the funder), so a mention of
+// @commonhold-agent. ONE function: stoppedMessage and firstRefusalDetail both serve it, so the two cannot drift. (SHOWHOME_REPORT_POINTER names a tx instead, for a payment that settled.)
+export function reportPointer(row: Pick<ClaimRow, "route" | "nonce">): string {
+  return row.route === "listing_pay"
+    ? `To add your own report, mention @commonhold-agent in a comment naming this nonce (${row.nonce}) (POST /api/comment).`
+    : `To add your own report, leave a free showhome note naming this nonce (${row.nonce}): POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
+}
+
+// Option B (docs/BRIEF-REFUSED-CHAIN-RECHECK.md): what a payer is told when the FIRST /settle of a claim answered a rule-7 recorded refusal and the claim was kept pending (markFirstRefusal).
+// It is the `detail` claimAnswer's pending branch serves after "Do not sign again.": the facilitator's own words, attributed to it (classifySettle rule 7's text, verbatim), then why the society
+// does not act on them alone, then the time before which nothing can be decided. `marginSeconds` is RECONCILE_EXPIRY_MARGIN_SECONDS (x402.ts owns it; this module imports no route or facilitator
+// module, so the caller passes it): T = valid_before + the margin is the earliest moment the expiry proof (C6) can mark the claim `expired`, which is what invites a fresh signature.
+//   - register, patron, listing_create: an identical re-send reaches the claim (replayForClaim runs before any free check), so the text promises the re-send and what it will be told.
+//   - listing_pay: the claim holds a RESERVATION of the listing, and a re-send meets that reservation first (loadPayableListing: "listing N is paying, not open"), before it can reach the claim,
+//     so a "re-send after T" promise would be false. The reconciler's pass decides it instead, and releases the listing in the same step if the authorisation expired unused.
+export function firstRefusalDetail(verdictError: string, row: Pick<ClaimRow, "route" | "nonce" | "valid_before">, marginSeconds: number): string {
+  const t = new Date((row.valid_before + marginSeconds) * 1000).toISOString();
+  const lead = `${verdictError} The society does not act on that account alone: the signed authorisation stays valid until its validBefore, so this payment is not treated as refused until the chain shows the authorisation unused after ${t}.`;
+  if (row.route === "listing_pay") {
+    return `${lead} The listing stays reserved for this payment until then, and while it is reserved a re-send of this request is refused (the listing is paying, not open) before it reaches this claim, so do not re-send. The society's reconciler decides it on a pass after that time and, if the authorisation expired unused, releases the listing in the same step; GET /api/listing/:id serves the listing's state. ${reportPointer(row)}`;
+  }
+  return `${lead} Re-send this identical request after that time and you will be told whether it expired unused (then sign a fresh one), settled, or is still unresolved. ${reportPointer(row)}`;
+}
+
 // R2-3: what a payer is told about a STOPPED row (a pending claim carrying CHAIN_SPENT_MARKER). It claims only what is established: the chain reads the nonce used
 // (authorizationState is true for a spent AND a cancelled authorisation), the society stopped retrying, and a person will look. It never says the reconciler will finish
 // it, never says repeating the request does anything, never says nothing was charged, never invites a signature, and never quotes the facilitator.
 export function stoppedMessage(row: ClaimRow): string {
-  const pointer =
-    row.route === "listing_pay"
-      ? `To add your own report, mention @commonhold-agent in a comment naming this nonce (${row.nonce}) (POST /api/comment).`
-      : `To add your own report, leave a free showhome note naming this nonce (${row.nonce}): POST /api/showhome/enter (any label that is not a citizen handle), then POST /api/showhome/note.`;
+  const pointer = reportPointer(row);
   return `The chain shows the signed authorisation for ${describeClaim(row)} was used (spent, or cancelled by its signer), so the money may have moved: whether it did is not established, and the society cannot tell which transaction used it. The society has stopped retrying this payment automatically. A person will check it against the chain by hand; no resolution time is promised. It is listed at GET /api/settlements/attention. Do not sign again. ${pointer}`;
 }
 
