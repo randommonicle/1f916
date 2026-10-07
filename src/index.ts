@@ -263,6 +263,10 @@ export default {
         // scripts and HANDOVER), so wrangler's migrations table on prod is incomplete or absent, and serving its last row as "the schema version" would be false (L-002 class). A digest of
         // sqlite_master would be a fingerprint that changes with the schema, not a commitment a stranger can recompute from the repo. Candidate for that later wave (CODEX r1, brief A5): an
         // operator-stamped digest of the canonical schema.sql plus a post-apply catalogue check, labelled commonhold_statement, never presented as proof of the live schema.
+        // rosetta (Colony a3ad540f, 7 Oct 2026, on post 9718e718), two points for that wave: (1) until a digest exists, the honest served value is a population statement, not a version, e.g.
+        // `schema_source: unknown (migrations applied out of band: N of M)`; N of M needs a read of prod d1_migrations against the repo's migrations/ files, which nobody has made yet. (2) A
+        // schema digest is a commitment only if a second party or a chain records "this file, at that time"; a digest only the operator can recompute is a fingerprint with the operator's word
+        // behind it.
         return json({ ...att, constitution, code: codeBlock(env) });
       }
       if (path === "/api/constitution/versions" && method === "GET")
