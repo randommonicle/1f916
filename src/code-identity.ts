@@ -60,21 +60,23 @@ export function codeIdentity(env: CodeIdentityEnv): CodeIdentity {
   };
 }
 
-// The sentence every settlement-claim answer carries in `answered_by.note` (A7; the text is pinned by the brief, corrected verbatim by the second exchange seat's round 3). One constant, so the
+// The sentence every settlement-claim answer carries in `answered_by.note` (A7; the text is pinned by the brief, corrected verbatim by the second exchange seat's round 3; its final sentence amended on 7 Oct 2026, A9, because a /verify failure answers before any claim exists). One constant, so the
 // served sentence, the test that pins it and the brief cannot drift apart.
 export const ANSWERED_BY_NOTE =
-  "The code that produced this answer. commit is the operator's deploy-time stamp: a statement checkable against the public repository at that commit, not proof of the running bytes, and null when no valid commit stamp is served, including when the stamp is absent or malformed (commit_status says which). version_id is Cloudflare's id for this Worker version. This payment's claim may have been decided earlier by other code; the claim row does not record which.";
+  "The code that produced this answer. commit is the operator's deploy-time stamp: a statement checkable against the public repository at that commit, not proof of the running bytes, and null when no valid commit stamp is served, including when the stamp is absent or malformed (commit_status says which). version_id is Cloudflare's id for this Worker version. This payment's claim, if one exists, may have been decided earlier by other code; a claim row does not record which.";
 
 export interface AnsweredBy {
   commit: string | null;
   commit_status: CommitStatus;
   version_id: string | null;
+  // Code-identity LOWs wave (gate L2): the same value GET /api/attest serves, so a reader of ONE answer can tell "the binding is missing" (version_id null, "unavailable") from an id.
+  version_status: VersionStatus;
   note: string;
 }
 
-// The block a settlement-claim answer carries. Deliberately narrower than the /api/attest block: no timestamp, no version_status (the version id is null when unavailable).
+// The block a settlement-claim answer carries. Narrower than the /api/attest block: no timestamp. version_status rides it (after version_id) so that a null version_id is never ambiguous.
 export function answeredBy(identity: CodeIdentity): AnsweredBy {
-  return { commit: identity.commit, commit_status: identity.commit_status, version_id: identity.version_id, note: ANSWERED_BY_NOTE };
+  return { commit: identity.commit, commit_status: identity.commit_status, version_id: identity.version_id, version_status: identity.version_status, note: ANSWERED_BY_NOTE };
 }
 
 // Where each served figure comes from, in the vocabulary of /api/official's composition provenance (society.ts COMPOSITION_PROVENANCE: commonhold_statement), plus one new label,

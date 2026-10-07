@@ -15,7 +15,8 @@ Base: 1927/1927 (`npm test`, 65 s) and `tsc` silent, measured in the worktree be
 | # | sha | what |
 |---|---|---|
 | 1 | `d380dbb6` | this log |
-| 2 | this commit | I1 + I2: the `moneyAnswer` marker on `SocietyError`, the router rule, 14 marked sites, the sweep, `test/code-identity-lows-d1.test.ts` |
+| 2 | `a7250b31` | I1 + I2: the `moneyAnswer` marker on `SocietyError`, the router rule, 14 marked sites, the sweep, `test/code-identity-lows-d1.test.ts` |
+| 3 | this commit | I3: `version_status` in `answered_by`, the note's final sentence, the brief (A9), the pins |
 
 ## Notes (one per commit, newest last)
 
@@ -72,3 +73,27 @@ payment, and those are not money answers. So `finishRegistration` catches the So
 **Red-proofs (I1).** Each marker removed in turn (14 mutants, `scratch/code-identity-lows-builder/mutate-markers.mjs`): every one turns exactly its own site's test red, plus the sweep (the three sweep tests for the `x402.ts`, `settlement-claims.ts` and settled-message `listings.ts` sites; the count test for the `register-gate.ts` ones). Router reverted to code-only: 13 red. Marker made enumerable: 1 red (the marker test). Marker made writable and configurable: 1 red. `errorBody` serving the marker: 16 red. Marker always true: 3 red (the marker test, the excluded refusals, the control). A `code` added to the marked answer by the router: 13 red. Each restored and compared byte for byte.
 
 **Decision invariance (I1).** The test file records status, `code` and `error` per scenario before it asserts; run against the base source (a `git archive` of `1491fb9c` in private scratch) and against this branch, the 20 recorded scenarios differ in nothing (status, code, error): 0 differences. (Against the base only the `answered_by` assertions fail, as they must: 2 pass, 20 fail, the 2 being the excluded-refusals test and the control, which assert there is no `answered_by`.)
+
+### 3. I3 (gate L2): `version_status` in `answered_by`, and the note's last sentence
+
+`AnsweredBy` (`src/code-identity.ts`) gains `version_status: VersionStatus` after `version_id`; `answeredBy()` copies it from the identity, the same value `/api/attest` serves (`"available"` or
+`"unavailable"`), so a reader of one answer can tell a missing binding from an id. The comment above `answeredBy` that said it deliberately has no `version_status` now says the opposite and why.
+
+**`ANSWERED_BY_NOTE`: only the final sentence changed** (CODEX r1 of the commission, verbatim; GEMINI conceded in its round 2, because a `/verify` failure now answers before any claim exists):
+
+- old: "This payment's claim may have been decided earlier by other code; the claim row does not record which."
+- new: "This payment's claim, if one exists, may have been decided earlier by other code; a claim row does not record which."
+
+Where the old sentence was quoted or pinned, and what was done: `docs/BRIEF-SERVED-CODE-IDENTITY.md` quotes the constant byte for byte and `test/code-identity-answers-d1.test.ts` T4c reads the brief, so the brief's
+A7 quotation now carries the new sentence, with an **A9** amendment recording the old text, the reason and `version_status` (the status line and the `answered_by: { ... }` shape line say so too). This is a
+difference from the brief (the commission wins for these items; the brief is the contract the last wave built). Pins updated: `test/code-identity-answers-d1.test.ts` `EXPECTED` and `NO_STAMP` (:65-66; the deep equalities at
+:118 and :134 use them) and T4c's sentence regex (plus a `doesNotMatch` on the old wording); `test/code-identity.test.ts` "answeredBy is the narrow block" (value, key order, a missing binding, an empty id);
+`test/code-identity-lows-d1.test.ts` `EXPECTED`. The comment at `settlement-claims.ts:217-218` that paraphrased the old sentence is aligned. `docs/REVIEW-CODE-IDENTITY-GATE-2026-10-06.md` is a historical record of
+`b60885a4` and is left alone. No other file quotes the note.
+
+**New tests** (`test/code-identity-lows-d1.test.ts`, 4): for a binding with an id, no binding, a binding with an empty id and a binding that is not an object, GET `/api/attest` and a claim answer (the
+booked 409 a paid patron request's identical replay gets) served by the same env agree on `version_status` and `version_id`, and `Object.keys(answered_by)` is `commit, commit_status, version_id, version_status, note`.
+
+**Red-proofs (I3), each exact-once and restored byte for byte:** `answeredBy` drops `version_status` (30 red across the four test files); it hard-codes `"available"` (5 red: the three missing-binding variants, the narrow-block test, the no-stamp test);
+`version_status` placed before `version_id` (5 red: the four agreement tests and the narrow-block test, via the key-order assertion); the note's final sentence reverted in the constant (T4c red); reverted in the
+brief only (T4c red, the brief no longer quotes the constant); `/api/attest`'s identity forced to `"unavailable"` (29 red).

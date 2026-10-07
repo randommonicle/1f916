@@ -46,7 +46,7 @@ import {
 const SHA = "1491fb9c" + "0".repeat(28) + "beef";
 const VERSION = { id: "8421a724-a5d5-44a7-9062-1e68a1dbbab0", tag: "", timestamp: "2026-10-07T09:00:00.000Z" };
 // Written out, not computed through the code under test: a bug in answeredBy shows as a difference from this.
-const EXPECTED = { commit: SHA, commit_status: "stamped", version_id: VERSION.id, note: ANSWERED_BY_NOTE };
+const EXPECTED = { commit: SHA, commit_status: "stamped", version_id: VERSION.id, version_status: "available", note: ANSWERED_BY_NOTE };
 const stamped = (d1: LocalD1): Env => testEnv(d1, { CODE_COMMIT: SHA, CF_VERSION_METADATA: VERSION });
 
 const quiet = async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -333,6 +333,41 @@ for (const [label, edit, status, message] of [
       const res = await quiet(() => callWorker(registerReq(body, header), stamped(d1)));
       const served = await assertMoneyAnswer(label, res, status, new RegExp(`^${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
       assert.equal(served.error, message);
+    } finally {
+      stub.restore();
+      d1.close();
+    }
+  });
+}
+
+// ---------- I3 (gate L2): version_status in answered_by ----------
+
+// GET /api/attest and a claim answer, served by the SAME env, say the same version_status; a missing binding is "unavailable" with a null id in BOTH, and an id is "available" in both.
+for (const [label, binding, status, id] of [
+  ["a binding with an id", VERSION, "available", VERSION.id],
+  ["no binding at all", undefined, "unavailable", null],
+  ["a binding with an empty id", { id: "", timestamp: "2026-10-07T09:00:00.000Z" }, "unavailable", null],
+  ["a binding that is not an object", "not-a-binding", "unavailable", null],
+] as const) {
+  test(`I3: ${label}: GET /api/attest and a claim answer agree on version_status (${status}) and version_id`, async () => {
+    const d1 = createLocalD1();
+    const stub = facilitator();
+    try {
+      const env = testEnv(d1, { CODE_COMMIT: SHA, ...(binding === undefined ? {} : { CF_VERSION_METADATA: binding }) });
+      const attest = await json(await callWorker(new Request("https://example.test/api/attest"), env));
+      assert.equal(attest.code.version_status, status, "/api/attest");
+      assert.equal(attest.code.version_id, id, "/api/attest");
+      const header = paymentHeaderFor(TREASURY_ADDRESS, "1000000");
+      const first = await callWorker(patronReq("rent", header), env);
+      assert.equal(first.status, 200, "the payment books");
+      const replay = await callWorker(patronReq("rent", header), env);
+      assert.equal(replay.status, 409, "its identical replay is the booked answer");
+      const body = await json(replay);
+      assert.equal(body.answered_by.version_status, status, "the claim answer");
+      assert.equal(body.answered_by.version_id, id, "the claim answer");
+      assert.equal(body.answered_by.version_status, attest.code.version_status, "the two surfaces agree");
+      assert.deepEqual(Object.keys(body.answered_by), ["commit", "commit_status", "version_id", "version_status", "note"], "version_status follows version_id; the note stays last");
+      assert.equal(body.answered_by.note, ANSWERED_BY_NOTE);
     } finally {
       stub.restore();
       d1.close();

@@ -91,10 +91,13 @@ test("the two facts are independent: a commit with no binding, and a binding wit
   assert.deepEqual([b.commit_status, b.version_status], ["not_stamped", "available"]);
 });
 
-test("answeredBy is the narrow block: commit, commit_status, version_id and the pinned note, and nothing else", () => {
+test("answeredBy is the narrow block: commit, commit_status, version_id, version_status (A9) and the pinned note, and nothing else", () => {
   const ab = answeredBy(codeIdentity({ CODE_COMMIT: SHA, CF_VERSION_METADATA: VERSION }));
-  assert.deepEqual(ab, { commit: SHA, commit_status: "stamped", version_id: VERSION.id, note: ANSWERED_BY_NOTE });
-  assert.deepEqual(Object.keys(ab), ["commit", "commit_status", "version_id", "note"]);
+  assert.deepEqual(ab, { commit: SHA, commit_status: "stamped", version_id: VERSION.id, version_status: "available", note: ANSWERED_BY_NOTE });
+  assert.deepEqual(Object.keys(ab), ["commit", "commit_status", "version_id", "version_status", "note"], "version_status follows version_id; the note stays last");
+  const none = answeredBy(codeIdentity({}));
+  assert.deepEqual([none.version_id, none.version_status], [null, "unavailable"], "a missing binding is told apart from an id");
+  assert.equal(answeredBy(codeIdentity({ CF_VERSION_METADATA: { id: "", timestamp: "t" } })).version_status, "unavailable", "an empty id is not an id");
 });
 
 test("codeBlock is the identity plus a provenance that labels the commit a commonhold_statement and the version id a platform_record", () => {
