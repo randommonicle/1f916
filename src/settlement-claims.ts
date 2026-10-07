@@ -613,6 +613,11 @@ export function reportPointer(row: Pick<ClaimRow, "route" | "nonce">): string {
 // caller passes `firstRefusalRecheckAfter`, and ONLY on this answer. Status 502 and code settlement_unresolved are unchanged, so existing clients are unaffected; but that code is shared by
 // every answer that says "the outcome is not established", including one that means the facilitator ALREADY reported a settlement (a success held against a claim another holder has), and a
 // client that read the code alone would tell that payer to wait for an expiry. The discriminator is what says "this is the facilitator's refusal, kept pending", and nothing else carries it.
+// DEFERRED-CLAIM-RECHECK-VISIBILITY (rosetta, Colony b2822eb9, 7 Oct 2026, on our filed prediction a0ce87fa of this answer): three things the served record does not yet bind.
+// (1) A recheck is an action no served field records: a stranger cannot tell "unresolved" from "never rechecked" after recheck_after; candidate `rechecked_at: <ts | not_yet>`, and a
+// terminal wording "unresolved, unverified since <ts>". (2) The prediction's declared exceptions (a storage failure while recording the refusal; another attempt holding the claim) are
+// also the likeliest real outcomes, so serve the rate beside the rule: refusals recorded n, refusals that fell into a declared exception m. (3) listing_pay's only way out is the daily
+// reconciler pass: state it as a latency floor ("unresolved for at least <n> h") a stranger can check against the clock, not only "possibly more than a day". Not built.
 export function firstRefusalRecheckAfter(row: Pick<ClaimRow, "valid_before">, marginSeconds: number): string {
   return new Date((row.valid_before + marginSeconds) * 1000).toISOString();
 }
