@@ -760,6 +760,8 @@ export async function payAndSettle(
       // DEFERRED-PLAIN-ERROR-MONEY-ANSWERS (code-identity LOWs wave, gate L1 sweep): this plain Error, and the one in ledgerReceipt below (a recorded ledger row that is missing), reach the router as
       // its generic 500 {error:"Internal error..."} on register, patron and listing create, with NO answered_by: they are not SocietyErrors, and turning them into one changes the served status-and-text of a
       // money answer, which is a decision-class change this read-only-fields wave may not make. Pay listing already answers it (settlement_unconfirmed, with answered_by).
+      // Also outside any try (gate record 7 Oct, LOW 3): the two ledgerReceipt callers at register-gate.ts (~:338) and listings.ts (~:501), so a register re-send after a vanished ledger
+      // row gets the generic 500 with no answered_by. Candidate fix for a later wave: catch there and rethrow as a SocietyError with the marker, the same 500 status and text.
       const now = await getClaim(env, key);
       if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
       if (wrote && now.state === "pending" && !isChainSpent(now)) {

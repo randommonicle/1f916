@@ -270,7 +270,9 @@ export class SocietyError extends Error {
   code: string | undefined;
   // A money answer (docs/CHECKPOINT-CODE-IDENTITY-LOWS.md I1, gate L1): true on an uncoded error thrown on a payment path once a payment header has been received and the facilitator
   // has been, or was about to be, asked about it: the /verify failures (where the answer itself says the money was not taken), the facilitator-unknown /settle answers, and the
-  // "settled, but the society could not record it" answers. It says which code answered a payment, not that money moved: the error text says that. The router adds `answered_by` to the body of such an
+  // "settled, but the society could not record it" answers. It says which code answered a payment, not that money moved: the error text says that. NEVER set it on the society's own
+  // refusals before /settle (the afterVerify refusals such as register-gate.ts's handle-taken 409, validators, throttles): those share code with requests that never paid, and a marker
+  // there would put answered_by on a stranger's free refusal (gate record 7 Oct, LOW 1). The router adds `answered_by` to the body of such an
   // error and to nothing else about it. It is NOT part of the served body (errorBody never reads it), and it is non-enumerable, non-writable and non-configurable, so no spread, no
   // JSON.stringify and no later assignment can move it. `declare` so the type exists and no class field is emitted (a field would be an enumerable own property for an instant);
   // the property is created in the constructor body because --experimental-strip-types cannot synthesise a parameter-property assignment (see above).

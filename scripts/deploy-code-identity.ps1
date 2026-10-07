@@ -12,7 +12,8 @@
 # against the public repository at that commit); the version id is Cloudflare's own. Nothing served proves the running bytes were built from the commit.
 # THE PROPAGATION CHECK the older scripts lacked: after the deploy this script polls GET /api/attest (12 tries, 5 s apart) until code.commit equals the pinned sha AND code.version_id equals
 # the `Current Version ID` wrangler printed, with commit_status "stamped" and version_status "available". It STOPS with the rollback line if that never happens, including when
-# code.version_id never equals the printed id. The live worker serves no `code` block before this deploy, so the poll proves something.
+# code.version_id never equals the printed id. The live worker already serves a `code` block (since the 6 Oct deploy, worker 8421a724, commit ecbd51ff); the poll still proves
+# propagation because both the stamped sha and the version id of this deploy differ from the live ones. (This header was written for that first deploy; its opening lines describe it.)
 # REVIEWED SOURCE ONLY: step 0 STOPS while $REVIEWED_COMMIT still holds the placeholder (the hub sets it to the commit the code exchange converged on), and otherwise STOPS unless HEAD is that
 # commit plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/). Any other changed path, src/ or wrangler.jsonc included, is printed and STOPS.
 # Pattern: scripts/deploy-refused-option-b.ps1 (L-046, L-069: one fail-fast script). Run from society/ on main, after the merge and the push:
