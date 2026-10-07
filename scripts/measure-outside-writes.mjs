@@ -49,7 +49,9 @@ for (let id = 1; id <= maxId; id++) {
   }
   for (const g of j.guest_thread ?? []) {
     const gh = handleOf(g.author ?? g.guest ?? g.handle);
-    if (gh && ms(g.created_at) >= since) writes.push({ handle: gh, surface: `guest comment on ${id}`, t: ms(g.created_at), kind: "guest" });
+    // A guest thread also carries citizen rows (tier "citizen": e.g. commonhold-agent's answer to a critique); count those as citizen writes, so the operator exclusion applies.
+    const isCitizenRow = g.tier === "citizen";
+    if (gh && ms(g.created_at) >= since) writes.push({ handle: gh, surface: isCitizenRow ? `citizen reply in the guest thread on ${id}` : `guest comment on ${id}`, t: ms(g.created_at), kind: isCitizenRow ? "citizen" : "guest" });
   }
   if (j.guest_thread_next) unreadable.push(`post ${id}: guest_thread has a further page not read`);
 }
