@@ -800,8 +800,9 @@ test("$LIVE_BASE_COMMIT is a full sha, names the option B deploy script's merge,
   const d = definitions(t);
   if (!d) return;
   assert.match(d.LIVE_BASE, /^[0-9a-f]{40}$/);
-  assert.ok(d.LIVE_BASE.startsWith("1e4ae4bf"), "main at the option B deploy (HANDOVER Addendum 86 s17)");
-  assert.ok(script.includes("worker a672490d per HANDOVER Addendum 86"), "the rollback hint names the worker version that deploy produced");
+  assert.ok(d.LIVE_BASE.startsWith("ecbd51ff"), "main at the served-code-identity deploy (HANDOVER Addendum 87 s9)");
+  assert.ok(script.includes("worker 8421a724 per HANDOVER Addendum 87 s9"), "the base comment names the worker version that deploy produced");
+  assert.ok(script.includes("which should be 8421a724 per HANDOVER Addendum 87 s9"), "the rollback hint names the worker version that deploy produced");
   const root = here("..");
   const head = git(root, "rev-parse", "HEAD");
   const shallow = git(root, "rev-parse", "--is-shallow-repository");

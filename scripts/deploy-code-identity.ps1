@@ -34,9 +34,9 @@ $ErrorActionPreference = "Stop"
 $BASE = "https://commonhold.randommonicle.workers.dev"
 # The attested constitution this wave must leave untouched (test/deploy-code-identity-script.test.ts compares it with computeLiveConstitutionPair's hash).
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
-# The live worker's code before this wave: main at the option B deploy script's merge (the deploy of 6 Oct 2026, worker a672490d per HANDOVER Addendum 86; its code is the option B merge
-# c93150ea, docs and scripts on top). Step 0 proves HEAD descends from it and that nothing under migrations/ or src/doc.ts and no schema.sql moved since.
-$LIVE_BASE_COMMIT = "1e4ae4bf17a5e38e89a8a5df357820d193954cda"
+# The live worker's code before this wave: main at the served-code-identity deploy (the evening of 6 Oct 2026, worker 8421a724 per HANDOVER Addendum 87 s9; its code is the merge
+# f66c061c plus the $REVIEWED_COMMIT commit ecbd51ff). Step 0 proves HEAD descends from it and that nothing under migrations/ or src/doc.ts and no schema.sql moved since.
+$LIVE_BASE_COMMIT = "ecbd51ff5389ab7999b67a5b8e4187294df724eb"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the code exchange converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
 # HEAD may differ from it ONLY in $ALLOWED_PATHS_AFTER_REVIEW: this script, its test, and anything under docs/ (an entry ending in "/" is a directory prefix, any other entry an exact
 # path). A change anywhere else (src/, migrations/, schema.sql, package.json, package-lock.json, wrangler.jsonc, tsconfig.json, .claude/, any other path) STOPS step 0: that code was not reviewed.
@@ -182,7 +182,7 @@ $dirty = @(git status --porcelain)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE): the clean-tree check cannot be read." }
 if ($dirty.Count -gt 0) { Stop-Here ("working tree not clean (" + $dirty.Count + " paths): the deploy must ship exactly the committed tree.") }
 git merge-base --is-ancestor $LIVE_BASE_COMMIT HEAD
-if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.Substring(0, 8)) (the live worker's code): this deploy would drop option B and the waves before it." }
+if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.Substring(0, 8)) (the live worker's code): this deploy would drop served code identity and the waves before it." }
 $schemaMoves = @(git diff --name-only $LIVE_BASE_COMMIT HEAD -- migrations schema.sql src/doc.ts)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-migration check cannot be read." }
 if ($schemaMoves.Count -gt 0) { Stop-Here ("this wave was to carry no migration and no constitution change, but these moved since " + $LIVE_BASE_COMMIT.Substring(0, 8) + ": " + ($schemaMoves -join ", ") + ". Not this script's deploy.") }
@@ -259,7 +259,7 @@ if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current 
 if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
 $versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
-$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be a672490d per HANDOVER Addendum 86; check npx wrangler deployments list first). No migration to undo; the old worker ignores the stamp and the binding."
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be 8421a724 per HANDOVER Addendum 87 s9; check npx wrangler deployments list first). No migration to undo; the old worker ignores the stamp and the binding."
 Wait-CodeIdentity $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 
