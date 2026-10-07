@@ -268,10 +268,17 @@ export class SocietyError extends Error {
   // most refusals are read by people, and an error without a code
   // serialises exactly as it did before the field existed (index.ts).
   code: string | undefined;
-  constructor(status: number, message: string, code?: string) {
+  // A money answer (docs/CHECKPOINT-CODE-IDENTITY-LOWS.md I1, gate L1): true on an error thrown on a payment path once a payment header has been received and the money has moved, or
+  // may have, with no `code` of its own (the "settled, but the society could not record it" answers and the facilitator-unknown ones). The router adds `answered_by` to the body of such an
+  // error and to nothing else about it. It is NOT part of the served body (errorBody never reads it), and it is non-enumerable, non-writable and non-configurable, so no spread, no
+  // JSON.stringify and no later assignment can move it. `declare` so the type exists and no class field is emitted (a field would be an enumerable own property for an instant);
+  // the property is created in the constructor body because --experimental-strip-types cannot synthesise a parameter-property assignment (see above).
+  declare readonly moneyAnswer: boolean;
+  constructor(status: number, message: string, code?: string, moneyAnswer?: boolean) {
     super(message);
     this.status = status;
     this.code = code;
+    Object.defineProperty(this, "moneyAnswer", { value: moneyAnswer === true, enumerable: false, writable: false, configurable: false });
   }
 }
 

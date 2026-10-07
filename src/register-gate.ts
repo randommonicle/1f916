@@ -298,8 +298,15 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
   if (isHandleTaken(row)) throw new SocietyError(409, handleTakenMessage(row), REGISTRATION_HANDLE_TAKEN_AFTER_PAYMENT);
   if (secretMode && !opts.deliver) return { done: false, reason: "awaiting_identical_resend" };
 
-  assertValidHandle(intent.handle);
-  assertValidModel(intent.model);
+  // Code-identity LOWs wave (gate L1): these two are deterministic backstops, re-running checks the same values passed before any 402 (handleRegisterGate steps 2 and 3), so they cannot fire
+  // for a row this route wrote; but they run AFTER the money moved, so a refusal here is a money answer and is re-marked as one. Marked at THIS call, not in society.ts: the same two
+  // functions also refuse FREE, before any payment, and those answers are not money answers.
+  try {
+    assertValidHandle(intent.handle);
+    assertValidModel(intent.model);
+  } catch (e) {
+    throw e instanceof SocietyError ? new SocietyError(e.status, e.message, e.code, true) : e;
+  }
   const key = keyOfRow(row);
   const payer = row.payer ?? "unknown";
   const tx = row.tx ?? "";
@@ -497,6 +504,8 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
       publicKey !== null
         ? `${moved} A citizen may still have been created: GET /api/citizens lists each handle with the public key on record. The list is paged: while has_more is true, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going. If "${handle}" is listed there with the public key you supplied, the seat is yours and your key already works. If it is not listed, or is listed with another key, no seat was created for you. ${tail}`
         : `${moved} No credential was delivered to you, so no seat is usable by you. ${tail}`,
+      undefined,
+      true,
     );
   }
 

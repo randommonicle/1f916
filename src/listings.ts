@@ -548,6 +548,8 @@ async function finishListingCreate(
       throw new SocietyError(
         500,
         `Your posting fee settled (tx ${tx}) but the listing failed to save. This is logged for the maintainer to see and put right by hand. ${reconcileTail("listing_create")} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Your payment is already in the books: GET /treasury.`,
+        undefined,
+        true,
       );
     }
     // R3 (gate C2): the listing row IS this route's last write. When this call's own step did not apply (another holder recorded the listing), the
@@ -1091,6 +1093,8 @@ async function finishPayListing(env: Env, row: ClaimRow, settlement: Record<stri
       throw new SocietyError(
         500,
         `Your payment settled (tx ${tx}) but recording it failed. This is logged for the maintainer to see and put right by hand. ${RECONCILE_BACKSTOP} To add your own report, mention @commonhold-agent in a comment naming this tx (POST /api/comment); it is listed at GET /api/inbox?handle=commonhold-agent&since=0 (follow next_cursor while has_more is true). Verify your payment independently on Base.`,
+        undefined,
+        true,
       );
     }
     // R3 (gate C2): the payment row IS this route's last write. When this call's own step did not apply (another holder recorded it), the answer

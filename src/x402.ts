@@ -184,6 +184,9 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   // failure may truthfully say (gate L2, 2026-09-29): the /verify body IS the full
   // signed authorisation, so it was sent, and "could not be reached" can follow
   // delivery; what is true is that this server never asked the facilitator to SETTLE it.
+  // Code-identity LOWs wave (gate L1): the four SocietyErrors below (and settleOrThrow's unknown verdict, the /verify "failed" verdict, the "settled but could not record" 500s and the claim
+  // read-back 503) answer a payment attempt with no code of their own, so they carry the fourth constructor argument, `moneyAnswer`: the router adds `answered_by` to their served body and
+  // changes nothing else. attemptPending reaches settleOrThrow too, but catches the throw and reports `unchanged`, so there the marker is never served.
   // The timer covers the answer's BODY as well as its headers (an abort during the body read makes res.json() throw, which the unreadable-body
   // path below already serves as an unknown /settle outcome), and is cleared only once that read is done.
   const timeoutMs = facilitatorTimeoutMs(env, path);
@@ -205,9 +208,9 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
     clearTimeout(timer);
     const reason = timedOut ? `no answer within ${Math.round(timeoutMs / 100) / 10} s` : clipReason(e instanceof Error ? e.message : String(e));
     if (path === "/settle") {
-      throw new SocietyError(502, `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`);
+      throw new SocietyError(502, `The request to the facilitator's /settle failed in transit (${reason}); it may have been received and settled. Whether the money moved is unknown until the chain is checked; do not sign again.`, undefined, true);
     }
-    throw new SocietyError(502, `The payment facilitator could not be reached to verify this payment (${reason}); the request may still have been delivered. ${NEVER_ASKED_TO_SETTLE} Try again later.`);
+    throw new SocietyError(502, `The payment facilitator could not be reached to verify this payment (${reason}); the request may still have been delivered. ${NEVER_ASKED_TO_SETTLE} Try again later.`, undefined, true);
   }
   // The facilitator answers malformed payloads with 4xx/5xx JSON; only an
   // unparseable response means it is actually down. The wording is
@@ -229,9 +232,9 @@ async function facilitator(env: Env, path: "/verify" | "/settle", body: unknown)
   }
   if (answer !== null && typeof answer === "object" && !Array.isArray(answer)) return { status: res.status, body: answer as Record<string, unknown> };
   if (path === "/settle") {
-    throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). ${SETTLE_UNKNOWN_TAIL}`);
+    throw new SocietyError(502, `The facilitator's answer to /settle could not be read (HTTP ${res.status}). ${SETTLE_UNKNOWN_TAIL}`, undefined, true);
   }
-  throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`);
+  throw new SocietyError(502, `The facilitator is unreachable (${res.status}). Your money was not taken. Try again later.`, undefined, true);
 }
 
 // A paid act's claim (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md): the route and the
@@ -491,7 +494,7 @@ async function settleOrThrow(
     const verdict = classifySettle(answer.status, answer.body);
     if (verdict.kind === "unknown") {
       broadcastTx = verdict.broadcastTx;
-      throw new SocietyError(502, verdict.message);
+      throw new SocietyError(502, verdict.message, undefined, true);
     }
     return { body: answer.body, verdict };
   } catch (e) {
@@ -575,7 +578,7 @@ export async function payAndSettle(
   // isValid: true goes on towards /settle.
   const checked = await facilitator(env, "/verify", rpcBody);
   const verdict = classifyVerify(checked.status, checked.body);
-  if (verdict.kind === "failed") throw new SocietyError(502, verdict.message);
+  if (verdict.kind === "failed") throw new SocietyError(502, verdict.message, undefined, true);
   if (verdict.kind !== "valid") {
     return {
       ok: false,
@@ -754,6 +757,9 @@ export async function payAndSettle(
       if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
       // CODEX M3-build r1 HIGH (pre-existing since M2): a refusal write that did not apply is no refusal recorded. Re-read the claim; a re-read that throws, or finds no row, is an unknown
       // outcome (thrown, so pay listing keeps its reservation: settlement_unconfirmed).
+      // DEFERRED-PLAIN-ERROR-MONEY-ANSWERS (code-identity LOWs wave, gate L1 sweep): this plain Error, and the one in ledgerReceipt below (a recorded ledger row that is missing), reach the router as
+      // its generic 500 {error:"Internal error..."} on register, patron and listing create, with NO answered_by: they are not SocietyErrors, and turning them into one changes the served status-and-text of a
+      // money answer, which is a decision-class change this read-only-fields wave may not make. Pay listing already answers it (settlement_unconfirmed, with answered_by).
       const now = await getClaim(env, key);
       if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
       if (wrote && now.state === "pending" && !isChainSpent(now)) {
@@ -812,6 +818,8 @@ export async function payAndSettle(
       throw new SocietyError(
         500,
         `Your payment settled (tx ${settled.verdict.tx}), but the society could not record that it had. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. ${reconcileTail(claim?.route ?? "register")} ${SHOWHOME_REPORT_POINTER}`,
+        undefined,
+        true,
       );
     }
     if (!wrote && row) {
@@ -1022,7 +1030,7 @@ async function answerFromMovedClaim(
 export async function answerFromClaim(env: Env, key: ClaimKey, owner: string): Promise<Response> {
   await quietly("release_lease", () => releaseLease(env, key, owner));
   const row = await getClaim(env, key);
-  if (!row) throw new SocietyError(503, "The payment claim could not be read back. Do not sign again: this payment may already have moved.");
+  if (!row) throw new SocietyError(503, "The payment claim could not be read back. Do not sign again: this payment may already have moved.", undefined, true);
   return claimResponse(claimAnswer(row, true, undefined), codeIdentity(env));
 }
 
@@ -1299,6 +1307,8 @@ export async function recordSettledPayment(
     throw new SocietyError(
       500,
       `Your $${(amountCents / 100).toFixed(2)} payment settled (tx ${settled.tx}), but the society could not record it in its treasury ledger. Do not sign again: this payment has already moved. This is logged for the maintainer to put right by hand. ${SHOWHOME_REPORT_POINTER}`,
+      undefined,
+      true,
     );
   }
 }

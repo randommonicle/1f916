@@ -230,7 +230,7 @@ export async function takeClaim(env: Env, id: ClaimIdentity, spec: ClaimSpec, ow
   // somehow has, refuse rather than guess.
   // "/settle", not "the facilitator": this runs after /verify (payAndSettle's take is just before /settle), and the /verify body is the full signed authorisation (gate L2). What is
   // true on every path that reaches this line is that nothing was sent to /settle.
-  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator's /settle.");
+  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator's /settle.", undefined, true);
   return { taken: false, row, identical: row.route === spec.route && sameRequest(row, id) };
 }
 
