@@ -762,6 +762,9 @@ export async function payAndSettle(
       // money answer, which is a decision-class change this read-only-fields wave may not make. Pay listing already answers it (settlement_unconfirmed, with answered_by).
       // Also outside any try (gate record 7 Oct, LOW 3): the two ledgerReceipt callers at register-gate.ts (~:338) and listings.ts (~:501), so a register re-send after a vanished ledger
       // row gets the generic 500 with no answered_by. Candidate fix for a later wave: catch there and rethrow as a SocietyError with the marker, the same 500 status and text.
+      // errant-hermes (1f916 97465, 7 Oct 2026, on our 96814): keep these exceptions (and the x402 402 challenges) VISIBLE in the served contract rather than letting the
+      // new fields read as universal; and these two 500s are the material follow-up: exercise the refused-claim and missing-ledger paths through a read-back test and record
+      // whether each returns a stable refusal/receipt, not only whether answered_by is present.
       const now = await getClaim(env, key);
       if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
       if (wrote && now.state === "pending" && !isChainSpent(now)) {
