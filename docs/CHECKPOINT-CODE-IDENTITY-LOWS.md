@@ -17,7 +17,8 @@ Base: 1927/1927 (`npm test`, 65 s) and `tsc` silent, measured in the worktree be
 | 1 | `d380dbb6` | this log |
 | 2 | `a7250b31` | I1 + I2: the `moneyAnswer` marker on `SocietyError`, the router rule, 14 marked sites, the sweep, `test/code-identity-lows-d1.test.ts` |
 | 3 | `c1a22349` | I3: `version_status` in `answered_by`, the note's final sentence, the brief (A9), the pins |
-| 4 | this commit | I4: the discovery description of `/api/attest` names the `code` block |
+| 4 | `64e21fe7` | I4: the discovery description of `/api/attest` names the `code` block |
+| 5 | this commit | I5: the deploy script (case-sensitive sha comparisons, the anchored unique `Current Version ID` capture, `$REVIEWED_COMMIT` reset to the placeholder) and its tests |
 
 ## Notes (one per commit, newest last)
 
@@ -111,3 +112,17 @@ malformed), `version_id` and `version_status`; the provenance says the commit is
 **Test** (`test/code-identity-lows-d1.test.ts`, 1): the three derived surfaces, fetched through the real router, each carry the clause and keep the old sentence; `/api/attest`'s `code` block carries the four
 fields the clause names, and its provenance says what the clause says. **Red-proofs:** the clause removed (1 red); "(the operator's statement, not proof of the running bytes)" reworded to "(proof of the running
 bytes)" (1 red); `/api/attest` stops serving `code` (5 red); the served provenance stops saying the commit is not proof (1 red). Each restored byte for byte.
+
+### 5. I5 (gate L4): the deploy script's nits (`scripts/deploy-code-identity.ps1`, `test/deploy-code-identity-script.test.ts`)
+
+Edited with the Edit tool (ASCII only, CRLF kept); the script still parses and every earlier test in its file passes.
+
+- **Case-sensitive comparisons.** The three sha comparisons at step 0 (`$mainSha`, `$originSha`, `$expectedSha`, `$headSha`) are `-cne`. There was no other variable-to-variable comparison: every other `-ne`/`-eq` is against a literal (an HTTP code string, an exit code, a count) or a `$null` check, and the poll's two comparisons were already `-cne`. The branch-name check is `-cne "main"` too (a branch name is not a sha, but a branch `Main` should not pass).
+- **The `Current Version ID` capture** is `(?m)^[ \t]*Current Version ID:[ \t]*([0-9a-fA-F-]{36})[ \t]*\r?$` (the commission's shape, with `[ \t]` rather than `\s` on the leading side so a match cannot begin on a preceding blank line, and `\r?` so wrangler's Windows CRLF output still matches), read with `[regex]::Matches`. More than one match STOPs ("wrangler deploy printed 'Current Version ID' on N lines; which one is this deploy's cannot be told, and the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else."); none still STOPs with the old text. The deploy may have succeeded in both, so both name the hand check.
+- **`$REVIEWED_COMMIT`** is reset to `"TO-BE-SET-BY-HUB"` (was `f66c061c...`, the merge of the first stamped deploy). The placeholder guard (`-ceq $REVIEWED_COMMIT_PLACEHOLDER`) is unchanged and STOPs on it. The `:559` pin keeps accepting either the placeholder or a sha, on purpose, so the hub's edit does not turn a test red.
+
+**Tests** (4 new in `test/deploy-code-identity-script.test.ts`, run for real under PowerShell 5.1 against a stand-in for npx): the id is taken from its own line for CRLF output, an indented line, trailing spaces, and a mid-line mention of ANOTHER id printed before the real line (the case a first-match unanchored pattern got wrong); more than one id line STOPs before any poll (two different, the same twice, three), and a line with text after the id, text before the label, only a mid-line mention, or an id one character short is no id; the sha comparison, evaluated for real, is a mismatch when the shas differ only by case, with identical shas as the control, plus a scan that no variable-to-variable `-ne`/`-eq` remains (a `$null` check is not one) and the branch pin; and the script as shipped, with the constant read from the FILE, STOPs on the placeholder (skips once the hub has set a sha: the injected-value test above still exercises the guard).
+
+**Red-proofs (I5), each exact-once and restored byte for byte:** step 0 back to `-ne` (1 red); only the HEAD comparison back to `-ne` (1 red); the branch back to `-ne` (1 red); the capture unanchored again (2 red); anchored at the start only, text after the id accepted (1 red); without `\r?` (1 red, the CRLF case); the double-match STOP removed (1 red); the placeholder STOP removed (4 red, including the new as-shipped test). The reset itself has no standing test by design (see above); the guard that makes the reset safe does.
+
+**For the hub, not changed here:** `$LIVE_BASE_COMMIT` (`1e4ae4bf`) and the rollback hint ("which should be a672490d per HANDOVER Addendum 86") still name the worker BEFORE the first stamped deploy; for a later wave the live worker is `8421a724` (code `ecbd51ff`) and the hint's id is stale. A test pins the hint's text (`"worker a672490d per HANDOVER Addendum 86"`), so it was left alone; it is the hub's edit together with `$REVIEWED_COMMIT`.

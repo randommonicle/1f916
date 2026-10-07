@@ -40,7 +40,7 @@ $LIVE_BASE_COMMIT = "1e4ae4bf17a5e38e89a8a5df357820d193954cda"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the code exchange converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
 # HEAD may differ from it ONLY in $ALLOWED_PATHS_AFTER_REVIEW: this script, its test, and anything under docs/ (an entry ending in "/" is a directory prefix, any other entry an exact
 # path). A change anywhere else (src/, migrations/, schema.sql, package.json, package-lock.json, wrangler.jsonc, tsconfig.json, .claude/, any other path) STOPS step 0: that code was not reviewed.
-$REVIEWED_COMMIT = "f66c061caef704ba35a08ddd73cd533063fef940"
+$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-code-identity.ps1", "test/deploy-code-identity-script.test.ts", "docs/")
 $ATTENTION_URL = "$BASE/api/settlements/attention"
@@ -161,7 +161,7 @@ Say "[git] git fetch origin"
 git fetch origin --quiet
 if ($LASTEXITCODE -ne 0) { Stop-Here "git fetch failed; the level check below would read a stale origin/main." }
 $branch = (git rev-parse --abbrev-ref HEAD).Trim()
-if ($branch -ne "main") { Stop-Here "the current branch is '$branch', not main: deploy from main only." }
+if ($branch -cne "main") { Stop-Here "the current branch is '$branch', not main: deploy from main only." }
 $headSha = (git rev-parse HEAD).Trim()
 $originSha = (git rev-parse origin/main).Trim()
 $mainSha = (git rev-parse main).Trim()
@@ -171,7 +171,7 @@ $expectedCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 if ($expectedCode -ne 0 -or -not $expectedSha) { Stop-Here "-ExpectedCommit '$ExpectedCommit' is not a commit in this repository." }
 $expectedSha = ([string]$expectedSha).Trim()
-if ($mainSha -ne $originSha -or $mainSha -ne $expectedSha -or $headSha -ne $expectedSha) {
+if ($mainSha -cne $originSha -or $mainSha -cne $expectedSha -or $headSha -cne $expectedSha) {
   Stop-Here ("main, origin/main and -ExpectedCommit are not one commit: HEAD " + $headSha.Substring(0, 8) + ", main " + $mainSha.Substring(0, 8) + ", origin/main " + $originSha.Substring(0, 8) + ", expected " + $expectedSha.Substring(0, 8) + ". Merge, push, and pass the pushed sha.")
 }
 # The stamp is this sha, in full, lower-case: the code serves a commit only if it matches ^[0-9a-f]{40}$ (src/code-identity.ts), so anything else would deploy as "malformed_stamp".
@@ -252,8 +252,12 @@ $deployOut = (npx wrangler deploy --var "CODE_COMMIT:$headSha" 2>&1 | Out-String
 $deployCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 if ($deployCode -ne 0) { Stop-Here "wrangler deploy failed (exit $deployCode); nothing else was changed (no migration in this wave). Output: $deployOut" }
-$versionId = [regex]::Match($deployOut, 'Current Version ID:\s*([0-9a-fA-F-]{36})').Groups[1].Value
-if (-not $versionId) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
+# The id is read from its OWN line (anchored at both ends, so a longer line, a quoted line or a bare mention in other output is not it), and exactly one such line must exist: with two, which one is this
+# deploy's cannot be told from the output, and a first-match capture could tie the poll to the wrong id.
+$versionMatches = @([regex]::Matches($deployOut, '(?m)^[ \t]*Current Version ID:[ \t]*([0-9a-fA-F-]{36})[ \t]*\r?$'))
+if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current Version ID' on " + $versionMatches.Count + " lines; which one is this deploy's cannot be told, and the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else.") }
+if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
+$versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
 $ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be a672490d per HANDOVER Addendum 86; check npx wrangler deployments list first). No migration to undo; the old worker ignores the stamp and the binding."
 Wait-CodeIdentity $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS

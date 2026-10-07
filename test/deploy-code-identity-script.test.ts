@@ -232,6 +232,71 @@ test("T6: the deploy STOPS, before any poll, when wrangler fails or prints no Cu
   assert.doesNotMatch(noId.run.out, /\[poll\]|REACHED-END/);
 });
 
+// ---------- I5 (code-identity gate L4): the Current Version ID capture is anchored to its own line and must be unique; the sha comparisons are case-sensitive ----------
+
+const wranglerWith = (...idLines: string[]): string => `Total Upload: 1000 KiB\nUploaded commonhold (3.0 sec)\nDeployed commonhold triggers (1.0 sec)\n  https://commonhold.randommonicle.workers.dev\n${idLines.join("\n")}\n`;
+
+test("I5: the Current Version ID is taken from its own line: CRLF output, an indented line, and a mid-line mention printed BEFORE the real line (which a first-match unanchored pattern captured) all give the real id", (t) => {
+  const cases: Array<[string, string]> = [
+    ["CRLF line endings, as wrangler prints them on Windows", WRANGLER_OK.replace(/\n/g, "\r\n")],
+    ["an indented line", wranglerWith(`    Current Version ID: ${VERSION}`)],
+    ["trailing spaces", wranglerWith(`Current Version ID: ${VERSION}   `)],
+    ["a mid-line mention of another id before the real line", wranglerWith(`Rolled forward from Current Version ID: ${OTHER_VERSION} earlier`, `Current Version ID: ${VERSION}`)],
+  ];
+  for (const [name, text] of cases) {
+    const r = runDeploy([ok(goodCode())], { text });
+    if (!r) return skipNoPs(t);
+    assert.equal(r.run.code, 0, `${name}: ${r.run.out}`);
+    assert.match(r.run.out, new RegExp(`\\[deploy\\] worker version id ${VERSION} \\(commit 69730d99\\)`), `${name}: the real id was read`);
+    assert.match(r.run.out, /\[poll\] try 1 of 12: GET \/api\/attest serves code\.commit 69730d99 and code\.version_id a672490d-/, name);
+    assert.match(r.run.out, /REACHED-END/, name);
+  }
+});
+
+test("I5: more than one Current Version ID line STOPS before any poll (identical or not), and a line that is not exactly the id, or only a mid-line mention, is no id", (t) => {
+  const stops: Array<[string, string, RegExp]> = [
+    ["two different ids", wranglerWith(`Current Version ID: ${OTHER_VERSION}`, `Current Version ID: ${VERSION}`), /\[STOP\] wrangler deploy printed 'Current Version ID' on 2 lines/],
+    ["the same id twice", wranglerWith(`Current Version ID: ${VERSION}`, `Current Version ID: ${VERSION}`), /\[STOP\] wrangler deploy printed 'Current Version ID' on 2 lines/],
+    ["three lines", wranglerWith(`Current Version ID: ${VERSION}`, `Current Version ID: ${VERSION}`, `Current Version ID: ${OTHER_VERSION}`), /on 3 lines/],
+    ["a line with text after the id", wranglerWith(`Current Version ID: ${VERSION} (the previous deployment)`), /\[STOP\] wrangler deploy exited 0 but printed no 'Current Version ID'/],
+    ["a line with text before the label", wranglerWith(`Previously Current Version ID: ${VERSION}`), /\[STOP\] wrangler deploy exited 0 but printed no 'Current Version ID'/],
+    ["only a mid-line mention", wranglerWith(`See Current Version ID: ${VERSION} in the dashboard`), /\[STOP\] wrangler deploy exited 0 but printed no 'Current Version ID'/],
+    ["an id one character short", wranglerWith(`Current Version ID: ${VERSION.slice(0, 35)}`), /\[STOP\] wrangler deploy exited 0 but printed no 'Current Version ID'/],
+  ];
+  for (const [name, text, expected] of stops) {
+    const r = runDeploy([ok(goodCode())], { text });
+    if (!r) return skipNoPs(t);
+    assert.equal(r.run.code, 1, `${name}: ${r.run.out}`);
+    assert.match(r.run.out, expected, name);
+    assert.match(r.run.out, /Check 'npx wrangler deployments list' by hand/, `${name}: it names the hand check`);
+    assert.doesNotMatch(r.run.out, /\[poll\]|REACHED-END|worker version id/, `${name}: nothing was polled and no id was adopted`);
+  }
+});
+
+test("I5: the three sha comparisons in step 0 are case-sensitive (-cne): a sha differing only by case is a MISMATCH, and no variable-to-variable -ne/-eq remains in the script", (t) => {
+  const line = code.split("\n").find((l) => l.startsWith("if ($mainSha "));
+  assert.ok(line, "the main / origin / expected / HEAD comparison is there");
+  const condition = line.replace(/^if \(/, "").replace(/\) \{$/, "");
+  assert.equal(condition, "$mainSha -cne $originSha -or $mainSha -cne $expectedSha -or $headSha -cne $expectedSha");
+  const evaluate = (main: string, origin: string, expected: string, head: string) =>
+    runPs([`$mainSha = '${main}'`, `$originSha = '${origin}'`, `$expectedSha = '${expected}'`, `$headSha = '${head}'`, `Write-Output ("MISMATCH=" + [bool](${condition}))`]);
+  const same = evaluate("abc123", "abc123", "abc123", "abc123");
+  if (!same) return skipNoPs(t);
+  assert.match(same.out, /MISMATCH=False/, "identical shas: no mismatch");
+  for (const [name, args] of [
+    ["origin differs by case", ["abc123", "ABC123", "abc123", "abc123"]],
+    ["expected differs by case", ["abc123", "abc123", "ABC123", "abc123"]],
+    ["HEAD differs by case", ["abc123", "abc123", "abc123", "aBc123"]],
+  ] as const) {
+    const r = evaluate(...args);
+    assert.ok(r);
+    assert.match(r.out, /MISMATCH=True/, name);
+  }
+  const bare = code.split("\n").filter((l) => /\$(?!null\b)\w+\s+-(?:ne|eq)\s+\$\w+/.test(l));
+  assert.deepEqual(bare, [], "every comparison of two variables (a null check is not one) is -ceq / -cne (the header promises it)");
+  assert.match(code, /if \(\$branch -cne "main"\)/, "and the branch name is compared case-sensitively");
+});
+
 test("T6: the poll compares BOTH code.commit and code.version_id and STOPS with the rollback line on any mismatch, after exactly 12 reads", (t) => {
   const cases: Array<[string, Reply[], RegExp]> = [
     ["the commit is not the pinned sha", [ok(goodCode({ commit: "a".repeat(40) }))], /code\.commit is 'a{40}', expected the pinned sha 69730d99/],
@@ -571,6 +636,26 @@ test("the placeholder guard is pinned in the file: the constant is the placehold
       assert.equal(git(root, "cat-file", "-t", d.REVIEWED).stdout.trim(), "commit", "once set, the reviewed commit is in this history");
       assert.equal(git(root, "merge-base", "--is-ancestor", d.REVIEWED, "HEAD").status, 0, "and HEAD descends from it");
     }
+  }
+});
+
+// I5 (code-identity gate L4, commission): the script ships with $REVIEWED_COMMIT reset to the placeholder; the hub sets it to the merge sha after review. While the file holds the placeholder,
+// the block AS SHIPPED (the constant read from the file, not injected as the tests above do) must STOP. Once the hub has set a sha this test has nothing to say about the placeholder and skips
+// (the :559 pin above accepts either, on purpose, so the hub's edit does not turn a test red).
+test("I5: the script as shipped holds the placeholder, and its step 0 block, run with the constant read from the FILE, STOPS on it", (t) => {
+  const d = definitions(t);
+  if (!d) return;
+  if (d.REVIEWED !== PLACEHOLDER) return t.skip(`the hub has set the reviewed commit (${d.REVIEWED.slice(0, 8)}); the injected-value placeholder test above still exercises the guard`);
+  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m, "the shipped constant is the placeholder, exactly");
+  const repo = makeRepo();
+  try {
+    const r = runPs(["$ErrorActionPreference = 'Stop'", `Set-Location '${repo.dir}'`, defs, reviewedBlock, 'Write-Host "REACHED-END"', "exit 0"]);
+    if (!r) return skipNoPs(t);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /\[STOP\] \$REVIEWED_COMMIT still holds the placeholder 'TO-BE-SET-BY-HUB'/);
+    assert.doesNotMatch(r.out, /REACHED-END|reviewed source:/);
+  } finally {
+    gone(repo.dir);
   }
 });
 
