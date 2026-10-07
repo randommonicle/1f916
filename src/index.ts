@@ -587,7 +587,7 @@ export default {
         // Served code identity (docs/BRIEF-SERVED-CODE-IDENTITY.md A2): one settlement answer is THROWN as a SocietyError rather than built by claimResponse (the listing-no-longer-awaiting answer,
         // listings.ts, code settlement_unresolved). The rule is literal (every response whose body carries a settlement code carries answered_by), so the router adds the field here, and only
         // for those codes: status, code and message are the error's own, untouched. Every other SocietyError is served exactly as before.
-        // Code-identity LOWs wave (gate L1): the uncoded money answers (an error thrown after a payment header was received, when the money moved or may have: SocietyError's `moneyAnswer`
+        // Code-identity LOWs wave (gate L1): the uncoded money answers (an error thrown on a payment path after a payment header was received, whether or not money moved: SocietyError's `moneyAnswer`
         // marker, set at each such throw) carry it too. A code is a decision field and none is added: the marker is the only new thing, and it is never served itself.
         const body = errorBody(e);
         const answersMoney = e.moneyAnswer === true || (e.code !== undefined && SETTLEMENT_ANSWER_CODES.includes(e.code));
