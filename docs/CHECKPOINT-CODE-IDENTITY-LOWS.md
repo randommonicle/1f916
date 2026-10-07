@@ -16,7 +16,8 @@ Base: 1927/1927 (`npm test`, 65 s) and `tsc` silent, measured in the worktree be
 |---|---|---|
 | 1 | `d380dbb6` | this log |
 | 2 | `a7250b31` | I1 + I2: the `moneyAnswer` marker on `SocietyError`, the router rule, 14 marked sites, the sweep, `test/code-identity-lows-d1.test.ts` |
-| 3 | this commit | I3: `version_status` in `answered_by`, the note's final sentence, the brief (A9), the pins |
+| 3 | `c1a22349` | I3: `version_status` in `answered_by`, the note's final sentence, the brief (A9), the pins |
+| 4 | this commit | I4: the discovery description of `/api/attest` names the `code` block |
 
 ## Notes (one per commit, newest last)
 
@@ -97,3 +98,16 @@ booked 409 a paid patron request's identical replay gets) served by the same env
 **Red-proofs (I3), each exact-once and restored byte for byte:** `answeredBy` drops `version_status` (30 red across the four test files); it hard-codes `"available"` (5 red: the three missing-binding variants, the narrow-block test, the no-stamp test);
 `version_status` placed before `version_id` (5 red: the four agreement tests and the narrow-block test, via the key-order assertion); the note's final sentence reverted in the constant (T4c red); reverted in the
 brief only (T4c red, the brief no longer quotes the constant); `/api/attest`'s identity forced to `"unavailable"` (29 red).
+
+### 4. I4 (gate L3): `/api/attest`'s discovery description mentions the `code` block
+
+`src/discovery.ts` (the `ROUTES` entry for `GET /api/attest`): one sentence is appended to the description. **Served sentence (new):** "Its `code` block carries the commit the deploy stamped (the operator's
+statement, not proof of the running bytes) and Cloudflare's id for the running Worker version, each with a status." The old sentence is kept in front of it, unchanged: "Recomputes the hash chain across
+identity, ledger, payouts, and ballots; verify we did not lie." That description is the one source for `/llms.txt`, `/api/surface` and `/openapi.json` (`discovery.ts`'s renderers read `r.description`), so all
+three carry it. It is not in `FRONT_DOOR_TEMPLATE` or anywhere under `src/doc.ts` (grepped: the only occurrence of the old sentence in `src/` is the `ROUTES` entry), so nothing mints; the existing
+non-minting pins and the discovery, L-002 residue and served-text suites pass unchanged. True to what is served: the block carries `commit` and `commit_status` (the deploy's stamp, null when absent or
+malformed), `version_id` and `version_status`; the provenance says the commit is the operator's statement and that nothing served proves the bytes (`CODE_PROVENANCE`), which the clause repeats in fewer words.
+
+**Test** (`test/code-identity-lows-d1.test.ts`, 1): the three derived surfaces, fetched through the real router, each carry the clause and keep the old sentence; `/api/attest`'s `code` block carries the four
+fields the clause names, and its provenance says what the clause says. **Red-proofs:** the clause removed (1 red); "(the operator's statement, not proof of the running bytes)" reworded to "(proof of the running
+bytes)" (1 red); `/api/attest` stops serving `code` (5 red); the served provenance stops saying the commit is not proof (1 red). Each restored byte for byte.

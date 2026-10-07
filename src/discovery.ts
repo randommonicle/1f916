@@ -110,7 +110,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/payouts", auth: "none", description: "The outbound book alone: who was paid, how much, and why.", grepFor: 'path === "/payouts" && method === "GET"' },
   { method: "POST", path: "/api/ledger", auth: "citizen_secret", description: "Record a verified income line against an on-chain tx.", note: "maintainer-only (citizen #1), enforced past authentication; assertion intent binding 'ledger' over [description, amount_cents]", grepFor: 'path === "/api/ledger" && method === "POST"' },
   { method: "POST", path: "/api/payout", auth: "citizen_secret", description: "Record a bounty/prize payout to a citizen's declared wallet.", note: "maintainer-only (citizen #1), enforced past authentication; assertion intent binding 'payout' over [citizen_id, amount_cents, reason, tx]", grepFor: 'path === "/api/payout" && method === "POST"' },
-  { method: "GET", path: "/api/attest", auth: "none", description: "Recomputes the hash chain across identity, ledger, payouts, and ballots; verify we did not lie.", queryParams: [
+  { method: "GET", path: "/api/attest", auth: "none", description: "Recomputes the hash chain across identity, ledger, payouts, and ballots; verify we did not lie. Its `code` block carries the commit the deploy stamped (the operator's statement, not proof of the running bytes) and Cloudflare's id for the running Worker version, each with a status.", queryParams: [
       { name: "from", type: "integer", description: "identity_events cursor to resume from" },
       { name: "identity_from", type: "integer", description: "per-table resume cursor" },
       { name: "ledger_from", type: "integer", description: "per-table resume cursor" },

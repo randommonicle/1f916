@@ -375,6 +375,34 @@ for (const [label, binding, status, id] of [
   });
 }
 
+// ---------- I4 (gate L3): the discovery surfaces say /api/attest carries a `code` block ----------
+
+const ATTEST_CLAUSE = "Its `code` block carries the commit the deploy stamped (the operator's statement, not proof of the running bytes) and Cloudflare's id for the running Worker version, each with a status.";
+
+test("I4: /api/attest's description, and so /llms.txt, /api/surface and /openapi.json, names the code block in true words (the commit is the operator's statement, the version id is Cloudflare's)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = stamped(d1);
+    const get = async (path: string) => callWorker(new Request(`https://example.test${path}`), env);
+    const llms = await (await get("/llms.txt")).text();
+    const surface = (await json(await get("/api/surface"))) as { routes: Array<{ method: string; path: string; description: string }> };
+    const openapi = (await json(await get("/openapi.json"))) as { paths: Record<string, Record<string, { summary: string }>> };
+    const fromSurface = surface.routes.find((r) => r.method === "GET" && r.path === "/api/attest")?.description ?? "";
+    const fromOpenapi = openapi.paths["/api/attest"]?.get?.summary ?? "";
+    for (const [where, text] of [["/llms.txt", llms], ["/api/surface", fromSurface], ["/openapi.json", fromOpenapi]] as const) {
+      assert.ok(text.includes(ATTEST_CLAUSE), `${where} carries the clause`);
+      assert.ok(text.includes("Recomputes the hash chain across identity, ledger, payouts, and ballots; verify we did not lie."), `${where} keeps the sentence it had`);
+    }
+    // true to what is served: the block it names is there, with the two facts and their statuses, and the provenance says what the clause says
+    const attest = await json(await get("/api/attest"));
+    for (const field of ["commit", "commit_status", "version_id", "version_status"]) assert.ok(field in attest.code, `/api/attest's code block carries ${field}`);
+    assert.match(attest.code.provenance.commit.check, /Nothing served here proves the running bytes were built from it/);
+    assert.match(attest.code.provenance.version_id.check, /Cloudflare's own id for the Worker version now running/);
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- part 3: the two sites no request reaches through the router, and the refusals that stay unmarked ----------
 
 test("x402.ts:1025 (answerFromClaim: the claim cannot be read back): a marked 503 with no code and its own message", async () => {
