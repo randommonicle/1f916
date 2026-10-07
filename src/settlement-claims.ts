@@ -214,8 +214,8 @@ export type TakeResult = { taken: true } | { taken: false; row: ClaimRow; identi
 // DEFERRED-CLAIM-ROW-CODE-IDENTITY (errant-hermes, 1f916 95176, 6 Oct 2026; docs/BRIEF-SERVED-CODE-IDENTITY.md): record the commit (and the Worker version id) on the settlement_claims row when
 // the claim is taken here, and accept a re-send only when the tuple matches, so the surviving row names the code that decided it. NOT built: it is a migration on the money-path table and a change to
 // replay semantics. A payer's identical re-send after a deploy must still finish a payment whose money moved (takeClaim creates the row before /settle; a later worker can record settled_unbooked),
-// so "refuse on tuple mismatch" could strand money. Its own brief and the D-018 Opus gate. Until then every claim answer says (answered_by.note, ANSWERED_BY_NOTE) that the claim may have been
-// decided earlier by other code and that the row does not record which.
+// so "refuse on tuple mismatch" could strand money. Its own brief and the D-018 Opus gate. Until then every claim answer says (answered_by.note, ANSWERED_BY_NOTE) that the claim, if one exists,
+// may have been decided earlier by other code and that a claim row does not record which.
 export async function takeClaim(env: Env, id: ClaimIdentity, spec: ClaimSpec, owner: string, now: number): Promise<TakeResult> {
   const res = await env.DB.prepare(
     `INSERT INTO settlement_claims (network, asset, from_addr, nonce, route, intent_json, intent_hash, rpc_body, rpc_body_hash, valid_before, state, booked_refs, created_at, updated_at, lease_owner, leased_until)
@@ -230,7 +230,7 @@ export async function takeClaim(env: Env, id: ClaimIdentity, spec: ClaimSpec, ow
   // somehow has, refuse rather than guess.
   // "/settle", not "the facilitator": this runs after /verify (payAndSettle's take is just before /settle), and the /verify body is the full signed authorisation (gate L2). What is
   // true on every path that reaches this line is that nothing was sent to /settle.
-  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator's /settle.");
+  if (!row) throw new SocietyError(503, "The payment claim could not be read back after a conflict. Nothing was sent to the facilitator's /settle.", undefined, true);
   return { taken: false, row, identical: row.route === spec.route && sameRequest(row, id) };
 }
 

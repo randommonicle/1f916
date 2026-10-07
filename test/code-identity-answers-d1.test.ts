@@ -62,8 +62,8 @@ const SHA = "69730d99c573b874f3acaecf34cf239fc90d252f";
 const VERSION = { id: "a672490d-1b8b-4457-9e34-b23dfb5c6c4d", tag: "", timestamp: "2026-10-06T17:00:00.000Z" };
 const IDENTITY_ENV = { CODE_COMMIT: SHA, CF_VERSION_METADATA: VERSION };
 // Written out, not computed through the code under test: a bug in answeredBy shows as a difference from this.
-const EXPECTED = { commit: SHA, commit_status: "stamped", version_id: VERSION.id, note: ANSWERED_BY_NOTE };
-const NO_STAMP = { commit: null, commit_status: "not_stamped", version_id: null, note: ANSWERED_BY_NOTE };
+const EXPECTED = { commit: SHA, commit_status: "stamped", version_id: VERSION.id, version_status: "available", note: ANSWERED_BY_NOTE };
+const NO_STAMP = { commit: null, commit_status: "not_stamped", version_id: null, version_status: "unavailable", note: ANSWERED_BY_NOTE };
 const REQS = { payTo: "x" };
 const IDENTITY = codeIdentity(IDENTITY_ENV);
 
@@ -73,7 +73,8 @@ test("T4c: ANSWERED_BY_NOTE is exactly the text the brief pins (A7, corrected by
   const brief = readFileSync(join(import.meta.dirname, "..", "docs", "BRIEF-SERVED-CODE-IDENTITY.md"), "utf8").replace(/\r\n/g, "\n");
   assert.ok(brief.includes(`"${ANSWERED_BY_NOTE}"`), "the brief quotes the constant byte for byte");
   assert.match(ANSWERED_BY_NOTE, /and null when no valid commit stamp is served, including when the stamp is absent or malformed \(commit_status says which\)\./);
-  assert.match(ANSWERED_BY_NOTE, /This payment's claim may have been decided earlier by other code; the claim row does not record which\.$/);
+  assert.match(ANSWERED_BY_NOTE, /This payment's claim, if one exists, may have been decided earlier by other code; a claim row does not record which\.$/, "A9: a /verify failure answers before any claim exists");
+  assert.doesNotMatch(ANSWERED_BY_NOTE, /claim may have been decided earlier|the claim row does not record/, "the pre-A9 sentence");
   assert.doesNotMatch(ANSWERED_BY_NOTE, /null when the deploy did not stamp one/, "the sentence CODEX r3 found false for a malformed stamp");
 });
 
