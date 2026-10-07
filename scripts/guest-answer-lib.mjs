@@ -248,6 +248,10 @@ function sectionConverges(section) {
 // The approval gate (A6 ii, bound per CODEX/GEMINI review of ccca8490): the LAST hub section names the target in a
 // top-level paragraph exactly `Target: <gid>` and carries the answer in ONE top-level ```answer fenced block equal to the
 // body; each seat's LATEST section comes after that hub section and converges. Returns null when approved, else the reason.
+// DEFERRED-APPROVAL-BINDS-BODY (hub, 7 Oct 2026, g2 exchange; LESSONS L-133): this gate reads POSITION, not what was approved. It passes when each seat's latest section
+// sits after the last hub section and carries [[CONVERGED]], but nothing shows the seat read THAT hub section: a seat run started before a new hub round lands after it,
+// so a convergence on an older body would approve a newer one the seat never saw (GEMINI r1 on g2 did exactly that, and withheld, so nothing was sent). Candidate fix:
+// the seat quotes the hub's round number or the body's sha256 in its approving section, and the gate checks it. Until then: never append a hub round while a seat run is in flight.
 export function approvalProblem(exchangeText, target, body) {
   const sections = parseSections(exchangeText);
   if (sections.ambiguous) return "the exchange file is ambiguous (a section header inside a fence, quotation or HTML block, a fence or comment left open, a raw HTML block other than a comment, or a control or line-separator character other than tab and LF); write a fresh exchange";
