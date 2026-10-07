@@ -796,7 +796,7 @@ test("$V5_HASH is the live constitution's template hash (a re-mint turns this re
   assert.equal(d.V5, (await computeLiveConstitutionPair()).templateHash);
 });
 
-test("$LIVE_BASE_COMMIT is a full sha, names the option B deploy script's merge, and is an ancestor of HEAD", (t) => {
+test("$LIVE_BASE_COMMIT is a full sha, names the served-code-identity deploy's $REVIEWED_COMMIT commit, and is an ancestor of HEAD", (t) => {
   const d = definitions(t);
   if (!d) return;
   assert.match(d.LIVE_BASE, /^[0-9a-f]{40}$/);
@@ -808,7 +808,7 @@ test("$LIVE_BASE_COMMIT is a full sha, names the option B deploy script's merge,
   const shallow = git(root, "rev-parse", "--is-shallow-repository");
   if (head.error || head.status !== 0 || shallow.error || shallow.status !== 0 || shallow.stdout.trim() !== "false") return t.skip("this checkout has no full git history to check the live base commit against");
   assert.equal(git(root, "cat-file", "-t", d.LIVE_BASE).stdout.trim(), "commit", `${d.LIVE_BASE} must be a commit in this repository`);
-  assert.match(git(root, "log", "-1", "--format=%s", d.LIVE_BASE).stdout, /option B deploy script/);
+  assert.match(git(root, "log", "-1", "--format=%s", d.LIVE_BASE).stdout, /^deploy\(code-identity\): \$REVIEWED_COMMIT = f66c061c/);
   assert.equal(git(root, "merge-base", "--is-ancestor", d.LIVE_BASE, "HEAD").status, 0, "HEAD descends from the live worker's code");
 });
 
