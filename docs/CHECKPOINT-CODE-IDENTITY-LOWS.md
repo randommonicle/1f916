@@ -18,7 +18,8 @@ Base: 1927/1927 (`npm test`, 65 s) and `tsc` silent, measured in the worktree be
 | 2 | `a7250b31` | I1 + I2: the `moneyAnswer` marker on `SocietyError`, the router rule, 14 marked sites, the sweep, `test/code-identity-lows-d1.test.ts` |
 | 3 | `c1a22349` | I3: `version_status` in `answered_by`, the note's final sentence, the brief (A9), the pins |
 | 4 | `64e21fe7` | I4: the discovery description of `/api/attest` names the `code` block |
-| 5 | this commit | I5: the deploy script (case-sensitive sha comparisons, the anchored unique `Current Version ID` capture, `$REVIEWED_COMMIT` reset to the placeholder) and its tests |
+| 5 | `96dd5bd9` | I5: the deploy script (case-sensitive sha comparisons, the anchored unique `Current Version ID` capture, `$REVIEWED_COMMIT` reset to the placeholder) and its tests |
+| 6 | this commit | the close: checklist walk, decision invariance, served sentences, differences, points for the hub |
 
 ## Notes (one per commit, newest last)
 
@@ -126,3 +127,26 @@ Edited with the Edit tool (ASCII only, CRLF kept); the script still parses and e
 **Red-proofs (I5), each exact-once and restored byte for byte:** step 0 back to `-ne` (1 red); only the HEAD comparison back to `-ne` (1 red); the branch back to `-ne` (1 red); the capture unanchored again (2 red); anchored at the start only, text after the id accepted (1 red); without `\r?` (1 red, the CRLF case); the double-match STOP removed (1 red); the placeholder STOP removed (4 red, including the new as-shipped test). The reset itself has no standing test by design (see above); the guard that makes the reset safe does.
 
 **For the hub, not changed here:** `$LIVE_BASE_COMMIT` (`1e4ae4bf`) and the rollback hint ("which should be a672490d per HANDOVER Addendum 86") still name the worker BEFORE the first stamped deploy; for a later wave the live worker is `8421a724` (code `ecbd51ff`) and the hint's id is stale. A test pins the hint's text (`"worker a672490d per HANDOVER Addendum 86"`), so it was left alone; it is the hub's edit together with `$REVIEWED_COMMIT`.
+
+### 6. The close
+
+**Checklist (order of work).** 1 this log: done (commit 1). 2 I1 + I2 and tests: done (commit 2). 3 I3 and tests (both `/api/attest` and an answer agree on `version_status`, present and missing): done (commit 3). 4 I4 and tests: done
+(commit 4). 5 I5 and its script tests (anchored regex, double-match STOP, placeholder STOP): done (commit 5). 7 red-proofs, one note each: in notes 2-5. 8 full `npm test` and `npm run typecheck` in the worktree: **1958/1958** (1927 base + 22 + 4 + 1 + 4 new)
+and `tsc` exit 0, silent; the tree is clean. I6: the hub's, on main as `4b6819ca`; not touched. No push, no `wrangler`, no deploy script (not even `-DryRun`), no network write, no sub-agent, no `*.local.*` read; `src/doc.ts`, `schema.sql` and `migrations/` untouched
+(`git diff 1491fb9c --stat -- src/doc.ts schema.sql migrations` is empty).
+
+**Decision invariance, for every touched answer (status / `code` / `error`, before and after).**
+- I1, the 19 marked-site answers and the free refusals around them (20 scenarios in `test/code-identity-lows-d1.test.ts`): recorded against a `git archive` of the base `1491fb9c` and against this branch: status, `code` and `error` identical in all 20 (0 differences; the second run after commit 5, same result). The only change is the added `answered_by`, last.
+- I3, every claim answer shape (17 in `test/code-identity-answers-d1.test.ts` T4/T5, served through `claimResponse`): status, `code`, `accepts` and every field other than `answered_by` equal the answer's own body, as before; that test passes on the base source with its old pins and on this branch with the new ones. `claimAnswer` and `claimResponse`'s spread are untouched.
+- I4: a discovery description (the three surfaces), not an answer. I5: a script, not served.
+No answer's status, `code`, `accepts`, branch, claim write, lease, reconciler selection or migration changed; nothing needed stopping.
+
+**Served sentences I wrote** (for the seats to check):
+- `/api/attest`'s route description now ends: "Its `code` block carries the commit the deploy stamped (the operator's statement, not proof of the running bytes) and Cloudflare's id for the running Worker version, each with a status." (after the unchanged "Recomputes the hash chain across identity, ledger, payouts, and ballots; verify we did not lie.")
+- `ANSWERED_BY_NOTE`'s final sentence: "This payment's claim, if one exists, may have been decided earlier by other code; a claim row does not record which." (CODEX r1's wording, verbatim.)
+- Printed to Ben by the deploy script, not served: "wrangler deploy printed 'Current Version ID' on N lines; which one is this deploy's cannot be told, and the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else."
+No other served text changed; the marked errors serve the messages they always did.
+
+**Done differently from the commission, or beyond it.** (1) One more site marked than listed: the post-payment `assertValidHandle` / `assertValidModel` in `finishRegistration` (note 2). (2) `docs/BRIEF-SERVED-CODE-IDENTITY.md` edited (A7's quotation, the shape line, an A9 amendment), because T4c reads the brief and pins the note byte for byte; the commission said the commission wins where they differ. (3) The branch comparison `$branch -cne "main"` too. (4) A `DEFERRED-PLAIN-ERROR-MONEY-ANSWERS` flag (comment only) at `x402.ts` for the two plain `Error`s that reach the router as a generic 500. (5) `x402.ts:1025` and `settlement-claims.ts:233` are pinned by calling them, not through the router: no request reaches the first without a vanished claim row, and the second is caught inside `payAndSettle`. (6) The `:559` placeholder pin was left accepting either value, as the hub's later edit needs. (7) A few read-only `git` commands ran after a `cd` into the worktree rather than with `git -C` (every one in the worktree; every write was `git -C`).
+
+**Points for the hub.** The stale `$LIVE_BASE_COMMIT` and rollback hint (note 5). The two plain `Error`s (note 2). `$REVIEWED_COMMIT` is the placeholder: set it to the merge sha after review, and the script's allowlist (this script, its test, `docs/`) then covers this checkpoint and the brief edit.
