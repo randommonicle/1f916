@@ -590,6 +590,7 @@ export default {
         // for those codes: status, code and message are the error's own, untouched. Every other SocietyError is served exactly as before.
         // Code-identity LOWs wave (gate L1): the uncoded money answers (an error thrown on a payment path after a payment header was received, whether or not money moved: SocietyError's `moneyAnswer`
         // marker, set at each such throw) carry it too. A code is a decision field and none is added: the marker is the only new thing, and it is never served itself.
+        // Plain-error wave (8 Oct 2026): the same marker on a PLAIN Error (markMoneyAnswer, society.ts) is read by the non-SocietyError branch below, not here; this branch is for SocietyErrors only.
         const body = errorBody(e);
         const answersMoney = e.moneyAnswer === true || (e.code !== undefined && SETTLEMENT_ANSWER_CODES.includes(e.code));
         return json(answersMoney ? { ...body, answered_by: answeredBy(codeIdentity(env)) } : body, e.status);

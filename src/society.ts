@@ -276,6 +276,7 @@ export class SocietyError extends Error {
   // error and to nothing else about it. It is NOT part of the served body (errorBody never reads it), and it is non-enumerable, non-writable and non-configurable, so no spread, no
   // JSON.stringify and no later assignment can move it. `declare` so the type exists and no class field is emitted (a field would be an enumerable own property for an instant);
   // the property is created in the constructor body because --experimental-strip-types cannot synthesise a parameter-property assignment (see above).
+  // A PLAIN Error can carry the same mark (markMoneyAnswer, below errorBody): the two plain throws on the paid path that reach the router's generic 500 are marked that way, not converted to SocietyErrors.
   declare readonly moneyAnswer: boolean;
   constructor(status: number, message: string, code?: string, moneyAnswer?: boolean) {
     super(message);

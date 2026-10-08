@@ -130,3 +130,16 @@ code after this wave, two parts of that are false, so I corrected them (the comm
 exclusions it names are exercised live through the router (an unpaid patron request is the 402 challenge with `accepts` and no `answered_by`; a register request with a payment header and an invalid handle is a
 400 with none; neither reaches the facilitator). The inclusions are pinned by the marked-site tests (`code-identity-lows-d1.test.ts`, `code-identity-answers-d1.test.ts`) and this wave's P3 tests; the raw
 D1 failure is P3 (c).
+
+### 5. Comments
+
+Comment-only in `src/` (the test is the flag pin):
+
+- `src/x402.ts` (the refusal read-back in `payAndSettle`): the `DEFERRED-PLAIN-ERROR-MONEY-ANSWERS` block is rewritten. It now says what is MARKED (these two plain Errors, why they stay plain: the router logs a plain Error
+  and not a SocietyError, and `register-gate.ts:478` logs `String(e)` for one; where the mark is dropped, harmlessly; that a catch which wraps either in a NEW error drops the mark), keeps errant-hermes's credit
+  (1f916 97465) and records both of her points (served-contract visibility in `discovery.ts`; read-back tests with stability), and keeps the flag name for what is STILL deferred: every other plain throw on these paths, a raw
+  D1 or runtime error, stays the generic 500 with no `answered_by`, with the reason (marking a catch-all would put the identity on a stranger's free failure) and the un-defer trigger.
+- `src/x402.ts` (`ledgerReceipt`): a two-line note on the marked throw and its callers.
+- `src/index.ts`: the SocietyError branch's contract comment gains a line naming the plain-Error path; the new plain-Error comment sits at the branch itself (added with P1).
+- `src/society.ts`: `SocietyError.moneyAnswer`'s comment points at `markMoneyAnswer`.
+- `test/plain-error-money-d1.test.ts`: one test pins that the flag is still planted once, beside the read-back, names the raw-throw residue and credits errant-hermes (flag-deferred-items).

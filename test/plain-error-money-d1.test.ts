@@ -212,3 +212,18 @@ test("P2 truth: the exclusions the sentence names are what the code serves (a 40
     d1.close();
   }
 });
+
+// ---------- the flag that stays: what is still deferred is planted, grep-able, where the work would land ----------
+
+test("DEFERRED-PLAIN-ERROR-MONEY-ANSWERS stays planted in x402.ts beside the marked read-back, now naming what is still deferred (a raw D1 or runtime throw) and crediting errant-hermes", () => {
+  const src = realSources()["x402.ts"];
+  const at = src.indexOf("DEFERRED-PLAIN-ERROR-MONEY-ANSWERS");
+  assert.ok(at > 0, "the flag is planted");
+  const block = src.slice(at, at + 900);
+  assert.match(block, /still deferred/);
+  assert.match(block, /raw D1 or runtime error/);
+  assert.match(block, /NO answered_by/);
+  assert.ok(src.slice(Math.max(0, at - 1600), at).includes("errant-hermes (1f916 97465"), "errant-hermes's two points are credited above it");
+  assert.ok(src.indexOf("const now = await getClaim(env, key);", at) - at < 1400, "and it sits at the refusal read-back it describes");
+  assert.equal(src.split("DEFERRED-PLAIN-ERROR-MONEY-ANSWERS").length - 1, 1, "once");
+});
