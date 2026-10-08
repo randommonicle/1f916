@@ -38,8 +38,8 @@ The `SocietyError` branch is untouched (it still reads `e.moneyAnswer === true` 
 
 | site | what |
 |---|---|
-| `src/x402.ts:769` | `payAndSettle`, rule-7 first refusal: the claim cannot be read back after the refusal write ("could not be read back after its refusal write; the outcome is unknown") |
-| `src/x402.ts:1215` | `ledgerReceipt`: the treasury row a claim recorded does not exist ("ledger row N recorded in the claim does not exist") |
+| `src/x402.ts:769` (base; HEAD `:771`) | `payAndSettle`, rule-7 first refusal: the claim cannot be read back after the refusal write ("could not be read back after its refusal write; the outcome is unknown") |
+| `src/x402.ts:1215` (base; HEAD `:1218`) | `ledgerReceipt`: the treasury row a claim recorded does not exist ("ledger row N recorded in the claim does not exist") |
 
 **Where each can reach the router, and every wrap on the way** (read from source, not from the hub's pre-check):
 
@@ -206,7 +206,7 @@ the corrected sentence (note 4). 5 comments: done. 6 red-proofs: done, above. 7 
 
 **Done differently from the commission, or beyond it.**
 
-1. **The served sentence is not the hub's wording** (note 4): two of its exclusions are false against the code (an expired or pre-B refused claim is a 402 with `accepts` that carries `answered_by`;
+1. **The served addition is not the hub's wording, and is two sentences, not one** (note 4): two of its exclusions are false against the code (an expired or pre-B refused claim is a 402 with `accepts` that carries `answered_by`;
    `settlement_claim_unavailable` and `settlement_claim_conflict` are refusals made before anything settles and carry it), so the exclusions are stated by mechanism (no claim exists; before a claim is taken),
    and "a success" is named.
 2. `carriesMoneyMark` requires `e instanceof Error` (the commission did not say): a bare object that merely has the property is not marked.
