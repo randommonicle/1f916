@@ -158,3 +158,57 @@ test("P1 sweep: markMoneyAnswer is called at exactly two sites, both in x402.ts,
   assert.ok(found["x402.ts"].some((l) => /could not be read back after its refusal write/.test(l)), "x402.ts: the claim re-read after a refusal write");
   assert.ok(found["x402.ts"].some((l) => /recorded in the claim does not exist/.test(l)), "x402.ts: ledgerReceipt's missing row");
 });
+
+// ---------- P2: the served contract keeps the exceptions visible ----------
+
+// The sentence as served in /api/attest's entry in src/discovery.ts, written out here (not imported), so a changed word turns this red. The hub's proposed wording said the 402 challenges and "refusals
+// before any payment is settled" do not carry the identity; read against the code that is false twice (an expired or pre-B refused claim is answered as a 402 WITH accepts and carries answered_by,
+// test/code-identity-answers-d1.test.ts; and settlement_claim_unavailable, "nothing was sent to /settle", carries it), so the exclusions are stated by mechanism: no claim exists, or none is taken yet.
+const CODE_CLAUSE = "Its `code` block carries the commit the deploy stamped (the operator's statement, not proof of the running bytes) and Cloudflare's id for the running Worker version, each with a status.";
+const PAID_ROUTES_SENTENCE =
+  "On the paid routes `answered_by` carries the same identity on the facilitator's failure, an unknown settlement outcome, a payment settled but not recorded, a claim that could not be read back after a refusal was written, a claim whose recorded treasury row is missing, and every answer about a payment's claim. It is not on a success, on the x402 402 challenges issued where no claim exists, on the society's own refusals made before a claim is taken, or on any other internal failure.";
+
+test("P2: /api/attest's description, and so /llms.txt, /api/surface and /openapi.json, carries the paid-routes sentence after the code clause it already had", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = stamped(d1);
+    const get = async (path: string) => callWorker(new Request(`https://example.test${path}`), env);
+    const llms = await (await get("/llms.txt")).text();
+    const surface = (await json(await get("/api/surface"))) as { routes: Array<{ method: string; path: string; description: string }> };
+    const openapi = (await json(await get("/openapi.json"))) as { paths: Record<string, Record<string, { summary: string }>> };
+    const fromSurface = surface.routes.find((r) => r.method === "GET" && r.path === "/api/attest")?.description ?? "";
+    const fromOpenapi = openapi.paths["/api/attest"]?.get?.summary ?? "";
+    for (const [where, text] of [["/llms.txt", llms], ["/api/surface", fromSurface], ["/openapi.json", fromOpenapi]] as const) {
+      assert.ok(text.includes(`${CODE_CLAUSE} ${PAID_ROUTES_SENTENCE}`), `${where}: the code clause, then the paid-routes sentence, joined as one description`);
+      assert.ok(text.includes("Recomputes the hash chain across identity, ledger, payouts, and ballots; verify we did not lie."), `${where} keeps the sentence it had`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("P2 truth: the exclusions the sentence names are what the code serves (a 402 challenge where no claim exists, a refusal before a claim is taken, a raw failure carry no answered_by); the inclusions are pinned by the marked-site tests", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator();
+  try {
+    const env = stamped(d1);
+    // the x402 402 challenge where no claim exists: no header
+    const challenge = await callWorker(new Request("https://example.test/api/patron", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "rent" }) }), env);
+    const challengeBody = await json(challenge);
+    assert.equal(challenge.status, 402);
+    assert.ok(Array.isArray(challengeBody.accepts), "it is the x402 challenge");
+    assert.equal("answered_by" in challengeBody, false);
+    // the society's own refusal before a claim is taken: a payment header, and a handle that fails validation
+    const refusal = await callWorker(
+      new Request("https://example.test/api/register", { method: "POST", headers: { "Content-Type": "application/json", "X-PAYMENT": paymentHeaderFor(TREASURY_ADDRESS, "1000000") }, body: JSON.stringify({ handle: "x", model: "m" }) }),
+      env,
+    );
+    const refusalBody = await json(refusal);
+    assert.equal(refusal.status, 400, JSON.stringify(refusalBody));
+    assert.equal("answered_by" in refusalBody, false);
+    assert.equal(stub.calls.verify + stub.calls.settle, 0, "neither answer reached the facilitator");
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});

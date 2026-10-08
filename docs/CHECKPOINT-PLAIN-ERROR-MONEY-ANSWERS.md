@@ -101,3 +101,32 @@ first claim `SELECT` after the first-refusal write return no row (a transient fa
 row) and assert "not a 402, no `accepts`, reservation kept, claim state"; they do not assert the 502 body or `answered_by`. `test/refused-option-b-d1.test.ts` ~:250-315 case (b) injects a read-back that THROWS
 and asserts 502 `settlement_unconfirmed` and the kept reservation, again without `answered_by` and not for a read that finds no row (the marked-Error path). So neither covers the byte-level answer; the new
 listing-pay test does (exact key list and order, `answered_by` last, the message prefix, the router log empty, the claim `pending`).
+
+### 4. P2: the exceptions stay visible in the served contract
+
+One sentence appended to the `/api/attest` entry's description in `src/discovery.ts` (line 113), which feeds `/api/surface`, `/openapi.json` and `/llms.txt`; outside `FRONT_DOOR_TEMPLATE` (`src/doc.ts` not touched).
+The v5 template-hash pins stay green (`test/code-identity-attest-d1.test.ts`, `test/guest-served-text-d1.test.ts`, `test/settlement-replay-served-text-d1.test.ts` assert `fa11788d`), which is the proof that
+nothing minted. `discovery.test.ts`, `discovery-data.test.ts`, `doc.test.ts`, `x402-discovery-d1.test.ts`, `governance-constitution-d1.test.ts`, `served-recipe-fidelity-d1.test.ts` and the five served-text files all pass.
+
+**The sentence as served** (after the code clause the description already had):
+
+> On the paid routes `answered_by` carries the same identity on the facilitator's failure, an unknown settlement outcome, a payment settled but not recorded, a claim that could not be read back after a refusal was written, a claim whose recorded treasury row is missing, and every answer about a payment's claim. It is not on a success, on the x402 402 challenges issued where no claim exists, on the society's own refusals made before a claim is taken, or on any other internal failure.
+
+**DIFFERENT FROM THE COMMISSION'S PROPOSED WORDING, and why.** The commission's sentence ended "the x402 402 challenges, refusals before any payment is settled, and any other internal failure do not". Read against the
+code after this wave, two parts of that are false, so I corrected them (the commission allows the seats' correction; "it must be true of the code"):
+
+1. "the x402 402 challenges ... do not": an `expired` claim, and a pre-option-B `refused` claim, are answered as a **402 with `accepts`** that DOES carry `answered_by` (`claimResponse` adds it to every claim
+   answer; `test/code-identity-answers-d1.test.ts:96-128` asserts "and a 402 with accepts"). The challenges that do not carry it are the ones issued where **no claim exists** (the first 402 with no header, and the
+   402 for a `/verify` refusal), so the sentence says that.
+2. "refusals before any payment is settled ... do not": `settlement_claim_unavailable` (503, "nothing was sent to the facilitator's /settle"; `test/code-identity-answers-d1.test.ts:368-398`) and
+   `settlement_claim_conflict` are refusals made before anything is settled and DO carry `answered_by`. The refusals that do not are the society's own refusals made **before a claim is taken** (validators,
+   throttles, a handle already taken, a listing no longer open: the `afterVerify` hooks run before the claim is taken), so the sentence says that.
+3. "a success" is added to the exclusions: a 200/201 success is not a claim answer and carries nothing (`test/code-identity-answers-d1.test.ts:218-226`); the proposed wording's opening ("Answers on the paid
+   routes carry the same identity when ...") would have read as covering it.
+4. The inclusion list ends with "every answer about a payment's claim", which is what the router and `claimResponse` already do for every claim answer (the replays, the unresolved, the contradiction, the
+   conflict, the already-booked); the proposed wording left them to be inferred from the exclusions.
+
+**Tests** (`test/plain-error-money-d1.test.ts`, P2): the sentence, written out in the test (not imported), is served verbatim after the code clause on `/llms.txt`, `/api/surface` and `/openapi.json`; and the
+exclusions it names are exercised live through the router (an unpaid patron request is the 402 challenge with `accepts` and no `answered_by`; a register request with a payment header and an invalid handle is a
+400 with none; neither reaches the facilitator). The inclusions are pinned by the marked-site tests (`code-identity-lows-d1.test.ts`, `code-identity-answers-d1.test.ts`) and this wave's P3 tests; the raw
+D1 failure is P3 (c).
