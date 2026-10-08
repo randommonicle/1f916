@@ -41,7 +41,7 @@ $LIVE_BASE_COMMIT = "5ecca7aea6268530b4dbe1d146162c8e62608f95"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the code exchange converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
 # HEAD may differ from it ONLY in $ALLOWED_PATHS_AFTER_REVIEW: this script, its test, and anything under docs/ (an entry ending in "/" is a directory prefix, any other entry an exact
 # path). A change anywhere else (src/, migrations/, schema.sql, package.json, package-lock.json, wrangler.jsonc, tsconfig.json, .claude/, any other path) STOPS step 0: that code was not reviewed.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "791111280591bb88938cf8094d35a01b85c3ef3b"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-code-identity.ps1", "test/deploy-code-identity-script.test.ts", "docs/")
 $ATTENTION_URL = "$BASE/api/settlements/attention"
