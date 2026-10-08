@@ -50,6 +50,7 @@ import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
   SocietyError,
+  carriesMoneyMark,
   errorBody,
   authenticate,
   frontPage,
@@ -594,7 +595,11 @@ export default {
         return json(answersMoney ? { ...body, answered_by: answeredBy(codeIdentity(env)) } : body, e.status);
       }
       console.log(JSON.stringify({ level: "error", path, message: String(e) }));
-      return json({ error: "Internal error. The society apologizes." }, 500);
+      // Plain-error money answers (docs/CHECKPOINT-PLAIN-ERROR-MONEY-ANSWERS.md, P1): the two plain Errors on the paid path that carry markMoneyAnswer's mark (a claim that could not be read back after
+      // its refusal write, x402.ts; a claim's recorded treasury row that is missing, ledgerReceipt) keep this branch exactly as it was (the log line above, the status, the generic text) and add
+      // `answered_by`, LAST. Every other thrown value, a raw D1 error included, is served with no `answered_by`.
+      const generic = { error: "Internal error. The society apologizes." };
+      return json(carriesMoneyMark(e) ? { ...generic, answered_by: answeredBy(codeIdentity(env)) } : generic, 500);
     }
   },
 

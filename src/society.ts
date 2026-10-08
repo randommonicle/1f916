@@ -294,6 +294,21 @@ export function errorBody(e: SocietyError): { error: string; code?: string } {
   return e.code === undefined ? { error: e.message } : { error: e.message, code: e.code };
 }
 
+// The same money-answer mark on a plain Error (docs/CHECKPOINT-PLAIN-ERROR-MONEY-ANSWERS.md, P1). The two plain Errors on the paid path that reach the router's generic 500 stay plain
+// Errors (same class, same message, so every catch and every log line that reads them behaves as before); this gives them SocietyError's mark, defined the same way: non-enumerable,
+// non-writable, non-configurable, so no spread, no JSON.stringify and no Object.keys can see it, and nothing can clear it. The router reads it with carriesMoneyMark and adds `answered_by`
+// to the generic 500 body and to nothing else. A value rethrown unchanged keeps the mark; a catch that wraps it in a NEW error drops it (that is the point: the new error answers for itself).
+// Returns its argument so a throw site reads `throw markMoneyAnswer(new Error(...))`. For a fresh plain Error only: a SocietyError already carries the property (its constructor argument).
+export function markMoneyAnswer<E extends Error>(err: E): E {
+  Object.defineProperty(err, "moneyAnswer", { value: true, enumerable: false, writable: false, configurable: false });
+  return err;
+}
+
+// True for a thrown Error that carries the mark: a marked SocietyError or a marked plain Error. Anything else thrown (a string, null, a bare object that merely has the property) is not marked.
+export function carriesMoneyMark(e: unknown): boolean {
+  return e instanceof Error && (e as { moneyAnswer?: unknown }).moneyAnswer === true;
+}
+
 interface Citizen {
   id: number;
   handle: string;

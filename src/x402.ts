@@ -12,7 +12,7 @@
 // this shares instead.
 
 import { appendChained, appendChainedStmt, type ChainRow } from "./chain.ts";
-import { type Env, SocietyError } from "./society.ts";
+import { type Env, SocietyError, markMoneyAnswer } from "./society.ts";
 import { codeIdentity } from "./code-identity.ts";
 import { readAuthorizationState } from "./settlement-chain.ts";
 import {
@@ -766,7 +766,7 @@ export async function payAndSettle(
       // new fields read as universal; and these two 500s are the material follow-up: exercise the refused-claim and missing-ledger paths through a read-back test and record
       // whether each returns a stable refusal/receipt, not only whether answered_by is present.
       const now = await getClaim(env, key);
-      if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
+      if (!now) throw markMoneyAnswer(new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown"));
       if (wrote && now.state === "pending" && !isChainSpent(now)) {
         // The discriminator (facilitator_refused, recheck_after) rides THIS answer only: settlement_unresolved is a code several answers share, one of them for a payment the facilitator has
         // already settled, so a client needs a field that says "this is the facilitator's refusal, kept pending" (build review F2).
@@ -1212,7 +1212,7 @@ export async function finishUnderOwnLease<T>(env: Env, result: Extract<SettleRes
 // The ledger row a claim recorded, for the receipt a response carries.
 export async function ledgerReceipt(env: Env, ledgerId: number): Promise<{ prev_hash: string; hash: string }> {
   const r = await env.DB.prepare("SELECT prev_hash, hash FROM ledger WHERE id = ?").bind(ledgerId).first<{ prev_hash: string; hash: string }>();
-  if (!r) throw new Error(`ledger row ${ledgerId} recorded in the claim does not exist`);
+  if (!r) throw markMoneyAnswer(new Error(`ledger row ${ledgerId} recorded in the claim does not exist`));
   return r;
 }
 
