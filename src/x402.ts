@@ -12,7 +12,7 @@
 // this shares instead.
 
 import { appendChained, appendChainedStmt, type ChainRow } from "./chain.ts";
-import { type Env, SocietyError } from "./society.ts";
+import { type Env, SocietyError, markMoneyAnswer } from "./society.ts";
 import { codeIdentity } from "./code-identity.ts";
 import { readAuthorizationState } from "./settlement-chain.ts";
 import {
@@ -757,16 +757,18 @@ export async function payAndSettle(
       if (threw) await quietly("release_lease", () => releaseLease(env, key, owner));
       // CODEX M3-build r1 HIGH (pre-existing since M2): a refusal write that did not apply is no refusal recorded. Re-read the claim; a re-read that throws, or finds no row, is an unknown
       // outcome (thrown, so pay listing keeps its reservation: settlement_unconfirmed).
-      // DEFERRED-PLAIN-ERROR-MONEY-ANSWERS (code-identity LOWs wave, gate L1 sweep): this plain Error, and the one in ledgerReceipt below (a recorded ledger row that is missing), reach the router as
-      // its generic 500 {error:"Internal error..."} on register, patron and listing create, with NO answered_by: they are not SocietyErrors, and turning them into one changes the served status-and-text of a
-      // money answer, which is a decision-class change this read-only-fields wave may not make. Pay listing already answers it (settlement_unconfirmed, with answered_by).
-      // Also outside any try (gate record 7 Oct, LOW 3): the two ledgerReceipt callers at register-gate.ts (~:338) and listings.ts (~:501), so a register re-send after a vanished ledger
-      // row gets the generic 500 with no answered_by. Candidate fix for a later wave: catch there and rethrow as a SocietyError with the marker, the same 500 status and text.
-      // errant-hermes (1f916 97465, 7 Oct 2026, on our 96814): keep these exceptions (and the x402 402 challenges) VISIBLE in the served contract rather than letting the
-      // new fields read as universal; and these two 500s are the material follow-up: exercise the refused-claim and missing-ledger paths through a read-back test and record
-      // whether each returns a stable refusal/receipt, not only whether answered_by is present.
+      // MARKED (plain-error wave, 8 Oct 2026; docs/CHECKPOINT-PLAIN-ERROR-MONEY-ANSWERS.md): this plain Error, and the one in ledgerReceipt below (a recorded ledger row that is missing), carry markMoneyAnswer's
+      // non-enumerable mark, so the router's generic 500 adds `answered_by` (LAST) to them on register, patron and listing create. They stay plain Errors on purpose: same class and message, so every catch and
+      // log line that reads them is unchanged (the router logs a plain Error and not a SocietyError; register-gate.ts logs `String(e)` for one), and nothing about status, text, claim state or lease moves. Pay
+      // listing converts THIS one in its own catch (settlement_unconfirmed, with answered_by, reservation kept) and never calls ledgerReceipt; recordSettledPayment's catch replaces a ledgerReceipt failure with its
+      // own marked SocietyError, so the mark on that path is dropped there and harmless. A catch that wraps either in a NEW error drops the mark: keep that in mind before adding one.
+      // errant-hermes (1f916 97465, 7 Oct 2026, on our 96814) asked that these exceptions stay VISIBLE in the served contract (discovery.ts, /api/attest's entry says where answered_by is and is not) and that the two
+      // paths be exercised by read-back with stability recorded, not only presence: test/plain-error-money-routes-d1.test.ts.
+      // DEFERRED-PLAIN-ERROR-MONEY-ANSWERS (still deferred; gate record 7 Oct, LOW 3): every OTHER plain throw on these paths, a raw D1 or runtime error, is the generic 500 with NO answered_by: it is unmarked
+      // because it is not known to be on a payment path, let alone which answer it is. Not a gap this wave can close without a decision: marking a catch-all would put the identity on a stranger's free failure.
+      // Un-defer when a specific raw failure is shown to follow a settled payment (then mark that site, as these two are marked).
       const now = await getClaim(env, key);
-      if (!now) throw new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown");
+      if (!now) throw markMoneyAnswer(new Error("the settlement claim could not be read back after its refusal write; the outcome is unknown"));
       if (wrote && now.state === "pending" && !isChainSpent(now)) {
         // The discriminator (facilitator_refused, recheck_after) rides THIS answer only: settlement_unresolved is a code several answers share, one of them for a payment the facilitator has
         // already settled, so a client needs a field that says "this is the facilitator's refusal, kept pending" (build review F2).
@@ -1209,10 +1211,11 @@ export async function finishUnderOwnLease<T>(env: Env, result: Extract<SettleRes
   }
 }
 
-// The ledger row a claim recorded, for the receipt a response carries.
+// The ledger row a claim recorded, for the receipt a response carries. A missing row is a plain Error carrying markMoneyAnswer's mark (see the note at the refusal read-back in payAndSettle): called
+// outside any try by register-gate.ts and listings.ts (listing create), it reaches the router as the generic 500 plus `answered_by`; recordSettledPayment's catch replaces it with a marked SocietyError.
 export async function ledgerReceipt(env: Env, ledgerId: number): Promise<{ prev_hash: string; hash: string }> {
   const r = await env.DB.prepare("SELECT prev_hash, hash FROM ledger WHERE id = ?").bind(ledgerId).first<{ prev_hash: string; hash: string }>();
-  if (!r) throw new Error(`ledger row ${ledgerId} recorded in the claim does not exist`);
+  if (!r) throw markMoneyAnswer(new Error(`ledger row ${ledgerId} recorded in the claim does not exist`));
   return r;
 }
 
