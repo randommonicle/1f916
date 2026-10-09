@@ -241,3 +241,7 @@ import inlined (`init_rule7_vote`) as the bundle smoke here did.
 - **The alternative to the dynamic import.** Moving `KIND_CLASS`, `CLASS_QUORUM_RULE`, `CLASS_PASSAGE_RULE`, `CLASS_MIN_BALLOTS`, `classOf` and `tally` to a leaf module that `governance.ts` re-exports would break the cycle
   statically, and `society.ts` could then import the reader normally. It touches the D-018 authority file `governance.ts` (and the policing/serialiser tests that read it), so it was not done here; it is the hub's choice if a
   dynamic `import()` (the first in `src/`) is not wanted as a precedent.
+
+## Hub note 1 (9 Oct, after the code exchange round 1): the floor mapping follows the commission
+
+CODEX r1 (`exchange/REVIEW_daily-loop-build-2026-10-09.md`) found that `rule7VoteState` mapped a missed class floor to `failed_without_quorum`, against commission R1 ("with quorum" is `cast >= quorumFor(class, eligible_count)`) and the proposal's own terms ("Failed with quorum reached (seven or more ballots ...)"); the served sentence would then say "closed without quorum" when quorum was met. GEMINI r1 accepted the builder's reading. The hub sided with the commission: `tally()` now only checks that the stored numbers agree with the `failed` row, and the split is ballots against `quorumFor`. Unreachable for proposal 8 itself (eligible frozen at 13, quorum 7, floor 3). The test case (eligible 4, two ballots) now expects `failed_with_quorum`. Red-proof: `>=` mutated to `>` fails 3 cases (this one and both seven-of-thirteen cases); restored, 19/19.

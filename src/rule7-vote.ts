@@ -13,7 +13,7 @@
 // test/rule7-status-d1.test.ts enters society.ts, topics.ts, governance.ts and this file first, each in a fresh process, to prove the order
 // does not matter.
 
-import { classOf, tally, type ProposalKind } from "./governance.ts";
+import { classOf, quorumFor, tally, type ProposalKind } from "./governance.ts";
 
 // The proposal the sentences read. A revote (a failed-without-quorum result is put to a vote again) would be a different proposal id:
 // change this constant and nothing else, and the sentences follow the new one.
@@ -46,8 +46,10 @@ interface ProposalRow {
 //   failed_*   'failed', split by the tally's own recorded reason, recomputed here because the reason is not stored (governance.ts
 //              TallyResult.reason, "proposals.status has no reason column"): the stored yes/no/abstain and eligible_count (snapshotted at
 //              close "so a historical quorum check is always recomputable", schema.sql) go back through the SAME tally() the sweep ran.
-//              Its reason 'margin' is quorum reached and not passed (the power retires); 'quorum' and 'floor' are both too few ballots to
-//              decide anything (the class floor is a minimum presence, abstain counts), so nobody decided.
+//              tally() is run only to check the stored numbers agree with the row (a 'failed' row whose numbers pass is unreadable). Which
+//              failure it was is decided by the proposal's own terms (drafts/send/commonhold-proposal-rule7-2026-09-23.txt: "Failed with quorum
+//              reached (seven or more ballots ...)") and the converged commission (R1): ballots cast >= quorumFor(class, eligible_count). So a
+//              missed class floor with quorum met reads as with quorum; for proposal 8 (eligible 13, quorum 7, floor 3) the floor cannot bind.
 //   absent     no row with that id (a fresh fork, an older fixture).
 export async function rule7VoteState(db: D1Database, now = Date.now()): Promise<Rule7Vote> {
   try {
@@ -63,8 +65,11 @@ export async function rule7VoteState(db: D1Database, now = Date.now()): Promise<
       const { tally_yes: yes, tally_no: no, tally_abstain: abstain, eligible_count: eligible } = row;
       if (yes == null || no == null || abstain == null || eligible == null) return { state: "unreadable", closes_at: null };
       const result = tally(classOf(row.kind as ProposalKind), yes, no, abstain, eligible);
-      if (result.status === "failed" && result.reason === "margin") return { state: "failed_with_quorum", closes_at: null };
-      if (result.status === "failed") return { state: "failed_without_quorum", closes_at: null };
+      if (result.status === "failed") {
+        const cls = classOf(row.kind as ProposalKind);
+        const reached = yes + no + abstain >= quorumFor(cls, eligible);
+        return { state: reached ? "failed_with_quorum" : "failed_without_quorum", closes_at: null };
+      }
       // The row says failed and the stored numbers say passed: they disagree, so claim neither.
       return { state: "unreadable", closes_at: null };
     }
