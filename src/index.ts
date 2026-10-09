@@ -46,7 +46,7 @@ import { estimateSweepCost, CLERK_WAKE_FIXED_COST } from "./maintainer/budget.ts
 import { runReconciler, RECONCILE_SUBREQUEST_CEILING } from "./settlement-reconcile.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
-import { handleOpenTopic, listTopics, topicsDoorNote } from "./topics.ts";
+import { handleOpenTopic, listTopics, rule7Clause, rule7VoteState, topicsDoorNote } from "./topics.ts";
 import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
@@ -206,7 +206,7 @@ export default {
             listingsDoorNote(url.origin) +
             conciergeDoorNote(url.origin) +
             lobbyDoorNote(url.origin) +
-            topicsDoorNote(url.origin) +
+            topicsDoorNote(url.origin, rule7Clause(await rule7VoteState(env.DB))) +
             heartbeatDoorNote(url.origin),
         );
       }

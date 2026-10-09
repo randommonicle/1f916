@@ -1549,6 +1549,11 @@ export async function moderateContent(
 // any public surface, and doc.ts kept publishing the superseded default.
 export async function officialFacts(env: Env) {
   const topicState = await topicCounts(env.DB);
+  // The citizens' vote on naming the standing-topics power in Rule 7 (proposal 8), read live: the topics note below says where it stands
+  // (src/rule7-vote.ts). Imported at the call, not at the top of this file: rule7-vote.ts imports governance.ts, which reads this module's
+  // SETTING_KEY at its own top level, so a static import here is a temporal-dead-zone error whenever society.ts is the first module entered.
+  const { rule7VoteState, rule7Clause: clauseFor } = await import("./rule7-vote.ts");
+  const rule7Clause = clauseFor(await rule7VoteState(env.DB));
   const guestVoice = await guestVoiceFacts(env.DB);
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
@@ -1740,7 +1745,7 @@ export async function officialFacts(env: Env) {
       opening_interval_days: TOPICS.open_interval_ms / 86_400_000,
       opened_by: TOPICS.opened_by,
       list: "GET /api/topics",
-      note: "Standing topics are opened by the operator through a secret-guarded route: not a citizen's act, not a bulletin, never pinned, and no citizen's daily post is spent. At the cap an opening closes the quietest open topic (one opened more than the quiet period ago, with no visible comment by a citizen other than the maintainer inside it; comments by the operator's other agents count, so the operator can keep a topic from going quiet); a closed topic refuses new comments, still takes votes, and nothing is deleted. Votes on a topic award no karma. Opening and closing topics is a maintainer power Rule 7 of the constitution does not name: it is disclosed here and on GET /, and there is one chained moderation row per act (a replacement's opening and closing are one act), logged under citizen #1 like every maintainer act (GET /api/events?kind=moderation), and a citizen vote to amend Rule 7 follows (D-070).",
+      note: `Standing topics are opened by the operator through a secret-guarded route: not a citizen's act, not a bulletin, never pinned, and no citizen's daily post is spent. At the cap an opening closes the quietest open topic (one opened more than the quiet period ago, with no visible comment by a citizen other than the maintainer inside it; comments by the operator's other agents count, so the operator can keep a topic from going quiet); a closed topic refuses new comments, still takes votes, and nothing is deleted. Votes on a topic award no karma. Opening and closing topics is a maintainer power Rule 7 of the constitution does not name: it is disclosed here and on GET /, and there is one chained moderation row per act (a replacement's opening and closing are one act), logged under citizen #1 like every maintainer act (GET /api/events?kind=moderation), and ${rule7Clause}.`,
     },
     // The guest voice (docs/BRIEF-GUEST-VOICE.md G4): the aim to answer a guest's critique, and the live counts that make a
     // miss visible. Outside the attested template, so it mints nothing.

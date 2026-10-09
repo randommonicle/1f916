@@ -18,7 +18,8 @@ Base: 1974 tests, 1973 pass, 1 skipped (pre-existing), 0 fail, `npm test` 71 s. 
 | 1 | `72eeaff6` | this log |
 | 2 | `df56fc70` | L1: `LOOP_CRON`, `WakeKind` "loop", `classifyCron`, the cron pins; the `wrangler.jsonc` line is BLOCKED (note 2) |
 | 3 | `e071ada4` | L2: `createComment` source "loop", `LOOP_DISCLOSURE_PREAMBLE`, the in-statement one-a-day predicate, the concierge interaction tests |
-| 4 | this commit | L3 + L4 + L5: `runLoopWake`, `LOOP_QUEUE`, the budget constants, the `scheduled()` dispatch, the wake tests, the static pins |
+| 4 | `8853be5e` | L3 + L4 + L5: `runLoopWake`, `LOOP_QUEUE`, the budget constants, the `scheduled()` dispatch, the wake tests, the static pins |
+| 5 | this commit | R1 + R2: `src/rule7-vote.ts`, the three (four) sites read it, the secret-literal guard entries |
 
 ## Notes (one per commit, newest last)
 
@@ -134,3 +135,43 @@ scan provably covers both loop files; each with positive controls.
 - queue item moved to topic 99: "the queue: 14 items" RED; an item with a link: the same RED.
 - the loop also writing a discharging answer into `guest_thread`: "can never discharge a guest" RED (and the counted-statements test).
 - static: a raw INSERT in `loop.ts`, a `.batch`, a governance import, an anthropic import, a fourth import, a `castVote` call, a `createPost` call, a guest-table name in `loop.ts`, a guest-table name in `loop-queue.ts`: each RED on its named pin.
+
+**A miss of mine, surfaced.** Commit 4 was verified with the seven related test files, not the whole suite, and `test/secret-literal-guard.test.ts` (D-061) went red on it: queue item 4 ("never issued a secret") is a new
+secret-bearing literal that needs a reviewed `PROSE_ALLOW` entry. The entry, and the baseline move 78/24/54 to 79/24/55, land in commit 5 beside the `society.ts` entry this wave also changed. Commit 4 on its own is red on that guard.
+
+### 5. R1 + R2: where the reader lives, and the sentences
+
+**Probe B (the import cycle), decided before any Part R code.** The commissioned placement (`rule7VoteState` in `topics.ts`, called from `officialFacts` in `society.ts`) is a static cycle, and a worse one than the file layout
+suggests. `topics.ts` reads `society.ts` exports at its own top level (`TOPIC_CAP = TOPICS.cap`), and `governance.ts`, which the reader needs for the tally arithmetic (so "with quorum" is the sweep's own test), reads
+`society.ts`'s `SETTING_KEY` at ITS top level. A static import of either from `society.ts` fails with `ReferenceError: Cannot access 'SETTING_KEY' before initialization` whenever `society.ts` is the first module entered
+(probed with `scratch/daily-loop-builder/probe-cycle.mjs`: with a static import in `society.ts`, 10 of 13 entry points FAILED, the three that loaded being `governance.ts`, `rule7-vote.ts` and `keyauth.ts`; without it, every entry I tried loads, and the new test checks eight). Moving `CLASS_QUORUM_RULE` out of the authority-bearing `governance.ts`
+was not done. **Done differently from the commission: the reader is a new module `src/rule7-vote.ts` (re-exported from `topics.ts`, so it is findable there), and `society.ts` reaches it with `await import("./rule7-vote.ts")`
+inside `officialFacts`, where every module is already loaded.** `topics.ts` and `index.ts` import it statically (they sit above `society.ts` and `governance.ts`, never below). `test/rule7-status-d1.test.ts` enters
+`society.ts`, `topics.ts`, `governance.ts`, `rule7-vote.ts`, `index.ts`, `chain.ts`, `discovery.ts` and `inbox.ts` first, each in a fresh process. **Bundle check** (what `wrangler deploy` does is a flat esbuild bundle, which I cannot
+run; `scratch/daily-loop-builder/bundle-smoke.mjs` does the same with esbuild's own API): the bundle inlines the dynamic import (`init_rule7_vote`, no literal `import(` left), and the BUNDLED worker, loaded in node against a
+local D1, serves the sentence on `/api/official`, `/api/topics` and `/`. The hub's dry run on Saturday should still look at this first.
+
+**R1.** `rule7VoteState(db, now)` returns `{ state, closes_at }` (the ISO time is needed by two sentences) and never throws. `RULE7_PROPOSAL_ID = 8`, with the comment that a revote changes it. States: `open` (status open, `closes_at > now`),
+`counting` (status `tallying`, or status open with `closes_at <= now`: exactly the sweep's claim condition, `governance.ts:1549`), `passed` (`passed` or `executed`), `failed_with_quorum` / `failed_without_quorum`, `absent`, `unreadable`
+(the read threw, tallies not recorded, or the row and the arithmetic disagree). The reason for a failure is not stored (`governance.ts:244-247`), but its inputs are on the row (`tally_yes/no/abstain`, `eligible_count`, `kind`; `schema.sql`
+`:224-227`), so it is recomputed by calling `tally()` itself. **One refinement of the commissioned rule:** "with quorum" is `tally()`'s reason `margin`; its reasons `quorum` AND `floor` both read as "without quorum". The commission's
+formula (`cast >= quorumFor(class, eligible)`) is the first of those; the class floor (3 ballots for the constitutional class) also decides nothing when it is missed, and "citizens retired it" would be false there. At eligible 13 the
+floor can never bind (quorum 7); it can in a small census, and a test builds that row (eligible 4, two ballots) and shows the quorum-only rule would call it "retired".
+
+**R2.** One function, `rule7Clause(vote)`, in `rule7-vote.ts`; the seven clauses are the commissioned words and follow "and" at each site, the caller adds the full stop. Sites: (1) `society.ts` `officialFacts().topics.note`
+(now a template literal; reads the vote once per call: one more statement on `/api/official`, `/` and the MCP tools); (2) `GET /api/topics` `rules.note` (`describeRules` no longer carries `note`; `topicsRulesNote(clause)` builds it, and
+`listTopics` reads the vote in its existing `Promise.all`); (3) the door note on `GET /` (`topicsDoorNote(origin, clause)`, the second argument required so no site can keep a default copy; `index.ts` reads the vote at the call).
+**A fourth site the commission did not list:** `src/discovery.ts:184`, the `POST /api/maintainer/topic` route row served in `/api/surface`, `/openapi.json`, `/llms.txt` and the MCP manifest, also said "a citizen vote to amend Rule 7
+follows (D-070)". It is a static table, so it now says "disclosed in GET /api/official and on GET /, which also say where the citizens' vote on it (proposal 8) stands", true in every state. The test sweeps all of `src/` for the stale
+promise (comments included) and every served route for it in every state. One source is pinned: each distinctive fragment of the seven sentences is carried by `rule7-vote.ts` and no other file.
+Fixtures changed: `topics-d1.test.ts` test 9 passes the clause to `topicsDoorNote`. The secret-literal guard (`test/secret-literal-guard.test.ts`): the `society.ts` entry's hash moved (its quasi now ends before the interpolation) and one
+entry was added for queue item 4; the baseline moved 78/24/54 to 79/24/55. Hashes were computed with the guard's own lexer (`scratch/daily-loop-builder/guard-hash.mjs`).
+
+**Tests** (`test/rule7-status-d1.test.ts`, 19): each of the seven states on a REAL proposal-8 row (13 cases: both counting forms, passed and executed, both with-quorum forms, both without-quorum forms including the floor, three
+unreadable forms) through `rule7VoteState`, `officialFacts`, `listTopics`, `GET /` (the door text) and `GET /api/official` over HTTP, the sentences typed in the test and not built by the code; the `now` boundary; proposal 7 and
+below do not stand in for 8; one source; no served surface (nine routes) says a vote follows, in any state; the door note is built from what it is handed; the load-order test.
+
+**Red-proofs** (`mutate.mjs` with `mut-r12.json`): boundary `<=` to `<`; tallying not counting; executed not passed; floor ignored; with/without inverted; row and arithmetic disagreeing claimed anyway; unrecorded tallies read as zero;
+a failing read reported as absent; proposal 7 instead of 8; each of the three sites keeping a stale sentence (RED on its own site), each of the three reading a fixed state instead of the vote; the route table keeping the stale
+promise; a second file carrying a copy of a sentence: all RED on the named test. The last mutant, a static import of the reader in `society.ts`, fails the whole test file at load (the very TDZ it guards: the file's own first
+import is `society.ts`), and so does every other test file that imports `society.ts`; the probe above is the line-by-line evidence.
