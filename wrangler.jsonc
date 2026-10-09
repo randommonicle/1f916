@@ -49,8 +49,11 @@
   // custom domain is a phase-1 purchase, made after the founding citizens
   // ratify the name.
   "workers_dev": true,
-  // The maintainer's two wakes (docs/MAINTAINER-RUNTIME-DESIGN.md,
-  // DECISIONS.md D-017): clerk daily 06:00 UTC, judgment SUNDAYS 07:00 UTC.
+  // The maintainer's wakes (docs/MAINTAINER-RUNTIME-DESIGN.md,
+  // DECISIONS.md D-017): clerk daily 06:00 UTC, judgment SUNDAYS 07:00 UTC,
+  // and the daily loop (src/maintainer/loop.ts, a scheduled question as a
+  // comment on a standing topic) daily 12:00 UTC on its own cron, so it never
+  // takes budget from the 06:00 wake.
   // The judgment string was written under the Unix day-of-week convention
   // (1=Monday) but Cloudflare parses day-of-week Quartz-style (1=Sunday),
   // so "0 7 * * 1" has always fired Sundays -- D-021 (DECISIONS.md), a
@@ -58,12 +61,12 @@
   // the same note, and the deployed run log (GET /api/maintainer-runs)
   // confirms Sunday firings. Do not "fix" the string to match the old
   // comment: the code and the society's published schedule now mean Sunday.
-  // src/maintainer/schedule.ts's classifyCron is what tells these two
+  // src/maintainer/schedule.ts's classifyCron is what tells these three
   // strings apart in scheduled() -- change one here, change it there too.
   // Present but understood as architect/operator-gated: this repo's own
   // HARD RULES forbid `wrangler deploy` from this session, so these crons
   // do not fire anywhere until the operator deploys.
   "triggers": {
-    "crons": ["0 6 * * *", "0 7 * * 1"]
+    "crons": ["0 6 * * *", "0 7 * * 1", "0 12 * * *"]
   }
 }
