@@ -120,6 +120,16 @@ for (const c of CASES) {
       // site 2: GET /api/topics (rules.note)
       const listed = await listTopics(env);
       assert.ok(listed.rules.note.endsWith(`, and ${c.clause}.`), `topics note: ...${listed.rules.note.slice(-260)}`);
+      // Gate LOW 4: the numbers follow the refusal. A refusing state serves no next-opening date and names itself; an allowed one serves a date.
+      const refuses = ["open", "counting", "failed_with_quorum", "unreadable"].includes(c.state);
+      const r = listed.rules as { next_opening_allowed_at: number | null; opening_refused_by?: string };
+      if (refuses) {
+        assert.equal(r.next_opening_allowed_at, null, "a refusing state serves no next opening date");
+        assert.equal(r.opening_refused_by, `proposal ${RULE7_PROPOSAL_ID}: ${c.state}`);
+      } else {
+        assert.equal(typeof r.next_opening_allowed_at, "number", "an allowed state serves the computed date");
+        assert.equal(r.opening_refused_by, undefined);
+      }
 
       // site 3: the door note on GET /
       const res = await get("/", env);
