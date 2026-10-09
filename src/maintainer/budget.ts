@@ -277,6 +277,27 @@ export function canAffordConcierge(priorCost: number): boolean {
   return priorCost + CONCIERGE_WORST_CASE_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }
 
+// The daily loop (src/maintainer/loop.ts), on its own 12:00 UTC cron: the governance sweep and then this, nothing else, so it shares only the
+// sweep's priorCost. No model call, no run table, no finalise write of its own (the log lines are its record), so "finalise" below is only the
+// reserve every phase leaves. Per run, in statements (each one subrequest on the platform):
+//   detection, 4: the one-a-day pre-read, the maintainer's citizen row, the topics' states (one IN query over the queue's distinct topics), and the
+//   queue's already-posted comments (one IN query). Two reads however long the queue is.
+//   one posting attempt, at most 5: createComment's post check, comment count and INSERT (3, a success); a refused attempt adds the loop-posted
+//   read and, when that finds nothing, the topic diagnosis read (5).
+//   attempts, at most LOOP_MAX_ATTEMPTS: only a refusal (a topic closed or moderated between the read and the write) sends the walk on to the next
+//   item, and each such refusal is a fresh attempt; the cap keeps a run of them from spending the invocation.
+// The proof is test/maintainer-loop-wake-d1.test.ts (counted statements against these constants on the success path and on a refused-then-posted path).
+export const LOOP_DETECTION_COST = 4;
+export const LOOP_ATTEMPT_COST = 5;
+export const LOOP_MAX_ATTEMPTS = 3;
+export const LOOP_WORST_CASE_COST = LOOP_DETECTION_COST + LOOP_MAX_ATTEMPTS * LOOP_ATTEMPT_COST;
+
+// Pure. May the loop run at all, given what the co-resident governance sweep (priorCost) has already spent? The worst case plus the finalise
+// reserve must fit the shared 50, checked ONCE before any read (the concierge's shape), so a shed run spends nothing.
+export function canAffordLoop(priorCost: number): boolean {
+  return priorCost + LOOP_WORST_CASE_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
+}
+
 // The guest-voice daily check (src/guest.ts runGuestDutyCheck, docs/BRIEF-GUEST-VOICE.md G4): ONE aggregate SELECT and ONE
 // INSERT of a dated run row, on the 06:00 clerk cron only, no model call. It runs AFTER the concierge (which keeps first
 // claim) and BEFORE the reconciler. The reconciler is handed what is left after the sweep, the concierge's actual cost and

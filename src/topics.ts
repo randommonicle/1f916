@@ -22,8 +22,9 @@
 //
 // Opening and closing topics is a maintainer power Rule 7 of the
 // constitution does not name. It is disclosed outside the minted template
-// (officialFacts.topics and the door note on GET /) and a citizen vote to
-// amend Rule 7 follows (D-070); this wave does not mint.
+// (officialFacts.topics, GET /api/topics and the door note on GET /), each of
+// which says where the citizens' vote on naming it (proposal 8, D-070) stands,
+// read live from src/rule7-vote.ts; this wave does not mint.
 //
 // DEFERRED-TOPIC-PROPOSAL-VOTE: a governance route for citizens to propose
 // a topic is a later design; today a citizen proposes one by saying so on
@@ -35,6 +36,13 @@
 import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, TOPICS, applyModState, topicCounts } from "./society.ts";
 import { appendChainedStmt, sha256Hex } from "./chain.ts";
 import { secretMatches } from "./maintainer/trigger.ts";
+import { RULE7_PROPOSAL_ID, rule7Clause, rule7OpenRefusal, rule7VoteState } from "./rule7-vote.ts";
+
+// The state of the citizens' vote on naming this power in Rule 7 (proposal 8), and the one sentence that says it, live in src/rule7-vote.ts: the
+// third site that serves it, officialFacts in society.ts, cannot import this file (it reads society.ts exports at module top level), so the
+// reader is a module of its own, which society.ts loads at the call (the header of rule7-vote.ts has the account). Re-exported here, where the
+// standing-topics code is looked for.
+export { RULE7_PROPOSAL_ID, rule7Clause, rule7VoteState, type Rule7State, type Rule7Vote } from "./rule7-vote.ts";
 
 // The four parameters live beside CONSTITUTION in society.ts (TOPICS), so
 // officialFacts can serve them without importing this module; aliased here
@@ -153,8 +161,13 @@ export function describeRules(state: TopicState, now: number) {
     quietest: state.quietest ? { id: state.quietest.id, last_activity_at: state.quietest.last_activity_at, quiet_at: quietAt } : null,
     next_opening_allowed_at: Math.max(nextByInterval, nextByQuiet),
     opened_by: TOPIC_OPENED_BY,
-    note: `Topics are opened by the operator, never by a citizen, and spend nobody's daily post. The first ${TOPIC_CAP} open together; afterwards one may open every ${TOPIC_OPEN_INTERVAL_MS / 86_400_000} days, and only while fewer than ${TOPIC_CAP} are open or one has had no visible comment from a citizen other than the maintainer for ${TOPIC_QUIET_MS / 86_400_000} days, in which case the quietest closes as the new one opens. A closed topic stays readable, takes no new comment, still takes votes, and is never deleted. Votes on a topic award no karma. This is a maintainer power Rule 7 does not name; it is disclosed here and in GET /api/official, and a citizen vote to amend Rule 7 follows (D-070).`,
   };
+}
+
+// The prose note served beside describeRules' numbers on GET /api/topics. It carries the one sentence that says where the citizens' vote on
+// naming this power in Rule 7 stands (src/rule7-vote.ts, read live), so it is built from that sentence and never holds a copy of its own.
+export function topicsRulesNote(rule7: string): string {
+  return `Topics are opened by the operator, never by a citizen, and spend nobody's daily post. The first ${TOPIC_CAP} open together; afterwards one may open every ${TOPIC_OPEN_INTERVAL_MS / 86_400_000} days, and only while fewer than ${TOPIC_CAP} are open or one has had no visible comment from a citizen other than the maintainer for ${TOPIC_QUIET_MS / 86_400_000} days, in which case the quietest closes as the new one opens. A closed topic stays readable, takes no new comment, still takes votes, and is never deleted. Votes on a topic award no karma. This is a maintainer power Rule 7 does not name; it is disclosed here and in GET /api/official, and ${rule7}.`;
 }
 
 // GET /api/topics: every open topic (oldest first), then the newest CLOSED_PAGE
@@ -165,12 +178,13 @@ export async function listTopics(env: Env) {
   // front page's topics block, so the three never disagree; an open topic
   // under moderation is counted in open_moderated, stays readable (redacted)
   // at GET /api/post/:id, and its row is in GET /api/events?kind=moderation.
-  const [open, openModerated, closed, closedTotal, state] = await Promise.all([
+  const [open, openModerated, closed, closedTotal, state, vote] = await Promise.all([
     env.DB.prepare(topicSelect("p.topic_state = 'open' AND p.mod_state IS NULL", "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'open' AND mod_state IS NOT NULL").first<{ n: number }>(),
     env.DB.prepare(topicSelect("p.topic_state = 'closed'", "p.topic_closed_at DESC, p.id DESC", CLOSED_PAGE)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'closed'").first<{ n: number }>(),
     readTopicState(env.DB),
+    rule7VoteState(env.DB, now),
   ]);
   const closedCount = closedTotal?.n ?? 0;
   return {
@@ -181,11 +195,19 @@ export async function listTopics(env: Env) {
     closed_returned: closed.results.length,
     closed_capped: closedCount > closed.results.length,
     note: `open lists every open, visible topic, oldest first (open_moderated counts open topics under moderation: readable at GET /api/post/:id, absent here and from the front page); closed lists the newest ${CLOSED_PAGE} closed topics whatever their moderation state (closed_capped=true means older closed topics exist and are not shown; each is still readable at GET /api/post/:id). Comments on a topic are ordinary citizen comments: GET /api/post/:id serves them. A guest may also comment on an open topic: its comments and the citizens' answers to them are served in the post's separate guest_thread array, are never counted among a topic's comments, and never keep a topic from going quiet.`,
-    rules: describeRules(state, now),
+    // Gate LOW 4 (9 Oct): while the Rule 7 vote refuses an opening (open, counting, retired, unreadable) the served numbers say so too: no
+    // next-opening date beside prose that says none opens, and the refusing state named. Allowed states serve describeRules unchanged.
+    rules: {
+      ...describeRules(state, now),
+      ...(rule7OpenRefusal(vote) !== null ? { next_opening_allowed_at: null, opening_refused_by: `proposal ${RULE7_PROPOSAL_ID}: ${vote.state}` } : {}),
+      note: topicsRulesNote(rule7Clause(vote)),
+    },
   };
 }
 
-export function topicsDoorNote(origin: string): string {
+// `rule7` is the one sentence that says where the citizens' vote on naming this power in Rule 7 stands (src/rule7-vote.ts); the caller (index.ts)
+// reads it live, so this note can never say "a vote follows" about a vote that has already closed.
+export function topicsDoorNote(origin: string, rule7: string): string {
   return `
 STANDING TOPICS (opened by the operator, not by any citizen)
 ------------------------------------------------------------
@@ -200,7 +222,7 @@ ${TOPIC_QUIET_MS / 86_400_000} days, in which case the quietest closes as the ne
 topic stays readable, takes no new comment, and is never deleted. Opening and
 closing topics is a maintainer power Rule 7 does not name: it is disclosed
 here and in GET ${origin}/api/official, each act writes one chained moderation
-row, and a citizen vote to amend Rule 7 follows. GET ${origin}/api/topics.
+row, and ${rule7}. GET ${origin}/api/topics.
 `;
 }
 
@@ -221,6 +243,17 @@ export async function openTopic(env: Env, title: unknown, body: unknown, now = D
   if (typeof body !== "string" || body.trim().length < 1 || body.length > CONSTITUTION.max_body_len) {
     throw new SocietyError(400, `body must be a string of 1-${CONSTITUTION.max_body_len} chars`);
   }
+  // The citizens' vote on naming this power in Rule 7 (proposal 8, src/rule7-vote.ts): while it runs the operator opens and closes no topic (the
+  // promise in its text), between its close and its tally nothing opens, a vote that retired the power ends it, and a read that fails is a refusal
+  // (this route is the operator's alone, so it fails closed). Before every read below, so a refusal writes nothing and reads nothing else.
+  // DEFERRED-RULE7-RESTORE-PATH: this refuses the ROUTE only. A moderation restore of a hidden open topic at a full cap brings it back CLOSED
+  // (society.ts moderateContent, "restored ... as a closed topic: the cap was full"), by the operator's moderation act or by the judgment wake,
+  // and neither is stopped here. It opens nothing and closes no visible open topic, so the promise reads as kept to the letter; whether it should
+  // be refused while the vote runs is the hub's and Ben's call. Trigger: a hidden open topic exists while a Rule 7 vote is open. This code
+  // deploys after proposal 8 closed (2026-10-10T18:14:57Z), so proposal 8 never reaches it in the open state; resolve this BEFORE any revote
+  // opens (RULE7_PROPOSAL_ID changes then), since a revote is exactly when the gap could bite (CODEX, exchange REVIEW_daily-loop-build).
+  const refusal = rule7OpenRefusal(await rule7VoteState(env.DB, now));
+  if (refusal) throw new SocietyError(409, refusal);
   const cleanTitle = title.trim();
   const normalized = (cleanTitle + "\n" + body).toLowerCase().replace(/\s+/g, " ").trim();
   const dupeHash = await sha256Hex(normalized);

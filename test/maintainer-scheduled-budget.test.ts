@@ -21,7 +21,7 @@ import worker from "../src/index.ts";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { installSubrequestCounter, makeModelRpcResponder, judgmentDecisionText, clerkDraftText, rpcBalanceResponse } from "./helpers/subrequest-counter.ts";
 import { MAINTAINER_MODELS } from "../src/maintainer/anthropic.ts";
-import { JUDGMENT_CRON, CLERK_CRON } from "../src/maintainer/schedule.ts";
+import { JUDGMENT_CRON, CLERK_CRON, LOOP_CRON } from "../src/maintainer/schedule.ts";
 import { detectConstitutionChange } from "../src/governance.ts";
 import { CONCIERGE_DISCLOSURE_PREAMBLE, MAINTAINER_ID } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
@@ -671,5 +671,39 @@ test("PROOF shape 4 -- POST /api/governance/sweep at zero/one/cap due each stays
       counter.restore();
       d1.close();
     }
+  }
+});
+
+// ---------- the daily loop's 12:00 cron: the compound case at the real limit ----------
+
+test("PROOF LOOP -- the 12:00 loop cron with a 2-due sweep (the cap) at the real limit of 50: the sweep, then the loop posts its question, <= 50 with headroom, and nothing of the 06:00 wake runs", async () => {
+  const counter = installSubrequestCounter(() => rpcBalanceResponse());
+  const d1 = createLocalD1({ onExec: counter.consume });
+  try {
+    seedMaintainer(d1);
+    for (let i = 0; i < 4; i++) insertCitizen(d1);
+    for (let id = 12; id <= 16; id++) {
+      d1.raw
+        .prepare("INSERT INTO posts (id, citizen_id, title, body, dupe_hash, pinned, mod_state, author_model, created_at, kind, topic_state) VALUES (?, 1, ?, 'body', ?, 0, NULL, NULL, ?, 'topic', 'open')")
+        .run(id, `standing topic ${id}`, `dupe-loop-${id}`, Date.now() - 20 * 86_400_000);
+    }
+    const now = Date.now();
+    // Sweep cohort: 2 due proposals (the cap), the worst sweep the loop can be handed as priorCost.
+    seedDueProposal(d1, now - 3_000);
+    seedDueProposal(d1, now - 2_000);
+    await callScheduled(LOOP_CRON, makeEnv(d1));
+    assert.equal(counter.breached(), false, `never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+    assert.ok(counter.total() <= 50, `total ${counter.total()} <= 50`);
+    assert.equal(counter.fetches(), 0, "the loop cron makes no outbound call: no model, no RPC");
+    const posted = d1.raw.prepare("SELECT post_id FROM comments WHERE citizen_id = 1 AND body LIKE 'Scheduled question:%'").all() as Array<{ post_id: number }>;
+    assert.equal(posted.length, 1, "the loop posted its one question in the same invocation as the 2-due sweep");
+    const open = (d1.raw.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").get() as { n: number }).n;
+    assert.equal(open, 0, "and the sweep processed both due proposals first");
+    for (const table of ["maintainer_runs", "concierge_runs", "guest_duty_runs"]) {
+      assert.equal((d1.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0, `${table}: nothing of the 06:00 or Sunday wake ran`);
+    }
+  } finally {
+    counter.restore();
+    d1.close();
   }
 });

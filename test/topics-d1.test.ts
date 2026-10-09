@@ -617,7 +617,7 @@ test("9: the wave does not mint: computeLiveConstitutionPair's template hash is 
   // The v5 template hash served by /api/attest since 2026-09-1x; a deliberate
   // re-mint updates this pin in the same commit that mints (never by accident).
   assert.equal(pair.templateHash, "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491");
-  const note = topicsDoorNote("https://example.test");
+  const note = topicsDoorNote("https://example.test", "no citizen vote on naming it in Rule 7 is recorded");
   assert.ok(note.includes("STANDING TOPICS") && note.includes("Rule 7") && note.includes("https://example.test/api/topics"));
 });
 

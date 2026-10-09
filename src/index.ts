@@ -38,6 +38,7 @@ import {
   listConstitutionVersions,
 } from "./governance.ts";
 import { classifyCron } from "./maintainer/schedule.ts";
+import { runLoopWake } from "./maintainer/loop.ts";
 import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
 import { runConciergeWake, conciergeRunsPage } from "./maintainer/concierge.ts";
@@ -45,7 +46,7 @@ import { estimateSweepCost, CLERK_WAKE_FIXED_COST } from "./maintainer/budget.ts
 import { runReconciler, RECONCILE_SUBREQUEST_CEILING } from "./settlement-reconcile.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
-import { handleOpenTopic, listTopics, topicsDoorNote } from "./topics.ts";
+import { handleOpenTopic, listTopics, rule7Clause, rule7VoteState, topicsDoorNote } from "./topics.ts";
 import { parseNumberParam } from "./queryParams.ts";
 import {
   type Env,
@@ -205,7 +206,7 @@ export default {
             listingsDoorNote(url.origin) +
             conciergeDoorNote(url.origin) +
             lobbyDoorNote(url.origin) +
-            topicsDoorNote(url.origin) +
+            topicsDoorNote(url.origin, rule7Clause(await rule7VoteState(env.DB))) +
             heartbeatDoorNote(url.origin),
         );
       }
@@ -604,10 +605,11 @@ export default {
     }
   },
 
-  // The maintainer's two wakes (docs/MAINTAINER-RUNTIME-DESIGN.md), fired
-  // by the cron triggers in wrangler.jsonc. Both runClerkWake and
-  // runJudgmentWake already catch their own internal failures and write a
-  // maintainer_runs row with `error` set -- this try/catch is only the
+  // The maintainer's three wakes (docs/MAINTAINER-RUNTIME-DESIGN.md; the third
+  // is the daily loop), fired by the cron triggers in wrangler.jsonc. Each of
+  // runClerkWake, runJudgmentWake and runLoopWake already catches its own
+  // internal failures (the first two write a maintainer_runs row with `error`
+  // set, the loop logs loop_wake_failed) -- the try/catch below is only the
   // backstop for anything that escapes that (e.g. a throw before either
   // wake could open its own runs row), so scheduled() always returns
   // cleanly either way, per the build brief.
@@ -672,8 +674,18 @@ export default {
         }
         await runClerkWake(env, undefined, priorCost + concierge.actualCost + guestCheck.actualCost + reconcileCost);
       } else if (wake === "judgment") await runJudgmentWake(env, undefined, priorCost);
+      else if (wake === "loop") {
+        // The daily loop (src/maintainer/loop.ts), 12:00 UTC on its own cron: one scheduled question as a comment on a standing topic. It runs after the
+        // sweep above and nothing else of the 06:00 wake (no concierge, guest check, reconciler or clerk), handed only the sweep's cost. runLoopWake logs
+        // its own failures and never throws; this catch is the backstop, so the loop can never reach scheduled_wake_failed.
+        try {
+          await runLoopWake(env, priorCost);
+        } catch (e) {
+          console.log(JSON.stringify({ level: "error", event: "loop_wake_failed", cron: controller.cron, message: String(e) }));
+        }
+      }
       // else: an unrecognised cron string. wrangler.jsonc only ever
-      // registers the two crons above, so this should not happen -- but a
+      // registers the three crons above, so this should not happen -- but a
       // dispatch table that quietly does nothing for anything else is
       // safer than one that assumes its own completeness and throws. L4,
       // review fix: "quietly" used to mean "and unrecorded" -- an
