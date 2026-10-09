@@ -15,7 +15,8 @@ Base: 1974 tests, 1973 pass, 1 skipped (pre-existing), 0 fail, `npm test` 71 s. 
 
 | # | sha | what |
 |---|---|---|
-| 1 | this commit | this log |
+| 1 | `72eeaff6` | this log |
+| 2 | this commit | L1: `LOOP_CRON`, `WakeKind` "loop", `classifyCron`, the cron pins; the `wrangler.jsonc` line is BLOCKED (note 2) |
 
 ## Notes (one per commit, newest last)
 
@@ -31,3 +32,20 @@ Pre-build probes, run before any code (two things the commission text does not s
   `preamble + "\n\n" + body`: all 14 and the preamble return null. Longest body 407 characters; longest stored comment 806 characters (preamble 397 + 2 + 407),
   against `CONSTITUTION.max_body_len` 8000.
 - **Probe B, the import cycle for Part R** decides where `rule7VoteState` lives; recorded in the note of the commit that builds it.
+
+### 2. L1: the cron string, the classification, the pins (the `wrangler.jsonc` line is BLOCKED)
+
+`src/maintainer/schedule.ts`: `LOOP_CRON = "0 12 * * *"`, `WakeKind` gains `"loop"`, `classifyCron` maps it; every other string still returns null (exact match,
+tested with near misses `"0 12 * * 1"`, a trailing space, a prefix). The `scheduled()` dispatch for `"loop"` lands with `loop.ts` (commit 4), because it has to
+import `runLoopWake`; until then (this commit only) the 12:00 string would fall into the unmatched-cron log branch. Pins updated: `test/maintainer-schedule.test.ts`,
+`test/guest-check-d1.test.ts` (the 12:00 cron writes no `guest_duty_runs` row; the manual trigger still writes none). The wrangler registration check was split out
+of the guest-check test into its own test so a missing cron line is one named failure.
+
+**BLOCKED, reported: the `wrangler.jsonc` edit.** The commission asks for `"0 12 * * *"` as the third entry of `triggers.crons` (and the two header comment lines
+that count the wakes). The Edit tool refused all three edits ("denied by your permission settings"); the project's `.claude/settings.local.json` carries
+`Edit(**/wrangler.jsonc)` and `Write(**/wrangler.jsonc)` in its deny list, and the project's hard rule is that no cron changes without Ben's per-action approval.
+A commission from the hub is not that approval, and a shell edit would be a way round a deny rule, so the file is untouched.
+Consequence, stated plainly: `test/guest-check-d1.test.ts` "the cron registration" is RED on this branch until the hub applies the patch below. That is intended:
+without the cron line the loop never fires and nothing else would say so.
+The patch is `scratch/daily-loop-builder/wrangler-loop-cron.patch` (checked with `git apply --check --ignore-whitespace` in the worktree; the file is CRLF in the
+working copy). Apply with: `git -C <worktree> apply --ignore-whitespace <patch>`.

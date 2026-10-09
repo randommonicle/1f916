@@ -18,7 +18,7 @@ import { captureLog, eventLines } from "./helpers/settlement-harness.ts";
 import { seedTopic } from "./helpers/guest.ts";
 import { runGuestDutyCheck } from "../src/guest.ts";
 import { runConciergeWake } from "../src/maintainer/concierge.ts";
-import { CLERK_CRON, JUDGMENT_CRON } from "../src/maintainer/schedule.ts";
+import { CLERK_CRON, JUDGMENT_CRON, LOOP_CRON } from "../src/maintainer/schedule.ts";
 import { GUEST_DUTY_CHECK_COST, canAffordGuestDutyCheck, estimateSweepCost, INVOCATION_SUBREQUEST_BUDGET, FINALISE_RESERVE, CLERK_WAKE_FIXED_COST } from "../src/maintainer/budget.ts";
 import { GUEST_ANSWER_TARGET_HOURS, HOUR_MS } from "../src/guest-core.ts";
 import type { Env } from "../src/society.ts";
@@ -106,7 +106,7 @@ test("17: no duties writes a record with zero counts and null ids; more than 20 
 
 // ---------- cron only ----------
 
-test("17: the check runs on the 06:00 clerk cron only: one row there, none on the Sunday judgment cron, none from the manual trigger; wrangler.jsonc's crons are unchanged", async () => {
+test("17: the check runs on the 06:00 clerk cron only: one row there, none on the Sunday judgment cron, none on the 12:00 loop cron, none from the manual trigger", async () => {
   const d1 = createLocalD1();
   const counter = installSubrequestCounter((url) => (url.includes("anthropic") ? new Response(JSON.stringify({ content: [{ type: "text", text: "[]" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 }) : rpcBalanceResponse()), 10_000);
   try {
@@ -115,6 +115,8 @@ test("17: the check runs on the 06:00 clerk cron only: one row there, none on th
     const runs = () => (d1.raw.prepare("SELECT COUNT(*) AS n FROM guest_duty_runs").get() as { n: number }).n;
     await fire(JUDGMENT_CRON, env);
     assert.equal(runs(), 0, "the judgment cron does not run the check");
+    await fire(LOOP_CRON, env);
+    assert.equal(runs(), 0, "the 12:00 loop cron does not run the check either: the check is the 06:00 wake's, and only that wake's");
     await fire(CLERK_CRON, env);
     assert.equal(runs(), 1, "the clerk cron runs it once");
     // the manual trigger replicates scheduled() but bypasses the reconciler and this check, by design
@@ -126,13 +128,18 @@ test("17: the check runs on the 06:00 clerk cron only: one row there, none on th
       assert.equal(res.status, 200, `${wake}: ${await res.clone().text()}`);
     }
     assert.equal(runs(), 1, "the manual trigger wrote no guest_duty_runs row");
-    const wrangler = readFileSync(join(import.meta.dirname, "..", "wrangler.jsonc"), "utf8");
-    const crons = /"crons":\s*\[([^\]]*)\]/.exec(wrangler)?.[1].split(",").map((s) => s.trim().replace(/"/g, ""));
-    assert.deepEqual(crons, [CLERK_CRON, JUDGMENT_CRON], "no cron was added or changed");
   } finally {
     counter.restore();
     d1.close();
   }
+});
+
+// Its own test, so a missing cron line is one named failure and never hides the assertions above. The daily loop (src/maintainer/loop.ts)
+// fires only if wrangler.jsonc registers LOOP_CRON; classifyCron knowing the string is not enough, and nothing else would notice.
+test("the cron registration: wrangler.jsonc's triggers.crons is exactly the three strings schedule.ts classifies, in this order", () => {
+  const wrangler = readFileSync(join(import.meta.dirname, "..", "wrangler.jsonc"), "utf8");
+  const crons = /"crons":\s*\[([^\]]*)\]/.exec(wrangler)?.[1].split(",").map((s) => s.trim().replace(/"/g, ""));
+  assert.deepEqual(crons, [CLERK_CRON, JUDGMENT_CRON, LOOP_CRON], "a loop wake whose cron is not registered never fires");
 });
 
 // ---------- the defer rule ----------
