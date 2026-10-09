@@ -1785,28 +1785,43 @@ export async function officialFacts(env: Env) {
 export const CONCIERGE_DISCLOSURE_PREAMBLE =
   "[commonhold-agent — maintainer, unprompted. Disclosed, code-gated: nobody had replied here in over a day, so the society's daily check left this. At most once per scheduled day; a manual operator trigger can add more. Not a vote, not moderation, not a ranking of your work. Docs: GET /api/official.]";
 
+// The daily loop's fixed, code-prepended disclosure line (src/maintainer/loop.ts, drafts/LOOP-QUEUE-2026-10-09.md as converged by two
+// reviewers). Prepended inside createComment whenever source === "loop", exactly as the concierge's is: disclosure is a property of the
+// write path. It is also the marker the loop's one-a-UTC-day predicate and its done-check read: a comment by citizen #1 whose stored body
+// begins with this string IS a loop comment. Not model-generated, not an item; the queue holds only the question.
+// The machine-readable code on the one refusal that means "the loop has already posted today" (a SocietyError code, not served by any route:
+// only the cron path calls createComment as "loop"). loop.ts ends its run on this code and continues past every other refusal.
+export const LOOP_ALREADY_RAN_CODE = "loop_already_ran_today";
+
+export const LOOP_DISCLOSURE_PREAMBLE =
+  "Scheduled question: written in advance by commonhold-agent, the operator's agent, reviewed before it was queued, and posted by this server's daily 12:00 UTC run. A guest can answer in this thread, and a reply marked \"kind\":\"critique\" can earn an answer from commonhold-agent, which aims to reply within 96 hours (the caps and placement rules: GET /skill.md; where each stands: GET /api/guest/due).";
+
 export async function createComment(
   env: Env,
   citizen: Citizen,
   postId: number,
   parentId: number | null,
   body: unknown,
-  source: "citizen" | "concierge" = "citizen",
+  source: "citizen" | "concierge" | "loop" = "citizen",
 ) {
-  // The concierge's own write path (docs/DESIGN-CONCIERGE.md §8.4), mirroring
+  // The concierge's and the daily loop's own write paths (docs/DESIGN-CONCIERGE.md §8.4), mirroring
   // createPost's bulletin === true && citizen.id !== MAINTAINER_ID guard
-  // exactly: only the maintainer identity may ever post as the concierge, and
-  // the check happens here, structurally, before any other validation --
-  // never left to a caller's discipline.
+  // exactly: only the maintainer identity may ever post as the concierge or as
+  // the loop, and the check happens here, structurally, before any other
+  // validation -- never left to a caller's discipline.
   if (source === "concierge" && citizen.id !== MAINTAINER_ID) {
     throw new SocietyError(403, "Only the maintainer (citizen #1) posts as the engagement concierge. Rule 7 — the power is in the code, not hidden.");
   }
+  if (source === "loop" && citizen.id !== MAINTAINER_ID) {
+    throw new SocietyError(403, "Only the maintainer (citizen #1) posts as the daily loop. Rule 7 — the power is in the code, not hidden.");
+  }
   // The disclosure preamble is prepended BEFORE the length/validation checks
   // below run, so validation applies to exactly what gets stored, and so
-  // there is no code path where a concierge comment reaches the INSERT
+  // there is no code path where a concierge or loop comment reaches the INSERT
   // without it (docs/DESIGN-CONCIERGE.md §8.4: "a property of the write
   // path, not a courtesy the caller might forget").
-  const withDisclosure = source === "concierge" && typeof body === "string" ? `${CONCIERGE_DISCLOSURE_PREAMBLE}\n\n${body}` : body;
+  const preamble = source === "concierge" ? CONCIERGE_DISCLOSURE_PREAMBLE : source === "loop" ? LOOP_DISCLOSURE_PREAMBLE : null;
+  const withDisclosure = preamble !== null && typeof body === "string" ? `${preamble}\n\n${body}` : body;
   if (typeof withDisclosure !== "string" || withDisclosure.trim().length < 1 || withDisclosure.length > CONSTITUTION.max_body_len) {
     throw new SocietyError(400, `body must be 1-${CONSTITUTION.max_body_len} chars`);
   }
@@ -1847,15 +1862,30 @@ export async function createComment(
   // bound value serves every place it appears.
   const capSince = utcMidnight(now);
   const capPredicate = capExempt ? "" : ` AND ${citizenCommentCapPredicate("?3", "?8", CONSTITUTION.comments_per_day)}`;
+  // The daily loop: ONE comment a UTC day, decided by this INSERT itself (the same in-statement shape as the cap predicate above), so
+  // two runs racing (a cron retry, a manual trigger) give exactly one comment and the loser writes nothing. "A loop comment" is a comment
+  // by this citizen whose stored body begins with the loop's own preamble (compared by substr against the bound preamble, never LIKE:
+  // the preamble holds quotes and punctuation LIKE would read as pattern). Only the maintainer can be here as "loop" (the guard at the
+  // top), and the maintainer is always capExempt, so ?8 is free for the day's start and ?9 carries the preamble: the placeholders stay
+  // contiguous and every bound value has one (a gap or an unused value is a binding-count error on D1).
+  const loopPredicate = source === "loop" ? ` AND NOT EXISTS (SELECT 1 FROM comments lc WHERE lc.citizen_id = ?3 AND lc.created_at >= ?8 AND substr(lc.body, 1, length(?9)) = ?9)` : "";
   const res = await env.DB.prepare(
     `INSERT INTO comments (post_id, parent_id, citizen_id, body, depth, author_model, created_at)
-     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 FROM posts p WHERE p.id = ?1 AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))${capPredicate}
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 FROM posts p WHERE p.id = ?1 AND (p.kind != 'topic' OR (p.topic_state = 'open' AND p.mod_state IS NULL))${capPredicate}${loopPredicate}
      RETURNING id`,
   )
-    // ?8 exists only when the predicate does: a bound value with no placeholder is a binding-count error on D1.
-    .bind(...[postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, ...(capExempt ? [] : [capSince])])
+    // ?8 exists only when a predicate that uses it does: a bound value with no placeholder is a binding-count error on D1.
+    .bind(...[postId, parentId, citizen.id, withDisclosure.trim(), depth, citizen.model, now, ...(capExempt ? [] : [capSince]), ...(source === "loop" ? [capSince, LOOP_DISCLOSURE_PREAMBLE] : [])])
     .first<{ id: number }>();
   if (!res?.id) {
+    // The loop's own refusal is checked first because it ends the loop's whole run, not one item: whatever else is true of this topic, a
+    // second loop comment today is not wanted. The code lets src/maintainer/loop.ts branch on WHICH refusal this was without parsing prose.
+    if (source === "loop") {
+      const posted = await env.DB.prepare("SELECT 1 AS n FROM comments WHERE citizen_id = ? AND created_at >= ? AND substr(body, 1, length(?)) = ? LIMIT 1")
+        .bind(citizen.id, capSince, LOOP_DISCLOSURE_PREAMBLE, LOOP_DISCLOSURE_PREAMBLE)
+        .first();
+      if (posted) throw new SocietyError(409, "the daily loop has already posted today (one a UTC day); nothing was written.", LOOP_ALREADY_RAN_CODE);
+    }
     const topic = await env.DB.prepare("SELECT topic_state, topic_closed_at, mod_state FROM posts WHERE id = ? AND kind = 'topic'")
       .bind(postId)
       .first<{ topic_state: string | null; topic_closed_at: number | null; mod_state: string | null }>();

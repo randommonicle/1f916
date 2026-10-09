@@ -16,7 +16,8 @@ Base: 1974 tests, 1973 pass, 1 skipped (pre-existing), 0 fail, `npm test` 71 s. 
 | # | sha | what |
 |---|---|---|
 | 1 | `72eeaff6` | this log |
-| 2 | this commit | L1: `LOOP_CRON`, `WakeKind` "loop", `classifyCron`, the cron pins; the `wrangler.jsonc` line is BLOCKED (note 2) |
+| 2 | `df56fc70` | L1: `LOOP_CRON`, `WakeKind` "loop", `classifyCron`, the cron pins; the `wrangler.jsonc` line is BLOCKED (note 2) |
+| 3 | this commit | L2: `createComment` source "loop", `LOOP_DISCLOSURE_PREAMBLE`, the in-statement one-a-day predicate, the concierge interaction tests |
 
 ## Notes (one per commit, newest last)
 
@@ -49,3 +50,30 @@ Consequence, stated plainly: `test/guest-check-d1.test.ts` "the cron registratio
 without the cron line the loop never fires and nothing else would say so.
 The patch is `scratch/daily-loop-builder/wrangler-loop-cron.patch` (checked with `git apply --check --ignore-whitespace` in the worktree; the file is CRLF in the
 working copy). Apply with: `git -C <worktree> apply --ignore-whitespace <patch>`.
+
+### 3. L2: `createComment` source "loop"
+
+**Mechanism** (`src/society.ts`). The union is `"citizen" | "concierge" | "loop"`. The structural guard is the concierge's: only citizen #1 may be "loop", checked before anything else (before body, post and
+parent validation; the test shows a 403 even for an empty body or a missing post). `LOOP_DISCLOSURE_PREAMBLE` (exported, the queue file's disclosure line word for word, pinned by a test) is prepended before
+validation, as the concierge's is. For source "loop" the INSERT carries one more predicate, `AND NOT EXISTS (SELECT 1 FROM comments lc WHERE lc.citizen_id = ?3 AND lc.created_at >= ?8 AND substr(lc.body, 1, length(?9)) = ?9)`,
+the in-statement shape of the A10 daily-cap predicate: two runs racing give exactly one comment. It is `substr(...) = ?9`, never LIKE (the preamble holds quotes and a colon). Placeholders: the maintainer is
+always capExempt, so ?8 (which the cap predicate would use) is free and is the day's start, and ?9 is the preamble; they are contiguous and every bound value has a placeholder (the D1 binding-count trap named at the old ?8
+comment). When the INSERT writes nothing, a loop source reads once for "a loop comment today" BEFORE the topic diagnosis and throws `SocietyError(409, ..., "loop_already_ran_today")` (`LOOP_ALREADY_RAN_CODE`, a code no
+route serves: only the cron path calls `createComment` as "loop"), so `loop.ts` can end its run on that code and continue past a closed or moderated topic. The code wins when both are true: the run is over whatever
+else is true of that topic.
+
+**Concierge interaction finding** (pinned in `test/maintainer-loop-d1.test.ts`). A loop comment never counts toward the concierge's one-a-day cap: the cap reads `concierge_runs`, not `comments`
+(`src/maintainer/concierge.ts:379`), so a loop comment today leaves the concierge free to engage (test: it engages on a silent post the same day). The concierge never selects a loop comment as a candidate, twice
+over: both candidate queries require `p.kind = 'post'` (a topic is excluded, `concierge.ts:171` and `:190`, the DEFERRED-CONCIERGE-TOPICS rule) and exclude the maintainer's own rows (`p.citizen_id != ?` `:172`,
+`c.citizen_id != ?` `:191`). The test places one loop comment on a topic and one on an ordinary post (`createComment` does not restrict the source to topics), both silent for two days: the concierge sees "no candidates"
+and makes no model call, and a citizen's identical row on the same post IS a candidate (the positive control). The topic exclusion alone has its own test in `test/topics-d1.test.ts`.
+
+**Red-proofs** (each: edit the guarded line, run `test/maintainer-loop-d1.test.ts`, watch the named test go red, restore; `scratch/daily-loop-builder/mutate.mjs` with `mut-l2.json` runs all nine):
+- guard `citizen.id !== MAINTAINER_ID` for "loop" disabled: "createComment as loop by anyone but citizen #1 is refused 403" RED.
+- preamble not prepended for loop: "the stored body is the preamble, a blank line, then the item" RED (and the one-a-day tests, which key on it).
+- predicate made never-match (`?8 + 1e15`): "one loop comment a UTC day" and "two loop writes started together" RED.
+- predicate widened to any maintainer comment today (the `substr` clause replaced): "only a comment that BEGINS with the preamble" RED.
+- predicate's day start loosened (`?8 - 1e11`, yesterday counts): "one loop comment a UTC day" RED.
+- the loop-refusal diagnosis skipped: "the refusal reason is the right one" RED.
+- concierge cap changed to count comments: "a loop comment never counts toward the concierge's one-a-day cap" RED.
+- concierge maintainer exclusion removed: "the concierge never selects a loop comment as a candidate" RED.
