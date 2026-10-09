@@ -12,7 +12,7 @@
 # against the public repository at that commit); the version id is Cloudflare's own. Nothing served proves the running bytes were built from the commit.
 # THE PROPAGATION CHECK the older scripts lacked: after the deploy this script polls GET /api/attest (12 tries, 5 s apart) until code.commit equals the pinned sha AND code.version_id equals
 # the `Current Version ID` wrangler printed, with commit_status "stamped" and version_status "available". It STOPS with the rollback line if that never happens, including when
-# code.version_id never equals the printed id. The live worker already serves a `code` block (since the 6 Oct deploy; now worker be15ed56, commit 5ecca7ae, since 7 Oct); the poll still proves
+# code.version_id never equals the printed id. The live worker already serves a `code` block (since the 6 Oct deploy; now worker 225cc7a6, commit 703f1077, since 8 Oct); the poll still proves
 # propagation because both the stamped sha and the version id of this deploy differ from the live ones. (This header was written for that first deploy; its opening lines describe it.)
 # REVIEWED SOURCE ONLY: step 0 STOPS while $REVIEWED_COMMIT still holds the placeholder (the hub sets it to the commit the code exchange converged on), and otherwise STOPS unless HEAD is that
 # commit plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/). Any other changed path, src/ or wrangler.jsonc included, is printed and STOPS.
@@ -35,13 +35,13 @@ $ErrorActionPreference = "Stop"
 $BASE = "https://commonhold.randommonicle.workers.dev"
 # The attested constitution this wave must leave untouched (test/deploy-code-identity-script.test.ts compares it with computeLiveConstitutionPair's hash).
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
-# The live worker's code before this wave: main at the code-identity LOWs deploy (the morning of 7 Oct 2026, worker be15ed56 per HANDOVER Addendum 88 s14; its code is the merge
-# a48165a3 plus the $REVIEWED_COMMIT commit 5ecca7ae). Step 0 proves HEAD descends from it and that nothing under migrations/ or src/doc.ts and no schema.sql moved since.
-$LIVE_BASE_COMMIT = "5ecca7aea6268530b4dbe1d146162c8e62608f95"
+# The live worker's code before this wave: main at the plain-error money answers deploy (the evening of 8 Oct 2026, worker 225cc7a6 per HANDOVER Addendum 89 s11; its code is the merge
+# 79111128 plus the $REVIEWED_COMMIT commit 703f1077). Step 0 proves HEAD descends from it and that nothing under migrations/ or src/doc.ts and no schema.sql moved since.
+$LIVE_BASE_COMMIT = "703f10770a233c0c25462f5f780332f3a6ab2f9f"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the code exchange converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
 # HEAD may differ from it ONLY in $ALLOWED_PATHS_AFTER_REVIEW: this script, its test, and anything under docs/ (an entry ending in "/" is a directory prefix, any other entry an exact
 # path). A change anywhere else (src/, migrations/, schema.sql, package.json, package-lock.json, wrangler.jsonc, tsconfig.json, .claude/, any other path) STOPS step 0: that code was not reviewed.
-$REVIEWED_COMMIT = "791111280591bb88938cf8094d35a01b85c3ef3b"
+$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-code-identity.ps1", "test/deploy-code-identity-script.test.ts", "docs/")
 $ATTENTION_URL = "$BASE/api/settlements/attention"
@@ -260,7 +260,7 @@ if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current 
 if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
 $versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
-$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be be15ed56 per HANDOVER Addendum 88 s14; check npx wrangler deployments list first). No migration to undo; the old worker ignores the stamp and the binding."
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be 225cc7a6 per HANDOVER Addendum 89 s11; check npx wrangler deployments list first). No migration to undo; the old worker ignores the stamp and the binding."
 Wait-CodeIdentity $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 

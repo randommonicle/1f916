@@ -796,19 +796,19 @@ test("$V5_HASH is the live constitution's template hash (a re-mint turns this re
   assert.equal(d.V5, (await computeLiveConstitutionPair()).templateHash);
 });
 
-test("$LIVE_BASE_COMMIT is a full sha, names the code-identity LOWs deploy's $REVIEWED_COMMIT commit, and is an ancestor of HEAD", (t) => {
+test("$LIVE_BASE_COMMIT is a full sha, names the plain-error money answers deploy's $REVIEWED_COMMIT commit, and is an ancestor of HEAD", (t) => {
   const d = definitions(t);
   if (!d) return;
   assert.match(d.LIVE_BASE, /^[0-9a-f]{40}$/);
-  assert.ok(d.LIVE_BASE.startsWith("5ecca7ae"), "main at the code-identity LOWs deploy (HANDOVER Addendum 88 s14)");
-  assert.ok(script.includes("worker be15ed56 per HANDOVER Addendum 88 s14"), "the base comment names the worker version that deploy produced");
-  assert.ok(script.includes("which should be be15ed56 per HANDOVER Addendum 88 s14"), "the rollback hint names the worker version that deploy produced");
+  assert.ok(d.LIVE_BASE.startsWith("703f1077"), "main at the plain-error money answers deploy (HANDOVER Addendum 89 s11)");
+  assert.ok(script.includes("worker 225cc7a6 per HANDOVER Addendum 89 s11"), "the base comment names the worker version that deploy produced");
+  assert.ok(script.includes("which should be 225cc7a6 per HANDOVER Addendum 89 s11"), "the rollback hint names the worker version that deploy produced");
   const root = here("..");
   const head = git(root, "rev-parse", "HEAD");
   const shallow = git(root, "rev-parse", "--is-shallow-repository");
   if (head.error || head.status !== 0 || shallow.error || shallow.status !== 0 || shallow.stdout.trim() !== "false") return t.skip("this checkout has no full git history to check the live base commit against");
   assert.equal(git(root, "cat-file", "-t", d.LIVE_BASE).stdout.trim(), "commit", `${d.LIVE_BASE} must be a commit in this repository`);
-  assert.match(git(root, "log", "-1", "--format=%s", d.LIVE_BASE).stdout, /^deploy\(code-identity\): \$REVIEWED_COMMIT = a48165a3/);
+  assert.match(git(root, "log", "-1", "--format=%s", d.LIVE_BASE).stdout, /^deploy\(code-identity\): \$REVIEWED_COMMIT = 79111128/);
   assert.equal(git(root, "merge-base", "--is-ancestor", d.LIVE_BASE, "HEAD").status, 0, "HEAD descends from the live worker's code");
 });
 
