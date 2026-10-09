@@ -17,6 +17,10 @@ export const JUDGMENT_CRON = "0 7 * * 1";
 // The daily loop (src/maintainer/loop.ts; Ben's ruling 1 of D-074's 8 Oct fourth note, shape per BEN-ASKS 9 Oct item 2): one scheduled
 // question a day, as a comment on a standing topic, at 12:00 UTC. Its own cron so it never takes budget from the 06:00 clerk wake, and
 // it runs neither the concierge, the guest check, the reconciler nor the clerk: the governance sweep (every wake) and nothing else.
+//
+// DEFERRED-LOOP-CRON-REGISTRATION: the worker only fires this if wrangler.jsonc's triggers.crons carries the string. That file is under a project
+// deny rule for edits by the builder, so the line is applied by the hub with Ben's per-action approval (a verified patch is named in
+// docs/CHECKPOINT-DAILY-LOOP-RULE7-STATUS.md note 2). Tripwire: test/guest-check-d1.test.ts "the cron registration" is red until it is there.
 export const LOOP_CRON = "0 12 * * *";
 
 export type WakeKind = "clerk" | "judgment" | "loop";

@@ -36,7 +36,7 @@
 import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, TOPICS, applyModState, topicCounts } from "./society.ts";
 import { appendChainedStmt, sha256Hex } from "./chain.ts";
 import { secretMatches } from "./maintainer/trigger.ts";
-import { rule7Clause, rule7VoteState } from "./rule7-vote.ts";
+import { rule7Clause, rule7OpenRefusal, rule7VoteState } from "./rule7-vote.ts";
 
 // The state of the citizens' vote on naming this power in Rule 7 (proposal 8), and the one sentence that says it, live in src/rule7-vote.ts: the
 // third site that serves it, officialFacts in society.ts, cannot import this file (it reads society.ts exports at module top level), so the
@@ -237,6 +237,15 @@ export async function openTopic(env: Env, title: unknown, body: unknown, now = D
   if (typeof body !== "string" || body.trim().length < 1 || body.length > CONSTITUTION.max_body_len) {
     throw new SocietyError(400, `body must be a string of 1-${CONSTITUTION.max_body_len} chars`);
   }
+  // The citizens' vote on naming this power in Rule 7 (proposal 8, src/rule7-vote.ts): while it runs the operator opens and closes no topic (the
+  // promise in its text), between its close and its tally nothing opens, a vote that retired the power ends it, and a read that fails is a refusal
+  // (this route is the operator's alone, so it fails closed). Before every read below, so a refusal writes nothing and reads nothing else.
+  // DEFERRED-RULE7-RESTORE-PATH: this refuses the ROUTE only. A moderation restore of a hidden open topic at a full cap brings it back CLOSED
+  // (society.ts moderateContent, "restored ... as a closed topic: the cap was full"), by the operator's moderation act or by the judgment wake,
+  // and neither is stopped here. It opens nothing and closes no visible open topic, so the promise reads as kept to the letter; whether it should
+  // be refused while the vote runs is the hub's and Ben's call. Trigger: a hidden open topic exists while proposal 8 is open.
+  const refusal = rule7OpenRefusal(await rule7VoteState(env.DB, now));
+  if (refusal) throw new SocietyError(409, refusal);
   const cleanTitle = title.trim();
   const normalized = (cleanTitle + "\n" + body).toLowerCase().replace(/\s+/g, " ").trim();
   const dupeHash = await sha256Hex(normalized);

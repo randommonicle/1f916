@@ -19,7 +19,8 @@ Base: 1974 tests, 1973 pass, 1 skipped (pre-existing), 0 fail, `npm test` 71 s. 
 | 2 | `df56fc70` | L1: `LOOP_CRON`, `WakeKind` "loop", `classifyCron`, the cron pins; the `wrangler.jsonc` line is BLOCKED (note 2) |
 | 3 | `e071ada4` | L2: `createComment` source "loop", `LOOP_DISCLOSURE_PREAMBLE`, the in-statement one-a-day predicate, the concierge interaction tests |
 | 4 | `8853be5e` | L3 + L4 + L5: `runLoopWake`, `LOOP_QUEUE`, the budget constants, the `scheduled()` dispatch, the wake tests, the static pins |
-| 5 | this commit | R1 + R2: `src/rule7-vote.ts`, the three (four) sites read it, the secret-literal guard entries |
+| 5 | `2f34e5a3` | R1 + R2: `src/rule7-vote.ts`, the three (four) sites read it, the secret-literal guard entries |
+| 6 | this commit | R3 + R4: the open route refuses by state, its tests, the restore-path finding, the flags, the close |
 
 ## Notes (one per commit, newest last)
 
@@ -175,3 +176,49 @@ below do not stand in for 8; one source; no served surface (nine routes) says a 
 a failing read reported as absent; proposal 7 instead of 8; each of the three sites keeping a stale sentence (RED on its own site), each of the three reading a fixed state instead of the vote; the route table keeping the stale
 promise; a second file carrying a copy of a sentence: all RED on the named test. The last mutant, a static import of the reader in `society.ts`, fails the whole test file at load (the very TDZ it guards: the file's own first
 import is `society.ts`), and so does every other test file that imports `society.ts`; the probe above is the line-by-line evidence.
+
+### 6. R3 + R4: the topics route against proposal 8
+
+**R3.** `rule7OpenRefusal(vote)` (pure, in `rule7-vote.ts`, from the same state the sentences read) and one check at the top of `openTopic` (`topics.ts`), so the HTTP route and the library call share it. It runs after the secret
+check (401) and after the title/body validation (400), before every read and write: a refusal writes no topic and no moderation row, and leaves no duplicate-post record (the same words open once the vote allows it; tested). Refused
+with a 409 that names proposal 8 and ends "Nothing was written": `open` (the promise "While this vote is open, the operator opens and closes no topic"), `counting` (closed, not yet tallied; the message names `POST /api/governance/sweep`
+and the 06:00 wake as what tallies it), `failed_with_quorum` (retired: "no new topic opens and none is closed to make room"), and `unreadable` (the operator-only route fails closed). `passed`, `failed_without_quorum` and `absent`
+open as today; `absent` is what keeps every existing fixture, and a fresh fork, behaving as before the vote. The existing interval/cap rules are untouched after a passed vote (tested: the sixth topic is still refused, for the topic
+rules' reason).
+
+**The restore-path finding (not built).** A moderation restore also closes a topic, and the route refusal does not reach it. Probed (`scratch/daily-loop-builder/probe-restore.mjs`, local D1): with five visible open topics, a sixth open
+topic hidden by moderation and proposal 8 open, `POST /api/maintainer/topic` is refused 409, while `moderateContent(... "restore" ...)` on the hidden topic succeeds and returns `topic_state: "closed"` with the chained row
+"restored post 6 to visible as a closed topic: the cap was full" (`society.ts` `moderateContent`, the `act === "restore" && type === "post"` branch). It is an operator act (Rule 7's `moderate`) and the judgment wake can execute it too. So the
+promise "the operator opens and closes no topic" does not reach it in code. Read to the letter it is arguably kept (the restore opens nothing and closes no VISIBLE open topic; the restored topic was already out of the count and
+comes back born closed), but it does change a topic's state during the vote. Flagged `DEFERRED-RULE7-RESTORE-PATH` in `topics.ts` beside the refusal; the ruling is the hub's and Ben's. Until then the discipline is: do not restore a hidden
+open topic while proposal 8 is open. Whether one exists now is a live read (`open_moderated` in `GET /api/topics`), which I did not make.
+
+**R4 tests** (`test/rule7-open-route-d1.test.ts`, 14): each of the states on a real proposal-8 row through `POST /api/maintainer/topic`, refused or allowed, with the topic row count and the moderation row count before and after (11
+cases: open, both counting forms, both with-quorum forms, both unreadable forms, passed, executed, failed without quorum, absent); the library call; the order of refusals (401, 400, then 409); and the topic rules still binding
+after a passed vote.
+
+**Red-proofs** (`mutate.mjs` with `mut-r34.json`): the route not refusing at all (9 red); each refused state dropped in turn (open, counting, retired, unreadable: each red on its own cases); the allowed states refusing too (passed,
+failed without quorum, absent: each red on its own case); the refusal moved before body validation ("order of refusals" red); a refusal that only logs and goes on to write (9 red).
+
+**Flags planted:** `DEFERRED-LOOP-CRON-REGISTRATION` (`schedule.ts`, beside `LOOP_CRON`), `DEFERRED-RULE7-RESTORE-PATH` (`topics.ts`).
+
+### 7. The close
+
+**Checklist walk.** L1: cron constant, classification, dispatch, pins (the `wrangler.jsonc` line BLOCKED, patch delivered, one test red by design). L2: guard, preamble, in-statement predicate, concierge interaction (cited). L3: the walk,
+two detection reads, the budget, never throws. L4: 14 items generated verbatim from the queue file. L5: wake tests, static pins, guest-duty citation. R1-R4 as above. No migration, no `src/doc.ts` / `schema.sql` / `migrations/` /
+`scripts/deploy-*` edit, no push, no wrangler command, no network write, no `*.local.*` read, no sub-agent. The template pin (v5 `fa11788d...`, `topics-d1.test.ts` test 9) is green: nothing minted.
+
+**Done differently from the commission, in one place each:**
+1. `wrangler.jsonc` not edited (project deny rule; patch delivered; note 2).
+2. `rule7VoteState` is in `src/rule7-vote.ts` (re-exported from `topics.ts`), and `society.ts` loads it with a dynamic import (note 5: a static import is a TDZ error through `governance.ts`).
+3. `rule7VoteState` returns `{ state, closes_at }`, not the bare state (two sentences need the time).
+4. "With quorum" is `tally()`'s reason `margin`; the class floor also reads as "without quorum" (note 5).
+5. A fourth site, `discovery.ts:184`, carried the stale promise and was fixed (note 5).
+6. Log values and lines beyond the commission's: `by: "predicate"` (not "insert"), `loop_attempts_exhausted`, `loop_nothing_postable`; refusals capped at 3 attempts a run (note 4).
+7. `describeRules` no longer returns `note`; `topicsRulesNote(clause)` does. `topicsDoorNote(origin, clause)` takes the clause as a required second argument (note 5).
+8. The secret-literal guard (D-061) needed two reviewed entries and a baseline move (note 5), and commit 4 alone is red on it (note 4).
+
+**For the hub.** (a) Apply `scratch/daily-loop-builder/wrangler-loop-cron.patch` (Ben's per-action word for the cron); the one red test then goes green. (b) The diff of `src/maintainer/loop-queue.ts` against
+`drafts/LOOP-QUEUE-2026-10-09.md` is yours to run; the generator is `scratch/daily-loop-builder/gen-loop-queue.mjs`. (c) The deploy script is untouched (`scripts/deploy-*` is forbidden): nothing in this wave needs a migration or a
+secret, and the first `GET /api/official` after the deploy is the ride for Part R; the first 12:00Z cron (`loop_posted` in the logs, a comment on topic 13) is the ride for the loop. (d) The dry run's bundle should show the dynamic
+import inlined (`init_rule7_vote`) as the bundle smoke here did.

@@ -74,6 +74,28 @@ export async function rule7VoteState(db: D1Database, now = Date.now()): Promise<
   }
 }
 
+// Why the topics route must not open a topic right now, or null if it may. Pure, from the same state the sentences read.
+//   open       the proposal text's promise: "While this vote is open, the operator opens and closes no topic."
+//   counting   the vote has closed and nobody has tallied it: opening now could pre-empt a result that retires the power.
+//   failed_with_quorum   citizens retired the power: no new topic opens, and none is closed to make room for one.
+//   unreadable a route only the operator can call fails closed when the vote it must respect cannot be read.
+// passed, failed_without_quorum and absent open as before (absent keeps a fresh fork and every older fixture behaving as it did before the vote).
+export function rule7OpenRefusal(v: Rule7Vote): string | null {
+  const when = new Date(v.closes_at ?? 0).toISOString();
+  switch (v.state) {
+    case "open":
+      return `Refused: the citizens' vote on naming this power in Rule 7 (proposal ${RULE7_PROPOSAL_ID}) is open until ${when}, and while it runs the operator opens and closes no topic. Nothing was written.`;
+    case "counting":
+      return `Refused: proposal ${RULE7_PROPOSAL_ID}, the citizens' vote on naming this power in Rule 7, closed at ${when} and has not yet been tallied; nothing opens until it is (POST /api/governance/sweep tallies it, and the 06:00 UTC wake does). Nothing was written.`;
+    case "failed_with_quorum":
+      return `Refused: citizens retired this power in proposal ${RULE7_PROPOSAL_ID} (quorum reached, not passed), so no new topic opens and none is closed to make room for one. Nothing was written.`;
+    case "unreadable":
+      return `Refused: proposal ${RULE7_PROPOSAL_ID}, the citizens' vote on naming this power in Rule 7, could not be read, and this route fails closed until it can be. Nothing was written.`;
+    default:
+      return null;
+  }
+}
+
 // The clause every site appends, built here and nowhere else. It reads after "and" (society.ts, topics.ts's rules note) and after
 // "and" in the door note, and the caller adds the full stop. Each state says only what the code makes true:
 //   open: no promise about closing (a moderation restore at the cap brings a topic back closed without the topics route, society.ts
