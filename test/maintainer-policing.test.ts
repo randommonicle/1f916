@@ -314,3 +314,54 @@ test("positive control: the same import-specifier pattern finds a real governanc
   const clerkText = readSourceWithoutComments(CLERK_PATH);
   assert.match(clerkText, /from\s*["'][^"']*\bgovernance\b[^"']*["']/, "clerk.ts legitimately imports detectConstitutionChange/reconcileConstitutionFidelityQueue from ../governance.ts");
 });
+
+// ============================================================================
+// The daily loop's own cage (src/maintainer/loop.ts, drafts/BUILDER-COMMISSION-DAILY-LOOP-RULE7-STATUS-2026-10-09.md L5): alongside, not instead of,
+// the generic MAINTAINER_DIR scans above (which already sweep loop.ts and loop-queue.ts, both being under src/maintainer/). The loop's ONLY write is
+// createComment(..., "loop"): no SQL write of its own, no batch, no model, no proposal or tally. Each scan has a positive control, so a regex that
+// could never match anything cannot pass quietly.
+// ============================================================================
+
+const LOOP_PATH = join(MAINTAINER_DIR, "loop.ts");
+const LOOP_QUEUE_PATH = join(MAINTAINER_DIR, "loop-queue.ts");
+const WRITE_SQL = /\b(INSERT|UPDATE|DELETE|REPLACE)\b/i;
+const BATCH_CALL = /\.batch\s*[<(]/; // a call, with or without a type argument
+
+test("loop.ts calls createComment as the loop and nothing else from the widened banned-call list -- no moderation, no money movement, no voting, no flagging, no post", () => {
+  const text = readSourceWithoutComments(LOOP_PATH);
+  const offenders: string[] = [];
+  for (const name of CONCIERGE_BANNED_CALLS) {
+    if (new RegExp(`\\b${name}\\s*\\(`).test(text)) offenders.push(`loop.ts calls ${name}(...)`);
+  }
+  assert.deepEqual(offenders, [], "the loop's only write-capable import from society.ts is createComment; the worker's automated code may not call createPost outside judgment.ts, which is why the loop is a comment");
+  // positive control: it does call createComment, and as "loop"
+  assert.match(text, /\bcreateComment\s*\(/);
+  assert.match(text, /createComment\([^)]*"loop"\)/);
+});
+
+test("loop.ts carries no INSERT, UPDATE, DELETE or REPLACE SQL and no .batch call: its only write is createComment", () => {
+  const text = readSourceWithoutComments(LOOP_PATH);
+  assert.doesNotMatch(text, WRITE_SQL, "a raw write statement in loop.ts would be a second, unreviewed write path outside createComment's predicate");
+  assert.doesNotMatch(text, BATCH_CALL, "a batch is how a write would be smuggled in");
+  // positive control: the same two regexes DO match real writers elsewhere in this directory (the concierge's run row; topics.ts's open batch)
+  assert.match(readSourceWithoutComments(CONCIERGE_PATH), WRITE_SQL);
+  assert.match(readSourceWithoutComments(join(SRC, "topics.ts")), BATCH_CALL);
+});
+
+test("loop.ts imports nothing from anthropic.ts or governance.ts -- no model call, and no code path to a proposal, ballot or tally", () => {
+  const text = readSourceWithoutComments(LOOP_PATH);
+  assert.doesNotMatch(text, /from\s*["'][^"']*\banthropic\b[^"']*["']/, "no model call can be made from a file that cannot import the model client");
+  assert.doesNotMatch(text, /from\s*["'][^"']*\bgovernance\b[^"']*["']/, "'never manufactures consensus on proposals' is a structural fact, not a prompt");
+  assert.doesNotMatch(text, /\bfetch\s*\(/, "and no outbound fetch of any kind");
+  // positive controls: the same import patterns match the files that do import them
+  assert.match(readSourceWithoutComments(CONCIERGE_PATH), /from\s*["'][^"']*\banthropic\b[^"']*["']/);
+  assert.match(readSourceWithoutComments(CLERK_PATH), /from\s*["'][^"']*\bgovernance\b[^"']*["']/);
+  // and the queue is data: it imports nothing at all
+  assert.doesNotMatch(readSourceWithoutComments(LOOP_QUEUE_PATH), /\bimport\b/);
+});
+
+test("loop.ts imports only society.ts, budget.ts and loop-queue.ts", () => {
+  const text = readSourceWithoutComments(LOOP_PATH);
+  const specifiers = [...text.matchAll(/from\s*["']([^"']+)["']/g)].map((m) => m[1]).sort();
+  assert.deepEqual(specifiers, ["../society.ts", "./budget.ts", "./loop-queue.ts"]);
+});

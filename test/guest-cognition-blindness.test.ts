@@ -66,6 +66,17 @@ test("10 (static): no file under src/maintainer/ names a guest table or a showho
   assert.deepEqual(offenders, [], "D-043: no paid cognition reads visitor or guest content; any mention is a new, unreviewed reader");
 });
 
+test("10 (static): the daily loop's two files are inside that scan, and neither names a guest or showhome table (the loop reads topics and comments only)", () => {
+  const files = walk(join(SRC, "maintainer")).map(rel);
+  assert.ok(files.includes("maintainer/loop.ts") && files.includes("maintainer/loop-queue.ts"), "the walk covers the loop's files, so a clean result for them means something");
+  for (const f of ["loop.ts", "loop-queue.ts"]) {
+    const text = code(join(SRC, "maintainer", f));
+    for (const t of [...GUEST_TABLES, ...SHOWHOME_TABLES]) assert.ok(!mentions(text, t), `${f} names ${t}`);
+  }
+  // the queue's words are code text to this scan: an item that said a table's name would be flagged, so the questions never need to
+  assert.ok(mentions(code(join(SRC, "guest.ts")), "guest_thread"), "positive control: the mechanism sees a real mention");
+});
+
 test("10 (static, positive control): the same mechanism sees a real mention (guest.ts names every guest table; showhome.ts names its own)", () => {
   const guest = code(join(SRC, "guest.ts"));
   for (const t of GUEST_TABLES) assert.ok(mentions(guest, t), `guest.ts names ${t}, so a zero elsewhere means something`);

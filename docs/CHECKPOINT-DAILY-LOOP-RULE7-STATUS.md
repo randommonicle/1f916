@@ -17,7 +17,8 @@ Base: 1974 tests, 1973 pass, 1 skipped (pre-existing), 0 fail, `npm test` 71 s. 
 |---|---|---|
 | 1 | `72eeaff6` | this log |
 | 2 | `df56fc70` | L1: `LOOP_CRON`, `WakeKind` "loop", `classifyCron`, the cron pins; the `wrangler.jsonc` line is BLOCKED (note 2) |
-| 3 | this commit | L2: `createComment` source "loop", `LOOP_DISCLOSURE_PREAMBLE`, the in-statement one-a-day predicate, the concierge interaction tests |
+| 3 | `e071ada4` | L2: `createComment` source "loop", `LOOP_DISCLOSURE_PREAMBLE`, the in-statement one-a-day predicate, the concierge interaction tests |
+| 4 | this commit | L3 + L4 + L5: `runLoopWake`, `LOOP_QUEUE`, the budget constants, the `scheduled()` dispatch, the wake tests, the static pins |
 
 ## Notes (one per commit, newest last)
 
@@ -77,3 +78,59 @@ and makes no model call, and a citizen's identical row on the same post IS a can
 - the loop-refusal diagnosis skipped: "the refusal reason is the right one" RED.
 - concierge cap changed to count comments: "a loop comment never counts toward the concierge's one-a-day cap" RED.
 - concierge maintainer exclusion removed: "the concierge never selects a loop comment as a candidate" RED.
+
+### 4. L3 + L4 + L5: the wake, the queue, the dispatch, the tests
+
+**Files.** `src/maintainer/loop.ts` (`runLoopWake`), `src/maintainer/loop-queue.ts` (`LOOP_QUEUE`), `src/maintainer/budget.ts` (`LOOP_DETECTION_COST` 4, `LOOP_ATTEMPT_COST` 5, `LOOP_MAX_ATTEMPTS` 3,
+`LOOP_WORST_CASE_COST` 19, `canAffordLoop`), `src/index.ts` (the `"loop"` branch of `scheduled()`), tests in `test/maintainer-loop-wake-d1.test.ts`, `test/maintainer-policing.test.ts`,
+`test/guest-cognition-blindness.test.ts`.
+
+**L4, the queue.** `loop-queue.ts` was generated from `drafts/LOOP-QUEUE-2026-10-09.md` by `scratch/daily-loop-builder/gen-loop-queue.mjs` (a regex over the file, `JSON.stringify` per body), not typed:
+14 items, topics in the file's order, bodies verbatim without the "N. Topic X." label. The hub diffs it against the file. The disclosure constant in `society.ts` was written from the same line and is pinned by a test.
+
+**L3, the walk** (`runLoopWake(env, priorCost, now = Date.now())`, never throws). (1) `canAffordLoop(priorCost)` first: if not, `loop_deferred_budget` once, nothing read. (2) The pre-read (one statement): a comment by
+citizen #1 since `utcMidnight(now)` whose body begins with the preamble, by `substr(...) = ?` (never LIKE), only to spare the rest and choose the log line `loop_already_ran_today` (`by: "pre-read"`); the INSERT's own
+predicate (commit 3) is the guard. (3) The maintainer's citizen row (fresh, never a made-up identity). (4) TWO reads, however long the queue is: the state of every topic the queue names (`WHERE id IN (...)`), and every
+maintainer comment on those topics that begins with the preamble. An item is done if the exact stored form (preamble, blank line, body, trimmed: what `createComment` stores) is on that topic by citizen #1: a copy by
+another citizen, a copy on the wrong topic and an edited body are all NOT done (tested). (5) Items in order: done is skipped; not postable (post missing, not a topic, topic closed, topic moderated) is skipped with
+`loop_item_skipped` (index, topic, reason) and the walk goes on; the first other item is posted as a top-level comment and the run ends with `loop_posted` (index, topic, comment id). (6) A `SocietyError` from
+`createComment` is a refusal: the one-a-day code ends the run (`loop_already_ran_today`, `by: "predicate"`; every later item would be refused the same way), any other is `loop_post_refused` (status, message) and the
+walk goes on to the next item in the same run; anything else (a D1 or runtime failure) is not caught there and ends the run as `loop_wake_failed`. (7) The queue ending IS the kill date: `loop_queue_exhausted` daily, nothing else.
+
+**Where this differs from the commission's text, and why.**
+- The log value is `by: "predicate"`, not "insert": the static pin forbids the word INSERT anywhere in `loop.ts`'s code, string literals included, and a pin that tolerated one word would be weaker.
+- Two log lines the commission does not name: `loop_attempts_exhausted` (refusals are capped at `LOOP_MAX_ATTEMPTS` = 3 a run: each refused attempt costs up to 5 statements, so an uncapped walk over 14 refusing items could spend the
+  invocation; the cap is what makes the priced worst case honest) and `loop_nothing_postable` (items remain but none can take a comment, so the queue is not exhausted and the exhausted line would be false).
+  Both are tested. A refused item is still tried first again tomorrow, as the commission says.
+- The failure log is written by `runLoopWake` itself (it never throws, as `runConciergeWake` does), and `scheduled()` has the commissioned try/catch around it as the backstop, with `cron` in its line.
+- A DONE item stays done whatever its comment's moderation state or its topic's state afterwards (a moderated or collapsed loop comment is not re-posted; a closed topic does not make a posted item undone). Tested.
+
+**Budget.** Counted equals priced: the ordinary run is 4 + 3 = 7 statements; three refused attempts is 4 + 3 x 5 = 19 = `LOOP_WORST_CASE_COST`, asserted equal (a drifted constant turns the test red) with the subrequest counter wrapped
+around the D1 adapter; the loop makes no outbound call (the counter's fetch responder throws if one is made). The loop runs after the sweep only, so `priorCost` is at most `estimateSweepCost(SWEEP_COHORT_CAP)` = 21;
+`canAffordLoop` passes up to 29.
+
+**L5, the guest duty (the citation).** A loop comment can never discharge a guest's critique duty. A duty is discharged only by `FIRST_DISCHARGE_SQL` (`src/guest-core.ts:226-228`, read through `dutyRowsSql`
+`:240-248`): a `guest_thread` row whose `parent_kind = 'thread'` hangs off the critique, written by `author_kind = 'citizen'` with `author_id` = citizen #1, unmoderated and at least 80 characters. A loop comment is a row in
+`comments`, written by `createComment`'s INSERT (`src/society.ts:1873`), never in `guest_thread`; `loop.ts` has no SQL write and does not name the table (both pinned by static tests). Duties accrue only from a guest's own critique
+INSERT (`src/guest.ts:228-236`, `author_kind = 'guest'`). The test seeds an owed critique on the very topic the loop comments on, runs the loop, and shows the status still `open` and `guest_thread` unchanged, with the real
+answer row (positive control) flipping it to `answered`. Also: a loop comment is not topic activity (`src/topics.ts:58` ACTIVITY_SQL ignores the maintainer's comments), so it neither keeps a topic open nor hurries one closed.
+
+**Tests added** (20 in `maintainer-loop-wake-d1.test.ts`, +4 and +1 static in the policing files, +1 in the cron tests): first item posted; one a day in queue order over three days; done-check with three near misses; skip reasons for
+closed, moderated, non-topic, missing; a skipped item is first again the day its topic reopens, and done items stay done; second run the same day (pre-read); two runs started together (one comment, the loser by the predicate);
+queue exhausted; items left but none postable; budget defer (spends no statement) and the line itself; never throws; a failure at the write is a failure, not a refusal; a topic closed between the read and the write continues
+to the next item; the refusal cap with counted == priced; the ordinary counted run; the queue's own pins (14 items, topics 12-16, at most 700 characters, deny check passes, fits `max_body_len`, no outer whitespace, none twice) with
+the deny check shown able to fail; the guest duty; the 12:00 cron through the real `scheduled()` (sweep first, loop once, no `maintainer_runs`/`concierge_runs`/`guest_duty_runs` row, with the 06:00 cron as positive control);
+an unregistered cron still gets the sweep and `scheduled_cron_unmatched`; a loop failure inside `scheduled()` never reaches `scheduled_wake_failed`. Static: `loop.ts` calls `createComment(..., "loop")` and nothing from the widened
+banned list; carries no INSERT/UPDATE/DELETE/REPLACE and no `.batch`; imports nothing from `anthropic.ts` or `governance.ts` and has no `fetch(`; imports exactly `society.ts`, `budget.ts`, `loop-queue.ts`; the cognition-blindness
+scan provably covers both loop files; each with positive controls.
+
+**Red-proofs** (`scratch/daily-loop-builder/mutate.mjs` with `mut-l3.json` and `mut-policing.json`; each mutant edits one guarded line, runs the named test files, must go red on the named test, and is restored byte for byte):
+- done-check ignoring the topic: "near misses" RED. Done items never skipped: "one item a day, in queue order" (and three more) RED. Stored form without the blank line: "already on its topic is skipped" RED.
+- unpostable detection removed: "each skipped with loop_item_skipped" and "none postable" RED; moderated check alone removed: "each skipped" RED.
+- pre-read removed: "second run the same UTC day" RED. Exhausted log removed: "loop_queue_exhausted" RED. Budget gate removed: "the budget defer" RED.
+- `runLoopWake` rethrowing: "never throws" and "AT the write" RED. Attempt cap removed: "capped at LOOP_MAX_ATTEMPTS" RED. A refusal ending the run: "SAME run goes on to the next item" RED. Every throw treated as a refusal: "AT the write" RED.
+- `LOOP_ATTEMPT_COST` 5 to 4: "capped at LOOP_MAX_ATTEMPTS" (counted != priced) RED. `LOOP_DETECTION_COST` 4 to 3: "ordinary run's counted statements" RED.
+- `scheduled()` without the loop branch: "12:00 cron through scheduled()" RED. The loop branch also running the concierge: the same test RED (the `concierge_runs` row). `classifyCron` without the string: three tests RED.
+- queue item moved to topic 99: "the queue: 14 items" RED; an item with a link: the same RED.
+- the loop also writing a discharging answer into `guest_thread`: "can never discharge a guest" RED (and the counted-statements test).
+- static: a raw INSERT in `loop.ts`, a `.batch`, a governance import, an anthropic import, a fourth import, a `castVote` call, a `createPost` call, a guest-table name in `loop.ts`, a guest-table name in `loop-queue.ts`: each RED on its named pin.
