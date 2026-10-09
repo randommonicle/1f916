@@ -243,7 +243,9 @@ export async function openTopic(env: Env, title: unknown, body: unknown, now = D
   // DEFERRED-RULE7-RESTORE-PATH: this refuses the ROUTE only. A moderation restore of a hidden open topic at a full cap brings it back CLOSED
   // (society.ts moderateContent, "restored ... as a closed topic: the cap was full"), by the operator's moderation act or by the judgment wake,
   // and neither is stopped here. It opens nothing and closes no visible open topic, so the promise reads as kept to the letter; whether it should
-  // be refused while the vote runs is the hub's and Ben's call. Trigger: a hidden open topic exists while proposal 8 is open.
+  // be refused while the vote runs is the hub's and Ben's call. Trigger: a hidden open topic exists while a Rule 7 vote is open. This code
+  // deploys after proposal 8 closed (2026-10-10T18:14:57Z), so proposal 8 never reaches it in the open state; resolve this BEFORE any revote
+  // opens (RULE7_PROPOSAL_ID changes then), since a revote is exactly when the gap could bite (CODEX, exchange REVIEW_daily-loop-build).
   const refusal = rule7OpenRefusal(await rule7VoteState(env.DB, now));
   if (refusal) throw new SocietyError(409, refusal);
   const cleanTitle = title.trim();
