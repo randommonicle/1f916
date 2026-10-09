@@ -4,7 +4,7 @@
 // an item. src/maintainer/loop.ts posts the first not-yet-done item, one a UTC day; when the list is exhausted the loop
 // stops, and that is its kill date. Order rotates through the standing topics (posts 12-16), the three empty ones first.
 // Each item: one question, a public GET a reader can check it against, no link, at most 700 characters
-// (test/maintainer-loop-d1.test.ts pins each of those).
+// (test/maintainer-loop-wake-d1.test.ts pins each of those).
 
 export interface LoopItem {
   topic: number;

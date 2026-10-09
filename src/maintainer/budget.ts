@@ -286,7 +286,7 @@ export function canAffordConcierge(priorCost: number): boolean {
 //   read and, when that finds nothing, the topic diagnosis read (5).
 //   attempts, at most LOOP_MAX_ATTEMPTS: only a refusal (a topic closed or moderated between the read and the write) sends the walk on to the next
 //   item, and each such refusal is a fresh attempt; the cap keeps a run of them from spending the invocation.
-// The proof is test/maintainer-loop-d1.test.ts (counted statements against these constants on the success path and on a refused-then-posted path).
+// The proof is test/maintainer-loop-wake-d1.test.ts (counted statements against these constants on the success path and on a refused-then-posted path).
 export const LOOP_DETECTION_COST = 4;
 export const LOOP_ATTEMPT_COST = 5;
 export const LOOP_MAX_ATTEMPTS = 3;

@@ -20,7 +20,8 @@ Base: 1974 tests, 1973 pass, 1 skipped (pre-existing), 0 fail, `npm test` 71 s. 
 | 3 | `e071ada4` | L2: `createComment` source "loop", `LOOP_DISCLOSURE_PREAMBLE`, the in-statement one-a-day predicate, the concierge interaction tests |
 | 4 | `8853be5e` | L3 + L4 + L5: `runLoopWake`, `LOOP_QUEUE`, the budget constants, the `scheduled()` dispatch, the wake tests, the static pins |
 | 5 | `2f34e5a3` | R1 + R2: `src/rule7-vote.ts`, the three (four) sites read it, the secret-literal guard entries |
-| 6 | this commit | R3 + R4: the open route refuses by state, its tests, the restore-path finding, the flags, the close |
+| 6 | `0a2a63bf` | R3 + R4: the open route refuses by state, its tests, the restore-path finding, the flags, the close |
+| 7 | this commit | the compound budget proof for the 12:00 cron at the real limit of 50, two citation fixes, the manual-trigger and `officialFacts` findings (note 8) |
 
 ## Notes (one per commit, newest last)
 
@@ -218,7 +219,25 @@ two detection reads, the budget, never throws. L4: 14 items generated verbatim f
 7. `describeRules` no longer returns `note`; `topicsRulesNote(clause)` does. `topicsDoorNote(origin, clause)` takes the clause as a required second argument (note 5).
 8. The secret-literal guard (D-061) needed two reviewed entries and a baseline move (note 5), and commit 4 alone is red on it (note 4).
 
+**Added after the close walk (note 8, below).**
+
 **For the hub.** (a) Apply `scratch/daily-loop-builder/wrangler-loop-cron.patch` (Ben's per-action word for the cron); the one red test then goes green. (b) The diff of `src/maintainer/loop-queue.ts` against
 `drafts/LOOP-QUEUE-2026-10-09.md` is yours to run; the generator is `scratch/daily-loop-builder/gen-loop-queue.mjs`. (c) The deploy script is untouched (`scripts/deploy-*` is forbidden): nothing in this wave needs a migration or a
 secret, and the first `GET /api/official` after the deploy is the ride for Part R; the first 12:00Z cron (`loop_posted` in the logs, a comment on topic 13) is the ride for the loop. (d) The dry run's bundle should show the dynamic
 import inlined (`init_rule7_vote`) as the bundle smoke here did.
+
+### 8. Findings from the close review
+
+- **The compound proof at the real limit (a convention gap, closed).** `test/maintainer-scheduled-budget.test.ts` is the house enforcement for the 50-subrequest budget and had no 12:00 case; my `scheduled()` test in
+  `maintainer-loop-wake-d1.test.ts` ran its counter at 10,000. "PROOF LOOP" now fires `LOOP_CRON` through the real handler with a 2-due sweep (the cap, so `priorCost` is the worst the loop can be handed: 21) and the counter at the
+  real 50, asserting never breached, total <= 50, no outbound call, the loop posted, both proposals tallied, and no `maintainer_runs`/`concierge_runs`/`guest_duty_runs` row. Arithmetic: 21 (sweep) + 19 (the loop's priced worst
+  case, only reachable by three refusals) + 2 (reserve) = 42. Red-proofs: the loop spending 40 extra statements, and the loop cron also running the concierge: both RED on it.
+- **The manual trigger is untouched and still refuses `"loop"`.** `parseWakeKind` (`src/maintainer/trigger.ts:33-36`) is a literal `"clerk" | "judgment"` check against its own `ManualWakeKind` type, not `WakeKind` and not
+  `classifyCron`, so `POST /api/maintainer/run {"wake":"loop"}` is the same 400 as before. The loop has no manual trigger; that is not asked for and not built.
+- **The extra `officialFacts` read is on no wake path.** Every `officialFacts(` call in `src/` is an HTTP handler (`index.ts`, `discovery.ts`, `mcp.ts`, `mcp-read.ts`); the hits in `src/governance.ts` and `src/maintainer/` are
+  comments only. The compound budget proofs (`maintainer-scheduled-budget.test.ts`, all 16) are green with it.
+- **Two citations fixed.** The loop block in `budget.ts` and the `loop-queue.ts` header named `test/maintainer-loop-d1.test.ts` as the proof; the counted-statement and queue pins are in `test/maintainer-loop-wake-d1.test.ts`
+  (the generator hard-coded the name before the file split). Both corrected, and the generator.
+- **The alternative to the dynamic import.** Moving `KIND_CLASS`, `CLASS_QUORUM_RULE`, `CLASS_PASSAGE_RULE`, `CLASS_MIN_BALLOTS`, `classOf` and `tally` to a leaf module that `governance.ts` re-exports would break the cycle
+  statically, and `society.ts` could then import the reader normally. It touches the D-018 authority file `governance.ts` (and the policing/serialiser tests that read it), so it was not done here; it is the hub's choice if a
+  dynamic `import()` (the first in `src/`) is not wanted as a precedent.
