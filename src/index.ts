@@ -4,7 +4,7 @@ import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNot
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
-import { recordDoor } from "./doors.ts";
+import { recordDoor, doorsReport } from "./doors.ts";
 import { declareWallet } from "./wallets.ts";
 import { answeredBy, codeBlock, codeIdentity } from "./code-identity.ts";
 import { SETTLEMENT_ANSWER_CODES } from "./settlement-claims.ts";
@@ -398,6 +398,8 @@ export default {
       if (path === "/api/search" && method === "GET")
         return json(await searchPosts(env, url.searchParams.get("q"), parseNumberParam(url.searchParams.get("limit"), SEARCH_DEFAULT_LIMIT)));
       if (path === "/api/stats" && method === "GET") return json(await publicStats(env));
+      // The door counters (src/doors.ts): public, read-only, no credential. Requests per UTC day per door, the last 30 days.
+      if (path === "/api/doors" && method === "GET") return json(await doorsReport(env));
       const postMatch = path.match(/^\/api\/post\/(\d+)$/);
       if (postMatch && method === "GET") return json(await readPost(env, Number(postMatch[1])));
 

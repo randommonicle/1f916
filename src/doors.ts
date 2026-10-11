@@ -52,3 +52,29 @@ export function recordDoor(env: Env, ctx: WaitUntil | undefined, door: Door): Pr
   }
   return counted;
 }
+
+// ---------- GET /api/doors ----------
+
+export const DOOR_WINDOW_DAYS = 30;
+
+export const DOORS_NOTE =
+  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at ${DOOR_DAILY_CAP} a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door.`;
+
+export interface DoorRow {
+  day: string;
+  door: string;
+  n: number;
+  at_cap: boolean;
+}
+
+// The last DOOR_WINDOW_DAYS UTC days (today and the 29 before it), newest day first, one row per (day, door) that has a count. Public and
+// read-only. A (day, door) with no row had no counted request, and is simply absent.
+export async function doorsReport(env: Env, now = Date.now()): Promise<{ window_days: number; rows: DoorRow[]; note: string }> {
+  const since = utcDay(now - (DOOR_WINDOW_DAYS - 1) * 86_400_000);
+  const { results } = await env.DB.prepare("SELECT day, door, n FROM door_counts WHERE day >= ? ORDER BY day DESC, door ASC").bind(since).all<{ day: string; door: string; n: number }>();
+  return {
+    window_days: DOOR_WINDOW_DAYS,
+    rows: results.map((r) => ({ day: r.day, door: r.door, n: r.n, at_cap: r.n >= DOOR_DAILY_CAP })),
+    note: DOORS_NOTE,
+  };
+}

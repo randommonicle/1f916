@@ -313,3 +313,85 @@ test("C2: with a ctx, no counted route waits for its count: ctx.waitUntil receiv
     d1.close();
   }
 });
+
+// ---------- C3: GET /api/doors ----------
+
+const DAY_MS = 86_400_000;
+const NOTE =
+  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at 2000 a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door.";
+
+test("C3: GET /api/doors serves the last 30 UTC days newest first, {day, door, n, at_cap} per row, and the note verbatim; no credential", async () => {
+  const { d1, env } = fresh();
+  try {
+    const ins = d1.raw.prepare("INSERT INTO door_counts (day, door, n) VALUES (?, ?, ?)");
+    const dayAgo = (k: number) => utcDay(Date.now() - k * DAY_MS);
+    ins.run(dayAgo(0), "skill_md", 7);
+    ins.run(dayAgo(0), "heartbeat_md", 2);
+    ins.run(dayAgo(1), "mcp_initialize", DOOR_DAILY_CAP);
+    ins.run(dayAgo(1), "showhome_enter", DOOR_DAILY_CAP - 1);
+    ins.run(dayAgo(29), "guest_comment", 3);
+    ins.run(dayAgo(30), "skill_md", 99); // the 31st day back: outside the window
+    ins.run(dayAgo(400), "skill_md", 99);
+    const r = await call(env, "GET", "/api/doors");
+    assert.equal(r.status, 200);
+    assert.equal(r.body.window_days, 30);
+    assert.equal(r.body.note, NOTE);
+    assert.deepEqual(r.body.rows, [
+      { day: dayAgo(0), door: "heartbeat_md", n: 2, at_cap: false },
+      { day: dayAgo(0), door: "skill_md", n: 7, at_cap: false },
+      { day: dayAgo(1), door: "mcp_initialize", n: DOOR_DAILY_CAP, at_cap: true },
+      { day: dayAgo(1), door: "showhome_enter", n: DOOR_DAILY_CAP - 1, at_cap: false },
+      { day: dayAgo(29), door: "guest_comment", n: 3, at_cap: false },
+    ]);
+    for (const row of r.body.rows as Array<Record<string, unknown>>) assert.deepEqual(Object.keys(row), ["day", "door", "n", "at_cap"]);
+    // no credential, any method but GET is the router's 404
+    assert.equal((await call(env, "POST", "/api/doors", {})).status, 404);
+    // the read counts nothing (it is not one of the six doors)
+    const before = rows(d1).length;
+    await call(env, "GET", "/api/doors");
+    assert.equal(rows(d1).length, before);
+    // an empty table is an empty list, not an error
+    d1.raw.exec("DELETE FROM door_counts");
+    const empty = await call(env, "GET", "/api/doors");
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.body.rows, []);
+    assert.equal(empty.body.note, NOTE);
+  } finally {
+    d1.close();
+  }
+});
+
+test("C3: end to end, a door that reaches the cap reads at_cap: true on /api/doors and stops counting", async () => {
+  const { d1, env } = fresh();
+  try {
+    d1.raw.prepare("INSERT INTO door_counts (day, door, n) VALUES (?, 'skill_md', ?)").run(utcDay(Date.now()), DOOR_DAILY_CAP - 1);
+    await call(env, "GET", "/skill.md");
+    await call(env, "GET", "/skill.md");
+    await call(env, "GET", "/skill.md");
+    const r = await call(env, "GET", "/api/doors");
+    assert.deepEqual(r.body.rows, [{ day: utcDay(Date.now()), door: "skill_md", n: DOOR_DAILY_CAP, at_cap: true }]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("C3: the route is listed everywhere the parity tests require: ROUTES (GET, no auth, a grepFor that index.ts really carries), /llms.txt, /openapi.json, /api/surface", async () => {
+  const { ROUTES } = await import("../src/discovery.ts");
+  const spec = ROUTES.find((r) => r.path === "/api/doors");
+  assert.ok(spec, "ROUTES carries /api/doors");
+  assert.equal(spec!.method, "GET");
+  assert.equal(spec!.auth, "none");
+  assert.equal(spec!.note, NOTE, "the route's note is the served note");
+  assert.ok(readFileSync(join(ROOT, "src", "index.ts"), "utf8").includes(spec!.grepFor!), "index.ts dispatches the route (the drift guard's literal)");
+  const { d1, env } = fresh();
+  try {
+    assert.ok(((await call(env, "GET", "/llms.txt")).body._text as string).includes("/api/doors"), "/llms.txt");
+    const openapi = (await call(env, "GET", "/openapi.json")).body;
+    assert.ok(openapi.paths["/api/doors"]?.get, "/openapi.json");
+    const surface = (await call(env, "GET", "/api/surface")).body;
+    const entry = (surface.routes as Array<Record<string, unknown>>).find((r) => r.path === "/api/doors");
+    assert.ok(entry && entry.auth === "none" && entry.method === "GET", "/api/surface");
+  } finally {
+    d1.close();
+  }
+});
