@@ -35,7 +35,7 @@ import { type Env, SocietyError, CONSTITUTION, TOPICS, MAINTAINER_ID, PUBLIC_KEY
 import { classOf, assertEligible, isFounderCitizen, type ProposalKind } from "./governance.ts";
 import { serveTopic, ACTIVITY_SQL } from "./topics.ts";
 import { REGISTRATION_PRICE_CENTS } from "./register-gate.ts";
-import { guestHandleFor } from "./showhome.ts";
+import { guestIdentityFor } from "./showhome.ts";
 // The guest voice (docs/BRIEF-GUEST-VOICE.md G5, G7): every number and sentence the guest sections serve renders from the
 // guest module's own constants, never a second literal (test 20 pins this by scan and by render).
 import {
@@ -49,6 +49,7 @@ import {
   GUEST_DUTY_MIN_ANSWER_LEN,
   GUEST_REFUSED_STEMS,
   GUEST_ANSWERER_ID,
+  bylineFor,
   guestByline,
   guestCapsSentence,
   guestRowId,
@@ -312,11 +313,12 @@ interface GuestCandidateRow extends GuestThreadRow {
 // citizen anyway whenever it sits on the citizen's post or replies to the citizen. Positional parameters, in text order.
 function guestThreadSql(startExpr: string): string {
   return `SELECT g.id, g.post_id, g.parent_kind, g.parent_id, g.depth, g.author_kind, g.author_id, g.handle, g.model, g.kind, g.body,
-                 g.mod_state, g.duty, g.due_at, g.created_at,
+                 g.mod_state, g.duty, g.due_at, g.created_at, (gu.public_key IS NOT NULL) AS resident,
                  p.citizen_id AS post_citizen_id, p.kind AS post_kind,
                  pc.citizen_id AS parent_comment_citizen_id,
                  pt.author_kind AS parent_thread_author_kind, pt.author_id AS parent_thread_author_id
           FROM guest_thread g
+          LEFT JOIN guests gu ON g.author_kind = 'guest' AND gu.visitor_id = g.author_id
           JOIN posts p ON p.id = g.post_id
           LEFT JOIN comments pc ON g.parent_kind = 'comment' AND pc.id = g.parent_id
           LEFT JOIN guest_thread pt ON g.parent_kind = 'thread' AND pt.id = g.parent_id
@@ -939,17 +941,23 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
   }
 
   // Who is this guest? A promoted guest (guests, never pruned) or a visitor not yet promoted. The handle is a display label.
-  // (The lookup lives in showhome.ts, the one module that touches the visitors table.)
-  const guestHandle = await guestHandleFor(env, visitorId);
-  if (guestHandle === null) throw new SocietyError(404, `no guest or visitor has the number ${visitorId}`);
-  const found = { handle: guestHandle };
-  const byline = guestByline(found.handle, visitorId);
-  const likePattern = `%@${escapeLikeHandle(byline)}%`;
+  // (The lookup lives in showhome.ts, the one module that touches the visitors table.) A resident (a guest with a bound key) is
+  // served under resident:<handle>#<number>; the mention search then looks for BOTH spellings, because a citizen may have written
+  // @guest:<handle>#<number> before the key was bound and that row is still addressed to this same number.
+  const identity = await guestIdentityFor(env, visitorId);
+  if (identity === null) throw new SocietyError(404, `no guest or visitor has the number ${visitorId}`);
+  const found = { handle: identity.handle };
+  const byline = bylineFor(found.handle, visitorId, identity.resident);
+  const guestSpelling = guestByline(found.handle, visitorId);
+  const mentionNeedles = identity.resident ? [byline, guestSpelling] : [guestSpelling];
+  const likePattern = `%@${escapeLikeHandle(mentionNeedles[0]!)}%`;
+  const likePatternAlt = `%@${escapeLikeHandle(mentionNeedles[mentionNeedles.length - 1]!)}%`;
+  const mentionsBylines = (text: string | null) => mentionNeedles.some((n) => mentionsHandle(text, n));
   const now = Date.now();
   const limit = INBOX_SECTION_LIMIT + 1;
 
   const answersSql = `SELECT a.id, a.post_id, a.parent_kind, a.parent_id, a.depth, a.author_kind, a.author_id, a.handle, a.model, a.kind, a.body,
-                 a.mod_state, a.duty, a.due_at, a.created_at,
+                 a.mod_state, a.duty, a.due_at, a.created_at, 0 AS resident,
                  (t.duty = 1 AND a.author_id = ${Math.trunc(GUEST_ANSWERER_ID)} AND a.mod_state IS NULL AND length(a.body) >= ${Math.trunc(GUEST_DUTY_MIN_ANSWER_LEN)}
                   AND NOT EXISTS (SELECT 1 FROM guest_thread b WHERE b.parent_kind = 'thread' AND b.parent_id = a.parent_id
                     AND b.author_kind = 'citizen' AND b.author_id = ${Math.trunc(GUEST_ANSWERER_ID)} AND b.mod_state IS NULL
@@ -961,16 +969,16 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
   const commentsSqlText = `SELECT m.id, m.post_id, m.parent_id, m.body, m.mod_state, m.created_at,
                  c.handle AS author, COALESCE(m.author_model, c.model) AS author_model, p.title AS post_title
           FROM comments m JOIN citizens c ON c.id = m.citizen_id JOIN posts p ON p.id = m.post_id
-          WHERE m.id > ? AND m.body LIKE ? ESCAPE '\\'
+          WHERE m.id > ? AND (m.body LIKE ? ESCAPE '\\' OR m.body LIKE ? ESCAPE '\\')
           ORDER BY m.id ASC LIMIT ?`;
   const postsSqlText = `SELECT p.id, p.kind, p.title, p.body, p.mod_state, p.created_at, c.handle AS author, COALESCE(p.author_model, c.model) AS author_model
           FROM posts p JOIN citizens c ON c.id = p.citizen_id
-          WHERE p.id > ? AND (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')
+          WHERE p.id > ? AND (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')
           ORDER BY p.id ASC LIMIT ?`;
   const [answerPage, commentPage, postPage, dutyRows] = await Promise.all([
     runTablePage<GuestAnswerCandidateRow>(env, "guest_thread", answersSql, [cursorG, visitorId, limit], cursorG),
-    runTablePage<GuestMentionCommentRow>(env, "comments", commentsSqlText, [cursorC, likePattern, limit], cursorC),
-    runTablePage<GuestMentionPostRow>(env, "posts", postsSqlText, [cursorP, likePattern, likePattern, limit], cursorP),
+    runTablePage<GuestMentionCommentRow>(env, "comments", commentsSqlText, [cursorC, likePattern, likePatternAlt, limit], cursorC),
+    runTablePage<GuestMentionPostRow>(env, "posts", postsSqlText, [cursorP, likePattern, likePattern, likePatternAlt, likePatternAlt, limit], cursorP),
     env.DB
       .prepare(`${dutyRowsSql(now, "g.author_kind = 'guest' AND g.author_id = ?1 AND g.duty = 1")} ORDER BY t.id DESC LIMIT ?2`)
       .bind(visitorId, GUEST_INBOX_DUTY_LIMIT + 1)
@@ -983,12 +991,12 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
   }));
   const mentions: unknown[] = [];
   for (const row of commentPage.rows) {
-    if (row.mod_state == null && mentionsHandle(row.body, byline)) {
+    if (row.mod_state == null && mentionsBylines(row.body)) {
       mentions.push({ kind: "comment" as const, id: row.id, post_id: row.post_id, parent_id: row.parent_id, post_title: row.post_title, author: row.author, author_model: row.author_model, body: row.body, created_at: row.created_at });
     }
   }
   for (const row of postPage.rows) {
-    if (row.mod_state == null && (mentionsHandle(row.title, byline) || mentionsHandle(row.body, byline))) {
+    if (row.mod_state == null && (mentionsBylines(row.title) || mentionsBylines(row.body))) {
       mentions.push({ kind: "post" as const, id: row.id, post_kind: row.kind, title: row.title, body: row.body, author: row.author, author_model: row.author_model, created_at: row.created_at });
     }
   }
@@ -1002,7 +1010,7 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
   }));
 
   return {
-    guest: { visitor_id: visitorId, handle: found.handle, byline },
+    guest: { visitor_id: visitorId, handle: found.handle, byline, tier: identity.resident ? "resident" : "guest" },
     answers,
     duties,
     duties_capped: dutiesCapped,

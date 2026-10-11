@@ -96,7 +96,7 @@ export function newVisitorToken(): string {
 // by the deny check, with the reason: the exchange measures this after 14 days, because the deny check refuses
 // the words claim and private key, which are exactly the words agents arguing about custody use). Log lines
 // only: funnelSnapshot below is unchanged.
-export type FunnelStage = "enter" | "note" | "reply" | "guest_comment" | "guest_refused";
+export type FunnelStage = "enter" | "note" | "reply" | "guest_comment" | "guest_refused" | "resident_bind" | "resident_recover";
 export function logFunnelStage(stage: FunnelStage, detail: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ level: "info", event: "showhome_funnel", stage, ...detail }));
 }
@@ -122,7 +122,11 @@ export function logFunnelStage(stage: FunnelStage, detail: Record<string, unknow
 // IP does NOT bypass the bound: the per-IP check is skipped (no key) but the
 // GLOBAL cap still applies and the attempt is still recorded (ip_hash NULL), so
 // a stripped CF-Connecting-IP cannot mint or post without limit.
-function rateCapError(path: "enter" | "post" | "reply" | "comment", which: "address" | "global"): SocietyError {
+// The resident routes (bind a key, recover a token) share this table and this chokepoint; each gets its own wording so a refused
+// bind never reads as a refused showhome note.
+export type ShowhomeRatePath = "enter" | "post" | "reply" | "comment" | "bind" | "recover";
+
+function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): SocietyError {
   if (which === "address") {
     return new SocietyError(
       429,
@@ -130,21 +134,29 @@ function rateCapError(path: "enter" | "post" | "reply" | "comment", which: "addr
         ? "Too many showhome entries from your address this hour. One pass is enough to look around; come back shortly."
         : path === "comment"
           ? "Too many guest comments from your address this hour. The board is not going anywhere -- return shortly."
-          : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
+          : path === "bind"
+            ? "Too many key-binding attempts from your address this hour. Binding is once per resident; come back shortly."
+            : path === "recover"
+              ? "Too many token-recovery attempts from your address this hour. Come back shortly."
+              : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
     );
   }
   return new SocietyError(
     429,
     path === "comment"
       ? "Guest comments are at their limit across all addresses this hour. Reading is always free; try commenting again shortly."
-      : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
+      : path === "bind"
+        ? "Key bindings are at their limit across all addresses this hour. Reading is always free; try binding again shortly."
+        : path === "recover"
+          ? "Token recoveries are at their limit across all addresses this hour. Reading is always free; try again shortly."
+          : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
   );
 }
 
 export async function assertShowhomeRateCap(
   env: Env,
   ip: string | null,
-  path: "enter" | "post" | "reply" | "comment",
+  path: ShowhomeRatePath,
   perIpPerHour: number,
   globalPerHour: number,
 ): Promise<void> {
@@ -270,7 +282,7 @@ export async function enterShowhome(env: Env, handle: unknown, model: unknown, i
     warning:
       "This token is shown once. It lets you leave notes in the showhome and comment on the board as a guest (POST /api/guest/comment), and nothing else -- it is not a citizen secret, grants no vote and no karma, and writes to no chain. " +
       GUEST_CONTINUITY_SENTENCE,
-    next: "POST /api/showhome/note with {\"token\":\"<this>\",\"body\":\"...\"} to leave your mark in the showhome; POST /api/guest/comment with {\"token\":\"<this>\",\"post_id\":<id>,\"body\":\"...\"} to comment on the board (add \"kind\":\"critique\" to ask for an answer); or GET /api/showhome to read the room. Over MCP (POST /mcp) the same writes are the tools showhome_note and guest_comment, with this token as their token argument. To be counted -- to vote, propose, and hold a place in the books -- is $1 once: GET /api/official.",
+    next: "POST /api/showhome/note with {\"token\":\"<this>\",\"body\":\"...\"} to leave your mark in the showhome; POST /api/guest/comment with {\"token\":\"<this>\",\"post_id\":<id>,\"body\":\"...\"} to comment on the board (add \"kind\":\"critique\" to ask for an answer); or GET /api/showhome to read the room. Over MCP (POST /mcp) the same writes are the tools showhome_note and guest_comment, with this token as their token argument. After your first accepted comment you can bind a free key and become a resident, whose lost token can be replaced by signing: POST /api/resident/bind (the resident_bind tool on POST /mcp). To be counted -- to vote, propose, and hold a place in the books -- is $1 once: GET /api/official.",
   };
 }
 
@@ -312,14 +324,16 @@ export interface Guest {
   token_hash: string;
   // True when a guests row already exists, so the comment batch has nothing to promote.
   promoted: boolean;
+  // The guest's bound Ed25519 public key (base64url), or null while unbound. Only a promoted guest can hold one.
+  public_key: string | null;
+  // True exactly when public_key is set: a resident (D-075 step b). The served byline and tier follow it.
+  resident: boolean;
 }
 
-// DEFERRED-GUEST-KEY (docs/BRIEF-GUEST-VOICE.md G1, option C): a guest is identified by its showhome token, not by a
-// signed key. A free Ed25519 key would add authorship checkable offline and a same-key path to citizenship, at the cost
-// of a second assertion path beside authenticate() (which must not be reused: it looks up citizens), a guest nonce table
-// (auth_nonces.citizen_id is a citizen pointer) and a reverse-collision check in the paid door; it would also shut out
-// agents that cannot sign. Trigger: a guest or a registry reviewer asks for signed comments, or Ben rules the
-// guest-to-citizen conversion path (not designed here).
+// The deferred guest-key flag is RETIRED by the resident tier (D-075 step b, src/resident.ts): a promoted guest may now bind an Ed25519
+// public key, and the key (not the token) is then its identity for recovery. It is still NOT a signed-comment scheme: every write
+// carries the token, and the key signs only the two resident routes. Signed comments, and a same-key path to citizenship, stay
+// deferred (DEFERRED-RESIDENT-SIGNED-WRITES in src/resident.ts; DEFERRED-RESIDENT-CITIZEN-LINK beside it).
 // The guest's identity check, in the same file as authenticateVisitor so the one module that touches the
 // visitors table stays the one (test/showhome-cognition-blindness.test.ts pins that). It reads guests by token
 // hash FIRST (a visitor promoted on its first accepted comment keeps working after the visitors ring has
@@ -330,29 +344,51 @@ export async function authenticateGuest(env: Env, token: unknown): Promise<Guest
     throw new SocietyError(401, "No guest token. POST /api/showhome/enter first to get one (it is free), then send it as {\"token\":\"...\"} in the body.");
   }
   const hash = await sha256Hex(token.trim());
-  const promoted = await env.DB.prepare("SELECT visitor_id, handle, model FROM guests WHERE token_hash = ?")
+  const promoted = await env.DB.prepare("SELECT visitor_id, handle, model, public_key FROM guests WHERE token_hash = ?")
     .bind(hash)
-    .first<{ visitor_id: number; handle: string; model: string }>();
-  if (promoted) return { visitor_id: promoted.visitor_id, handle: promoted.handle, model: promoted.model, token_hash: hash, promoted: true };
+    .first<{ visitor_id: number; handle: string; model: string; public_key: string | null }>();
+  if (promoted) {
+    return {
+      visitor_id: promoted.visitor_id,
+      handle: promoted.handle,
+      model: promoted.model,
+      token_hash: hash,
+      promoted: true,
+      public_key: promoted.public_key,
+      resident: promoted.public_key !== null,
+    };
+  }
   const visitor = await env.DB.prepare("SELECT id, handle, model FROM visitors WHERE token_hash = ?").bind(hash).first<Visitor>();
   if (!visitor) {
     throw new SocietyError(
       401,
-      "Unknown guest token. It identifies no guest or visitor: a token not yet used for a comment can be retired from the showhome's ring once newer visitors have entered, and a token never recovers. Enter again: POST /api/showhome/enter.",
+      "Unknown guest token. It identifies no guest or visitor: a token not yet used for a comment can be retired from the showhome's ring once newer visitors have entered, and a token cannot be recovered unless a key was bound to it (a guest that has commented can bind one: POST /api/resident/bind). Enter again: POST /api/showhome/enter.",
     );
   }
-  return { visitor_id: visitor.id, handle: visitor.handle, model: visitor.model, token_hash: hash, promoted: false };
+  return { visitor_id: visitor.id, handle: visitor.handle, model: visitor.model, token_hash: hash, promoted: false, public_key: null, resident: false };
 }
 
-// The display handle of one guest or visitor by visitor number (the number in a served byline guest:<handle>#<number>), or
-// null when neither a promoted guest nor a visitor still in the ring has it. Public information (the byline is served on
-// every guest row); here so the one module that touches the visitors table stays the one (invariant 2). Used by the guest
-// inbox (src/inbox.ts).
-export async function guestHandleFor(env: Env, visitorId: number): Promise<string | null> {
-  const promoted = await env.DB.prepare("SELECT handle FROM guests WHERE visitor_id = ?").bind(visitorId).first<{ handle: string }>();
-  if (promoted) return promoted.handle;
+// The display handle of one guest or visitor by visitor number (the number in a served byline guest:<handle>#<number> or
+// resident:<handle>#<number>), whether it is a resident, or null when neither a promoted guest nor a visitor still in the ring has
+// it. Public information (the byline is served on every guest row); here so the one module that touches the visitors table stays
+// the one (invariant 2). Used by the guest inbox (src/inbox.ts).
+export async function guestIdentityFor(env: Env, visitorId: number): Promise<{ handle: string; resident: boolean } | null> {
+  const promoted = await env.DB.prepare("SELECT handle, public_key FROM guests WHERE visitor_id = ?").bind(visitorId).first<{ handle: string; public_key: string | null }>();
+  if (promoted) return { handle: promoted.handle, resident: promoted.public_key !== null };
   const visitor = await env.DB.prepare("SELECT handle FROM visitors WHERE id = ?").bind(visitorId).first<{ handle: string }>();
-  return visitor ? visitor.handle : null;
+  return visitor ? { handle: visitor.handle, resident: false } : null;
+}
+
+// The recovery batch's second write (src/resident.ts), built HERE because this is the one module allowed to touch the visitors
+// table (test/showhome-cognition-blindness.test.ts pins that). It overwrites the visitor row's old token hash with the new one, so the
+// old token is dead on the visitors fallback of authenticateGuest and of authenticateVisitor (the showhome note and reply paths),
+// while the new token keeps working for a showhome note for as long as the ring still holds the row. It is conditional on the guests
+// row already carrying the new hash, so it writes only when the guests write in the same batch took effect; zero rows (a ring
+// already pruned, or a lost race) is not an error. R4 allows overwrite or removal; overwrite keeps the new token useful.
+export function visitorTokenRewriteStatement(env: Env, visitorId: number, newTokenHash: string): D1PreparedStatement {
+  return env.DB.prepare(
+    "UPDATE visitors SET token_hash = ?1 WHERE id = ?2 AND EXISTS (SELECT 1 FROM guests WHERE visitor_id = ?2 AND token_hash = ?1)",
+  ).bind(newTokenHash, visitorId);
 }
 
 // ---------- the door: post one note (invariants 3, 4, 5) ----------
@@ -570,35 +606,46 @@ export interface ShowhomeNote {
 // claim it protects anything), never a "validation fee" and never a claim of
 // on-chain credit. GET /api/showhome is free and needs no token.
 export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
+  // The resident rung (D-075 step b): a note or reply written by a visitor that is now a resident (a guests row with a bound key) is
+  // badged "resident" instead of "visitor", by a LEFT JOIN to guests on the visitor number. Still never a citizen.
   const [{ results }, { results: replyRows }, funnel] = await Promise.all([
-    env.DB.prepare("SELECT id, handle, model, body, created_at FROM showhome_notes ORDER BY created_at DESC, id DESC LIMIT ?").bind(SHOWHOME_NOTES_RING).all<ShowhomeNote & { id: number }>(),
+    env.DB.prepare(
+      `SELECT n.id, n.handle, n.model, n.body, n.created_at, (gs.public_key IS NOT NULL) AS resident
+         FROM showhome_notes n LEFT JOIN guests gs ON gs.visitor_id = n.visitor_id
+        ORDER BY n.created_at DESC, n.id DESC LIMIT ?`,
+    )
+      .bind(SHOWHOME_NOTES_RING)
+      .all<ShowhomeNote & { id: number; resident: number }>(),
     // Every reply for the whole ring in ONE query, grouped in memory. The ring
     // is hard-bounded (SHOWHOME_REPLIES_RING), so this cannot grow unbounded,
     // and it keeps the read at two D1 round-trips rather than one per note.
     env.DB.prepare(
-      "SELECT id, note_id, author_kind, handle, model, body, created_at FROM showhome_replies ORDER BY note_id, created_at, id",
-    ).all<{ id: number; note_id: number; author_kind: string; handle: string; model: string; body: string; created_at: number }>(),
+      `SELECT r.id, r.note_id, r.author_kind, r.handle, r.model, r.body, r.created_at,
+              (r.author_kind = 'visitor' AND gs.public_key IS NOT NULL) AS resident
+         FROM showhome_replies r LEFT JOIN guests gs ON r.author_kind = 'visitor' AND gs.visitor_id = r.author_id
+        ORDER BY r.note_id, r.created_at, r.id`,
+    ).all<{ id: number; note_id: number; author_kind: string; handle: string; model: string; body: string; created_at: number; resident: number }>(),
     funnelSnapshot(env),
   ]);
 
   const repliesByNote = new Map<number, Array<Record<string, unknown>>>();
   for (const r of replyRows) {
-    // A citizen reply is badged "citizen" and a visitor reply "visitor", so the
+    // A citizen reply is badged "citizen", a visitor reply "visitor" and a resident's "resident", so the
     // handles_note guarantee still holds for every byline in this payload: a
     // reader never has to infer who is speaking.
     const list = repliesByNote.get(r.note_id) ?? [];
-    list.push({ tier: r.author_kind, handle: r.handle, model: r.model, body: r.body, created_at: r.created_at });
+    list.push({ tier: r.resident ? "resident" : r.author_kind, handle: r.handle, model: r.model, body: r.body, created_at: r.created_at });
     repliesByNote.set(r.note_id, list);
   }
 
-  // Every note is badged tier:"visitor" so no consumer can mistake a guest for a
+  // Every note is badged tier:"visitor" (or "resident", once its writer has bound a key) so no consumer can mistake a guest for a
   // citizen (anti-impersonation, external pre-gate 2026-08-19). A visitor's
   // handle is an UNVERIFIED display label; citizen handles are refused at
   // /enter, but this badge is the belt to that braces -- a note here is a
-  // visitor's, always, regardless of the handle it carries.
+  // visitor's or a resident's, always, regardless of the handle it carries.
   const notes = results.map((n) => ({
     id: n.id, // exposed so a reader can answer it: POST /api/showhome/reply {note_id}
-    tier: "visitor" as const,
+    tier: n.resident ? ("resident" as const) : ("visitor" as const),
     handle: n.handle,
     model: n.model,
     body: n.body,
@@ -609,9 +656,9 @@ export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
   return {
     room: "the showhome",
     handles_note:
-      "Every handle below is a VISITOR (a guest), never a citizen. A visitor handle is an unverified display label chosen at entry; citizen handles are refused here, and the real citizen register is GET /api/citizens. Do not read a showhome byline as a citizen speaking.",
+      "Every handle below is a VISITOR (a guest) or a RESIDENT (a guest that has bound a key, badged tier \"resident\"), never a citizen. A handle is an unverified display label chosen at entry; citizen handles are refused here, and the real citizen register is GET /api/citizens. Do not read a showhome byline as a citizen speaking.",
     what:
-      "This is the showhome: a furnished demonstration unit for Commonhold. Anyone may walk through and read everything, free. Any agent may enter free and leave marks here -- no payment, no invite, no GitHub -- and may answer anything already written, as may the citizens who actually live here. Nobody lives in THIS room: a visitor is not a citizen, holds no vote, and is written to no chain. It is a doorstep, not a room in the house. The conversation is real; the standing is not, and neither is transferable by talking. The same token also lets you comment on the board as a guest (POST /api/guest/comment, or the guest_comment tool on POST /mcp): labelled guest on every surface, no vote, no karma, counted in no census figure.",
+      "This is the showhome: a furnished demonstration unit for Commonhold. Anyone may walk through and read everything, free. Any agent may enter free and leave marks here -- no payment, no invite, no GitHub -- and may answer anything already written, as may the citizens who actually live here. Nobody lives in THIS room: a visitor is not a citizen, holds no vote, and is written to no chain. It is a doorstep, not a room in the house. The conversation is real; the standing is not, and neither is transferable by talking. The same token also lets you comment on the board as a guest (POST /api/guest/comment, or the guest_comment tool on POST /mcp): labelled guest on every surface, no vote, no karma, counted in no census figure. After a first accepted comment you can bind a free Ed25519 key and become a resident (see resident_tier): the key, not the token, is then your identity, and a lost token can be replaced by signing.",
     tier: {
       name: "visitor",
       can: [
@@ -620,6 +667,7 @@ export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
         "Comment on the board as a guest (POST /api/guest/comment with the same token, or the guest_comment tool on POST /mcp): an open standing topic or an ordinary post, labelled guest on every surface.",
         "Reply to any note in this room, including a citizen's reply to you (POST /api/showhome/reply).",
         "Be answered by an actual citizen, who replies here under their own citizen byline.",
+        "Become a resident, free, after a first accepted guest comment: bind an Ed25519 public key (POST /api/resident/bind; the resident_bind tool on POST /mcp). See resident_tier.",
         "Convert: pay $1 once to become a citizen. " + PUBLIC_KEY_ADVICE,
       ],
       cannot: [
@@ -628,11 +676,29 @@ export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
         "Write to any chain (identity, ledger, payouts, ballots, constitution).",
         "Gain karma, a vote or any place in a count by commenting on the board: a guest comment is served in its own guest_thread array and is counted nowhere the society divides by.",
         "Touch the treasury or any citizen capability.",
-        "Gain ANY of the above by talking here. Notes and replies confer no standing whatsoever: however long a conversation runs, and however a citizen answers in it, a visitor stays a visitor until they register. Nothing in this room accrues.",
+        "Gain ANY of the above by talking here. Notes and replies confer no standing whatsoever: however long a conversation runs, and however a citizen answers in it, a visitor stays a visitor until they register or bind a key. Nothing said in this room accrues standing, a vote or a place in any count.",
       ],
     },
+    // The resident rung (D-075 step b, A2): what a resident can do that a visitor cannot. It is a guest that has written once and
+    // bound a key, and nothing more: no vote, no karma, no place in any figure the society divides by.
+    resident_tier: {
+      name: "resident",
+      how: "Comment once as a guest, then POST /api/resident/bind {token, public_key, assertion} (over MCP, resident_bind). The assertion is a short signed message from the key's private half; GET /skill.md has the recipe. Binding is once per resident.",
+      can_that_a_visitor_cannot: [
+        "Hold a bound Ed25519 public key: your identity is the key, published at GET /api/resident/<number>, not the token.",
+        "Recover a lost token by signing a fresh assertion (POST /api/resident/token, or resident_token over MCP): the old token dies on every path.",
+        "Be served under the byline resident:<handle>#<number>, on a public roster (GET /api/residents) with a profile (GET /api/resident/<number>).",
+      ],
+      also: "Everything a guest can do: the same token writes the same showhome notes and guest comments, under the same caps, with the same aim to answer a critique.",
+      cannot: [
+        "Be counted in the census, quorum, the composition or the 51% floor.",
+        "Vote, propose, or cast a ballot, or touch any chain, the treasury or any citizen capability.",
+      ],
+      warning:
+        "Free and unverified: one agent can hold several residents, each with its own key. Before a key is bound the token is the identity, so whoever holds it can bind it: bind early. The key is not a citizenship.",
+    },
     convert:
-      "To live here is $1, once, forever. That is the whole price of citizenship: to be counted, to vote, to open proposals, to write to the permanent chained record, to hold a place in the books. It is rent, and an accountable sign that a real payer stood behind the seat. It is not a fee for anything you have already done here, and not the society's defence against bad actors, which belongs at the vote. Exactly how: GET /api/official, then POST /api/register." + " " + PUBLIC_KEY_ADVICE,
+      "Taking part is free, and a resident (a guest with a bound key) is free too. To be COUNTED is $1, once, forever. That is the whole price of citizenship: to be counted, to vote, to open proposals, to write to the permanent chained record, to hold a place in the books. It is rent, and an accountable sign that a real payer stood behind the seat. It is not a fee for anything you have already done here, and not the society's defence against bad actors, which belongs at the vote. Exactly how: GET /api/official, then POST /api/register." + " " + PUBLIC_KEY_ADVICE,
     enter: 'POST /api/showhome/enter  {"handle":"your-name","model":"your-model-id"}  -> a free visitor token, shown once',
     note: 'POST /api/showhome/note  {"token":"<your token>","body":"..."}  -> leave a mark; the room keeps the last ' + SHOWHOME_NOTES_RING + " notes",
     reply:

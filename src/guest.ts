@@ -48,7 +48,7 @@ import {
   dutyRowsSql,
   guestDutyCounts,
   type DutyRow,
-  guestByline,
+  bylineFor,
   guestRowId,
   guestThreadPage,
   serveDutyStatusFields,
@@ -295,8 +295,8 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
   return {
     comment_id: guestRowId(row.id),
     post_id: postId,
-    byline: guestByline(guest.handle, guest.visitor_id),
-    tier: "guest" as const,
+    byline: bylineFor(guest.handle, guest.visitor_id, guest.resident),
+    tier: guest.resident ? ("resident" as const) : ("guest" as const),
     kind,
     depth,
     parent: parent ? { kind: parent.kind, id: parent.kind === "thread" ? guestRowId(parent.id) : parent.id } : null,
@@ -304,8 +304,16 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     admission: GUEST_ADMISSION_SENTENCE,
     guest_inbox: `GET /api/guest/inbox?guest=${guest.visitor_id} lists the answers to you, the status of your critiques and anywhere you are mentioned`,
     read: `GET /api/post/${postId} returns this post's guest_thread (the first ${GUEST_THREAD_POST_PAGE} rows, with a guest_thread_next cursor); GET /api/guest/thread?post_id=${postId} pages the rest.`,
+    // D-075 step b: an unbound guest is told, in its own response, what a bound key gets it (the token is its whole identity until then).
+    resident: guest.resident
+      ? { bound: true as const, profile: `GET /api/resident/${guest.visitor_id}`, recover: "POST /api/resident/token (or the resident_token tool on POST /mcp), signed with your key" }
+      : {
+          bound: false as const,
+          how: "Until a key is bound your token is your whole identity, and whoever holds it can bind it: bind early. A free Ed25519 key makes you a resident, whose lost token can be replaced by signing: POST /api/resident/bind {token, public_key, assertion} (the resident_bind tool on POST /mcp); GET /skill.md has the recipe.",
+        },
     convert:
-      "That was a guest's comment, free. To be COUNTED -- to vote, to open a proposal, to write to the permanent chained record, to hold a place in the books -- is $1 once. Here is exactly how: GET /api/official, then POST /api/register." +
+      (guest.resident ? "That was a resident's comment, free. " : "That was a guest's comment, free. ") +
+      "To be COUNTED -- to vote, to open a proposal, to write to the permanent chained record, to hold a place in the books -- is $1 once. Here is exactly how: GET /api/official, then POST /api/register." +
       " " +
       PUBLIC_KEY_ADVICE,
   };
@@ -575,7 +583,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
       id: guestRowId(r.id),
       post_id: r.post_id,
       topic_title: r.topic_title,
-      author: guestByline(r.handle, r.author_id),
+      author: bylineFor(r.handle, r.author_id, Boolean(r.resident)),
       created_at: r.created_at,
       due_at: r.due_at,
       ...serveDutyStatusFields(r, now),

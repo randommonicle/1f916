@@ -229,7 +229,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/discovery.ts", sha: "5cc60b92e27deda63c634184b6e058f140fdb0d2136e671db014ce82cf9a4551", note: "/mcp/read read-only no-auth, writes need a credential" },
   { file: "src/discovery.ts", sha: "212ca495cf6d1aaf3da131637aa1b544123035c6a121eefabaefa6b9d4c1889a", note: "authenticate every citizen write with your citizen credential (both forms); not every write takes one: guest comment and showhome note take a visitor token, a reply takes either, enter and sweep none, register and patron x402, a listing x402 plus the funder's citizen credential, the maintainer routes the operator's maintainer secret (gate M-1, 2026-10-02; CODEX gate-fixes r1, 2026-10-03)" },
   // CODEX gate-fixes r1 (2026-10-03): the two other credentials sentences now name the maintainer routes, so their literals carry "secret" for the first time: the operator's maintainer secret, never a citizen-auth instruction.
-  { file: "src/guest-core.ts", sha: "be1c32fa3a23a5f2e4aff23960b6c79946a4959847c7f18423d80a050874dc4b", note: "guest writes exception: visitor token, none, x402, listing x402 plus funder credential, maintainer routes take the operator's maintainer secret" },
+  { file: "src/guest-core.ts", sha: "33ad5be0a50abd4315555562e5d9718493a9f808b61bda6c084a09a1d69d3fcc", note: "guest writes exception (resident tier, D-075 step b: adds the two resident routes taking a signed assertion; the word secret is unchanged and still only the operator's maintainer secret): visitor token, none, x402, listing x402 plus funder credential, maintainer routes take the operator's maintainer secret" },
   { file: "src/inbox.ts", sha: "3dc24db5a89ca87d4ef3447db88ef0ae57c07b32a18de4bda4afb3c4a49b02eb", note: "skill.md Credentials: not every write takes a citizen credential; maintainer routes take the maintainer secret, not a citizen credential; every other write: both citizen forms" },
   { file: "src/discovery.ts", sha: "07584c9afa4ef1e1978a6f40f05f98c5955dab0ced278454e0b14505c651f21b", note: "an issued secret from POST" },
   { file: "src/discovery.ts", sha: "8939a5a0e843ea4ecfd4c162e64fc6b252267bdf86d5590976c5878d4d7812cd", note: "llms.txt for write routes, credential (secret or assertion)" },
@@ -338,6 +338,7 @@ test("secret-literal guard: every 'secret' literal in src/ is a reviewed wire to
   // The MCP guest door (D-075 order step a) re-reviewed seven EXISTING prose literals (the /mcp and /mcp/read route entries, the two llms.txt
   // chunks, the OpenAPI description, the two /mcp/read strings): each said "writes need a citizen credential over /mcp" and now also names the
   // free guest tools. Each entry's sha was replaced, so the baseline did not move: 79 / 24 / 55. The new tool descriptions avoid the word.
+  // Resident tier (D-075 step b): the guest-core "writes" exception gained the two resident routes, so its entry's sha was replaced; every other new literal (src/resident.ts, the two tool descriptions, the route rows, the skill text) avoids the word. The baseline did not move: 79 / 24 / 55.
   assert.equal(total, 79, "secret-literal total drifted from the committed baseline (79)");
   assert.equal(wire, 24, "exact wire-token count drifted from the committed baseline (24)");
   assert.equal(prose, 55, "prose-literal count drifted from the committed baseline (55)");
