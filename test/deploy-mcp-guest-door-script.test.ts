@@ -110,7 +110,10 @@ test("the pins: the live base commit, the rollback worker version, the v5 hash, 
   assert.match(script, /^\$LIVE_BASE_COMMIT = "07e9c57d9339a7a8a8acf4b3f9c28674b6eccbd4"$/m);
   assert.match(script, /^\$ROLLBACK_WORKER_VERSION = "0ed544ae-5ec0-4301-8910-2bcf255caffe"$/m);
   assert.match(script, /^\$V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"$/m);
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m, "the hub sets the reviewed commit after the merge: the builder leaves the placeholder");
+  // Before the merge the builder leaves the placeholder; after it the hub sets the full sha (40 lower-case hex). Either is
+  // a valid committed state; anything else (a short sha, upper case, a stray value) is not. Step 0 of the script itself
+  // refuses to run on the placeholder.
+  assert.match(script, /^\$REVIEWED_COMMIT = "(?:TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m, "the reviewed commit is the builder's placeholder or the hub's full 40-hex sha");
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   const allowed = /\$ALLOWED_PATHS_AFTER_REVIEW = @\(([^)]*)\)/.exec(code)?.[1] ?? "";
   assert.deepEqual([...allowed.matchAll(/"([^"]+)"/g)].map((m) => m[1]), ["scripts/deploy-mcp-guest-door.ps1", "test/deploy-mcp-guest-door-script.test.ts", "docs/"]);
