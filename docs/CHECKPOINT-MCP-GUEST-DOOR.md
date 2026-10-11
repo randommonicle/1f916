@@ -5,13 +5,18 @@ Nothing pushed, deployed, migrated or written to a network; no `*.local.*` file 
 
 Class: no money path, no model call, no mint, ONE additive migration (0019). Gate: Sonnet (DECISIONS D-018 note 28 Sept). If an item needs an edit to `src/doc.ts`, a second migration or a money path, it stops and is reported.
 
-Base: measured in the worktree before any edit (figures filled in below).
+Base: 2045 tests (2044 pass, 0 fail, 1 skipped, 68 s) and `tsc` silent, measured in the worktree before any edit. Final: 2093 tests, 2092 pass, 0 fail, 1 skipped.
 
 ## Commits
 
 | # | sha | what |
 |---|---|---|
-| 1 | this commit | this log |
+| 1 | `c0d303c0` | this log |
+| 2 | `f22b37fa` | M1-M4 (and the M5 sentence): the three guest tools on the full `/mcp` door, `test/mcp-guest-door-d1.test.ts` |
+| 3 | `c5df07fb` | M5-M6 and S1-S4: the served-text sweep, `/skill.md` 1.2.0, the four reviewer amendments |
+| 4 | `8ea38946` | C1-C2: migration 0019, `src/doors.ts`, the hooks |
+| 5 | `82db0061` | C3: `GET /api/doors` |
+| 6 | this commit | C4: the deploy script and its test; the close |
 
 ## Notes (one per commit, newest last)
 
@@ -120,3 +125,46 @@ Red-proofs: (1) the migration loses its primary key: C1 red. (2) the cap predica
 Tests (in `test/door-counts-d1.test.ts`): shape, order, the 30-day boundary (day 29 in, day 30 out), `at_cap` at 2000 and not at 1999, the note verbatim, an empty table is an empty list, POST is a 404, the read counts nothing, an end-to-end cap (a door driven to the cap by real GETs reads `at_cap: true`), and the route is in `ROUTES`, `/llms.txt`, `/openapi.json` and `/api/surface` with the `grepFor` really in `index.ts`.
 
 Red-proofs: (1) ascending order: red. (2) a 31-day window: red (day 30 appears). (3) `at_cap` uses `>`: red, twice. (4) one word of the note changed: red, twice. (5) the route not dispatched: red, four tests including the existing drift guard. (6) the `ROUTES` entry removed: the listing test red.
+
+### 6. C4: the deploy script and its test; the close
+
+- `scripts/deploy-mcp-guest-door.ps1` (new, never run, not even `-DryRun`): the migration-first shape of `scripts/deploy-guest-voice.ps1` with the stamp, the reviewed-source check, the test-summary parser and the propagation poll of `scripts/deploy-code-identity.ps1`. `$LIVE_BASE_COMMIT = 07e9c57d9339a7a8a8acf4b3f9c28674b6eccbd4`, `$ROLLBACK_WORKER_VERSION = 0ed544ae-5ec0-4301-8910-2bcf255caffe` (named in the rollback line), `$REVIEWED_COMMIT = TO-BE-SET-BY-HUB`, with the allowlist this script, its test and `docs/`. Steps: fetch and the one-commit pin; HEAD contains the live base; `src/doc.ts` unmoved (non-minting); exactly one added migration since the live base and it is `0019_door_counts.sql`; reviewed source; the gates; live before (v5, the new route `GET /api/doors` answers 404, the guest and showhome tables are on prod, `door_counts` state); the `-DryRun` exit; migration 0019 to the REMOTE D1 first; the catalogue read (THREE columns `day`, `door`, `n` in order, the primary key `(day, door)` in key order, no foreign key, one automatic index); `npx wrangler deploy --var "CODE_COMMIT:<sha>"` and the single `Current Version ID`; the poll until `/api/attest` serves that commit and id AND `/api/doors` answers 200; attest (v5, every chain); the ride.
+- `-DryRun` reads the remote D1 through wrangler (reads only) like `deploy-guest-voice.ps1`; the header says so and says it was never run. Nothing in the script executes any wrangler subcommand but `d1 execute` and `deploy` (pinned by the test; the rollback is text for Ben).
+- The ride (Ben's run): the 13 public reads, `/skill.md` 1.2.0, `POST /mcp` `initialize` (carries the guest sentence), `tools/list` (lists the three guest tools; `/mcp/read` lists none), and ONE real free write, `POST /mcp tools/call guest_enter` (handle `deploy-ride`, token discarded unread), then reads `/api/doors` back (with retries: the count is on `ctx.waitUntil`) for `skill_md`, `heartbeat_md`, `mcp_initialize`, `showhome_enter`. A missing count is a STOP that says it is not by itself a rollback signal.
+- A bug the test caught before it could cost a deploy: the first draft checked `/mcp/read`'s tools/list for the bare words `guest_enter` etc., but M6 put those words into the `guest_thread`, `guest_inbox` and `guest_due` descriptions, which `/mcp/read` serves. A bare-word check would have STOPPED a good deploy. The script (and its test) now check the tool NAMES (`"name":"guest_enter"`).
+- Another, in the first draft: PowerShell's `-and` and `-or` have EQUAL precedence, so a condition mixing them reads differently from how it looks. The test now fails any group that mixes them (innermost parentheses first, with a positive control).
+
+Tests: `test/deploy-mcp-guest-door-script.test.ts` (17): parses under PowerShell's own parser, ASCII, no traps, parameters, the pins, the step order, wrangler used for three things only, the one-commit pin, non-minting and one migration, the prerequisites and `-MigrationAlreadyApplied` both ways, the 404 probe and the poll, the column lists equal to the migration's and `schema.sql`'s, the definitions region runs nothing (throwing stubs), `Assert-DoorTable` RUN FOR REAL against a stand-in for the remote read (the right three pass; a fourth column, a missing column, a wrong order, a wrong key, a reversed key, a foreign key and a missing key index each STOP), the reviewed-source check RUN for the placeholder and for a non-hex value, `Get-DisallowedPaths` and `Get-TestSummary` run for real, and the ride's targets served by the new code in a local D1.
+
+Red-proofs: (1) a fourth column in the script's list: the columns test and the real `Assert-DoorTable` run red. (2) the catalogue read removed: the order test red. (3) the stamp removed from the deploy line: the wrangler test red. (4) `$REVIEWED_COMMIT` set by the builder: the pins test red. (5) `Assert-DoorTable` ignores the column count: the real run red. (6) an executed `npx wrangler rollback`: the wrangler test red. (7) a non-ASCII character: the parse/ASCII test red. (8) `-and` beside `-or`: the traps test red (after the check was rewritten to look inside parentheses; its first version looked only outside them and missed this mutant). (9) the `src/doc.ts` no-mint check dropped: the non-minting test red.
+
+## Close: the checklist walk
+
+| commission item | state |
+|---|---|
+| M1 three tools, same functions, five REST fields only, annotations (amended: enter and note destructive), titles, descriptions | done, commit 2 and 3 |
+| M2 address read like REST; one cap across both doors | done; mixed-door cap test; mutant (null address) red |
+| M3 token from `args.token` only; dispatched before `callTool` computes `secret`; bearer plus token speaks as guest; bearer without token refused | done ("ignored" wording per amendment 4) |
+| M4 `/mcp/read` read-only, stays twelve, a test pins it | done |
+| M5 initialize sentence | done (commit 2), pinned verbatim (commit 3) |
+| M6 served-text sweep, `src/doc.ts` unedited, every changed line listed | done, commit 3 note; `heartbeatDoorNote` is the one GET / door note that gained a pointer |
+| C1 migration 0019 and `schema.sql` | done |
+| C2 `src/doors.ts`, hooks on REST and MCP, never throws, `ctx.waitUntil`, count after success | done |
+| C3 `GET /api/doors`, listed everywhere | done |
+| C4 deploy script and test | done, never run |
+| S1-S4 `/skill.md` | done, commit 3 (with M6: the skill is one of the M6 surfaces and its pins moved together) |
+| Tests, red-proofed | each note lists its mutants |
+| Full `npm test` and `npm run typecheck` green, tree clean | 2093 tests, 2092 pass, 0 fail, 1 skipped (the base had 2045, 2044 pass, 1 skipped); `tsc` silent; `git status` clean |
+
+## Differences from the commission, and points for the hub
+
+- Order: S1-S4 landed in commit 3 with M6 (the skill is an M6 surface and its sha pin, doc and version moved with the same text), not commit 7; M5 landed in commit 2 beside the tools. Commit 6 is the deploy script and this close.
+- `handleMcp` extracts the `Authorization` header only on the non-guest branch (stricter than amendment 4 requires).
+- `/api/doors` serves `window_days: 30` beside `rows` and `note`.
+- The deploy script carries `--var CODE_COMMIT` (the guest-voice pattern predates served code identity) and a real guest_enter ride; its `-DryRun` reads the remote D1.
+- `docs/HEARTBEAT-SKILL-TEXT.md` (the hub-authored source that `test/inbox-d1.test.ts` compares byte for byte) was edited for the new skill block, heartbeat section 6 and the door note, with two new placeholders; the served-path extractor in that test now also strips a closing parenthesis (the commission's own opening ends "(GET .../api/guest/due)").
+- `DEFERRED-GUEST-MCP-WRITE` is retired; `test/guest-deferred-flags.test.ts` pins its absence.
+- Seven existing prose literals changed, so seven `PROSE_ALLOW` shas in `test/secret-literal-guard.test.ts` were replaced; the baseline stayed 79 / 24 / 55.
+- `showhomeDoorNote` (in `src/doc.ts`, outside the template) lists the HTTP routes and says nothing about MCP; it is not false, so by amendment 2 it is untouched. If the hub wants an MCP line on `GET /` it can ride a later `doc.ts` edit, or stay in `heartbeatDoorNote` as now.
+- A mistake of mine, disclosed: early on I ran an interpreter heredoc (`python3 - <<'EOF'` with an empty body) by reflex, against the rule. It did nothing (Python is not installed; the call hung and I stopped the task). No file was written by it. All later edits used the file tools, `sed -i`, `git` and `node --test`.
+- One scratch aid outside the repo: `scratch/mcp-guest-door-builder/lit-sha.ts`, a copy of the secret-literal guard's own lexer, used to compute the replacement shas. Nothing under `scratch/` is in the branch.
