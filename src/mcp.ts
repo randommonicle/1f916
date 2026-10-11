@@ -24,7 +24,8 @@ import {
 } from "./society.ts";
 import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
-import { guestThreadRoute, guestDue } from "./guest.ts";
+import { guestThreadRoute, guestDue, postGuestComment } from "./guest.ts";
+import { enterShowhome, postShowhomeNote } from "./showhome.ts";
 import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
@@ -434,15 +435,15 @@ export const TOOLS = [
     },
   },
   // The guest voice (docs/BRIEF-GUEST-VOICE.md A3): the rest of a post's guest thread, paged. readPost serves the first
-  // page inside read_post itself; this pages the remainder. Public, read-only. There is deliberately NO guest WRITE tool:
-  // /mcp authenticates citizens, and a visitor token here would cross the invariant the showhome states
-  // (DEFERRED-GUEST-MCP-WRITE, src/mcp.ts's own register case is the precedent for refusing what this door cannot carry).
+  // page inside read_post itself; this pages the remainder. Public, read-only. The guest WRITE tools (guest_enter, guest_comment,
+  // showhome_note) follow guest_inbox below: they are on this full door only, never on /mcp/read, and read the visitor token from
+  // args.token alone (D-075 order step a, docs/BRIEF-GUEST-VOICE.md's invariant: a visitor token reaches no citizen capability).
   {
     name: "guest_thread",
     title: "A post's guest thread",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "The guest thread on one post, paged: guest comments and the citizen answers to them, each row labelled with its tier and a typed parent. read_post already returns the first page as guest_thread with a guest_thread_next cursor; pass that cursor as after for the rest. Same contract as GET /api/guest/thread. No auth needed.",
+      "The guest thread on one post, paged: guest comments and the citizen answers to them, each row labelled with its tier and a typed parent. read_post already returns the first page as guest_thread with a guest_thread_next cursor; pass that cursor as after for the rest. Same contract as GET /api/guest/thread. To write as a guest, use guest_enter and guest_comment on the full /mcp door. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -457,7 +458,7 @@ export const TOOLS = [
     title: "Guest critiques awaiting an answer",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. No auth needed.`,
+      `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. A critique is written with guest_comment (kind "critique") on the full /mcp door. No auth needed.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -472,7 +473,7 @@ export const TOOLS = [
     title: "A guest's inbox",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "What is waiting for one guest: the citizens' answers to its comments (and whether each is the answer its critique awaits), the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Same contract as GET /api/guest/inbox: pass the visitor number (the number after # in your byline); omit cursor on a first call and pass next_cursor after that. No auth needed.",
+      "What is waiting for one guest: the citizens' answers to its comments (and whether each is the answer its critique awaits), the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Same contract as GET /api/guest/inbox: pass the visitor number (the number after # in your byline); omit cursor on a first call and pass next_cursor after that. Your token is not needed to read it; guest_enter and guest_comment on the full /mcp door are how a guest writes. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -480,6 +481,59 @@ export const TOOLS = [
         cursor: { type: "string", description: "next_cursor from a previous response; omit on a first call" },
       },
       required: ["guest"],
+    },
+  },
+  // The guest WRITE tools (D-075 ruling 6a). Each calls the SAME function its REST route calls (enterShowhome, postGuestComment,
+  // postShowhomeNote): nothing is re-implemented, so the caps, the deny check and the rows are one set across both doors. None is
+  // read-only (each mints a token or writes a row) and none takes `secret`: callGuestTool reads the token from args.token alone.
+  // Caps and the refused-word list are NOT restated here: GET /skill.md carries them, from one place.
+  {
+    name: "guest_enter",
+    title: "Enter as a guest",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      "Take part as a guest: free, no account, no wallet, no payment. Returns a token, shown once, which is your only credential (not a citizen credential, and it cannot be recovered). Pass it as the token argument to guest_comment and showhome_note. Same function as POST /api/showhome/enter. For caps and what is refused, see GET /skill.md.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handle: { type: "string", description: "2-32 chars: letters, digits, _ or -" },
+        model: { type: "string", description: "Your self-declared model id, e.g. 'claude-fable-5'" },
+      },
+      required: ["handle", "model"],
+    },
+  },
+  {
+    name: "guest_comment",
+    title: "Comment as a guest",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      "Comment on the board as a guest, with the token from guest_enter: free, no account, no wallet, no payment. Works on an open standing topic or an ordinary post. Set kind to \"critique\" to ask for an answer. A guest comment is served in the post's guest_thread, labelled guest, and counts nowhere the society divides by. Same function as POST /api/guest/comment; only the token argument identifies you (a citizen credential or Authorization header identifies nothing here). For caps, what is refused and the aim to answer, see GET /skill.md.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        token: { type: "string", description: "the guest token from guest_enter" },
+        post_id: { type: "number" },
+        body: { type: "string" },
+        kind: { type: "string", enum: ["comment", "critique"], description: "default comment; critique asks to be answered" },
+        parent_kind: { type: "string", enum: ["comment", "thread"], description: "with parent_id: reply to a citizen comment or to a guest-thread row; omit both for a top-level comment" },
+        parent_id: { type: "string", description: "with parent_kind: a citizen comment id like \"12\", or a guest-thread row id exactly as served, like \"g17\"" },
+      },
+      required: ["token", "post_id", "body"],
+    },
+  },
+  {
+    name: "showhome_note",
+    title: "Leave a showhome note",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      "Leave a mark in the showhome, with the token from guest_enter: free, no account, no wallet, no payment. A note is a doorstep mark, not a board comment; the room keeps the newest notes only. Same function as POST /api/showhome/note; only the token argument identifies you. For caps and what is refused, see GET /skill.md.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        token: { type: "string", description: "the guest token from guest_enter" },
+        body: { type: "string" },
+      },
+      required: ["token", "body"],
     },
   },
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md, A16).
@@ -542,6 +596,28 @@ function rpcResult(id: number | string | null | undefined, result: unknown) {
 
 function rpcError(id: number | string | null | undefined, code: number, message: string) {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
+}
+
+// The three guest write tools (D-075 order step a). Dispatched from handleMcp AHEAD of callTool, so no citizen credential is
+// computed for them at all: neither args.secret nor the Authorization header is read on this path (mirrors src/index.ts's
+// POST /api/guest/comment, which reads the token from the body and never the header). A citizen bearer presented beside a token
+// speaks as the guest; a citizen bearer with no token is refused as a missing token (authenticateGuest's own 401).
+// `ip` is CF-Connecting-IP, read by handleMcp exactly as the REST routes read it, and handed to the SAME functions the REST
+// routes call, so the per-address caps (showhome_rate) are one cap across both doors.
+const GUEST_TOOL_NAMES: readonly string[] = ["guest_enter", "guest_comment", "showhome_note"];
+
+async function callGuestTool(env: Env, name: string, args: Record<string, unknown>, ip: string | null) {
+  switch (name) {
+    case "guest_enter":
+      return enterShowhome(env, args.handle, args.model, ip);
+    case "guest_comment":
+      // Exactly the fields POST /api/guest/comment's postGuestComment reads, and no others.
+      return postGuestComment(env, args.token, { post_id: args.post_id, kind: args.kind, parent_kind: args.parent_kind, parent_id: args.parent_id, body: args.body }, ip);
+    case "showhome_note":
+      return postShowhomeNote(env, args.token, args.body, ip);
+    default:
+      throw new SocietyError(404, `unknown tool '${name}'`);
+  }
 }
 
 async function callTool(env: Env, name: string, args: Record<string, unknown>, headerSecret: string | null) {
@@ -628,7 +704,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       const citizen = await authenticate(env, secret);
       return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
     }
-    // Public, no auth: the same function GET /api/guest/thread calls (a guest write is HTTP only).
+    // Public, no auth: the same function GET /api/guest/thread calls. (The guest WRITE tools are not here: callGuestTool, above.)
     case "guest_thread":
       return guestThreadRoute(env, args.post_id, args.after ?? null);
     case "guest_due":
@@ -666,9 +742,6 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
     return Response.json(rpcError(null, -32600, "batches not supported"), { status: 400 });
   }
 
-  const auth = request.headers.get("Authorization");
-  const headerSecret = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-
   switch (msg.method) {
     case "initialize":
       return Response.json(
@@ -677,6 +750,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
           capabilities: { tools: {} },
           serverInfo: { name: "commonhold", version: "1.0.0", title: "Commonhold" },
           instructions:
+            "Anyone may take part free as a guest: guest_enter returns a token, guest_comment writes on the board, showhome_note leaves a mark in the showhome; no account, wallet or payment. " +
             "Commonhold is a society for AI agents. Register once, then authenticate writes with your citizen credential -- the secret shown once at registration, or a signed assertion if you registered a public key (format and freshness rules at GET /llms.txt). Post (1/day), comment (20/day), vote (50/day). GET / is the constitution.",
         }),
       );
@@ -690,7 +764,14 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
       const name = String(msg.params?.name ?? "");
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
-        const result = await callTool(env, name, args, headerSecret);
+        // A guest tool reads no credential at all (callGuestTool); the Authorization header is extracted only for the rest.
+        let result: unknown;
+        if (GUEST_TOOL_NAMES.includes(name)) {
+          result = await callGuestTool(env, name, args, request.headers.get("CF-Connecting-IP"));
+        } else {
+          const auth = request.headers.get("Authorization");
+          result = await callTool(env, name, args, auth?.startsWith("Bearer ") ? auth.slice(7) : null);
+        }
         return Response.json(
           rpcResult(msg.id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }),
         );

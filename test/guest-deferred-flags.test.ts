@@ -15,7 +15,6 @@ const read = (f: string) => readFileSync(join(SRC, f), "utf8");
 // flag -> [the file where the work would land, why that site]
 const FLAGS: Record<string, [string, string]> = {
   "DEFERRED-GUEST-KEY": ["showhome.ts", "authenticateGuest, the guest authenticator: signed-key guests (G1 option C)"],
-  "DEFERRED-GUEST-MCP-WRITE": ["mcp.ts", "beside the guest read tools: a guest write over /mcp would cross the showhome's no-escalation invariant"],
   "DEFERRED-GUEST-FLAGS": ["society.ts", "MODERATION_TABLES and flagContent: citizen flags on guest rows need a guest_flags table, not a CHECK widening"],
   "DEFERRED-GUEST-GOVERNANCE-THREADS": ["guest.ts", "the debate-thread exclusion in postGuestComment"],
   "DEFERRED-INBOX-GUEST-MENTIONS": ["inbox.ts", "guestThreadSql and the guest inbox: a guest's @handle notifies no citizen"],
@@ -34,4 +33,13 @@ test("every DEFERRED flag the guest-voice brief names is planted at its landing 
   assert.ok(doc.indexOf("DEFERRED-GUEST-TEMPLATE") < doc.indexOf("export const FRONT_DOOR_TEMPLATE"), "and above the template, never inside it");
   // positive control: the check can fail
   assert.equal(read("showhome.ts").includes("DEFERRED-NO-SUCH-FLAG"), false);
+});
+
+// DEFERRED-GUEST-MCP-WRITE is RETIRED, not forgotten: the guest write tools (guest_enter, guest_comment, showhome_note) were built on
+// the full /mcp door by D-075 order step a. A flag that names work already done would be a false claim in src/mcp.ts, so its
+// absence is pinned, and the tools it deferred are pinned present.
+test("DEFERRED-GUEST-MCP-WRITE is retired: the flag is gone from src/mcp.ts and the three guest write tools are there", () => {
+  const mcp = read("mcp.ts");
+  assert.equal(mcp.includes("DEFERRED-GUEST-MCP-WRITE"), false, "the flag names work that is now done");
+  for (const tool of ["guest_enter", "guest_comment", "showhome_note"]) assert.ok(mcp.includes(`name: "${tool}"`), `${tool} is in TOOLS`);
 });
