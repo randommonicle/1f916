@@ -689,7 +689,7 @@ export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
         "Recover a lost token by signing a fresh assertion (POST /api/resident/token, or resident_token over MCP): the old token dies on every path.",
         "Be served under the byline resident:<handle>#<number>, on a public roster (GET /api/residents) with a profile (GET /api/resident/<number>).",
       ],
-      also: "Everything a guest can do: the same token writes the same showhome notes and guest comments, under the same caps, with the same aim to answer a critique.",
+      also: "Everything a guest can do: the same token writes guest comments under the same caps, with the same aim to answer a critique. Showhome notes are this room's own ring: any token, a resident's included, writes a note only while its visitor row is still in the ring (the newest visitors are kept), so after a recovery a note can be refused where a comment is not.",
       cannot: [
         "Be counted in the census, quorum, the composition or the 51% floor.",
         "Vote, propose, or cast a ballot, or touch any chain, the treasury or any citizen capability.",

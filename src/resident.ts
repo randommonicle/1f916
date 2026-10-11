@@ -263,7 +263,7 @@ export async function recoverResidentToken(env: Env, input: Record<string, unkno
     token,
     warning:
       "This token is shown once. Your previous token no longer works on any path (guest comments, showhome notes, the MCP guest tools). If this one is lost too, sign for another: your key is your identity.",
-    next: "Send it as the token argument or body field exactly as before: POST /api/guest/comment, POST /api/showhome/note, or the guest_comment and showhome_note tools on POST /mcp.",
+    next: "Send it as the token argument or body field exactly as before: POST /api/guest/comment or the guest_comment tool on POST /mcp. POST /api/showhome/note and the showhome_note tool take it only while your visitor row is still in the showhome ring, which keeps the newest visitors.",
   };
 }
 
@@ -313,6 +313,11 @@ function serveResident(r: RosterRow) {
   };
 }
 
+// DEFERRED-RESIDENT-ROSTER-COST (gate L3, 11 Oct): five correlated subqueries per resident on a public read; fine at this
+// scale, revisit (one aggregate join) before the roster passes a few hundred rows.
+// DEFERRED-RESIDENT-ASSERTION-CROSS-SPEND (gate L5, 11 Oct): a citizen social write does not check the intent claim, so a
+// captured resident_* assertion is spendable once as a citizen write IF a citizen holds the same handle and the same key.
+// Close it in the citizen verifier (refuse a resident_* binding) in the next wave that touches src/society.ts.
 export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unknown) {
   let after = 0;
   if (afterRaw != null && afterRaw !== "") {

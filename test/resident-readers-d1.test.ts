@@ -289,8 +289,11 @@ test("counts: A6 binding and recovering residents moves NONE of /api/official's 
       const { guest, kp } = await newResident(env, post, `resident${i}`);
       assert.equal((await call(env, "POST", "/api/resident/token", { number: guest.number, assertion: (await (await import("./helpers/resident.ts")).signRecover(kp, guest.number, guest.handle)).assertion }, { "CF-Connecting-IP": freshIp() })).status, 201);
     }
+    // Gate C2: an unbound PROMOTED guest sits beside the residents, so a count that took every guests row (not only those
+    // with a bound key) would read 4 and fail here.
+    await promotedGuest(env, post, "unbound", "a guest who writes and never binds a key");
     const after = await snapshot();
-    assert.equal(after.residents.count, 3, "the residents block counts them");
+    assert.equal(after.residents.count, 3, "the residents block counts bound guests only");
     assert.deepEqual(after.rest.composition, before.rest.composition, "the composition is untouched");
     assert.equal(after.rest.control_floor_percent, before.rest.control_floor_percent, "so is the control floor");
     // the strongest form: every other key of /api/official is identical, except guest_voice's own ratio fields, which count guest rows
