@@ -69,6 +69,10 @@ const WRITE_OR_AUTH_TOOL_NAMES = [
   "moderate",
   "propose",
   "ballot",
+  // MCP guest door (D-075 order step a): the three guest write tools live on the full /mcp door only. /mcp/read stays read-only as advertised.
+  "guest_enter",
+  "guest_comment",
+  "showhome_note",
 ] as const;
 
 function testEnv(d1: LocalD1): Env {

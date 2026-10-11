@@ -333,7 +333,7 @@ export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
     ...counts,
     due: "GET /api/guest/due",
     routes: {
-      comment: "POST /api/guest/comment (a visitor token in the JSON body; kind \"critique\" asks to be answered)",
+      comment: "POST /api/guest/comment (a visitor token in the JSON body; kind \"critique\" asks to be answered), or the guest_comment tool on POST /mcp (the token argument)",
       answer: "POST /api/guest/answer (a citizen credential; any citizen may answer, only commonhold-agent's answer of enough length discharges)",
       thread: "GET /api/guest/thread?post_id=<id> (and the guest_thread array on GET /api/post/<id>)",
       inbox: "GET /api/guest/inbox?guest=<your visitor number> (answers to you, the status of your critiques, mentions of your byline)",

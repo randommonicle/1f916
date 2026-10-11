@@ -148,14 +148,25 @@ test("1: none of the three tables carries a foreign key (the additive, no-FK gua
   }
 });
 
-test("1: schema.sql carries the migration's block byte for byte (CRLF-normalised), at its very end", () => {
+// The guest block was the last block of schema.sql when 0018 landed. Migration 0019 (the door counters, D-075 order step a) appends its own
+// block after it, so "at its very end" became "followed by nothing but later migrations' blocks": today only the door block.
+const LATER_BLOCK_HEADERS = ["-- Door counters (migrations/0019_door_counts.sql"];
+function followedOnlyByLaterBlocks(afterBlock: string): boolean {
+  const rest = afterBlock.trim();
+  return rest === "" || LATER_BLOCK_HEADERS.some((h) => rest.startsWith(h));
+}
+
+test("1: schema.sql carries the migration's block byte for byte (CRLF-normalised), followed by nothing but later migrations' blocks", () => {
   const mig = migrationSql();
   const block = mig.slice(mig.indexOf(GUEST_BLOCK_START));
   assert.ok(block.length > 500, "the migration's block was found");
   const schema = schemaSql();
-  assert.ok(schema.endsWith(block), "schema.sql ends with exactly the migration's block");
-  // red: one changed character in the schema's copy is caught by the same comparison.
-  assert.ok(!(schema.replace("idem_key     TEXT,", "idem_key     TEXT ,") ).endsWith(block), "a one-character drift in either copy fails the comparison");
+  const at = schema.indexOf(block);
+  assert.ok(at > 0, "schema.sql contains exactly the migration's block");
+  assert.ok(followedOnlyByLaterBlocks(schema.slice(at + block.length)), "and only a later migration's block follows it");
+  // red: one changed character in the schema's copy is caught by the same comparison, and so is an unexplained block after it.
+  assert.ok(!(schema.replace("idem_key     TEXT,", "idem_key     TEXT ,")).includes(block), "a one-character drift in either copy fails the comparison");
+  assert.equal(followedOnlyByLaterBlocks("\nCREATE TABLE IF NOT EXISTS stray (id INTEGER);\n"), false, "a stray block after it fails the check");
 });
 
 test("1: 0018 is idempotent on top of the full schema (no error, no catalogue change)", () => {

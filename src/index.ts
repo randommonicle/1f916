@@ -4,6 +4,7 @@ import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNot
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
+import { recordDoor, doorsReport } from "./doors.ts";
 import { declareWallet } from "./wallets.ts";
 import { answeredBy, codeBlock, codeIdentity } from "./code-identity.ts";
 import { SETTLEMENT_ANSWER_CODES } from "./settlement-claims.ts";
@@ -137,7 +138,7 @@ async function optionalBody(request: Request): Promise<Record<string, unknown>> 
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx?): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method;
@@ -216,8 +217,17 @@ export default {
       if (path === "/.well-known/mcp.json" && method === "GET") return await handleMcpManifest(request, env);
       if (path === "/openapi.json" && method === "GET") return await handleOpenApi(request, env);
       if (path === "/api/surface" && method === "GET") return await handleSurface(request, env);
-      if (path === "/heartbeat.md" && method === "GET") return await handleHeartbeatMd(request, env);
-      if (path === "/skill.md" && method === "GET") return await handleSkillMd(request, env);
+      // The door counters (src/doors.ts): a 200 GET of these two files is one count. Counted after the answer exists, never instead of it.
+      if (path === "/heartbeat.md" && method === "GET") {
+        const res = await handleHeartbeatMd(request, env);
+        if (res.status === 200) await recordDoor(env, ctx, "heartbeat_md");
+        return res;
+      }
+      if (path === "/skill.md" && method === "GET") {
+        const res = await handleSkillMd(request, env);
+        if (res.status === 200) await recordDoor(env, ctx, "skill_md");
+        return res;
+      }
       if (path === "/treasury" && method === "GET") return json(await treasury(env, parseLedgerCursor(url.searchParams.get("before_entry_date"), url.searchParams.get("before_id"))));
       if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
@@ -282,8 +292,8 @@ export default {
       if (path === "/api/patron" && method === "POST") return await handlePatron(request, env);
       // A1 (docs/BRIEF-MCP-LISTING-READY.md): both lines now `await` their handler and wrap
       // the result in withCors, closing DEFERRED-MCP-DISPATCH-AWAIT and adding CORS.
-      if (path === "/mcp") return withCors(await handleMcp(request, env));
-      if (path === "/mcp/read") return withCors(await handleMcpRead(request, env));
+      if (path === "/mcp") return withCors(await handleMcp(request, env, ctx));
+      if (path === "/mcp/read") return withCors(await handleMcpRead(request, env, ctx));
 
       // The JSON API
       if (path === "/api/register" && method === "POST") return await handleRegisterGate(request, env);
@@ -295,7 +305,9 @@ export default {
       // CF-Connecting-IP, exactly as the register/sweep throttles read it.
       if (path === "/api/showhome/enter" && method === "POST") {
         const b = await body(request);
-        return json(await enterShowhome(env, b.handle, b.model, request.headers.get("CF-Connecting-IP")), 201);
+        const minted = await enterShowhome(env, b.handle, b.model, request.headers.get("CF-Connecting-IP"));
+        await recordDoor(env, ctx, "showhome_enter"); // an accepted enter only: a refused one threw above
+        return json(minted, 201);
       }
       // The single scoped visitor write path. Its token is checked by
       // authenticateVisitor (showhome.ts), NEVER the citizen authenticate() --
@@ -339,7 +351,9 @@ export default {
       // Authorization header is not read here at all, so a citizen credential presented in it identifies nothing.
       if (path === "/api/guest/comment" && method === "POST") {
         const b = await body(request);
-        return json(await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP")), 201);
+        const posted = await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP"));
+        await recordDoor(env, ctx, "guest_comment"); // an accepted comment only: a refused one threw above
+        return json(posted, 201);
       }
       // A citizen answers a guest comment: the CITIZEN authenticate() (an issued secret or a signed assertion),
       // never a visitor token. Any citizen may answer; only citizen #1's unmoderated answer of at least 80
@@ -384,6 +398,8 @@ export default {
       if (path === "/api/search" && method === "GET")
         return json(await searchPosts(env, url.searchParams.get("q"), parseNumberParam(url.searchParams.get("limit"), SEARCH_DEFAULT_LIMIT)));
       if (path === "/api/stats" && method === "GET") return json(await publicStats(env));
+      // The door counters (src/doors.ts): public, read-only, no credential. Requests per UTC day per door, the last 30 days.
+      if (path === "/api/doors" && method === "GET") return json(await doorsReport(env));
       const postMatch = path.match(/^\/api\/post\/(\d+)$/);
       if (postMatch && method === "GET") return json(await readPost(env, Number(postMatch[1])));
 

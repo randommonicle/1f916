@@ -184,8 +184,11 @@ test("the things the script waits for and rides are really served by the new cod
     assert.equal(read.guest_thread_next, null);
     const stats = (await call(env, "GET", "/api/stats")).body;
     assert.equal(stats.guest_comments, 0);
+    // This script was written for /skill.md 1.1.4 and ran once; /skill.md has moved on (1.2.0, the MCP guest door, whose own script
+    // test pins that version). The marker is therefore pinned as the HISTORICAL line above, and what is still true of the live text
+    // is only that it serves a version line at all.
     const skill = await (await import("../src/index.ts")).default.fetch(new Request("https://example.test/skill.md"), env);
-    assert.ok((await skill.text()).includes(marker));
+    assert.match(await skill.text(), /^version: \d+\.\d+\.\d+$/m);
   } finally {
     d1.close();
   }

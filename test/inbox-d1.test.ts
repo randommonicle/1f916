@@ -20,6 +20,8 @@ import { REGISTRATION_PRICE_CENTS } from "../src/register-gate.ts";
 import {
   GUEST_ADMISSION_SENTENCE,
   GUEST_AIM_SENTENCE,
+  GUEST_ANSWERER,
+  GUEST_ANSWER_TARGET_HOURS,
   GUEST_ANSWERS_SENTENCE,
   GUEST_CONTINUITY_SENTENCE,
   GUEST_DUTIES_PER_DAY,
@@ -1061,14 +1063,14 @@ test("8: /heartbeat.md and /skill.md are 200 text/markdown; charset=utf-8; the r
 // A path this checker scans for is written as "GET <origin><path>" / "POST <origin><path>"
 // in the served text (the hub own template style); this extracts the path portion up to
 // the first whitespace or a question mark (a query string or human-readable placeholder
-// text follows), then strips trailing sentence punctuation the surrounding prose attaches.
+// text follows), then strips trailing sentence punctuation (and a closing parenthesis) the surrounding prose attaches.
 function extractServedPaths(text: string, origin: string): string[] {
   const escaped = origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(escaped + "(/[^\\s?]*)", "g");
   const paths: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    paths.push(m[1]!.replace(/[.,:;]+$/, ""));
+    paths.push(m[1]!.replace(/[.,:;)]+$/, ""));
   }
   return paths;
 }
@@ -1126,8 +1128,11 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // never computed by hand. B10 (docs/BRIEF-SETTLEMENT-REPLAY-GUARD.md, 2026-09-30) moved it
     // again: the Join section recommends a public_key; SKILL_VERSION bumped to 1.0.3 in the same commit.
     // The guest-voice wave (docs/BRIEF-GUEST-VOICE.md G5, G7) rewrote the file to lead with the free guest path: 1.1.0; the gate M-1 wording fix: 1.1.1; the CODEX gate-fixes r1 write-route sentence: 1.1.2; Ben's A3 ruling, 'awaiting an answer': 1.1.3; CODEX A3 r1, the daily caps count accepted critiques: 1.1.4.
-    assert.equal(await sha256Hex(pinnedText), "320484a7b7562e7d9702ff6b535f575a0707e29a299726cdbb6ab37f22d58e8c", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.1.4", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // The MCP guest door wave (D-075 step a, S1-S3): 1.2.0; CODEX code r1 renamed the false heading "Start in one call" to
+    // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version; the gate L5 then gave the
+    // MCP line its post_id pointer (front_page lists the topics), again before 1.2.0 was served.
+    assert.equal(await sha256Hex(pinnedText), "42a29f79717f17b5d8da9cc56569bd65919224a9ae2be7fd6e82ddc5757de4ba", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.2.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }
@@ -1320,6 +1325,8 @@ test("D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md's three fenced blocks, the inbox 
     const GUEST = {
       CAPS: guestCapsSentence(),
       AIM: GUEST_AIM_SENTENCE,
+      ANSWERER: GUEST_ANSWERER,
+      TARGET_HOURS: String(GUEST_ANSWER_TARGET_HOURS),
       ANSWERS: GUEST_ANSWERS_SENTENCE,
       ADMISSION: GUEST_ADMISSION_SENTENCE,
       STEMS: GUEST_REFUSED_STEMS,

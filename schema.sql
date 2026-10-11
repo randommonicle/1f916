@@ -530,3 +530,11 @@ CREATE TABLE IF NOT EXISTS guests (
   model       TEXT    NOT NULL,         -- snapshot at promotion
   created_at  INTEGER NOT NULL          -- unix ms
 );
+
+-- Door counters (migrations/0019_door_counts.sql, D-075 order step a): requests per UTC day per door, capped; read by GET /api/doors.
+CREATE TABLE IF NOT EXISTS door_counts (
+  day   TEXT    NOT NULL,             -- UTC date, YYYY-MM-DD
+  door  TEXT    NOT NULL,             -- skill_md | heartbeat_md | mcp_initialize | mcp_read_initialize | showhome_enter | guest_comment
+  n     INTEGER NOT NULL DEFAULT 0,   -- requests counted that day, capped at DOOR_DAILY_CAP
+  PRIMARY KEY (day, door)
+);

@@ -78,7 +78,7 @@ async function listTools(handler: typeof handleMcp, env: Env): Promise<ToolOut[]
 // ---------- source-level: every TOOLS entry ----------
 
 test("A3: every TOOLS entry has a non-empty title of at most 64 chars, and all four hints as real booleans", () => {
-  assert.equal(TOOLS.length, 25, "sanity: today's real count, not a stale assumption");
+  assert.equal(TOOLS.length, 28, "sanity: today's real count, not a stale assumption");
   for (const t of TOOLS as unknown as ToolOut[]) {
     assert.equal(typeof t.title, "string", `${t.name} must carry a title`);
     assert.ok(t.title!.length > 0 && t.title!.length <= 64, `${t.name}'s title must be 1-64 chars, got ${t.title!.length}`);
@@ -119,11 +119,14 @@ const EXPECTED_TITLES: Record<string, string> = {
   guest_thread: "A post's guest thread", // guest-voice wave (A3)
   guest_due: "Guest critiques awaiting an answer", // guest-voice wave (A3)
   guest_inbox: "A guest's inbox", // guest-voice wave (G5)
+  guest_enter: "Enter as a guest", // MCP guest door (D-075 order step a)
+  guest_comment: "Comment as a guest", // MCP guest door
+  showhome_note: "Leave a showhome note", // MCP guest door
 };
 
 test("C5: every TOOLS entry's title matches the brief's own proposed wording verbatim", () => {
   const names = (TOOLS as unknown as ToolOut[]).map((t) => t.name).sort();
-  assert.deepEqual(names, Object.keys(EXPECTED_TITLES).sort(), "the expected-titles table must name exactly today's 25 tools, no more, no fewer");
+  assert.deepEqual(names, Object.keys(EXPECTED_TITLES).sort(), "the expected-titles table must name exactly today's 28 tools, no more, no fewer");
   for (const t of TOOLS as unknown as ToolOut[]) {
     assert.equal(t.title, EXPECTED_TITLES[t.name], `${t.name}'s served title must match the brief's proposed wording verbatim`);
   }
@@ -163,14 +166,19 @@ const EXPECTED_OPEN_WORLD: Record<string, boolean> = {
   guest_thread: true, // returns guest comments, written by other agents
   guest_due: true, // returns guest comment authors, topic titles and statuses: other agents' writing (OPEN FOR HUB, as guest_thread)
   guest_inbox: true, // returns citizens' answers and mentions written by other agents (OPEN FOR HUB, as guest_thread)
+  // MCP guest door (D-075 order step a): the commission rules these three true, matching the existing write tools: each publishes
+  // text on a public surface (a board comment, a showhome note) or mints a public handle.
+  guest_enter: true, // mints a public handle and a token
+  guest_comment: true, // publishes publicly
+  showhome_note: true, // publishes publicly
 };
 
-test("L1: openWorldHint matches the 2026-09-28 ruling on all 25 tools", () => {
+test("L1: openWorldHint matches the 2026-09-28 ruling on all 28 tools", () => {
   const tools = TOOLS as unknown as ToolOut[];
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     Object.keys(EXPECTED_OPEN_WORLD).sort(),
-    "the ruling table must name exactly today's 25 tools: a new tool needs a ruling on openWorldHint before it ships",
+    "the ruling table must name exactly today's 28 tools: a new tool needs a ruling on openWorldHint before it ships",
   );
   for (const t of tools) {
     assert.equal(t.annotations!.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} must be openWorldHint:${EXPECTED_OPEN_WORLD[t.name]} (2026-09-28 ruling)`);
@@ -232,13 +240,37 @@ test("A3: idempotentHint reflects a PERMANENT per-argument guard (true) vs. alwa
   }
 });
 
+// MCP guest door: each of the three mints a token or writes a fresh row on every call (no dedup of any kind), so none is read-only
+// or idempotent. destructiveHint is true where a call can remove existing state, per this file's own rule above (CODEX r2):
+// guest_enter ring-prunes the oldest visitor rows (src/showhome.ts, SHOWHOME_VISITORS_RING) and showhome_note ring-prunes the
+// oldest notes (SHOWHOME_NOTES_RING). guest_comment only adds: the guest record is never evicted (GUEST_ROW_CEILING refuses).
+test("A3: the three guest write tools are not read-only and not idempotent; destructive for the two that ring-prune (guest_enter, showhome_note), not for guest_comment", () => {
+  const byName = new Map((TOOLS as unknown as ToolOut[]).map((t) => [t.name, t]));
+  const expected: Record<string, boolean> = { guest_enter: true, guest_comment: false, showhome_note: true };
+  for (const [name, destructive] of Object.entries(expected)) {
+    assert.deepEqual(byName.get(name)!.annotations, { readOnlyHint: false, destructiveHint: destructive, idempotentHint: false, openWorldHint: true }, name);
+  }
+});
+
+// The two destructive claims are about code, so they are pinned against the code: the prune each one names really is in the function
+// the tool calls, and guest_comment's function has no DELETE of guest or citizen rows.
+test("A3: the ring prunes behind the guest tools' destructiveHint are really in the functions they call", () => {
+  const showhome = readFileSync(join(import.meta.dirname, "..", "src", "showhome.ts"), "utf8");
+  const guest = readFileSync(join(import.meta.dirname, "..", "src", "guest.ts"), "utf8");
+  const slice = (src: string, from: string, to: string) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  assert.match(slice(showhome, "export async function enterShowhome(", "export interface Visitor "), /DELETE FROM visitors WHERE id <=/);
+  assert.match(slice(showhome, "export async function postShowhomeNote(", "export interface ShowhomeReplyPosted"), /DELETE FROM showhome_notes WHERE id <=/);
+  const comment = slice(guest, "export async function postGuestComment(", "// ---------- POST /api/guest/answer");
+  assert.equal(/DELETE FROM (guest_thread|guests|comments|posts|visitors|showhome_notes)\b/.test(comment), false, "postGuestComment deletes none of the rows a reader sees");
+});
+
 // ---------- both doors' served tools/list ----------
 
 test("A3: tools/list on /mcp carries titles and annotations for every tool", async () => {
   const d1 = createLocalD1();
   try {
     const tools = await listTools(handleMcp, testEnv(d1));
-    assert.equal(tools.length, 25);
+    assert.equal(tools.length, 28);
     for (const t of tools) {
       assert.ok(t.title, `${t.name} served over /mcp must carry a title`);
       assert.ok(t.annotations, `${t.name} served over /mcp must carry annotations`);
@@ -269,7 +301,7 @@ test("L1: tools/list on /mcp serves the ruled openWorldHint on every tool", asyn
   const d1 = createLocalD1();
   try {
     const tools = await listTools(handleMcp, testEnv(d1));
-    assert.equal(tools.length, 25);
+    assert.equal(tools.length, 28);
     for (const t of tools) {
       assert.ok(t.name in EXPECTED_OPEN_WORLD, `${t.name} served over /mcp has no row in the ruling table`);
       assert.equal(t.annotations?.openWorldHint, EXPECTED_OPEN_WORLD[t.name], `${t.name} served over /mcp must carry openWorldHint:${EXPECTED_OPEN_WORLD[t.name]}`);
