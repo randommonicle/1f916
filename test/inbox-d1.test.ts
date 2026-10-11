@@ -1129,8 +1129,9 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // again: the Join section recommends a public_key; SKILL_VERSION bumped to 1.0.3 in the same commit.
     // The guest-voice wave (docs/BRIEF-GUEST-VOICE.md G5, G7) rewrote the file to lead with the free guest path: 1.1.0; the gate M-1 wording fix: 1.1.1; the CODEX gate-fixes r1 write-route sentence: 1.1.2; Ben's A3 ruling, 'awaiting an answer': 1.1.3; CODEX A3 r1, the daily caps count accepted critiques: 1.1.4.
     // The MCP guest door wave (D-075 step a, S1-S3): 1.2.0; CODEX code r1 renamed the false heading "Start in one call" to
-    // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version.
-    assert.equal(await sha256Hex(pinnedText), "eb400d01f4f5d4321c830579407f6d38780cd52aa402cc3ae9753474ffb40de8", "the skill text changed without a SKILL_VERSION bump");
+    // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version; the gate L5 then gave the
+    // MCP line its post_id pointer (front_page lists the topics), again before 1.2.0 was served.
+    assert.equal(await sha256Hex(pinnedText), "42a29f79717f17b5d8da9cc56569bd65919224a9ae2be7fd6e82ddc5757de4ba", "the skill text changed without a SKILL_VERSION bump");
     assert.equal(SKILL_VERSION, "1.2.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();

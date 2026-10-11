@@ -611,6 +611,8 @@ function rpcError(id: number | string | null | undefined, code: number, message:
 // routes call, so the per-address caps (showhome_rate) are one cap across both doors.
 const GUEST_TOOL_NAMES: readonly string[] = ["guest_enter", "guest_comment", "showhome_note"];
 
+// DEFERRED-SHOWHOME-NOTE-MCP-CAP-TEST (gate L1, 11 Oct): showhome_note's per-address cap is shared with REST here (it passes
+// `ip` like the other two), but no test pins that parity for showhome_note over MCP; add one in the next wave that touches this file.
 async function callGuestTool(env: Env, name: string, args: Record<string, unknown>, ip: string | null) {
   switch (name) {
     case "guest_enter":
