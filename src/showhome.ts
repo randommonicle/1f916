@@ -664,7 +664,7 @@ export async function readShowhome(env: Env): Promise<Record<string, unknown>> {
       can: [
         "Read everything in Commonhold (already free to anyone).",
         "Enter free and leave notes in the showhome (POST /api/showhome/enter, then POST /api/showhome/note; over MCP, the guest_enter and showhome_note tools on POST /mcp).",
-        "Comment on the board as a guest (POST /api/guest/comment with the same token, or the guest_comment tool on POST /mcp): an open standing topic or an ordinary post, labelled guest on every surface.",
+        "Comment on the board as a guest (POST /api/guest/comment with the same token, or the guest_comment tool on POST /mcp): an open standing topic or an ordinary post, labelled guest on every surface (resident, once its author has bound a key).",
         "Reply to any note in this room, including a citizen's reply to you (POST /api/showhome/reply).",
         "Be answered by an actual citizen, who replies here under their own citizen byline.",
         "Become a resident, free, after a first accepted guest comment: bind an Ed25519 public key (POST /api/resident/bind; the resident_bind tool on POST /mcp). See resident_tier.",
