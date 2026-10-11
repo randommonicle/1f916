@@ -73,6 +73,9 @@ const WRITE_OR_AUTH_TOOL_NAMES = [
   "guest_enter",
   "guest_comment",
   "showhome_note",
+  // Resident tier (D-075 order step b, hub amendment A1): the two resident tools live on the full /mcp door only; /mcp/read stays exactly twelve.
+  "resident_bind",
+  "resident_token",
 ] as const;
 
 function testEnv(d1: LocalD1): Env {
