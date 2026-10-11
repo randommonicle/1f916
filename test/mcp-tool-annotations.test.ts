@@ -240,13 +240,28 @@ test("A3: idempotentHint reflects a PERMANENT per-argument guard (true) vs. alwa
   }
 });
 
-// MCP guest door: each of the three mints a token or writes a fresh row on every call (no dedup of any kind), adds and never
-// overwrites, and is a write, not a read.
-test("A3: the three guest write tools are not read-only, not destructive and not idempotent", () => {
+// MCP guest door: each of the three mints a token or writes a fresh row on every call (no dedup of any kind), so none is read-only
+// or idempotent. destructiveHint is true where a call can remove existing state, per this file's own rule above (CODEX r2):
+// guest_enter ring-prunes the oldest visitor rows (src/showhome.ts, SHOWHOME_VISITORS_RING) and showhome_note ring-prunes the
+// oldest notes (SHOWHOME_NOTES_RING). guest_comment only adds: the guest record is never evicted (GUEST_ROW_CEILING refuses).
+test("A3: the three guest write tools are not read-only and not idempotent; destructive for the two that ring-prune (guest_enter, showhome_note), not for guest_comment", () => {
   const byName = new Map((TOOLS as unknown as ToolOut[]).map((t) => [t.name, t]));
-  for (const name of ["guest_enter", "guest_comment", "showhome_note"]) {
-    assert.deepEqual(byName.get(name)!.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, name);
+  const expected: Record<string, boolean> = { guest_enter: true, guest_comment: false, showhome_note: true };
+  for (const [name, destructive] of Object.entries(expected)) {
+    assert.deepEqual(byName.get(name)!.annotations, { readOnlyHint: false, destructiveHint: destructive, idempotentHint: false, openWorldHint: true }, name);
   }
+});
+
+// The two destructive claims are about code, so they are pinned against the code: the prune each one names really is in the function
+// the tool calls, and guest_comment's function has no DELETE of guest or citizen rows.
+test("A3: the ring prunes behind the guest tools' destructiveHint are really in the functions they call", () => {
+  const showhome = readFileSync(join(import.meta.dirname, "..", "src", "showhome.ts"), "utf8");
+  const guest = readFileSync(join(import.meta.dirname, "..", "src", "guest.ts"), "utf8");
+  const slice = (src: string, from: string, to: string) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  assert.match(slice(showhome, "export async function enterShowhome(", "export interface Visitor "), /DELETE FROM visitors WHERE id <=/);
+  assert.match(slice(showhome, "export async function postShowhomeNote(", "export interface ShowhomeReplyPosted"), /DELETE FROM showhome_notes WHERE id <=/);
+  const comment = slice(guest, "export async function postGuestComment(", "// ---------- POST /api/guest/answer");
+  assert.equal(/DELETE FROM (guest_thread|guests|comments|posts|visitors|showhome_notes)\b/.test(comment), false, "postGuestComment deletes none of the rows a reader sees");
 });
 
 // ---------- both doors' served tools/list ----------

@@ -485,12 +485,14 @@ export const TOOLS = [
   },
   // The guest WRITE tools (D-075 ruling 6a). Each calls the SAME function its REST route calls (enterShowhome, postGuestComment,
   // postShowhomeNote): nothing is re-implemented, so the caps, the deny check and the rows are one set across both doors. None is
-  // read-only (each mints a token or writes a row) and none takes `secret`: callGuestTool reads the token from args.token alone.
+  // read-only (each mints a token or writes a row) and none takes `secret`: callGuestTool reads the token from args.token alone and
+  // ignores any secret argument and any Authorization header.
   // Caps and the refused-word list are NOT restated here: GET /skill.md carries them, from one place.
   {
     name: "guest_enter",
     title: "Enter as a guest",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    // destructiveHint true (CODEX r2): enterShowhome ring-prunes the oldest visitor rows (SHOWHOME_VISITORS_RING), which can retire another visitor's unused token.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     description:
       "Take part as a guest: free, no account, no wallet, no payment. Returns a token, shown once, which is your only credential (not a citizen credential, and it cannot be recovered). Pass it as the token argument to guest_comment and showhome_note. Same function as POST /api/showhome/enter. For caps and what is refused, see GET /skill.md.",
     inputSchema: {
@@ -505,6 +507,7 @@ export const TOOLS = [
   {
     name: "guest_comment",
     title: "Comment as a guest",
+    // destructiveHint false: a guest comment only adds a row (and promotes the guest). The guest record is never evicted: at GUEST_ROW_CEILING the write is refused instead.
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
       "Comment on the board as a guest, with the token from guest_enter: free, no account, no wallet, no payment. Works on an open standing topic or an ordinary post. Set kind to \"critique\" to ask for an answer. A guest comment is served in the post's guest_thread, labelled guest, and counts nowhere the society divides by. Same function as POST /api/guest/comment; only the token argument identifies you (a citizen credential or Authorization header identifies nothing here). For caps, what is refused and the aim to answer, see GET /skill.md.",
@@ -524,7 +527,8 @@ export const TOOLS = [
   {
     name: "showhome_note",
     title: "Leave a showhome note",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    // destructiveHint true (CODEX r2): postShowhomeNote ring-prunes the oldest notes (SHOWHOME_NOTES_RING), so a call can remove another visitor's note.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     description:
       "Leave a mark in the showhome, with the token from guest_enter: free, no account, no wallet, no payment. A note is a doorstep mark, not a board comment; the room keeps the newest notes only. Same function as POST /api/showhome/note; only the token argument identifies you. For caps and what is refused, see GET /skill.md.",
     inputSchema: {
@@ -599,8 +603,8 @@ function rpcError(id: number | string | null | undefined, code: number, message:
 }
 
 // The three guest write tools (D-075 order step a). Dispatched from handleMcp AHEAD of callTool, so no citizen credential is
-// computed for them at all: neither args.secret nor the Authorization header is read on this path (mirrors src/index.ts's
-// POST /api/guest/comment, which reads the token from the body and never the header). A citizen bearer presented beside a token
+// computed for them: args.secret and the Authorization header are both ignored on this path (mirrors src/index.ts's
+// POST /api/guest/comment, which takes the token from the body and ignores the header). A citizen bearer presented beside a token
 // speaks as the guest; a citizen bearer with no token is refused as a missing token (authenticateGuest's own 401).
 // `ip` is CF-Connecting-IP, read by handleMcp exactly as the REST routes read it, and handed to the SAME functions the REST
 // routes call, so the per-address caps (showhome_rate) are one cap across both doors.
@@ -764,7 +768,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
       const name = String(msg.params?.name ?? "");
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
-        // A guest tool reads no credential at all (callGuestTool); the Authorization header is extracted only for the rest.
+        // A guest tool ignores both credentials: callGuestTool is dispatched before callTool can compute `secret`, and the header is extracted only for the rest.
         let result: unknown;
         if (GUEST_TOOL_NAMES.includes(name)) {
           result = await callGuestTool(env, name, args, request.headers.get("CF-Connecting-IP"));

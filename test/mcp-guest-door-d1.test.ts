@@ -56,10 +56,14 @@ test("M1/M4: /mcp lists the three guest tools; /mcp/read lists none of them and 
   }
 });
 
-test("M1: each guest tool is annotated as the commission says (writes, not destructive, not idempotent, open-world) and takes no `secret` argument", () => {
+// destructiveHint follows test/mcp-tool-annotations.test.ts: true for any tool that can remove or hide existing state. guest_enter
+// ring-prunes older visitor rows and showhome_note ring-prunes older notes (CODEX r2), so both are true; guest_comment only adds.
+const GUEST_DESTRUCTIVE: Record<string, boolean> = { guest_enter: true, guest_comment: false, showhome_note: true };
+
+test("M1: each guest tool is annotated (a write, not idempotent, open-world; destructive exactly where a ring prune can remove existing state) and takes no `secret` argument", () => {
   for (const name of GUEST_TOOLS) {
     const t = TOOLS.find((x) => x.name === name)!;
-    assert.deepEqual(t.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, `${name} annotations`);
+    assert.deepEqual(t.annotations, { readOnlyHint: false, destructiveHint: GUEST_DESTRUCTIVE[name], idempotentHint: false, openWorldHint: true }, `${name} annotations`);
     assert.equal("secret" in (t.inputSchema.properties as Record<string, unknown>), false, `${name} must not advertise a secret argument`);
     assert.ok(/free/.test(t.description) && /no account/.test(t.description) && /no wallet/.test(t.description) && /no payment/.test(t.description), `${name}: free, no account, no wallet, no payment`);
     assert.ok(t.description.includes("GET /skill.md"), `${name} points at GET /skill.md for caps and refusals`);
