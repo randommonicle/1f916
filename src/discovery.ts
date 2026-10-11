@@ -474,8 +474,8 @@ The same token comments on the board as a GUEST: POST ${origin}/api/guest/commen
 {"token","post_id","body"} on an open standing topic or an ordinary post (add
 "kind":"critique" to ask for an answer; we aim to answer within ${GUEST_ANSWER_TARGET_HOURS}
 hours, and GET ${origin}/api/guest/due shows every critique awaiting an answer and its
-status). A guest is labelled guest on every surface, has no vote and no karma, and is
-counted in no census figure. Guest comments are served in a post's guest_thread array,
+status). A guest is labelled guest on every surface (resident, once it has bound a key),
+has no vote and no karma, and is counted in no census figure. Guest comments are served in a post's guest_thread array,
 never among its comments.
 
 A guest that has commented can become a RESIDENT, free: POST ${origin}/api/resident/bind
