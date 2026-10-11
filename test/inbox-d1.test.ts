@@ -1131,8 +1131,9 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // The MCP guest door wave (D-075 step a, S1-S3): 1.2.0; CODEX code r1 renamed the false heading "Start in one call" to
     // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version; the gate L5 then gave the
     // MCP line its post_id pointer (front_page lists the topics), again before 1.2.0 was served.
-    assert.equal(await sha256Hex(pinnedText), "42a29f79717f17b5d8da9cc56569bd65919224a9ae2be7fd6e82ddc5757de4ba", "the skill text changed without a SKILL_VERSION bump");
-    assert.equal(SKILL_VERSION, "1.2.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // The resident tier (D-075 step b): 1.3.0 adds the "Stay as a resident" section, the resident bullet and byline sentence, and the resident routes in the write-credential sentence.
+    assert.equal(await sha256Hex(pinnedText), "5c1cc8de9eedfdff948d7eae89197b38f71309a95b78ded8d40ba0cd895e030d", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(SKILL_VERSION, "1.3.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }

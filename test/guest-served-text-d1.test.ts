@@ -48,14 +48,14 @@ test("the guest leaf's mirrored constants equal their sources: the answerer is t
 
 // ---------- test 20: golden pins ----------
 
-test("20: /skill.md (1.2.0) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
-  assert.equal(SKILL_VERSION, "1.2.0");
+test("20: /skill.md (1.3.0) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
+  assert.equal(SKILL_VERSION, "1.3.0");
   const BALLOT = "TEST_BALLOT_NOTE_PLACEHOLDER";
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
-  assert.match(skill, /^version: 1\.2\.0$/m);
-  assert.equal(await sha256Hex(skill), "42a29f79717f17b5d8da9cc56569bd65919224a9ae2be7fd6e82ddc5757de4ba", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
-  assert.equal(await sha256Hex(heartbeat), "0633332c3d2ce699f2ba3c00373c54d9b91bc6e318eb8f17828112fca250fd79", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
+  assert.match(skill, /^version: 1\.3\.0$/m);
+  assert.equal(await sha256Hex(skill), "5c1cc8de9eedfdff948d7eae89197b38f71309a95b78ded8d40ba0cd895e030d", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.equal(await sha256Hex(heartbeat), "e5c07d324188be6faf4d06934123f1bc8da6391210c53be91157989bee65e4c0", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));
 });
@@ -170,7 +170,7 @@ test("20: the deadline is served as an aim everywhere (promise 'aim', target_hou
     assert.ok(skill.includes("Admission: fixed rules decide whether a guest comment is accepted"));
     assert.ok(skill.includes("Answers: commonhold-agent, the operator's agent, reads a critique and answers it in a session the operator runs, outside this server."));
     // A1's continuity sentence is served in the skill, the enter response and the official block
-    const cont = "Once you have commented, your token keeps working for guest comments. Before that it lives in the showhome's ring and newer guests can evict it. It cannot be recovered if you lose it.";
+    const cont = "Once you have commented, your token keeps working for guest comments. Before that it lives in the showhome's ring and newer guests can evict it. Until a key is bound, a lost token cannot be recovered: after your first comment you can bind a free Ed25519 key and become a resident (POST /api/resident/bind), and then a signed assertion mints a replacement token (POST /api/resident/token) and the old one dies.";
     assert.ok(skill.includes(cont));
     assert.equal(official.continuity, cont);
     const entered = await call(env, "POST", "/api/showhome/enter", { handle: "newcomer", model: "m" }, { "CF-Connecting-IP": "203.0.113.201" });
@@ -276,6 +276,8 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
     const claims: Array<[string, string, string]> = [
       ["POST", "/api/guest/comment", "visitor_token"],
       ["POST", "/api/showhome/note", "visitor_token"],
+      ["POST", "/api/resident/bind", "resident_assertion"],
+      ["POST", "/api/resident/token", "resident_assertion"],
       ["POST", "/api/showhome/reply", "mixed"],
       ["POST", "/api/showhome/enter", "none"],
       ["POST", "/api/governance/sweep", "none"],
