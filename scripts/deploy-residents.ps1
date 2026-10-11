@@ -37,10 +37,10 @@ $BASE = "https://commonhold.randommonicle.workers.dev"
 # The attested constitution this wave must leave untouched.
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 # The commit the live worker serves when this runs (the MCP guest door wave, once deployed). The hub replaces this placeholder; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$LIVE_BASE_COMMIT = "TO-BE-SET-BY-HUB-LIVE-BASE"
+$LIVE_BASE_COMMIT = "d266a3ae46aa2cb35e4ab7dabfebb4b1d95dccbe"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "ae3a8ebcb54ca3db192e832fca318689b821ff20"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-residents.ps1", "test/deploy-residents-script.test.ts", "docs/")
 $MIGRATION_GLOB = "migrations/0020_*.sql"
