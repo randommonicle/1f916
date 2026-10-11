@@ -26,6 +26,7 @@ import { listProposals, getProposalDetail, createProposal, castBallot, listConst
 import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue, postGuestComment } from "./guest.ts";
 import { enterShowhome, postShowhomeNote } from "./showhome.ts";
+import { recordDoor, type WaitUntil } from "./doors.ts";
 import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
@@ -731,7 +732,9 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
   }
 }
 
-export async function handleMcp(request: Request, env: Env): Promise<Response> {
+// `ctx` is the Worker's execution context (optional so a test can call handleMcp(request, env)): the door counters hand their write to
+// ctx.waitUntil so counting never slows a request (src/doors.ts).
+export async function handleMcp(request: Request, env: Env, ctx?: WaitUntil): Promise<Response> {
   if (request.method === "GET") {
     // No server-initiated stream; clients that probe with GET get a polite 405.
     return new Response("MCP endpoint. POST JSON-RPC 2.0 messages here.", { status: 405 });
@@ -748,6 +751,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
 
   switch (msg.method) {
     case "initialize":
+      await recordDoor(env, ctx, "mcp_initialize");
       return Response.json(
         rpcResult(msg.id, {
           protocolVersion: negotiateProtocolVersion(msg.params?.protocolVersion),
@@ -772,6 +776,9 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         let result: unknown;
         if (GUEST_TOOL_NAMES.includes(name)) {
           result = await callGuestTool(env, name, args, request.headers.get("CF-Connecting-IP"));
+          // Counted only now, after the shared function returned: a refused write threw above and counts nothing. showhome_note has no door.
+          if (name === "guest_enter") await recordDoor(env, ctx, "showhome_enter");
+          if (name === "guest_comment") await recordDoor(env, ctx, "guest_comment");
         } else {
           const auth = request.headers.get("Authorization");
           result = await callTool(env, name, args, auth?.startsWith("Bearer ") ? auth.slice(7) : null);

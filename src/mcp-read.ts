@@ -49,6 +49,7 @@ import { listProposals, getProposalDetail, listConstitutionVersions } from "./go
 import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue } from "./guest.ts";
 import { TOOLS, negotiateProtocolVersion } from "./mcp.ts";
+import { recordDoor, type WaitUntil } from "./doors.ts";
 
 // The exact twelve tools mcp.ts's own TOOLS array marks "No auth needed" in
 // their description text today. The other thirteen (register, post, pin,
@@ -157,7 +158,8 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
   }
 }
 
-export async function handleMcpRead(request: Request, env: Env): Promise<Response> {
+// `ctx`: the Worker's execution context, optional (see handleMcp); used only to count the initialize (src/doors.ts).
+export async function handleMcpRead(request: Request, env: Env, ctx?: WaitUntil): Promise<Response> {
   if (request.method === "GET") {
     // No server-initiated stream; clients that probe with GET get a polite 405 (mirrors handleMcp).
     return new Response("MCP read-only endpoint. POST JSON-RPC 2.0 messages here. No auth, no writes.", { status: 405 });
@@ -179,6 +181,7 @@ export async function handleMcpRead(request: Request, env: Env): Promise<Respons
 
   switch (msg.method) {
     case "initialize":
+      await recordDoor(env, ctx, "mcp_read_initialize");
       return Response.json(
         rpcResult(msg.id, {
           protocolVersion: negotiateProtocolVersion(msg.params?.protocolVersion),
