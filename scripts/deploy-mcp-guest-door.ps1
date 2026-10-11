@@ -39,7 +39,7 @@ $LIVE_BASE_COMMIT = "07e9c57d9339a7a8a8acf4b3f9c28674b6eccbd4"
 # The worker version live before this wave; the rollback target.
 $ROLLBACK_WORKER_VERSION = "0ed544ae-5ec0-4301-8910-2bcf255caffe"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "7d1d13e7b51a3fa4db3d998c03e4b966832e5583"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-mcp-guest-door.ps1", "test/deploy-mcp-guest-door-script.test.ts", "docs/")
 $MIGRATION_GLOB = "migrations/0019_*.sql"
