@@ -218,6 +218,19 @@ test("wrangler is used for exactly three things: D1 reads, the one migration app
   assert.equal(/--command[^\n]*\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i.test(code), false);
 });
 
+test("no SQL handed to wrangler contains a double quote (PowerShell 5.1 does not escape an embedded one in a native argument, so the argument splits): every Invoke-D1Read line is single-quoted SQL inside one double-quoted string", () => {
+  const reads = code.split("\n").filter((l) => /Invoke-D1Read\s+"/.test(l));
+  assert.ok(reads.length >= 9, `sanity: the scan found the catalogue reads, not ${reads.length}`);
+  for (const l of reads) {
+    assert.equal(/`"/.test(l), false, `an escaped double quote inside SQL: ${l.trim().slice(0, 120)}`);
+    const sql = /Invoke-D1Read\s+"((?:[^"`]|`[^"])*)"/.exec(l)?.[1];
+    assert.ok(sql !== undefined, `the SQL string ends cleanly: ${l.trim().slice(0, 120)}`);
+  }
+  // positive control: the check can fail on the shape that was there before (the real query it replaced)
+  assert.equal(/`"/.test('$idx = @(Invoke-D1Read "SELECT name, `"unique`" AS is_unique FROM pragma_index_list(\'guests\')")'), true);
+  assert.match(code, /\$idx\[0\]\.unique/, "and the unique flag is read by its own column name");
+});
+
 test("the ride makes NO live write: no POST except the two read-only tools/list calls, no tools/call, no guest_enter, no showhome/enter, no bind, and no key, token or assertion is ever built", () => {
   const posts = [...code.matchAll(/Post-Json "[^"]+" '([^']*)'/g)].map((m) => m[1]!);
   assert.ok(posts.length === 2, "exactly two POSTs: the two tools/list calls");
@@ -333,7 +346,7 @@ test("Assert-ResidentSchema (run for real against a stand-in for the remote read
         "function Invoke-D1Read($sql) {",
         "  if ($sql -like '*pragma_table_info(''guests'')*') { return @($cfg.guests) }",
         "  if ($sql -like '*pragma_table_info(''resident_nonces'')*') { return @($cfg.nonces) }",
-        "  if ($sql -like '*pragma_index_list(''guests'')*') { return @(for ($i = 0; $i -lt $cfg.idxCount; $i++) { @{ name = 'idx_guests_public_key'; is_unique = $cfg.unique; partial = $cfg.partial } }) }",
+        "  if ($sql -like '*pragma_index_list(''guests'')*') { return @(for ($i = 0; $i -lt $cfg.idxCount; $i++) { @{ name = 'idx_guests_public_key'; unique = $cfg.unique; partial = $cfg.partial } }) }",
         "  if ($sql -like '*SELECT sql FROM sqlite_master*idx_guests_public_key*') { return @(@{ sql = $cfg.idxSql }) }",
         "  if ($sql -like '*idx_resident_nonces_expiry*') { return @(for ($i = 0; $i -lt $cfg.expiry; $i++) { @{ name = 'idx_resident_nonces_expiry' } }) }",
         "  if ($sql -like '*pragma_foreign_key_list(''guests'')*') { return @(@{ n = $cfg.fkGuests }) }",

@@ -202,9 +202,10 @@ function Assert-ResidentSchema {
   for ($k = 0; $k -lt $GUESTS_COLUMN_NAMES.Count; $k++) {
     if ($gotNames[$k] -cne $GUESTS_COLUMN_NAMES[$k]) { Stop-Here ("guests column " + $k + " is '" + $gotNames[$k] + "', expected '" + $GUESTS_COLUMN_NAMES[$k] + "'") }
   }
-  $idx = @(Invoke-D1Read "SELECT name, `"unique`" AS is_unique, partial FROM pragma_index_list('guests') WHERE name = '$KEY_INDEX_NAME'")
+  # No double quote inside any SQL handed to wrangler: PowerShell 5.1 does not escape an embedded one when it passes a native argument, so the argument would split. Hence SELECT *, and the column read by its own name.
+  $idx = @(Invoke-D1Read "SELECT * FROM pragma_index_list('guests') WHERE name = '$KEY_INDEX_NAME'")
   if ($idx.Count -ne 1) { Stop-Here "guests carries $($idx.Count) indexes named $KEY_INDEX_NAME, expected 1." }
-  if ("$($idx[0].is_unique)" -cne "1") { Stop-Here "$KEY_INDEX_NAME is not UNIQUE." }
+  if ("$($idx[0].unique)" -cne "1") { Stop-Here "$KEY_INDEX_NAME is not UNIQUE." }
   if ("$($idx[0].partial)" -cne "1") { Stop-Here "$KEY_INDEX_NAME is not partial: it would refuse a second unbound guest." }
   $idxSql = @(Invoke-D1Read "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '$KEY_INDEX_NAME'")
   if ($idxSql.Count -ne 1 -or -not ([string]$idxSql[0].sql).Contains("WHERE public_key IS NOT NULL")) { Stop-Here "$KEY_INDEX_NAME is not defined over WHERE public_key IS NOT NULL." }
