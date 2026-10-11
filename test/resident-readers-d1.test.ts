@@ -152,6 +152,7 @@ test("readers: a citizen's answer under a resident's critique is served as the c
     const answered = await postGuestAnswer(env, MAINTAINER, { guest_comment_id: c.body.comment_id, body: LONG });
     assert.equal(answered.body.tier, "citizen");
     const inbox = await call(env, "GET", `/api/guest/inbox?guest=${guest.number}`);
+    assert.equal(inbox.body.guest.byline, `resident:wren#${guest.number}`, "the inbox that lists the answer is the resident's own");
     assert.equal(inbox.body.answers.length, 1);
     assert.equal(inbox.body.answers[0].author, "commonhold-agent");
     assert.equal(inbox.body.answers[0].discharges_duty, true);
