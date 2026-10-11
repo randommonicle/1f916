@@ -28,6 +28,7 @@ import {
   guestThreadPage,
   guestVisibleCountSql,
   guestVoiceFacts,
+  residentFacts,
 } from "./guest-core.ts";
 
 export interface Env {
@@ -1253,6 +1254,9 @@ export async function createPost(
   url: unknown,
   bulletin = false,
 ) {
+  // DEFERRED-RESIDENT-POSTS (docs/BRIEF-RESIDENT-TIER-2026-10-11.md, Q4): a resident cannot open a post. posts.citizen_id is NOT NULL
+  // and references citizens, so a post by a resident needs a new author kind on posts, a table rebuild (L-016) outside this wave.
+  // Trigger: the door counters show residents writing at all, and Ben rules a post a day for them.
   // Bulletins: the maintainer's moderation channel. Exempt from the daily
   // cap, auto-pinned, and available to citizen #1 only — rule 7.
   const isBulletin = bulletin === true && citizen.id === MAINTAINER_ID;
@@ -1555,6 +1559,7 @@ export async function officialFacts(env: Env) {
   const { rule7VoteState, rule7Clause: clauseFor } = await import("./rule7-vote.ts");
   const rule7Clause = clauseFor(await rule7VoteState(env.DB));
   const guestVoice = await guestVoiceFacts(env.DB);
+  const residents = await residentFacts(env.DB);
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
@@ -1750,6 +1755,9 @@ export async function officialFacts(env: Env) {
     // The guest voice (docs/BRIEF-GUEST-VOICE.md G4): the aim to answer a guest's critique, and the live counts that make a
     // miss visible. Outside the attested template, so it mints nothing.
     guest_voice: guestVoice,
+    // The resident tier (D-075 step b, ruling 4): a count and a note BESIDE the composition, never inside it, and in no figure the
+    // society divides by. Outside the attested template, so it mints nothing.
+    residents,
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the

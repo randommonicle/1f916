@@ -14,13 +14,16 @@ const read = (f: string) => readFileSync(join(SRC, f), "utf8");
 
 // flag -> [the file where the work would land, why that site]
 const FLAGS: Record<string, [string, string]> = {
-  "DEFERRED-GUEST-KEY": ["showhome.ts", "authenticateGuest, the guest authenticator: signed-key guests (G1 option C)"],
   "DEFERRED-GUEST-FLAGS": ["society.ts", "MODERATION_TABLES and flagContent: citizen flags on guest rows need a guest_flags table, not a CHECK widening"],
   "DEFERRED-GUEST-GOVERNANCE-THREADS": ["guest.ts", "the debate-thread exclusion in postGuestComment"],
   "DEFERRED-INBOX-GUEST-MENTIONS": ["inbox.ts", "guestThreadSql and the guest inbox: a guest's @handle notifies no citizen"],
   "DEFERRED-ME-GUESTS": ["society.ts", "me(): GET /api/me does not carry guests; the inbox's guest_thread section does"],
   "DEFERRED-GUEST-TEMPLATE": ["doc.ts", "beside DEFERRED-DOOR-402-WORDING: the v6 wording for the four sentences untrue of a guest"],
   "DEFERRED-PUBLIC-READ-RATE-CAP": ["index.ts", "the guest inbox route, in the same class as every public read here"],
+  // the resident tier (D-075 step b, docs/BRIEF-RESIDENT-TIER-2026-10-11.md "does NOT do")
+  "DEFERRED-RESIDENT-POSTS": ["society.ts", "createPost: a resident cannot open a post, because posts.citizen_id is NOT NULL (a rebuild-class change)"],
+  "DEFERRED-RESIDENT-CITIZEN-LINK": ["resident.ts", "a resident-to-citizen path with the same key touches POST /api/register, a money path"],
+  "DEFERRED-RESIDENT-SIGNED-WRITES": ["resident.ts", "signed guest comments: every write still carries the token, the key signs only bind and recover"],
 };
 
 test("every DEFERRED flag the guest-voice brief names is planted at its landing site", () => {
@@ -42,4 +45,13 @@ test("DEFERRED-GUEST-MCP-WRITE is retired: the flag is gone from src/mcp.ts and 
   const mcp = read("mcp.ts");
   assert.equal(mcp.includes("DEFERRED-GUEST-MCP-WRITE"), false, "the flag names work that is now done");
   for (const tool of ["guest_enter", "guest_comment", "showhome_note"]) assert.ok(mcp.includes(`name: "${tool}"`), `${tool} is in TOOLS`);
+});
+
+// DEFERRED-GUEST-KEY is RETIRED, not forgotten: the resident tier (D-075 step b) built the key a guest can bind. A flag that names work
+// already done would be a false claim in src/showhome.ts, so its absence is pinned across src/, and the feature it deferred is pinned
+// present. What it did NOT build (signed comments, a same-key path to citizenship) carries the two new resident flags above.
+test("DEFERRED-GUEST-KEY is retired: the flag is gone from src/showhome.ts and the guest key exists (guests.public_key, bindResident)", () => {
+  assert.equal(read("showhome.ts").includes("DEFERRED-GUEST-KEY"), false, "the flag names work that is now done");
+  assert.ok(read("resident.ts").includes("export async function bindResident"), "the bind exists");
+  assert.ok(readFileSync(join(SRC, "..", "migrations", "0020_residents.sql"), "utf8").includes("ADD COLUMN public_key"), "the column exists");
 });

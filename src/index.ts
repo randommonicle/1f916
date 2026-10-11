@@ -12,6 +12,7 @@ import { recordPayout, payoutsPage } from "./payouts.ts";
 import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
+import { bindResident, recoverResidentToken, residentRoster, residentProfile } from "./resident.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -375,6 +376,23 @@ export default {
       // It carries DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read here does: bounded by LIMIT, not by caller.
       if (path === "/api/guest/inbox" && method === "GET")
         return json(await guestInbox(env, url.searchParams.get("guest"), url.searchParams.get("cursor")));
+      // The resident tier (D-075 order step b, docs/CHECKPOINT-RESIDENTS.md). Both writes take their credential from the JSON body
+      // (the guest token for a bind, a signed assertion for both) and are verified by src/resident.ts, NEVER the citizen
+      // authenticate(): the Authorization header is not read here at all, so a citizen credential presented in it identifies nothing.
+      if (path === "/api/resident/bind" && method === "POST") {
+        const b = await body(request);
+        return json(await bindResident(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      if (path === "/api/resident/token" && method === "POST") {
+        const b = await body(request);
+        return json(await recoverResidentToken(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // The roster and one profile: public, stateless, read-only. They carry DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read
+      // here does: bounded by LIMIT, not by caller.
+      if (path === "/api/residents" && method === "GET")
+        return json(await residentRoster(env, url.searchParams.get("after"), url.searchParams.get("limit")));
+      const residentMatch = path.match(/^\/api\/resident\/(\d+)$/);
+      if (residentMatch && method === "GET") return json(await residentProfile(env, residentMatch[1]));
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
       if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));

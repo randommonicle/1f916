@@ -29,11 +29,15 @@ const SHOWHOME_TABLES = ["visitors", "showhome_notes", "showhome_rate", "showhom
 // authenticateVisitor so the one module that touches visitors stays the one). A new reader is a conscious edit HERE.
 const GUEST_READERS: Record<string, string[]> = {
   "guest.ts": ["guest_thread", "guests", "guest_duty_runs"],
-  "guest-core.ts": ["guest_thread"],
+  // dutyRowsSql LEFT JOINs guests to serve the resident byline and tier (D-075 step b, R5); residentFacts counts bound keys for /api/official.
+  "guest-core.ts": ["guest_thread", "guests"],
   "showhome.ts": ["guests"],
   // the citizen inbox's guest_thread section and the guest inbox read guest_thread (public, deterministic SQL over a deterministic
-  // prefilter; src/inbox.ts, the last commit of the guest-voice wave)
-  "inbox.ts": ["guest_thread"],
+  // prefilter; src/inbox.ts, the last commit of the guest-voice wave); the same two queries LEFT JOIN guests for the resident flag (R7).
+  "inbox.ts": ["guest_thread", "guests"],
+  // the resident tier (D-075 step b): bind and recover write guests, the roster and profile read guests and count guest_thread rows.
+  // Not under src/maintainer/, no model call; test/resident-isolation-d1.test.ts pins the rest of its fence.
+  "resident.ts": ["guest_thread", "guests"],
 };
 
 function walk(dir: string): string[] {

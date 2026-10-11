@@ -339,8 +339,10 @@ test("Get-DisallowedPaths and Get-TestSummary (run for real): only this script, 
 
 test("the poll target and the ride are real: /api/doors answers 200 with rows and a note (and a route the router does not know answers 404, which is the pre-deploy state), /skill.md carries the version line, POST /mcp initialize carries the guest sentence, tools/list lists the three tools and /mcp/read none, guest_enter mints a token", async () => {
   const marker = /\$SKILL_VERSION_LINE = "([^"]+)"/.exec(script)?.[1] ?? "";
-  assert.equal(marker, `version: ${SKILL_VERSION}`, "the script's marker is the live skill version");
-  assert.equal(marker, "version: 1.2.0");
+  // This script deploys wave a, whose skill is 1.2.0. The resident tier (D-075 step b) bumped the served skill to 1.3.0 on top of it, so on
+  // this branch the marker is the version wave a shipped, no longer the current one; the script itself is not edited (it is wave a's record).
+  assert.equal(marker, "version: 1.2.0", "the script's marker is the skill version wave a deployed");
+  assert.notEqual(SKILL_VERSION, "1.2.0", "and the served skill has moved on since (wave b, 1.3.0): a later wave must not reuse this marker");
   const d1 = createLocalD1();
   try {
     seedCitizens(d1);
@@ -351,7 +353,7 @@ test("the poll target and the ride are real: /api/doors answers 200 with rows an
     assert.equal(doors.body.window_days, 30);
     assert.equal((await call(env, "GET", "/api/doors-not-a-route")).status, 404, "the pre-deploy 404 is the router's own catch-all");
     const skill = await call(env, "GET", "/skill.md");
-    assert.ok((skill.body._text as string).includes(marker));
+    assert.ok((skill.body._text as string).includes(`version: ${SKILL_VERSION}`), "the served skill carries its own current version line (wave a's marker is history on this branch)");
     const init = await call(env, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } });
     assert.ok(JSON.stringify(init.body).includes("guest_enter returns a token"));
     const list = await call(env, "POST", "/mcp", { jsonrpc: "2.0", id: 2, method: "tools/list" });

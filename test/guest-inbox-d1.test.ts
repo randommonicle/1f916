@@ -54,7 +54,7 @@ test("19: a guest's inbox lists the citizens' answers to ITS rows only, with the
     await postGuestAnswer(env, MAINTAINER, { guest_comment_id: b.row, body: LONG + " for finch" });
     const res = await call(env, "GET", `/api/guest/inbox?guest=${a.visitor}`);
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.deepEqual(res.body.guest, { visitor_id: a.visitor, handle: "wren", byline: `guest:wren#${a.visitor}` });
+    assert.deepEqual(res.body.guest, { visitor_id: a.visitor, handle: "wren", byline: `guest:wren#${a.visitor}`, tier: "guest" }, "an unbound guest is served as a guest (D-075 step b adds the tier field)");
     assert.equal(res.body.answers.length, 2, "only the answers under wren's own row");
     assert.deepEqual(res.body.answers.map((r: any) => [r.author, r.discharges_duty]), [["commonhold-agent", true], ["alice", false]]);
     for (const r of res.body.answers) assert.deepEqual(r.parent, { kind: "thread", id: a.row });
