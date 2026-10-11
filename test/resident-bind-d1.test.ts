@@ -75,10 +75,13 @@ test("bind: an unknown token and a missing token are 401 with nothing written (t
   try {
     const kp = await genKeypair();
     const g = { number: 99, handle: "ghost", token: "commonhold_visit_nothing" };
-    assert.equal((await bindRoute(env, g, kp)).status, 401);
+    const unknown = await bindRoute(env, g, kp);
+    assert.equal(unknown.status, 401);
+    assert.match(unknown.body.error, /Unknown guest token/);
     const { assertion } = await signBind(kp, 1, "ghost");
     const missing = await call(env, "POST", "/api/resident/bind", { public_key: kp.publicKey, assertion }, { "CF-Connecting-IP": freshIp() });
     assert.equal(missing.status, 401);
+    assert.match(missing.body.error, /No guest token/);
     assert.equal(nonceCount(d1), 0);
   } finally {
     d1.close();
