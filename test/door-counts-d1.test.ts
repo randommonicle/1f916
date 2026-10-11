@@ -58,7 +58,10 @@ test("C1: migration 0019 adds exactly one table, door_counts(day, door, n) with 
     before.exec(pre);
     after.exec(pre);
     after.exec(migration);
-    full.exec(schema);
+    // The comparison is "the pre-0019 schema plus 0019" against "schema.sql up to the end of the door block": a LATER migration's block
+    // (0020, the resident tier, appended after this one) adds its own table and is proved by test/resident-migration-d1.test.ts.
+    const later = schema.indexOf("-- The resident tier (migrations/0020_residents.sql");
+    full.exec(later > 0 ? schema.slice(0, later) : schema);
     assert.deepEqual(tables(after), [...tables(before), "door_counts"].sort(), "exactly one table added, nothing existing touched");
     assert.deepEqual(tables(after), tables(full), "migration on the pre-0019 schema gives the same table set as schema.sql");
     const info = after.prepare("SELECT cid, name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('door_counts') ORDER BY cid").all() as Array<Record<string, unknown>>;

@@ -538,3 +538,15 @@ CREATE TABLE IF NOT EXISTS door_counts (
   n     INTEGER NOT NULL DEFAULT 0,   -- requests counted that day, capped at DOOR_DAILY_CAP
   PRIMARY KEY (day, door)
 );
+
+-- The resident tier (migrations/0020_residents.sql, D-075 order step b, docs/CHECKPOINT-RESIDENTS.md): guests gains public_key and resident_at, appended by ALTER exactly as the migration appends them (the guest block above stays byte-identical to 0018), plus the resident verifier's own nonce table. Everything from the first ALTER below to the end of this file MUST stay byte-for-byte identical to the same block in the migration. A guest is a resident exactly when public_key IS NOT NULL.
+ALTER TABLE guests ADD COLUMN public_key TEXT;
+ALTER TABLE guests ADD COLUMN resident_at INTEGER;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_public_key ON guests(public_key) WHERE public_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS resident_nonces (
+  nonce       TEXT    PRIMARY KEY,     -- base64url, 16-64 chars; single use
+  visitor_id  INTEGER NOT NULL,        -- attribution pointer (the guest's public number), NOT a foreign key
+  expires_at  INTEGER NOT NULL         -- unix ms; issued_at + the assertion window
+);
+CREATE INDEX IF NOT EXISTS idx_resident_nonces_expiry ON resident_nonces(expires_at);
