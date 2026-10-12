@@ -216,29 +216,50 @@ export async function assertShowhomeRateCap(
 // The resident routes' two halves (12 Oct, residents gate L1; commission C2, RW4). assertShowhomeRateCap above charges the per-address AND the global counter in one
 // conditional INSERT before anything is checked, so junk from many addresses could fill the global cap and lock every resident out of recovery. It is NOT changed (the
 // guest and council callers share it). The resident routes call these two instead, in this order: (1) the per-address slot on every attempt; (2) the signature is verified;
-// (3) the global slot, under its own path, only for a request that verified; (4) the nonce and write batch. Both are the same lock-at-the-chokepoint shape: the bound is
-// the conditional INSERT, whose WHERE re-counts inside the one statement.
+// (2b) the nonce is read, advisorily (assertResidentNonceUnspent); (3) the global slot, under its own path, only for a request that verified; (4) the nonce and write batch.
+// Both are the same lock-at-the-chokepoint shape: the bound is the conditional INSERT, whose WHERE re-counts inside the one statement.
+//
+// Every showhome_rate path and what collects it (12 Oct hardening wave, HW5): "enter", "post", "reply", "comment", "council_challenge", "council_claim" and "council" are
+// collected by assertShowhomeRateCap's delete across all paths (guest and council traffic, unchanged); "bind" and "recover" by assertShowhomeAddressCap, scoped to its own
+// path (a range scan on idx_showhome_rate_path, not a full scan); "bind_global" and "recover_global" by assertShowhomeGlobalCap, scoped to its own path. None relies on
+// another caller's traffic.
 
-// Step 1. Reserves one per-address slot under `path` ("bind" | "recover"). A missing address has nothing to key a count on and reserves nothing.
-export async function assertShowhomeAddressCap(env: Env, ip: string | null, path: "bind" | "recover", perIpPerHour: number): Promise<void> {
-  if (!ip) return;
+// What the shared bucket for requests with no address hashes. Hub-chosen, fixed: all addresses-unknown attempts share ONE per-address allowance (H3).
+const NO_ADDRESS_KEY = "showhome:no-address";
+
+// Step 1. Reserves one per-address slot under `path` ("bind" | "recover"), unless `attemptCeiling` rows already stand for the path in the last hour. A request with no address is
+// keyed to one shared bucket (NO_ADDRESS_KEY) rather than skipping the cap, so it meets the same per-address allowance as any other single address: junk without an address can
+// therefore deny a valid addressless request for the hour (on Cloudflare every request carries an address, so this is reachable only off the edge).
+//
+// The ceiling (H2, HW6) lives INSIDE the conditional INSERT: one statement decides the per-address cap, the ceiling and the reservation, so concurrent requests cannot all pass
+// either. A zero-row INSERT is then read back to say which bound held, and the two are not the same outcome: the per-address cap refuses (429); the ceiling does not refuse, it
+// writes no row and lets the request go on to verify. What that gives up, stated plainly: above the ceiling the per-address cap stops applying to bind and recovery attempts
+// (the number of unverified requests from one address is then unbounded), but such a request is bounded in effect to a signature check that writes nothing, and a verified
+// one still meets the global cap and the nonce. The log itself stays bounded: at most `attemptCeiling` rows an hour per path, each kept at most a day.
+export async function assertShowhomeAddressCap(env: Env, ip: string | null, path: "bind" | "recover", perIpPerHour: number, attemptCeiling: number): Promise<void> {
   const now = Date.now();
   const hourAgo = now - HOUR_MS;
-  const ipHash = await sha256Hex("showhome:" + ip);
+  const ipHash = await sha256Hex(ip ? "showhome:" + ip : NO_ADDRESS_KEY);
   const reserved = await env.DB.prepare(
     `INSERT INTO showhome_rate (path, ip_hash, created_at)
        SELECT ?1, ?2, ?3
-       WHERE (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND ip_hash = ?2 AND created_at > ?4) < ?5`,
+       WHERE (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND created_at > ?4) < ?6
+         AND (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND ip_hash = ?2 AND created_at > ?4) < ?5`,
   )
-    .bind(path, ipHash, now, hourAgo, Math.trunc(perIpPerHour))
+    .bind(path, ipHash, now, hourAgo, Math.trunc(perIpPerHour), Math.trunc(attemptCeiling))
     .run();
-  if (reserved.meta.changes !== 1) throw rateCapError(path, "address");
-  // This is the one step every attempt pays, junk included, and nothing else here collects: bound the log (as assertShowhomeRateCap does).
-  await env.DB.prepare("DELETE FROM showhome_rate WHERE created_at < ?").bind(now - DAY_MS).run();
+  if (reserved.meta.changes !== 1) {
+    // Nothing was written. Name the bound that held: the ceiling first (a bypass, not a refusal), else the per-address cap.
+    const standing = await env.DB.prepare("SELECT COUNT(*) AS n FROM showhome_rate WHERE path = ? AND created_at > ?").bind(path, hourAgo).first<{ n: number }>();
+    if ((standing?.n ?? 0) < Math.trunc(attemptCeiling)) throw rateCapError(path, "address");
+  }
+  // The one step every attempt pays, junk included: collect this path's own rows older than a day (and no other path's: that scan is what the scoping removes).
+  await env.DB.prepare("DELETE FROM showhome_rate WHERE path = ? AND created_at < ?").bind(path, now - DAY_MS).run();
 }
 
 // Step 3. Reserves one slot toward the across-all-addresses hourly cap, under the global path ("bind_global" | "recover_global"), with no address on the row. Call it only
-// after the assertion verified and before the nonce and write batch: a refusal here writes nothing and burns no nonce.
+// after the assertion verified and before the nonce and write batch: a refusal here writes nothing and burns no nonce. It collects its own path's rows older than a day, so
+// they are collected whether or not step 1 wrote a row for the request (HW5).
 export async function assertShowhomeGlobalCap(env: Env, path: "bind_global" | "recover_global", globalPerHour: number): Promise<void> {
   const now = Date.now();
   const reserved = await env.DB.prepare(
@@ -249,6 +270,7 @@ export async function assertShowhomeGlobalCap(env: Env, path: "bind_global" | "r
     .bind(path, now, now - HOUR_MS, Math.trunc(globalPerHour))
     .run();
   if (reserved.meta.changes !== 1) throw rateCapError(path, "global");
+  await env.DB.prepare("DELETE FROM showhome_rate WHERE path = ? AND created_at < ?").bind(path, now - DAY_MS).run();
 }
 
 // ---------- the door: enter (mint a visitor token), free ----------
