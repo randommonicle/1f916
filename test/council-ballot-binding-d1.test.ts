@@ -204,7 +204,7 @@ test("CA5: a resident_* assertion is refused as a citizen credential EVERYWHERE,
   }
 });
 
-test("CA5, the other direction: every existing citizen binding still passes as an unbound citizen credential (all of INTENT_OPS, the rotation shape, no binding); only the resident_ family is refused, matched at the start and case-sensitively (mutant: the check refuses a broader set)", async () => {
+test("CA5, the other direction: every existing citizen binding still passes as an unbound citizen credential (all of INTENT_OPS, the rotation shape, no binding); only a whole resident binding (resident_<op>:) is refused, matched at the start and case-sensitively, so a bare key that begins resident_ passes (gate L1) (mutant: the check refuses a broader set)", async () => {
   const c = await councilCast();
   try {
     const kp = await genKeypair();
@@ -218,8 +218,8 @@ test("CA5, the other direction: every existing citizen binding still passes as a
     // the refused family, on another citizen so the daily cap does not decide
     const k2 = await seedKeyCitizen(c.d1, "free-key-two");
     const refused = async (binding: string) => call(c.env, "POST", "/api/council/thread", { body: "x" }, bearerHeader(await citizenAssertion(k2, binding)));
-    for (const b of ["resident_", "resident_bind:abc", "resident_recover:abc", "resident_council_ballot:abc", "resident_anything_new:abc"]) assert.equal((await refused(b)).status, 403, b);
-    for (const b of ["Resident_bind:abc", "xresident_bind:abc", " resident_bind:abc"]) assert.equal((await refused(b)).status, 201, `${b} is not in the family`);
+    for (const b of ["resident_bind:abc", "resident_recover:abc", "resident_council_ballot:abc", "resident_anything_new:abc"]) assert.equal((await refused(b)).status, 403, b);
+    for (const b of ["Resident_bind:abc", "xresident_bind:abc", " resident_bind:abc", "resident_", "resident_AbC-dEf_0123"]) assert.equal((await refused(b)).status, 201, `${b} is not in the family`);
   } finally {
     c.d1.close();
   }

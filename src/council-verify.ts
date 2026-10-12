@@ -32,7 +32,9 @@ export const COUNCIL_ACCOUNT_MAX_BYTES = 2 * 1024 * 1024;
 export const COUNCIL_CLOCK_SKEW_MS = 60_000;
 const DAY_MS = 86_400_000;
 
-export type FetchInit = { redirect: "error"; signal: AbortSignal; headers: Record<string, string> };
+// "manual", never "error": workerd refuses redirect "error" with a TypeError ("won't be implemented since it does not make sense at the edge; use \"manual\" and
+// check the response status code"), so "error" would turn every real claim into fetch_failed (gate M1, 12 Oct). "manual" returns the 3xx itself, refused below.
+export type FetchInit = { redirect: "manual"; signal: AbortSignal; headers: Record<string, string> };
 export type FetchLike = (url: string, init: FetchInit) => Promise<Response>;
 
 export interface VerifyInput {
@@ -114,7 +116,7 @@ async function get(deps: VerifyDeps, url: string, maxBytes: number): Promise<Got
     }, timeoutMs);
   });
   const work = (async (): Promise<Got | Unreadable> => {
-    const res = await deps.fetch(target.toString(), { redirect: "error", signal: controller.signal, headers: { accept: "application/json" } });
+    const res = await deps.fetch(target.toString(), { redirect: "manual", signal: controller.signal, headers: { accept: "application/json" } });
     if (res.status >= 300 && res.status < 400) return unreadable("redirect", `the platform redirected (${res.status}); redirects are never followed`, false);
     if (res.redirected) return unreadable("redirect", "the platform redirected; redirects are never followed", false);
     const declared = Number(res.headers.get("content-length"));

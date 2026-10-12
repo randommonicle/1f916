@@ -57,11 +57,12 @@ test("K1: the council is imported only by the router, the two MCP doors, the rou
 
 test("the citizen verifier is touched by the council wave in exactly one place: a single narrowing check in authenticateByAssertion (CA5); authenticate, requireSignedIntent and the citizen ballot are byte-for-byte what they were (the gate examines the one edit first)", () => {
   const society = readFileSync(join(SRC, "society.ts"), "utf8");
-  const checks = society.match(/startsWith\("resident_"\)/g) ?? [];
-  assert.equal(checks.length, 1, "one resident_ prefix check in all of society.ts");
+  const CA5 = "/^resident_[a-z_]+:/.test(a.binding)"; // the whole-binding form (gate L1)
+  assert.equal(society.split(CA5).length - 1, 1, "one resident_ binding check in all of society.ts");
+  assert.equal(society.includes('startsWith("resident_")'), false, "no bare prefix check anywhere");
   const fn = society.slice(society.indexOf("async function authenticateByAssertion("), society.indexOf("export function assertValidHandle"));
   const verifyAt = fn.indexOf("verifyAssertion(row.public_key, a)");
-  const checkAt = fn.indexOf('startsWith("resident_")');
+  const checkAt = fn.indexOf(CA5);
   const nonceAt = fn.indexOf("INSERT INTO auth_nonces");
   assert.ok(verifyAt > 0 && checkAt > verifyAt && nonceAt > checkAt, "the check sits after the signature check and before the nonce INSERT, nowhere else");
   assert.equal(readFileSync(join(SRC, "governance.ts"), "utf8").includes("council"), false, "the citizen ballot and proposal paths never mention the council");

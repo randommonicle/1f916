@@ -186,7 +186,7 @@ const UNREADABLE: Array<[string, (ch: Challenge) => Record<string, Served | Erro
   ["a record read that answers 429", (ch) => ({ ...proof(ch, "a"), [recordUrl(RID)]: { status: 429, body: "{}" } }), 503, "not_ok"],
   ["an account read that answers 403", (ch) => ({ ...proof(ch, "a"), [accountUrl("a")]: { status: 403, body: "{}" } }), 502, "not_ok"],
   ["a redirect answer (302)", (ch) => ({ ...proof(ch, "a"), [recordUrl(RID)]: { status: 302, headers: { location: "https://evil.example/" }, body: "" } }), 502, "redirect"],
-  ["a fetch that throws (what a real redirect:error or a network failure does)", (ch) => ({ ...proof(ch, "a"), [recordUrl(RID)]: new TypeError("redirect mode is set to error") }), 503, "fetch_failed"],
+  ["a fetch that throws (what a network failure does)", (ch) => ({ ...proof(ch, "a"), [recordUrl(RID)]: new TypeError("network connection lost") }), 503, "fetch_failed"],
   ["a body that is not JSON", (ch) => ({ ...proof(ch, "a"), [recordUrl(RID)]: { body: "<html>maintenance</html>" } }), 502, "not_json"],
   ["a body that is JSON but not an object", (ch) => ({ ...proof(ch, "a"), [accountUrl("a")]: { body: "[1,2,3]" } }), 502, "not_json"],
 ];

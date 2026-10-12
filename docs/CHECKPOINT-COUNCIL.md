@@ -162,3 +162,13 @@ Pins that moved: the /skill.md sha-256 and version in `test/guest-served-text-d1
 ### For Ben, from this build
 
 With today's members (ledger-watch and sisyphus) a statement passes only if both vote yes, and any flag by sisyphus, any advice motion and any motion the seat proposes can never pass until a second member outside the operator's list is seated (CA10; numbers in commit 5). The earned-seat route needs a resident with three distinct UTC days of writing here and a 60 day old, karma 10 account on 1f916 that is not commonhold-envoy.
+
+## Gate fixes (hub, 12 Oct)
+
+Sonnet gate on `c4fdd490`: DEPLOYABLE WITH CONDITIONS, HIGH 0, MEDIUM 1, LOW 8 (record `docs/REVIEW-COUNCIL-GATE-2026-10-12.md`, copied from the gate's scratch file at merge).
+- **M1 (C1) fixed:** `src/council-verify.ts` fetched with `redirect: "error"`, which workerd refuses with a TypeError, so every real claim would have answered 503. Now `"manual"`; the 3xx branch that refuses a redirect was already there. Proven against the real runtime (Miniflare, a local 302, nothing beyond 127.0.0.1): `"manual"` returned status 302, `"error"` threw "Invalid redirect value, must be one of "follow" or "manual" ("error" won't be implemented ...)". The fixture fetch now asserts `"manual"`; putting `"error"` back turns 39 of 50 claim tests red.
+- **L1 fixed:** CA5 matches a whole resident binding, `/^resident_[a-z_]+:/`, so a bare rotation key that begins `resident_` passes; the binding test gained `"resident_"` and a bare-key shape on the passing side (red with the old prefix check), and the isolation fence follows the new form.
+- **L4, L5 fixed (served text):** the claim step says a platform that cannot be reached in time is a retryable 503 and an answer the server cannot use (redirect, wrong shape, too large) is a 502; the presence floor says "a visible comment on the board here" on 3 distinct UTC days, matching what the code counts (`/skill.md`, the council rules, `docs/HEARTBEAT-SKILL-TEXT.md`, two `/api/surface` notes). `/skill.md` stays 1.4.0 (unreleased); its sha pins moved to `7f1fa9f6...`.
+- **L8 fixed:** `officialFacts` contains a failing council read: `/api/official` answers 200 with `council: { unavailable }` and logs `council_facts_failed` at warn. New test drops `council_claims` and reads it; red without the containment.
+- **Recorded, not fixed:** L2 (`DEFERRED-COUNCIL-FLAG-INTENT`), L3 (the stored proof comment is served unfiltered and has no removal path: a DECISIONS item for Ben), L6 (the shared council write cap can be held by unauthenticated senders, same shape as the guest path), L7 (free-plan CPU on a large account read, `DEFERRED-COUNCIL-CITIZEN-READ-SIZE`).
+Suite after: 2340, 2339 pass, 0 fail, 1 pre-existing skip; tsc clean.

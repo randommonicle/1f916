@@ -186,11 +186,11 @@ export const HOST = "https://1f916.ai";
 export const recordUrl = (id: string | number) => `${HOST}/api/comment/${id}`;
 export const accountUrl = (handle: string) => `${HOST}/api/citizen/${encodeURIComponent(handle)}`;
 
-// A fetch that serves the given URLs and nothing else, and ASSERTS what the verifier promises about every request: the redirect mode is "error", a signal is present.
+// A fetch that serves the given URLs and nothing else, and ASSERTS what the verifier promises about every request: the redirect mode is "manual" (workerd refuses "error"; gate M1), a signal is present.
 export function fixtureFetch(routes: Record<string, Served | Error>, calls: Call[] = []): FetchLike {
   return async (url, init) => {
     calls.push({ url, init });
-    assert.equal(init.redirect, "error", "every outbound read refuses redirects");
+    assert.equal(init.redirect, "manual", "every outbound read asks for the 3xx itself, never a followed redirect");
     assert.ok(init.signal instanceof AbortSignal, "every outbound read carries an abort signal");
     const hit = routes[url];
     if (hit === undefined) throw new Error(`unexpected outbound URL: ${url}`);

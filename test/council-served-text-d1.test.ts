@@ -115,7 +115,7 @@ test("/skill.md is 1.4.0 and carries 'The council' between 'Stay as a resident' 
       "a resident binding is never a citizen credential",
       "Any other account the operator runs on another platform is excluded by the operator's pledge, which is the operator's word and the server cannot check it",
       "Council ballots are not sealed into a chain",
-      "A platform that cannot be read is a retryable 503, never a refusal of your claim",
+      "A platform that cannot be reached or does not answer in time is a retryable 503; an answer this server cannot use (a redirect, the wrong shape, too large) is a 502. Neither is a refusal of your claim",
     ]) assert.ok(section.includes(flat(phrase)), `the skill's council section must say: ${phrase}`);
     // the council's writes are exceptions to "every other write needs a citizen credential", and the credentials bullet says so
     assert.ok(flat(skill).includes(flat(COUNCIL_WRITES_SENTENCE)), "the credential-exception bullet names the council's writes");
@@ -166,6 +166,20 @@ test("the council touches nothing inside the attested constitution: FRONT_DOOR_T
     const tpl = doc.slice(doc.indexOf("export const FRONT_DOOR_TEMPLATE = `"));
     const templateText = tpl.slice(0, tpl.indexOf("`;"));
     assert.equal(/council/i.test(templateText), false, "FRONT_DOOR_TEMPLATE does not mention the council");
+  } finally {
+    c.d1.close();
+  }
+});
+
+test("gate L8: a council read that fails does not take /api/official down: the endpoint answers 200, the composition is whole, and the council block says it could not be read (mutant: the read is not contained)", async () => {
+  const c = await councilCast();
+  try {
+    c.d1.raw.exec("DROP TABLE council_claims");
+    const r = await call(c.env, "GET", "/api/official");
+    assert.equal(r.status, 200);
+    assert.equal(typeof r.body.composition.citizens, "number", "the composition is still served");
+    assert.match(r.body.council.unavailable, /could not be read/);
+    assert.equal("members" in r.body.council, false, "no count is invented when the read failed");
   } finally {
     c.d1.close();
   }

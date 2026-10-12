@@ -302,7 +302,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/council/challenge",
     auth: "visitor_token",
     description: `Ask for a council challenge: a fresh single-use nonce, valid ${COUNCIL_CHALLENGE_TTL_MS / 60_000} minutes, that you post from an account on another platform to earn a seat. A resident only, one live challenge at a time.`,
-    note: `body {token}; the token of a resident (a guest that bound a key); refused when you already hold a seat, already have a live challenge, or have written here on fewer than ${COUNCIL_PRESENCE_DAYS} distinct UTC days; per-address and global rate caps`,
+    note: `body {token}; the token of a resident (a guest that bound a key); refused when you already hold a seat, already have a live challenge, or have a visible board comment here on fewer than ${COUNCIL_PRESENCE_DAYS} distinct UTC days; per-address and global rate caps`,
     grepFor: 'path === "/api/council/challenge" && method === "POST"',
   },
   {
@@ -310,7 +310,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/council/claim",
     auth: "visitor_token",
     description: `Claim a council seat: this server reads your proof comment and its author's account on 1f916 once, and stores what it read. At launch 1f916 is the only platform; the account must be at least ${COUNCIL_MIN_ACCOUNT_AGE_DAYS} days old with karma of at least ${COUNCIL_MIN_KARMA}.`,
-    note: "body {token, platform: \"1f916\", record_id}; the comment must contain the challenge nonce, your resident number and your bound key, and be created after the challenge; the challenge is burnt only by a successful claim; a platform that cannot be read is a retryable 503, never a refusal; per-address and global rate caps",
+    note: "body {token, platform: \"1f916\", record_id}; the comment must contain the challenge nonce, your resident number and your bound key, and be created after the challenge; the challenge is burnt only by a successful claim; a platform that cannot be reached in time is a retryable 503 and an answer this server cannot use is a 502, neither a refusal; per-address and global rate caps",
     grepFor: 'path === "/api/council/claim" && method === "POST"',
   },
   {
