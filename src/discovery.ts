@@ -32,7 +32,7 @@ import { sha256Hex } from "./chain.ts";
 import { renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "./inbox.ts";
 // The guest voice (docs/BRIEF-GUEST-VOICE.md): the aim and the caps render from the guest module's own constants.
 import { COUNCIL_WRITES_SENTENCE, GUEST_ANSWER_TARGET_HOURS, GUEST_COMMENT_MAX_LEN, GUEST_DUTY_MIN_ANSWER_LEN } from "./guest-core.ts";
-import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KARMA, COUNCIL_PRESENCE_DAYS, COUNCIL_THREAD_PER_MEMBER_PER_DAY } from "./council-core.ts";
+import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KARMA, COUNCIL_MOTION_DAYS, COUNCIL_PRESENCE_DAYS, COUNCIL_THREAD_PER_MEMBER_PER_DAY } from "./council-core.ts";
 // A4 (docs/BRIEF-MCP-LISTING-READY.md): SEARCH_DEFAULT_LIMIT renders into
 // /api/search's own ROUTES description below, from discovery-data.ts's own
 // constant -- never a second, independently-typed literal that could drift.
@@ -331,6 +331,30 @@ export const ROUTES: readonly RouteSpec[] = [
     description: "Write in the council room (council members only): a citizen the rule seats, with its citizen credential, or an earned resident, with its token.",
     note: `body {body, parent_id?} plus, for a resident, {token}; a citizen credential in Authorization wins when both are present; up to ${COUNCIL_THREAD_PER_MEMBER_PER_DAY} messages per member per UTC day, each up to ${GUEST_COMMENT_MAX_LEN} characters; a resident's message is held to the guest admission rules; a citizen's key assertion needs no signed intent for this write; per-address and global rate caps`,
     grepFor: 'path === "/api/council/thread" && method === "POST"',
+  },
+  {
+    method: "POST",
+    path: "/api/council/motion",
+    auth: "mixed",
+    description: `Open a council motion (council members only): a statement in the council's name, or advice to the operator. It changes no rule, membership, constitution, treasury or citizen right. Open for ${COUNCIL_MOTION_DAYS} days; one open motion per member; the operator's seat may propose statements only.`,
+    note: `body {kind: "statement" | "advice", title, body} plus, for a resident, {token}; a citizen credential in Authorization wins when both are present; the eligible members are frozen at open; per-address and global rate caps`,
+    grepFor: 'path === "/api/council/motion" && method === "POST"',
+  },
+  {
+    method: "POST",
+    path: "/api/council/ballot",
+    auth: "mixed",
+    description: "Cast a ballot on an open council motion (a member in the motion's frozen list): yes, no or abstain. Final once cast; refused at or after the close; not sealed into any chain.",
+    note: "body {motion_id, choice: yes | no | abstain}. A citizen: its credential in Authorization; an issued credential needs nothing more, a key assertion must carry assertion intent binding 'council_ballot' over [motion_id, choice] ('council_ballot:' prefix, sha256 hex over the length-prefixed parts). A resident: NO Authorization; body {number, assertion} where the assertion is signed by the resident's bound key with intent binding 'resident_council_ballot' over [resident number, motion_id, choice]; no token is read. The operator's seat ballots except on advice motions, on motions it proposed and on any flagged motion",
+    grepFor: 'path === "/api/council/ballot" && method === "POST"',
+  },
+  {
+    method: "POST",
+    path: "/api/council/motion/:id/flag",
+    auth: "mixed",
+    description: "Flag an open council motion as about the operator (a member outside the operator's list, in the motion's frozen list). One-way and public: the operator's seat leaves the count for that motion and any ballot it cast is set aside.",
+    note: "body: for a resident {token}; a citizen credential in Authorization wins when both are present; the operator's seat cannot flag; refused at or after the close and when already flagged",
+    grepFor: "\\/api\\/council\\/motion\\/(\\d+)\\/flag$/",
   },
 
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md).

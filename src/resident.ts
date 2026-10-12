@@ -54,7 +54,8 @@ export const RESIDENT_ROSTER_MAX_PAGE = 100;
 
 // ---------- the two intents ----------
 
-export type ResidentOp = "resident_bind" | "resident_recover";
+// The council (D-075 step c) adds the third: a resident's council ballot. Every resident binding starts "resident_" so a citizen verifier can refuse the whole family by prefix.
+export type ResidentOp = "resident_bind" | "resident_recover" | "resident_council_ballot";
 
 // The value a resident signs into the assertion's "b" claim and the value the server demands are the SAME function of the same
 // inputs, exported so tests and clients build it from here (the buildIntentBinding precedent). It is NOT keyauth's
@@ -81,7 +82,7 @@ interface Subject {
 // Everything short of the write, in the order the header names. Returns the verified assertion; the caller burns its nonce in its
 // batch. Never reads citizens, never calls authenticate. `key` is the public key the signature must verify under: the SUPPLIED key at
 // bind (after the shape and curve checks), the STORED key at recovery.
-async function verifyResidentAssertion(env: Env, raw: unknown, op: ResidentOp, subject: Subject, parts: readonly string[], key: string): Promise<ParsedAssertion> {
+export async function verifyResidentAssertion(env: Env, raw: unknown, op: ResidentOp, subject: Subject, parts: readonly string[], key: string): Promise<ParsedAssertion> {
   if (typeof raw !== "string" || raw.trim().length === 0) {
     throw new SocietyError(400, 'assertion is required: a string ch1.<base64url payload>.<base64url signature> signed with the resident\'s private key (GET /skill.md has the recipe).');
   }
@@ -121,15 +122,15 @@ async function verifyResidentAssertion(env: Env, raw: unknown, op: ResidentOp, s
 
 // The nonce insert and its garbage collect, as batch statements. The INSERT is the replay check (the nonce is the PRIMARY KEY);
 // the DELETE rides last in the batch so it can never disturb an earlier statement's result.
-function nonceStatement(env: Env, a: ParsedAssertion, visitorId: number) {
+export function nonceStatement(env: Env, a: ParsedAssertion, visitorId: number) {
   return env.DB.prepare("INSERT INTO resident_nonces (nonce, visitor_id, expires_at) VALUES (?, ?, ?)").bind(a.nonce, visitorId, a.issuedAt + ASSERTION_WINDOW_MS);
 }
-function nonceGcStatement(env: Env) {
+export function nonceGcStatement(env: Env) {
   return env.DB.prepare("DELETE FROM resident_nonces WHERE expires_at < ?").bind(Date.now());
 }
 
 // Maps a batch failure to one precise message. A UNIQUE hit on the nonce is a replay; on the key it is another guest's key. Anything else rethrows.
-function refuseBatchFailure(e: unknown): never {
+export function refuseBatchFailure(e: unknown): never {
   const text = String(e);
   if (/resident_nonces/i.test(text) && /UNIQUE|PRIMARY KEY/i.test(text)) {
     throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
@@ -315,9 +316,6 @@ function serveResident(r: RosterRow) {
 
 // DEFERRED-RESIDENT-ROSTER-COST (gate L3, 11 Oct): five correlated subqueries per resident on a public read; fine at this
 // scale, revisit (one aggregate join) before the roster passes a few hundred rows.
-// DEFERRED-RESIDENT-ASSERTION-CROSS-SPEND (gate L5, 11 Oct): a citizen social write does not check the intent claim, so a
-// captured resident_* assertion is spendable once as a citizen write IF a citizen holds the same handle and the same key.
-// Close it in the citizen verifier (refuse a resident_* binding) in the next wave that touches src/society.ts.
 export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unknown) {
   let after = 0;
   if (afterRaw != null && afterRaw !== "") {

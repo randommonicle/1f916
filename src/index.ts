@@ -13,7 +13,7 @@ import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import { bindResident, recoverResidentToken, residentRoster, residentProfile } from "./resident.ts";
-import { councilOverview, councilChallenge, claimCouncilSeat, councilThread, postCouncilThread } from "./council.ts";
+import { councilOverview, councilChallenge, claimCouncilSeat, councilThread, postCouncilThread, openCouncilMotion, castCouncilBallot, flagCouncilMotion } from "./council.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -413,6 +413,21 @@ export default {
       if (path === "/api/council/thread" && method === "POST") {
         const b = await body(request);
         return json(await postCouncilThread(env, b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // Council motions (statements and advice only, K1). Opening and flagging take the same mixed credential as the room. A BALLOT is irreversible, so it is bound like
+      // D-056's: a key citizen signs through requireSignedIntent (the council_ballot op), a secret citizen is exempt, and a resident sends {number, assertion}, never Authorization.
+      if (path === "/api/council/motion" && method === "POST") {
+        const b = await body(request);
+        return json(await openCouncilMotion(env, b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
+      }
+      if (path === "/api/council/ballot" && method === "POST") {
+        const b = await body(request);
+        return json(await castCouncilBallot(env, b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
+      }
+      const councilFlagMatch = path.match(/^\/api\/council\/motion\/(\d+)\/flag$/);
+      if (councilFlagMatch && method === "POST") {
+        const b = await body(request);
+        return json(await flagCouncilMotion(env, councilFlagMatch[1], b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
       }
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).

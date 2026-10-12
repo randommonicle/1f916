@@ -6,7 +6,8 @@
 //   operator_seat  COUNCIL_OPERATOR_SEAT, the operator's one seat (D-075 ruling 2)
 //   earned         a resident holding a council_claims row (its key stays bound for good, so a seat is never lost by silence or by an outage, K4)
 
-import { type Env, SocietyError, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES, KEY_LOST_SEATS, authenticate, utcMidnight } from "./society.ts";
+import { type Env, SocietyError, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES, KEY_LOST_SEATS, authenticate, requireSignedIntent, utcMidnight } from "./society.ts";
+import { nonceGcStatement, nonceStatement, refuseBatchFailure, verifyResidentAssertion } from "./resident.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { GUEST_COMMENT_MAX_LEN, residentByline } from "./guest-core.ts";
 import { assertShowhomeRateCap, authenticateGuest, type Guest } from "./showhome.ts";
@@ -20,6 +21,9 @@ import {
   COUNCIL_CLAIM_GLOBAL_PER_HOUR,
   COUNCIL_CLAIM_PER_IP_PER_HOUR,
   COUNCIL_KNOWN_WEAKNESSES,
+  COUNCIL_MOTION_DAYS,
+  COUNCIL_MOTION_TITLE_MAX,
+  COUNCIL_RECENT_MOTIONS,
   COUNCIL_MIN_ACCOUNT_AGE_DAYS,
   COUNCIL_MIN_KARMA,
   COUNCIL_NOT_COUNTED_SENTENCE,
@@ -38,7 +42,15 @@ import {
   COUNCIL_THREAD_PER_MEMBER_PER_DAY,
   COUNCIL_WRITE_GLOBAL_PER_HOUR,
   COUNCIL_WRITE_PER_IP_PER_HOUR,
+  deriveMotionTally,
+  operatorExclusions,
+  citizenCouncilBallotParts,
+  councilBallotParts,
+  type Choice,
   type MemberKind,
+  type MotionKind,
+  type OperatorExclusion,
+  type SnapshotMember,
   type MemberRule,
 } from "./council-core.ts";
 
@@ -215,6 +227,7 @@ export async function councilOverview(env: Env) {
     operator_accounts: COUNCIL_OPERATOR_ACCOUNTS_SENTENCE,
     recusal: COUNCIL_RECUSAL_SENTENCE,
     motion_rule: { version: COUNCIL_RULE_VERSION, text: COUNCIL_PASS_SENTENCE },
+    motions: await motionsBlock(env, now),
     ballots: COUNCIL_BALLOTS_SENTENCE,
     not_counted: COUNCIL_NOT_COUNTED_SENTENCE,
     room: COUNCIL_ROOM_SENTENCE,
@@ -542,4 +555,326 @@ export async function councilThread(env: Env, afterRaw: unknown, limitRaw: unkno
     limit,
     note: `The council room, oldest message first. ${COUNCIL_ROOM_SENTENCE} Pass after=<next_cursor> for the next page.`,
   };
+}
+
+// ---------- motions: what is served ----------
+
+interface MotionRow {
+  id: number;
+  kind: MotionKind;
+  title: string;
+  body: string;
+  proposer_kind: MemberKind;
+  proposer_id: number;
+  opened_at: number;
+  closes_at: number;
+  eligible_json: string;
+  operator_flagged_at: number | null;
+  operator_flagged_by_kind: MemberKind | null;
+  operator_flagged_by_id: number | null;
+  created_at: number;
+}
+interface BallotRow {
+  motion_id: number;
+  member_kind: MemberKind;
+  member_id: number;
+  choice: Choice;
+  created_at: number;
+}
+const MOTION_COLUMNS =
+  "id, kind, title, body, proposer_kind, proposer_id, opened_at, closes_at, eligible_json, operator_flagged_at, operator_flagged_by_kind, operator_flagged_by_id, created_at";
+
+function parseSnapshot(json: string): SnapshotMember[] {
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (!Array.isArray(v)) return [];
+    return v.flatMap((m): SnapshotMember[] => {
+      const o = m as Record<string, unknown>;
+      return (o?.kind === "citizen" || o?.kind === "resident") && typeof o.id === "number" && typeof o.handle === "string" && typeof o.rule === "string"
+        ? [{ kind: o.kind, id: o.id, handle: o.handle, rule: o.rule as MemberRule, operator_seat: o.operator_seat === true }]
+        : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+const idField = (m: { kind: MemberKind; id: number }) => (m.kind === "citizen" ? { citizen_id: m.id } : { number: m.id });
+const servedMember = (m: SnapshotMember) => ({ kind: m.kind, handle: m.handle, byline: memberByline(m), ...idField(m), rule: m.rule, operator_seat: m.operator_seat });
+// A member not found in the snapshot (it cannot happen for a row this module wrote) is still named by what the row holds, never dropped.
+const memberOrBare = (snapshot: readonly SnapshotMember[], kind: MemberKind, id: number) => {
+  const m = snapshot.find((s) => s.kind === kind && s.id === id);
+  return m ? servedMember(m) : { kind, handle: null, byline: null, ...idField({ kind, id }) };
+};
+
+const SET_ASIDE_TEXT: Record<OperatorExclusion, string> = {
+  advice: "an advice motion",
+  proposed_by_operator_seat: "the operator's seat proposed it",
+  flagged: "the motion was flagged",
+};
+
+export function serveMotion(m: MotionRow, ballots: readonly BallotRow[], now: number) {
+  const snapshot = parseSnapshot(m.eligible_json);
+  const tally = deriveMotionTally(m, snapshot, ballots.map((b) => ({ member_kind: b.member_kind, member_id: b.member_id, choice: b.choice })), now);
+  const setAside = (b: BallotRow) => tally.set_aside.some((s) => s.member_kind === b.member_kind && s.member_id === b.member_id);
+  return {
+    id: m.id,
+    kind: m.kind,
+    title: m.title,
+    body: m.body,
+    status: tally.status,
+    rule: COUNCIL_RULE_VERSION,
+    proposer: memberOrBare(snapshot, m.proposer_kind, m.proposer_id),
+    opened_at: m.opened_at,
+    closes_at: m.closes_at,
+    eligible: snapshot.map(servedMember),
+    operator_seat: {
+      out_of_the_count: tally.operator_excluded,
+      reasons: tally.operator_exclusions,
+      flagged:
+        m.operator_flagged_at === null
+          ? null
+          : { at: m.operator_flagged_at, by: memberOrBare(snapshot, m.operator_flagged_by_kind!, m.operator_flagged_by_id!), note: "A flag is one-way and public: it takes the operator's seat out of the count for this motion and sets aside any ballot the seat cast." },
+    },
+    tally: {
+      counted: tally.counted,
+      yes: tally.yes,
+      no: tally.no,
+      abstain: tally.abstain,
+      counted_outside_operator_list: tally.counted_outside_operator_list,
+      eligible_at_open: tally.snapshot_size,
+      eligible_in_the_count: tally.effective_size,
+      why_not: tally.why_not,
+    },
+    ballots: ballots.map((b) => ({
+      member: memberOrBare(snapshot, b.member_kind, b.member_id),
+      choice: b.choice,
+      cast_at: b.created_at,
+      counted: !setAside(b),
+      ...(setAside(b) ? { set_aside: `set aside: ${tally.operator_exclusions.map((r) => SET_ASIDE_TEXT[r]).join("; ")}` } : {}),
+    })),
+  };
+}
+
+async function readMotion(env: Env, id: number): Promise<{ row: MotionRow; ballots: BallotRow[] } | null> {
+  const row = await env.DB.prepare(`SELECT ${MOTION_COLUMNS} FROM council_motions WHERE id = ?`).bind(id).first<MotionRow>();
+  if (!row) return null;
+  const { results } = await env.DB.prepare("SELECT motion_id, member_kind, member_id, choice, created_at FROM council_ballots WHERE motion_id = ? ORDER BY created_at ASC, member_kind ASC, member_id ASC").bind(id).all<BallotRow>();
+  return { row, ballots: results };
+}
+
+// The motions block of GET /api/council: every open motion and the most recent closed ones, ballots in full (public and attributed). Two statements, no bound ids.
+async function motionsBlock(env: Env, now: number) {
+  const rows = await env.DB.prepare(
+    `SELECT ${MOTION_COLUMNS} FROM council_motions WHERE closes_at > ?1 OR id IN (SELECT id FROM council_motions WHERE closes_at <= ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id DESC`,
+  )
+    .bind(now, COUNCIL_RECENT_MOTIONS)
+    .all<MotionRow>();
+  const ballots = await env.DB.prepare(
+    `SELECT b.motion_id, b.member_kind, b.member_id, b.choice, b.created_at FROM council_ballots b JOIN council_motions m ON m.id = b.motion_id
+      WHERE m.closes_at > ?1 OR m.id IN (SELECT id FROM council_motions WHERE closes_at <= ?1 ORDER BY id DESC LIMIT ?2) ORDER BY b.created_at ASC, b.member_kind ASC, b.member_id ASC`,
+  )
+    .bind(now, COUNCIL_RECENT_MOTIONS)
+    .all<BallotRow>();
+  const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM council_motions").first<{ n: number }>();
+  const byMotion = new Map<number, BallotRow[]>();
+  for (const b of ballots.results) byMotion.set(b.motion_id, [...(byMotion.get(b.motion_id) ?? []), b]);
+  const served = rows.results.map((m) => serveMotion(m, byMotion.get(m.id) ?? [], now));
+  return {
+    open: served.filter((m) => m.status === "open"),
+    recent_closed: served.filter((m) => m.status !== "open"),
+    total: total?.n ?? 0,
+    recent_closed_shown_at_most: COUNCIL_RECENT_MOTIONS,
+    note: "Every open motion, and the most recent closed ones (at most the number above; total counts every motion ever). Status is derived from the ballots when you read it, never stored.",
+  };
+}
+
+// ---------- motions: POST /api/council/motion ----------
+
+export async function openCouncilMotion(env: Env, input: Record<string, unknown>, credential: string | null, ip: string | null) {
+  await assertShowhomeRateCap(env, ip, "council", COUNCIL_WRITE_PER_IP_PER_HOUR, COUNCIL_WRITE_GLOBAL_PER_HOUR);
+  const actor = await resolveActor(env, input, credential);
+  if (input.kind !== "statement" && input.kind !== "advice") {
+    throw new SocietyError(400, 'kind must be "statement" (a statement in the council\'s name) or "advice" (advice to the operator). A motion changes no rule, membership, constitution, treasury or citizen right.', "council_motion_kind");
+  }
+  const kind: MotionKind = input.kind;
+  if (typeof input.title !== "string" || input.title.trim().length < 1) throw new SocietyError(400, "A motion needs a title.");
+  if (input.title.trim().length > COUNCIL_MOTION_TITLE_MAX) throw new SocietyError(400, `A motion title is at most ${COUNCIL_MOTION_TITLE_MAX} characters.`);
+  if (typeof input.body !== "string" || input.body.trim().length < 1) throw new SocietyError(400, "A motion needs a body.");
+  if (input.body.length > GUEST_COMMENT_MAX_LEN) throw new SocietyError(400, `A motion body is at most ${GUEST_COMMENT_MAX_LEN} characters.`);
+  const title = input.title.trim();
+  const body = input.body.trim();
+  // CA10: the operator's seat may propose statements only. A motion that advises the operator is a motion the seat cannot be the proposer of.
+  if (actor.operator_seat && kind !== "statement") {
+    throw new SocietyError(403, "The operator's seat may propose statement motions only, never advice to the operator. Another member can propose it.", "council_operator_statement_only");
+  }
+  assertResidentAdmitted(actor, title, body);
+
+  const now = Date.now();
+  const snapshot: SnapshotMember[] = (await councilMembers(env, now)).map((m) => ({ kind: m.kind, id: m.id, handle: m.handle, rule: m.rule, operator_seat: m.operator_seat }));
+  if (!snapshot.some((m) => m.kind === actor.kind && m.id === actor.id)) throw notAMember();
+  const closesAt = now + COUNCIL_MOTION_DAYS * DAY_MS;
+  // ONE conditional INSERT: at most one open motion per member however many requests arrive together.
+  const res = await env.DB.prepare(
+    `INSERT INTO council_motions (kind, title, body, proposer_kind, proposer_id, opened_at, closes_at, eligible_json, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?6
+        WHERE NOT EXISTS (SELECT 1 FROM council_motions WHERE proposer_kind = ?4 AND proposer_id = ?5 AND closes_at > ?6)`,
+  )
+    .bind(kind, title, body, actor.kind, actor.id, now, closesAt, JSON.stringify(snapshot))
+    .run();
+  if (res.meta.changes !== 1) {
+    const open = await env.DB.prepare("SELECT id, closes_at FROM council_motions WHERE proposer_kind = ? AND proposer_id = ? AND closes_at > ? ORDER BY id DESC LIMIT 1").bind(actor.kind, actor.id, now).first<{ id: number; closes_at: number }>();
+    throw new SocietyError(
+      409,
+      `You already have an open motion (${open ? `motion ${open.id}, open until ${new Date(open.closes_at).toISOString()}` : "one is open"}); a member holds one at a time. Nothing was written.`,
+      "council_motion_open",
+    );
+  }
+  const made = await readMotion(env, Number(res.meta.last_row_id));
+  if (!made) throw new SocietyError(500, "a council motion was written but could not be read back; refusing to report it as success");
+  return { ...serveMotion(made.row, made.ballots, now), note: `${COUNCIL_POWERS_SENTENCE} ${COUNCIL_PASS_SENTENCE}` };
+}
+
+// ---------- motions: POST /api/council/ballot ----------
+
+const isChoice = (v: unknown): v is Choice => v === "yes" || v === "no" || v === "abstain";
+
+// The ballot INSERT, one statement for both kinds of member. The predicates that can MOVE between the pre-read and the write are in its WHERE: the clock (a ballot at or after
+// closes_at is refused even when the read before it saw the motion open, CA2) and, for the operator's seat, the flag (CA10). What cannot move is a pre-read only: the snapshot,
+// the motion's kind and its proposer never change after open, so membership and the other two recusal reasons are decided by the read, exactly. The PRIMARY KEY is the one-ballot rule.
+const BALLOT_INSERT_SQL = `INSERT INTO council_ballots (motion_id, member_kind, member_id, choice, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5
+        WHERE EXISTS (
+          SELECT 1 FROM council_motions m
+           WHERE m.id = ?1 AND m.closes_at > ?5
+             AND NOT (?6 = 1 AND m.operator_flagged_at IS NOT NULL)
+        )`;
+
+export async function castCouncilBallot(env: Env, input: Record<string, unknown>, credential: string | null, ip: string | null) {
+  await assertShowhomeRateCap(env, ip, "council", COUNCIL_WRITE_PER_IP_PER_HOUR, COUNCIL_WRITE_GLOBAL_PER_HOUR);
+  const motionId = positiveIntegerField(input.motion_id, "motion_id");
+  if (!isChoice(input.choice)) throw new SocietyError(400, "choice must be one of: yes, no, abstain");
+  const choice: Choice = input.choice;
+
+  // Who is balloting. A citizen (an Authorization credential) is a member the rule seats; a resident (number + assertion, NO Authorization) is a member that holds a seat.
+  let member: { kind: MemberKind; id: number; handle: string; operator_seat: boolean };
+  let residentAssertion: Awaited<ReturnType<typeof verifyResidentAssertion>> | null = null;
+  const presented = typeof credential === "string" && credential.trim().length > 0 ? credential : null;
+  if (presented !== null) {
+    const actor = await resolveActor(env, input, presented);
+    // D-056: a ballot is final once cast, so a key citizen signs the exact vote (a secret is exempt). The council op is its own: a citizen's BALLOT assertion is refused here
+    // and a council ballot assertion is refused by the citizen ballot. Checked before the motion is looked up, so an unbound credential learns nothing about it.
+    await requireSignedIntent(presented, "council_ballot", citizenCouncilBallotParts(motionId, choice));
+    member = actor;
+  } else {
+    const number = positiveIntegerField(input.number, "number");
+    const row = await env.DB.prepare("SELECT visitor_id, handle, public_key FROM guests WHERE visitor_id = ?").bind(number).first<{ visitor_id: number; handle: string; public_key: string | null }>();
+    if (!row || row.public_key === null) throw notAMember();
+    const seat = await env.DB.prepare("SELECT 1 AS x FROM council_claims WHERE visitor_id = ?").bind(row.visitor_id).first();
+    if (!seat) throw notAMember();
+    // A resident's ballot commits to the one act and is signed by the BOUND key: the key is the identity here, as at token recovery, so no token is read.
+    residentAssertion = await verifyResidentAssertion(env, input.assertion, "resident_council_ballot", { visitorId: row.visitor_id, handle: row.handle }, councilBallotParts(row.visitor_id, motionId, choice), row.public_key);
+    member = { kind: "resident", id: row.visitor_id, handle: row.handle, operator_seat: false };
+  }
+
+  const readAt = Date.now();
+  const found = await readMotion(env, motionId);
+  if (!found) throw new SocietyError(404, `council motion ${motionId} does not exist`, "council_motion_missing");
+  if (readAt >= found.row.closes_at) {
+    throw new SocietyError(409, `council motion ${motionId} closed at ${new Date(found.row.closes_at).toISOString()}; ballots are refused from that instant. Nothing was written.`, "council_motion_closed");
+  }
+  const snapshot = parseSnapshot(found.row.eligible_json);
+  if (!snapshot.some((s) => s.kind === member.kind && s.id === member.id)) {
+    throw new SocietyError(403, `You were not a member when motion ${motionId} opened: its eligible members are frozen at open. Nothing was written.`, "council_not_eligible");
+  }
+  const exclusions = operatorExclusions(found.row, snapshot);
+  if (member.operator_seat && exclusions.length > 0) {
+    throw new SocietyError(403, `The operator's seat does not ballot on this motion (${exclusions.map((r) => SET_ASIDE_TEXT[r]).join("; ")}). Nothing was written.`, "council_operator_recused");
+  }
+
+  // CA2: the clock the INSERT is judged by is the server's clock AT THE WRITE, taken after every pre-read, not the one the pre-read used.
+  const at = Date.now();
+  const bind = [motionId, member.kind, member.id, choice, at, member.operator_seat ? 1 : 0] as const;
+  let changes: number;
+  try {
+    if (residentAssertion !== null) {
+      // The nonce is burnt in the same batch as the ballot, only after the signature verified (src/resident.ts). A duplicate ballot is a UNIQUE violation that rolls the whole
+      // batch back, so a refused double vote does not spend the assertion; a lost race on the clock or the recusal leaves it spent, as a refused signed act does elsewhere.
+      const results = await env.DB.batch<{ meta: { changes: number } }>([
+        nonceStatement(env, residentAssertion, member.id),
+        env.DB.prepare(BALLOT_INSERT_SQL).bind(...bind),
+        nonceGcStatement(env),
+      ]);
+      changes = results[1]?.meta?.changes ?? 0;
+    } else {
+      changes = (await env.DB.prepare(BALLOT_INSERT_SQL).bind(...bind).run()).meta.changes;
+    }
+  } catch (e) {
+    if (/council_ballots/i.test(String(e)) && /UNIQUE|PRIMARY KEY/i.test(String(e))) {
+      throw new SocietyError(409, `You have already balloted on council motion ${motionId}: a ballot is final once cast. Nothing was written.`, "council_already_balloted");
+    }
+    return refuseBatchFailure(e);
+  }
+  if (changes !== 1) {
+    // The pre-reads said yes and the write said no: the clock or a flag moved in between. Say which.
+    const again = await readMotion(env, motionId);
+    if (again && Date.now() >= again.row.closes_at) {
+      throw new SocietyError(409, `council motion ${motionId} closed while your ballot was in flight, so it was not recorded.`, "council_motion_closed");
+    }
+    if (again && member.operator_seat && operatorExclusions(again.row, snapshot).length > 0) {
+      throw new SocietyError(403, `The operator's seat does not ballot on this motion: it was flagged while your ballot was in flight, so it was not recorded.`, "council_operator_recused");
+    }
+    throw new SocietyError(409, `Your ballot on council motion ${motionId} was refused inside the transaction. Nothing was written.`, "council_ballot_refused");
+  }
+  const after = await readMotion(env, motionId);
+  return {
+    motion_id: motionId,
+    choice,
+    member: servedMember(snapshot.find((s) => s.kind === member.kind && s.id === member.id)!),
+    cast_at: at,
+    counts: !(member.operator_seat && after !== null && operatorExclusions(after.row, snapshot).length > 0),
+    note: member.operator_seat
+      ? `Recorded. A member outside the operator's list can still flag this motion before it closes, which takes the operator's seat out of the count and sets this ballot aside. ${COUNCIL_BALLOTS_SENTENCE}`
+      : `Recorded; a ballot is final once cast. ${COUNCIL_BALLOTS_SENTENCE}`,
+    motion: after ? serveMotion(after.row, after.ballots, Date.now()) : null,
+  };
+}
+
+// ---------- motions: POST /api/council/motion/:id/flag ----------
+
+// DEFERRED-COUNCIL-FLAG-INTENT: a flag is one-way and public, but it is not an op in INTENT_OPS (the commission adds exactly one, council_ballot), so a key citizen's flag
+// needs no signed intent: a captured assertion could be redirected into a flag within its 120 seconds. Trigger: the first flag, or Ben ruling that a flag binds like a ballot
+// (then one more citizen op and one more resident op, each tested both ways).
+export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: Record<string, unknown>, credential: string | null, ip: string | null) {
+  await assertShowhomeRateCap(env, ip, "council", COUNCIL_WRITE_PER_IP_PER_HOUR, COUNCIL_WRITE_GLOBAL_PER_HOUR);
+  const motionId = positiveIntegerField(motionIdRaw, "motion id");
+  const actor = await resolveActor(env, input, credential);
+  if (actor.operator_seat) {
+    throw new SocietyError(403, "The operator's seat cannot flag a motion as being about the operator: the flag is a check on it, set by a member outside the operator's list. Nothing was written.", "council_operator_cannot_flag");
+  }
+  const readAt = Date.now();
+  const found = await readMotion(env, motionId);
+  if (!found) throw new SocietyError(404, `council motion ${motionId} does not exist`, "council_motion_missing");
+  if (readAt >= found.row.closes_at) throw new SocietyError(409, `council motion ${motionId} closed at ${new Date(found.row.closes_at).toISOString()}; it can no longer be flagged. Nothing was written.`, "council_motion_closed");
+  const snapshot = parseSnapshot(found.row.eligible_json);
+  if (!snapshot.some((s) => s.kind === actor.kind && s.id === actor.id)) {
+    throw new SocietyError(403, `You were not a member when motion ${motionId} opened: only its eligible members can flag it. Nothing was written.`, "council_not_eligible");
+  }
+  // ONE conditional UPDATE: one winner however many members flag at once, never after the close, never twice. The clock is the server's AT THE WRITE.
+  const at = Date.now();
+  const res = await env.DB.prepare(
+    "UPDATE council_motions SET operator_flagged_at = ?1, operator_flagged_by_kind = ?2, operator_flagged_by_id = ?3 WHERE id = ?4 AND operator_flagged_at IS NULL AND closes_at > ?1",
+  )
+    .bind(at, actor.kind, actor.id, motionId)
+    .run();
+  if (res.meta.changes !== 1) {
+    const again = await readMotion(env, motionId);
+    if (again && again.row.operator_flagged_at !== null) {
+      throw new SocietyError(409, `Motion ${motionId} was already flagged at ${new Date(again.row.operator_flagged_at).toISOString()}. A flag is one-way; nothing was written.`, "council_already_flagged");
+    }
+    throw new SocietyError(409, `council motion ${motionId} closed while your flag was in flight, so it was not recorded.`, "council_motion_closed");
+  }
+  const after = await readMotion(env, motionId);
+  if (!after) throw new SocietyError(500, "a council flag was written but the motion could not be read back; refusing to report it as success");
+  return { ...serveMotion(after.row, after.ballots, Date.now()), note: "Flagged. The flag is one-way and public. For this motion the operator's seat is out of the count and any ballot it cast is set aside." };
 }

@@ -13,6 +13,7 @@ import { insertCitizen, createLocalD1, guestEnv, type LocalD1, call, freshIp, ty
 import { genKeypair, sign, type Keypair } from "./resident.ts";
 import { residentBinding } from "../../src/resident.ts";
 import { councilBallotParts } from "../../src/council-core.ts";
+import { buildIntentBinding } from "../../src/keyauth.ts";
 import type { Env } from "../../src/society.ts";
 import type { FetchLike, FetchInit } from "../../src/council-verify.ts";
 
@@ -125,7 +126,7 @@ export async function signResidentBallot(
 }
 
 export const withIp = (ip: string | null = freshIp()): Record<string, string> => (ip ? { "CF-Connecting-IP": ip } : {});
-export const rows = <T = Record<string, unknown>>(d1: LocalD1, sql: string, ...args: unknown[]): T[] => d1.raw.prepare(sql).all(...(args as never[])) as T[];
+export const rows = <T = Record<string, unknown>>(d1: LocalD1, sql: string, ...args: unknown[]): T[] => d1.raw.prepare(sql).all(...(args as never[])).map((r) => ({ ...r })) as T[];
 export type { Env };
 
 // ---------- presence ----------
@@ -252,3 +253,83 @@ export async function citizenAssertion(c: { handle: string; kp: Keypair }, bindi
   return (await sign(c.kp, { handle: over.claimHandle ?? c.handle, binding, t: over.t, nonce: over.nonce })).assertion;
 }
 export const bearerHeader = (credential: string, ip: string | null = freshIp()): Record<string, string> => ({ Authorization: `Bearer ${credential}`, ...withIp(ip) });
+
+// ---------- the council cast ----------
+
+
+
+export interface CouncilCast {
+  d1: LocalD1;
+  env: Env;
+  seat: SecretCitizen; // ledger-watch, the operator's seat
+  sis: SecretCitizen; // sisyphus, self-paid, bearer secret
+  key: KeyCitizen; // a self-paid public-key citizen
+  wren: SeededResident; // an earned resident
+}
+// Four members: the operator's seat, a self-paid secret citizen, a self-paid key citizen and an earned resident. The maintainer is citizen #1 and holds no seat.
+export async function councilCast(): Promise<CouncilCast> {
+  const d1 = createLocalD1();
+  seedCitizenNamed(d1, "commonhold-agent");
+  const seat = await seedSecretCitizen(d1, "ledger-watch");
+  const sis = await seedSecretCitizen(d1, "sisyphus");
+  const key = await seedKeyCitizen(d1, "keyed-free");
+  const wren = await seedEarned(d1, "wren");
+  return { d1, env: guestEnv(d1), seat, sis, key, wren };
+}
+
+export type Who = SecretCitizen | KeyCitizen | SeededResident;
+const isSecret = (w: Who): w is SecretCitizen => "secret" in w;
+const isKey = (w: Who): w is KeyCitizen => "kp" in w && "id" in w;
+
+// The credential a mixed route takes, for any member: a secret in Authorization, a (unbound) key assertion in Authorization, or a resident's token in the body.
+export async function credential(w: Who, ip: string | null = freshIp()): Promise<{ headers: Record<string, string>; extra: Record<string, unknown> }> {
+  if (isSecret(w)) return { headers: bearerHeader(w.secret, ip), extra: {} };
+  if (isKey(w)) return { headers: bearerHeader(await citizenAssertion(w), ip), extra: {} };
+  return { headers: withIp(ip), extra: { token: w.token } };
+}
+
+export async function openMotion(env: Env, w: Who, kind: string, title = "a motion", body = "its body"): Promise<Reply> {
+  const c = await credential(w);
+  return call(env, "POST", "/api/council/motion", { kind, title, body, ...c.extra }, c.headers);
+}
+export async function flagMotion(env: Env, w: Who, motionId: number | string): Promise<Reply> {
+  const c = await credential(w);
+  return call(env, "POST", `/api/council/motion/${motionId}/flag`, { ...c.extra }, c.headers);
+}
+// A ballot, built the way each kind of member must build it: a secret needs nothing more; a key citizen signs the exact vote (council_ballot); a resident sends
+// {number, assertion} with NO Authorization. `over` swaps any part to build a wrong one.
+export async function castBallot(
+  env: Env,
+  w: Who,
+  motionId: number,
+  choice: string,
+  over: Partial<{ binding: string | null; headers: Record<string, string>; body: Record<string, unknown>; ip: string | null; t: number; nonce: string }> = {},
+): Promise<Reply> {
+  const ip = over.ip === undefined ? freshIp() : over.ip;
+  if (isSecret(w)) return call(env, "POST", "/api/council/ballot", { motion_id: motionId, choice, ...(over.body ?? {}) }, over.headers ?? bearerHeader(w.secret, ip));
+  if (isKey(w)) {
+    const binding = over.binding !== undefined ? over.binding : await buildIntentBinding("council_ballot", [String(motionId), choice]);
+    return call(env, "POST", "/api/council/ballot", { motion_id: motionId, choice, ...(over.body ?? {}) }, over.headers ?? bearerHeader(await citizenAssertion(w, binding, { t: over.t, nonce: over.nonce }), ip));
+  }
+  const { assertion } = await signResidentBallot(w, motionId, choice, { binding: over.binding, t: over.t, nonce: over.nonce });
+  return call(env, "POST", "/api/council/ballot", { motion_id: motionId, choice, number: w.number, assertion, ...(over.body ?? {}) }, over.headers ?? withIp(ip));
+}
+
+export const motionRow = (d1: LocalD1, id: number) => d1.raw.prepare("SELECT * FROM council_motions WHERE id = ?").get(id) as Record<string, any>;
+// Move a motion's window without touching anything else (a past window closes it; a future one opens it).
+export function setWindow(d1: LocalD1, id: number, opened_at: number, closes_at: number): void {
+  d1.raw.prepare("UPDATE council_motions SET opened_at = ?, closes_at = ? WHERE id = ?").run(opened_at, closes_at, id);
+}
+export const closeMotionNow = (d1: LocalD1, id: number): void => setWindow(d1, id, Date.now() - 8 * 86_400_000, Date.now() - 1_000);
+export async function servedMotion(env: Env, id: number): Promise<any> {
+  const body = (await call(env, "GET", "/api/council")).body;
+  return [...body.motions.open, ...body.motions.recent_closed].find((m: { id: number }) => m.id === id);
+}
+// A fake clock for boundary tests: Date.now() answers the given value until restored.
+export function withClock<T>(ms: number | (() => number), fn: () => Promise<T>): Promise<T> {
+  const real = Date.now;
+  Date.now = typeof ms === "number" ? () => ms : ms;
+  return fn().finally(() => {
+    Date.now = real;
+  });
+}

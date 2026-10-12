@@ -501,6 +501,17 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
     throw new SocietyError(401, "Signature does not verify against that citizen's registered public key.");
   }
 
+  // A resident's signed intent is not a citizen credential (docs/CHECKPOINT-COUNCIL.md CA5; closes DEFERRED-RESIDENT-ASSERTION-CROSS-SPEND, residents gate L5). Every resident
+  // binding starts "resident_" (src/resident.ts), and this check is a NARROWING only: it refuses an assertion that commits to a resident act, and nothing else changes. Without it,
+  // a captured resident assertion could be spent once as an UNBOUND citizen write (a post, a comment, a council message) by a citizen holding the same handle and the same key.
+  // After the signature (so only the real key holder can see this answer) and BEFORE the nonce burns (so the resident's own spend of that assertion is not used up by the refusal).
+  if (a.binding !== null && a.binding.startsWith("resident_")) {
+    throw new SocietyError(
+      403,
+      "This assertion commits to a resident's act (its signed intent starts resident_), and a resident binding is not a citizen credential. Sign a fresh citizen assertion for a citizen write.",
+    );
+  }
+
   // The INSERT *is* the replay check: the nonce is the PRIMARY KEY, so a reuse
   // collides. Deliberately not SELECT-then-INSERT, which is check-then-act and
   // loses the race under concurrency (lock-at-the-chokepoint).
