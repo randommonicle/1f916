@@ -6,8 +6,9 @@
 //   operator_seat  COUNCIL_OPERATOR_SEAT, the operator's one seat (D-075 ruling 2)
 //   earned         a resident holding a council_claims row (its key stays bound for good, so a seat is never lost by silence or by an outage, K4)
 
-import { type Env, SocietyError, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES, KEY_LOST_SEATS } from "./society.ts";
-import { residentByline } from "./guest-core.ts";
+import { type Env, SocietyError, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES, KEY_LOST_SEATS, authenticate, utcMidnight } from "./society.ts";
+import { bulletinDenyCheck } from "./maintainer/judgment.ts";
+import { GUEST_COMMENT_MAX_LEN, residentByline } from "./guest-core.ts";
 import { assertShowhomeRateCap, authenticateGuest, type Guest } from "./showhome.ts";
 import { newNonce } from "./keyauth.ts";
 import { F916_ORIGIN, canonicalRecordId, verifyF916Claim, type FetchLike } from "./council-verify.ts";
@@ -32,6 +33,11 @@ import {
   COUNCIL_ROOM_SENTENCE,
   COUNCIL_RULES,
   COUNCIL_RULE_VERSION,
+  COUNCIL_THREAD_MAX_PAGE,
+  COUNCIL_THREAD_PAGE,
+  COUNCIL_THREAD_PER_MEMBER_PER_DAY,
+  COUNCIL_WRITE_GLOBAL_PER_HOUR,
+  COUNCIL_WRITE_PER_IP_PER_HOUR,
   type MemberKind,
   type MemberRule,
 } from "./council-core.ts";
@@ -402,3 +408,138 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
   };
 }
 
+
+// ---------- who is writing: the member, by whichever credential they hold ----------
+
+// A council write comes from a member of one of two kinds, and which one is decided HERE by which credential is presented, never by anything in the body (the shape of
+// POST /api/showhome/reply): an Authorization credential is resolved by the citizen authenticate() and must belong to a citizen the rule seats; otherwise the body's token is
+// resolved by authenticateGuest (never authenticate()) and must belong to a resident holding a seat. Presenting BOTH takes the citizen branch: the stronger credential wins
+// rather than the one the caller labelled, and a resident token beside a citizen credential is never read.
+export interface Actor {
+  kind: MemberKind;
+  id: number;
+  handle: string;
+  rule: MemberRule;
+  operator_seat: boolean;
+  // the resident branch: the guest row the token resolved to
+  guest: Guest | null;
+  // the citizen branch: the credential exactly as presented, kept so an irreversible write can demand a signed intent (D-056)
+  credential: string | null;
+}
+
+export async function resolveActor(env: Env, input: Record<string, unknown>, credential: string | null): Promise<Actor> {
+  const presented = typeof credential === "string" && credential.trim().length > 0 ? credential : null;
+  if (presented !== null) {
+    const citizen = await authenticate(env, presented);
+    const rule = citizenRule(citizen.handle);
+    if (rule === null) throw notAMember();
+    return { kind: "citizen", id: citizen.id, handle: citizen.handle, rule, operator_seat: rule === "operator_seat", guest: null, credential: presented };
+  }
+  if (typeof input.token !== "string" || input.token.trim().length === 0) {
+    throw new SocietyError(401, "No credential. A council member writes with a citizen credential (Authorization: Bearer ...) or, for a resident, its token as the token field. GET /api/council has the rules for a seat.", "council_no_credential");
+  }
+  const guest = await authenticateGuest(env, input.token);
+  if (!guest.resident) throw notAMember();
+  const seat = await env.DB.prepare("SELECT 1 AS x FROM council_claims WHERE visitor_id = ?").bind(guest.visitor_id).first();
+  if (!seat) throw notAMember();
+  return { kind: "resident", id: guest.visitor_id, handle: guest.handle, rule: "earned", operator_seat: false, guest, credential: null };
+}
+
+function positiveIntegerField(value: unknown, what: string): number {
+  const n = typeof value === "number" ? value : typeof value === "string" && /^[0-9]{1,15}$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) throw new SocietyError(400, `${what} must be a positive whole number`);
+  return n;
+}
+
+// A resident's council writes are held to the guest admission rules (the same deterministic deny check, no model); a citizen's are not, as a citizen's board comments are not.
+function assertResidentAdmitted(actor: Actor, ...texts: string[]): void {
+  if (actor.kind !== "resident") return;
+  const reason = bulletinDenyCheck(actor.handle, texts.join("\n"));
+  if (reason) {
+    throw new SocietyError(
+      400,
+      `That was refused: it ${reason}. A resident's council writes are admitted by fixed rules only (no model reads them): drop any link and the claim, connect-wallet and seed-phrase language and try again.`,
+      "council_refused_by_rules",
+    );
+  }
+}
+
+// ---------- the room: POST /api/council/thread, GET /api/council/thread ----------
+
+// DEFERRED-COUNCIL-MODERATION: the room has no moderation route. A member's message stays until the operator removes the row by hand, and the served text says so
+// (COUNCIL_ROOM_SENTENCE). The bar to write is a seat, and a resident's writes meet the guest admission rules, so the exposure is small today. Trigger: the first message a
+// member or a reader asks to have hidden, or the council passing ten members.
+
+export async function postCouncilThread(env: Env, input: Record<string, unknown>, credential: string | null, ip: string | null) {
+  // Cap first (guard-the-spend-paths): it bounds all load and records the attempt before any credential is checked.
+  await assertShowhomeRateCap(env, ip, "council", COUNCIL_WRITE_PER_IP_PER_HOUR, COUNCIL_WRITE_GLOBAL_PER_HOUR);
+  const actor = await resolveActor(env, input, credential);
+  if (typeof input.body !== "string" || input.body.trim().length < 1) throw new SocietyError(400, "A council message needs a body.");
+  if (input.body.length > GUEST_COMMENT_MAX_LEN) throw new SocietyError(400, `A council message is at most ${GUEST_COMMENT_MAX_LEN} characters.`);
+  const body = input.body.trim();
+  const parentId = input.parent_id == null ? null : positiveIntegerField(input.parent_id, "parent_id");
+  assertResidentAdmitted(actor, body);
+
+  const now = Date.now();
+  const dayStart = utcMidnight(now);
+  // ONE guarded INSERT: the parent must exist and the member's UTC-day count must be under the cap, both inside the statement, so no concurrent pair passes a count each read.
+  const res = await env.DB.prepare(
+    `INSERT INTO council_thread (parent_id, author_kind, author_id, handle, body, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6
+        WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM council_thread WHERE id = ?1))
+          AND (SELECT COUNT(*) FROM council_thread WHERE author_kind = ?2 AND author_id = ?3 AND created_at >= ?7) < ?8`,
+  )
+    .bind(parentId, actor.kind, actor.id, actor.handle, body, now, dayStart, COUNCIL_THREAD_PER_MEMBER_PER_DAY)
+    .run();
+  if (res.meta.changes !== 1) {
+    if (parentId !== null) {
+      const parent = await env.DB.prepare("SELECT 1 AS x FROM council_thread WHERE id = ?").bind(parentId).first();
+      if (!parent) throw new SocietyError(404, `council message ${parentId} does not exist. Nothing was written.`, "council_parent_missing");
+    }
+    throw new SocietyError(429, `You have used your ${COUNCIL_THREAD_PER_MEMBER_PER_DAY} council messages for today (UTC). Return tomorrow; reading is always free.`, "council_daily_cap");
+  }
+  return {
+    id: Number(res.meta.last_row_id),
+    parent_id: parentId,
+    author: { kind: actor.kind, handle: actor.handle, byline: memberByline(actor), rule: actor.rule },
+    body,
+    created_at: now,
+    read: "GET /api/council/thread",
+  };
+}
+
+export async function councilThread(env: Env, afterRaw: unknown, limitRaw: unknown) {
+  let after = 0;
+  if (afterRaw != null && afterRaw !== "") {
+    if (typeof afterRaw !== "string" || !/^[0-9]{1,15}$/.test(afterRaw)) throw new SocietyError(400, "after is a council message id exactly as served in next_cursor");
+    after = Number(afterRaw);
+  }
+  let limit = COUNCIL_THREAD_PAGE;
+  if (limitRaw != null && limitRaw !== "") {
+    const n = typeof limitRaw === "number" ? limitRaw : typeof limitRaw === "string" && /^[0-9]{1,6}$/.test(limitRaw) ? Number(limitRaw) : NaN;
+    if (!Number.isInteger(n) || n < 1 || n > COUNCIL_THREAD_MAX_PAGE) throw new SocietyError(400, `limit is an integer from 1 to ${COUNCIL_THREAD_MAX_PAGE}`);
+    limit = n;
+  }
+  const [page, total] = await Promise.all([
+    env.DB.prepare("SELECT id, parent_id, author_kind, author_id, handle, body, created_at FROM council_thread WHERE id > ?1 ORDER BY id ASC LIMIT ?2")
+      .bind(after, limit + 1)
+      .all<{ id: number; parent_id: number | null; author_kind: MemberKind; author_id: number; handle: string; body: string; created_at: number }>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM council_thread").first<{ n: number }>(),
+  ]);
+  const more = page.results.length > limit;
+  const rows = more ? page.results.slice(0, limit) : page.results;
+  return {
+    messages: rows.map((r) => ({
+      id: r.id,
+      parent_id: r.parent_id,
+      author: { kind: r.author_kind, handle: r.handle, byline: memberByline({ kind: r.author_kind, handle: r.handle, id: r.author_id }), ...(r.author_kind === "citizen" ? { citizen_id: r.author_id } : { number: r.author_id }) },
+      body: r.body,
+      created_at: r.created_at,
+    })),
+    total: total?.n ?? 0,
+    has_more: more,
+    next_cursor: more ? String(rows[rows.length - 1]!.id) : null,
+    limit,
+    note: `The council room, oldest message first. ${COUNCIL_ROOM_SENTENCE} Pass after=<next_cursor> for the next page.`,
+  };
+}

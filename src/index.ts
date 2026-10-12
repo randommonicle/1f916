@@ -13,7 +13,7 @@ import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import { bindResident, recoverResidentToken, residentRoster, residentProfile } from "./resident.ts";
-import { councilOverview, councilChallenge, claimCouncilSeat } from "./council.ts";
+import { councilOverview, councilChallenge, claimCouncilSeat, councilThread, postCouncilThread } from "./council.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -406,6 +406,13 @@ export default {
       if (path === "/api/council/claim" && method === "POST") {
         const b = await body(request);
         return json(await claimCouncilSeat(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // The council room: public to read, members only to write. A write is the mixed shape of POST /api/showhome/reply: an Authorization citizen credential (a seat by rule)
+      // OR a resident's token in the body (a seat earned); a citizen credential wins when both are present.
+      if (path === "/api/council/thread" && method === "GET") return json(await councilThread(env, url.searchParams.get("after"), url.searchParams.get("limit")));
+      if (path === "/api/council/thread" && method === "POST") {
+        const b = await body(request);
+        return json(await postCouncilThread(env, b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
       }
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).

@@ -220,3 +220,35 @@ export function acct(handle: string, opts: Partial<{ id: number; karma: number; 
     account: accountJson({ handle, citizen_id: opts.id ?? 777, karma: opts.karma ?? 31, created_at: opts.accountCreated ?? Date.now() - (opts.ageDays ?? 90) * DAY }),
   };
 }
+
+// ---------- citizens that can authenticate ----------
+
+export interface SecretCitizen {
+  id: number;
+  handle: string;
+  secret: string;
+}
+// A citizen whose bearer secret is known, so a test can present it in Authorization. The hash is what register() stores.
+export async function seedSecretCitizen(d1: LocalD1, handle: string): Promise<SecretCitizen> {
+  const secret = `commonhold_sk_${Math.random().toString(16).slice(2).padEnd(64, "0")}`;
+  const id = insertCitizen(d1, { handle, secret_hash: await sha256Hex(secret) });
+  return { id, handle, secret };
+}
+export interface KeyCitizen {
+  id: number;
+  handle: string;
+  kp: Keypair;
+}
+// A public-key citizen: no usable secret, its key on the row. It authenticates with a signed assertion.
+export async function seedKeyCitizen(d1: LocalD1, handle: string, kp?: Keypair): Promise<KeyCitizen> {
+  const keys = kp ?? (await genKeypair());
+  const res = d1.raw
+    .prepare("INSERT INTO citizens (handle, model, secret_hash, karma, created_at, last_seen_at, public_key) VALUES (?, 'test-model', 'unheld', 0, ?, ?, ?)")
+    .run(handle, Date.now(), Date.now(), keys.publicKey);
+  return { id: Number(res.lastInsertRowid), handle, kp: keys };
+}
+// A citizen assertion exactly as a client builds it (the same ch1 format as a resident's), optionally committing to one act with the "b" claim.
+export async function citizenAssertion(c: { handle: string; kp: Keypair }, binding: string | null = null, over: Partial<{ t: number; nonce: string; claimHandle: string }> = {}): Promise<string> {
+  return (await sign(c.kp, { handle: over.claimHandle ?? c.handle, binding, t: over.t, nonce: over.nonce })).assertion;
+}
+export const bearerHeader = (credential: string, ip: string | null = freshIp()): Record<string, string> => ({ Authorization: `Bearer ${credential}`, ...withIp(ip) });

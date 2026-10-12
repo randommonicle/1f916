@@ -280,6 +280,7 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
       ["POST", "/api/resident/token", "resident_assertion"],
       ["POST", "/api/council/challenge", "visitor_token"],
       ["POST", "/api/council/claim", "visitor_token"],
+      ["POST", "/api/council/thread", "mixed"],
       ["POST", "/api/showhome/reply", "mixed"],
       ["POST", "/api/showhome/enter", "none"],
       ["POST", "/api/governance/sweep", "none"],
