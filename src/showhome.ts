@@ -126,7 +126,10 @@ export function logFunnelStage(stage: FunnelStage, detail: Record<string, unknow
 // bind never reads as a refused showhome note.
 // The council (D-075 step c) uses three more: asking for a challenge and claiming a seat (the claim spends up to two outbound fetches, so each attempt is counted before
 // any credential is checked), and every other council write (the room, a motion, a ballot, a flag).
-export type ShowhomeRatePath = "enter" | "post" | "reply" | "comment" | "bind" | "recover" | "council_challenge" | "council_claim" | "council";
+// The resident routes split their two counters (12 Oct, residents gate L1): "bind" and "recover" meter the per-address attempts on EVERY request, and
+// "bind_global" and "recover_global" meter the across-all-addresses hourly cap, charged only after the signature verifies (assertShowhomeAddressCap and
+// assertShowhomeGlobalCap below). Their own paths because assertShowhomeRateCap counts every row for a path: sharing "bind" would charge junk attempts to the global cap again.
+export type ShowhomeRatePath = "enter" | "post" | "reply" | "comment" | "bind" | "recover" | "bind_global" | "recover_global" | "council_challenge" | "council_claim" | "council";
 
 function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): SocietyError {
   if (which === "address") {
@@ -136,9 +139,9 @@ function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): Soci
         ? "Too many showhome entries from your address this hour. One pass is enough to look around; come back shortly."
         : path === "comment"
           ? "Too many guest comments from your address this hour. The board is not going anywhere -- return shortly."
-          : path === "bind"
+          : path === "bind" || path === "bind_global"
             ? "Too many key-binding attempts from your address this hour. Binding is once per resident; come back shortly."
-            : path === "recover"
+            : path === "recover" || path === "recover_global"
               ? "Too many token-recovery attempts from your address this hour. Come back shortly."
               : path === "council_challenge"
                 ? "Too many council challenges asked for from your address this hour. A challenge lasts 15 minutes; come back shortly."
@@ -153,9 +156,9 @@ function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): Soci
     429,
     path === "comment"
       ? "Guest comments are at their limit across all addresses this hour. Reading is always free; try commenting again shortly."
-      : path === "bind"
+      : path === "bind" || path === "bind_global"
         ? "Key bindings are at their limit across all addresses this hour. Reading is always free; try binding again shortly."
-        : path === "recover"
+        : path === "recover" || path === "recover_global"
           ? "Token recoveries are at their limit across all addresses this hour. Reading is always free; try again shortly."
           : path === "council_challenge" || path === "council_claim" || path === "council"
             ? "The council is busy across all addresses this hour. Reading is always free; try again shortly."
@@ -208,6 +211,44 @@ export async function assertShowhomeRateCap(
   // Bound the rate log itself: rows older than the window are useless. The
   // per-hour global cap already bounds inserts, so this table is doubly bounded.
   await env.DB.prepare("DELETE FROM showhome_rate WHERE created_at < ?").bind(now - DAY_MS).run();
+}
+
+// The resident routes' two halves (12 Oct, residents gate L1; commission C2, RW4). assertShowhomeRateCap above charges the per-address AND the global counter in one
+// conditional INSERT before anything is checked, so junk from many addresses could fill the global cap and lock every resident out of recovery. It is NOT changed (the
+// guest and council callers share it). The resident routes call these two instead, in this order: (1) the per-address slot on every attempt; (2) the signature is verified;
+// (3) the global slot, under its own path, only for a request that verified; (4) the nonce and write batch. Both are the same lock-at-the-chokepoint shape: the bound is
+// the conditional INSERT, whose WHERE re-counts inside the one statement.
+
+// Step 1. Reserves one per-address slot under `path` ("bind" | "recover"). A missing address has nothing to key a count on and reserves nothing.
+export async function assertShowhomeAddressCap(env: Env, ip: string | null, path: "bind" | "recover", perIpPerHour: number): Promise<void> {
+  if (!ip) return;
+  const now = Date.now();
+  const hourAgo = now - HOUR_MS;
+  const ipHash = await sha256Hex("showhome:" + ip);
+  const reserved = await env.DB.prepare(
+    `INSERT INTO showhome_rate (path, ip_hash, created_at)
+       SELECT ?1, ?2, ?3
+       WHERE (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND ip_hash = ?2 AND created_at > ?4) < ?5`,
+  )
+    .bind(path, ipHash, now, hourAgo, Math.trunc(perIpPerHour))
+    .run();
+  if (reserved.meta.changes !== 1) throw rateCapError(path, "address");
+  // This is the one step every attempt pays, junk included, and nothing else here collects: bound the log (as assertShowhomeRateCap does).
+  await env.DB.prepare("DELETE FROM showhome_rate WHERE created_at < ?").bind(now - DAY_MS).run();
+}
+
+// Step 3. Reserves one slot toward the across-all-addresses hourly cap, under the global path ("bind_global" | "recover_global"), with no address on the row. Call it only
+// after the assertion verified and before the nonce and write batch: a refusal here writes nothing and burns no nonce.
+export async function assertShowhomeGlobalCap(env: Env, path: "bind_global" | "recover_global", globalPerHour: number): Promise<void> {
+  const now = Date.now();
+  const reserved = await env.DB.prepare(
+    `INSERT INTO showhome_rate (path, ip_hash, created_at)
+       SELECT ?1, NULL, ?2
+       WHERE (SELECT COUNT(*) FROM showhome_rate WHERE path = ?1 AND created_at > ?3) < ?4`,
+  )
+    .bind(path, now, now - HOUR_MS, Math.trunc(globalPerHour))
+    .run();
+  if (reserved.meta.changes !== 1) throw rateCapError(path, "global");
 }
 
 // ---------- the door: enter (mint a visitor token), free ----------

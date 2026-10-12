@@ -93,6 +93,15 @@ test("claim: a proof comment from an old, reputable account seats the resident, 
     const wren = served.members.find((m: { handle: string }) => m.handle === "wren");
     assert.equal(wren.rule, "earned");
     assert.equal(wren.evidence.record_sha256, row.record_sha256);
+    // R3 (12 Oct, council gate L3): the stored record text is NOT served, on the seat's own answer or on the roster. The link, the hashes and which proof strings were
+    // found are. (mutant: record_body is put back into the SELECT and the projection, or the claim response spreads the whole evidence)
+    assert.equal("record_body" in out.body.evidence, false, "the claim response carries no record text");
+    assert.equal("record_body" in wren.evidence, false, "the roster carries no record text");
+    assert.ok(!JSON.stringify(out.body).includes(ch.text_to_post), "the proof text is nowhere in the claim response");
+    assert.ok(!JSON.stringify(served).includes(ch.text_to_post), "the proof text is nowhere in GET /api/council");
+    assert.deepEqual(out.body.evidence.proof_found, { nonce: true, resident_number: true, public_key: true });
+    assert.deepEqual(wren.evidence.proof_found, { nonce: true, resident_number: true, public_key: true });
+    assert.equal(out.body.evidence.record_link, `https://1f916.ai/api/comment/${RID}`);
     assert.equal(wren.evidence.account_id, "777");
     assert.equal(served.counts.earned, 1);
   } finally {
@@ -579,7 +588,11 @@ test("the stored evidence survives the proof's later deletion and the platform's
   try {
     const e = await seedEarned(d1, "finch", { record_body: "evidence as read" });
     const members = await councilMembers(env, Date.now());
-    assert.equal(members.find((m) => m.handle === "finch")!.evidence!.record_body, "evidence as read");
+    // The stored text is not part of the served member (R3, 12 Oct): the link, the hashes and the proof flags are. The column itself stays (K8.3).
+    const evidence = members.find((m) => m.handle === "finch")!.evidence!;
+    assert.equal("record_body" in evidence, false);
+    assert.deepEqual(evidence.proof_found, { nonce: true, resident_number: true, public_key: true });
+    assert.equal((d1.raw.prepare("SELECT record_body FROM council_claims").get() as { record_body: string }).record_body, "evidence as read", "the column still holds what was read");
     const served = await call(env, "GET", "/api/council"); // the global fetch is the throwing guard: any outward read would have failed this call
     assert.equal(served.status, 200);
     assert.equal(served.body.members.find((m: { handle: string }) => m.handle === "finch").number, e.number);

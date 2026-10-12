@@ -294,7 +294,7 @@ export const ROUTES: readonly RouteSpec[] = [
     method: "GET",
     path: "/api/council",
     auth: "none",
-    description: "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules, the evidence read for each earned seat, and the motions. Never fetches outward.",
+    description: "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules, each earned seat's evidence (the record's link, the hashes, which proof strings were found; never the record's text), and the motions. Never fetches outward.",
     grepFor: 'path === "/api/council" && method === "GET"',
   },
   {

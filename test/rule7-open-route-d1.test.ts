@@ -2,7 +2,7 @@
 // vote is open, the operator opens and closes no topic" and "Failed with quorum reached ... the power retires. No new topic opens, so none is closed to make
 // room"). POST /api/maintainer/topic (and openTopic under it) refuses with a 409 that names proposal 8, writing nothing and logging no moderation row, while the
 // vote is open, between its close and its tally, after it retired the power, and when it cannot be read (the operator-only route fails closed); it opens as
-// before when the vote passed, failed for want of quorum, or does not exist (a fresh fork and every older fixture). Proposal rows are real, in the D1 harness.
+// before when the vote passed or does not exist (a fresh fork and every older fixture). Proposal rows are real, in the D1 harness.
 // Every guard was red-proofed by mutation (docs/CHECKPOINT-DAILY-LOOP-RULE7-STATUS.md carries the ledger).
 //
 // Run just this file: node --experimental-strip-types --test "test/rule7-open-route-d1.test.ts"
@@ -82,7 +82,8 @@ const CASES: Case[] = [
   { name: "unreadable (the read throws)", row: { status: "open", closes_at: CLOSES_FUTURE }, throws: true, refusal: /proposal 8.*could not be read.*fails closed/ },
   { name: "passed", row: { status: "passed", closes_at: CLOSES_PAST, yes: 8, no: 1, abstain: 0, eligible: 13 }, refusal: null },
   { name: "executed", row: { status: "executed", closes_at: CLOSES_PAST, yes: 8, no: 1, abstain: 0, eligible: 13 }, refusal: null },
-  { name: "failed without quorum", row: { status: "failed", closes_at: CLOSES_PAST, yes: 4, no: 1, abstain: 1, eligible: 13 }, refusal: null },
+  // 12 Oct (D-075 note, options B + C): no longer opens. The operator suspended its own power until a citizens' vote with quorum decides it.
+  { name: "failed without quorum (the operator's own suspension)", row: { status: "failed", closes_at: CLOSES_PAST, yes: 4, no: 1, abstain: 1, eligible: 13 }, refusal: /proposal 8.*closed without quorum.*the operator has suspended its own power to open a standing topic until a citizens' vote with quorum decides it.*at least 2 citizens outside the operator's list.*within 30 days; today the count is 0/ },
   { name: "absent (no proposal 8: a fresh fork, every older fixture)", row: null, refusal: null },
 ];
 

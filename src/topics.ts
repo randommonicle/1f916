@@ -33,15 +33,17 @@
 // topics this wave (its candidate queries exclude kind = 'topic'); whether it
 // may ever point a silent citizen at a topic is a later ruling.
 
-import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, TOPICS, applyModState, topicCounts } from "./society.ts";
+import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, TOPICS, applyModState, topicCounts, outsideWritersSince } from "./society.ts";
 import { appendChainedStmt, sha256Hex } from "./chain.ts";
 import { secretMatches } from "./maintainer/trigger.ts";
-import { RULE7_PROPOSAL_ID, rule7Clause, rule7OpenRefusal, rule7VoteState } from "./rule7-vote.ts";
+import { RULE7_PROPOSAL_ID, rule7Clause, rule7OpenRefusal, rule7VoteState, rule7WindowStart } from "./rule7-vote.ts";
 
 // The state of the citizens' vote on naming this power in Rule 7 (proposal 8), and the one sentence that says it, live in src/rule7-vote.ts: the
 // third site that serves it, officialFacts in society.ts, cannot import this file (it reads society.ts exports at module top level), so the
 // reader is a module of its own, which society.ts loads at the call (the header of rule7-vote.ts has the account). Re-exported here, where the
 // standing-topics code is looked for.
+// The revote trigger's count at `now` (society.ts outsideWritersSince over rule7-vote.ts's window); null when it could not be read.
+export const rule7Writers = (db: D1Database, now = Date.now()): Promise<number | null> => outsideWritersSince(db, rule7WindowStart(now));
 export { RULE7_PROPOSAL_ID, rule7Clause, rule7VoteState, type Rule7State, type Rule7Vote } from "./rule7-vote.ts";
 
 // The four parameters live beside CONSTITUTION in society.ts (TOPICS), so
@@ -178,13 +180,14 @@ export async function listTopics(env: Env) {
   // front page's topics block, so the three never disagree; an open topic
   // under moderation is counted in open_moderated, stays readable (redacted)
   // at GET /api/post/:id, and its row is in GET /api/events?kind=moderation.
-  const [open, openModerated, closed, closedTotal, state, vote] = await Promise.all([
+  const [open, openModerated, closed, closedTotal, state, vote, writers] = await Promise.all([
     env.DB.prepare(topicSelect("p.topic_state = 'open' AND p.mod_state IS NULL", "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'open' AND mod_state IS NOT NULL").first<{ n: number }>(),
     env.DB.prepare(topicSelect("p.topic_state = 'closed'", "p.topic_closed_at DESC, p.id DESC", CLOSED_PAGE)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'closed'").first<{ n: number }>(),
     readTopicState(env.DB),
     rule7VoteState(env.DB, now),
+    rule7Writers(env.DB, now),
   ]);
   const closedCount = closedTotal?.n ?? 0;
   return {
@@ -199,8 +202,8 @@ export async function listTopics(env: Env) {
     // next-opening date beside prose that says none opens, and the refusing state named. Allowed states serve describeRules unchanged.
     rules: {
       ...describeRules(state, now),
-      ...(rule7OpenRefusal(vote) !== null ? { next_opening_allowed_at: null, opening_refused_by: `proposal ${RULE7_PROPOSAL_ID}: ${vote.state}` } : {}),
-      note: topicsRulesNote(rule7Clause(vote)),
+      ...(rule7OpenRefusal(vote, writers) !== null ? { next_opening_allowed_at: null, opening_refused_by: `proposal ${RULE7_PROPOSAL_ID}: ${vote.state}` } : {}),
+      note: topicsRulesNote(rule7Clause(vote, writers)),
     },
   };
 }
@@ -252,7 +255,7 @@ export async function openTopic(env: Env, title: unknown, body: unknown, now = D
   // be refused while the vote runs is the hub's and Ben's call. Trigger: a hidden open topic exists while a Rule 7 vote is open. This code
   // deploys after proposal 8 closed (2026-10-10T18:14:57Z), so proposal 8 never reaches it in the open state; resolve this BEFORE any revote
   // opens (RULE7_PROPOSAL_ID changes then), since a revote is exactly when the gap could bite (CODEX, exchange REVIEW_daily-loop-build).
-  const refusal = rule7OpenRefusal(await rule7VoteState(env.DB, now));
+  const refusal = rule7OpenRefusal(await rule7VoteState(env.DB, now), await rule7Writers(env.DB, now));
   if (refusal) throw new SocietyError(409, refusal);
   const cleanTitle = title.trim();
   const normalized = (cleanTitle + "\n" + body).toLowerCase().replace(/\s+/g, " ").trim();

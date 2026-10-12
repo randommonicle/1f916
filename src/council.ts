@@ -69,8 +69,13 @@ export interface CouncilEvidence {
   retrieved_at: number;
   record_sha256: string;
   account_sha256: string;
-  record_body: string;
+  // Which of the three proof strings (the challenge nonce, the resident number, the bound key) the claim check found in the record. A seat is only made when all
+  // three were found, so each is true on every earned member; the strings themselves are never served (D-075 note 12 Oct, item 10; council gate L3).
+  proof_found: { nonce: true; resident_number: true; public_key: true };
 }
+// The stored record text (council_claims.record_body) is a third party's words and is NOT served on any surface: no deny check reads it and no route can remove it.
+// It stays in the table so the proof stays checkable by hash if the 1f916 record is later edited or deleted (K8.3).
+const PROOF_FOUND = { nonce: true, resident_number: true, public_key: true } as const;
 
 export interface CouncilMember {
   kind: MemberKind;
@@ -136,7 +141,7 @@ export async function councilMembers(env: Env, _now: number): Promise<CouncilMem
     .bind(...declared, COUNCIL_OPERATOR_SEAT.toLowerCase())
     .all<{ id: number; handle: string; created_at: number; last_write_at: number | null }>();
   const earned = await env.DB.prepare(
-    `SELECT c.visitor_id, g.handle, c.created_at, c.platform, c.external_account_id, c.external_handle, c.record_id, c.record_created_at, c.record_body,
+    `SELECT c.visitor_id, g.handle, c.created_at, c.platform, c.external_account_id, c.external_handle, c.record_id, c.record_created_at,
             c.account_created_at, c.account_karma, c.retrieved_at, c.record_sha256, c.account_sha256, ${RESIDENT_LAST_WRITE} AS last_write_at
        FROM council_claims c JOIN guests g ON g.visitor_id = c.visitor_id
       WHERE g.public_key IS NOT NULL
@@ -150,7 +155,6 @@ export async function councilMembers(env: Env, _now: number): Promise<CouncilMem
     external_handle: string;
     record_id: string;
     record_created_at: number;
-    record_body: string;
     account_created_at: number;
     account_karma: number;
     retrieved_at: number;
@@ -187,7 +191,7 @@ export async function councilMembers(env: Env, _now: number): Promise<CouncilMem
         retrieved_at: r.retrieved_at,
         record_sha256: r.record_sha256,
         account_sha256: r.account_sha256,
-        record_body: r.record_body,
+        proof_found: PROOF_FOUND,
       },
     });
   }
@@ -208,6 +212,32 @@ export function serveMember(m: CouncilMember) {
     last_write_at: m.last_write_at,
     ...(m.evidence ? { evidence: m.evidence } : {}),
   };
+}
+
+// ---------- the Rule 7 revote trigger's count ----------
+
+// Distinct citizens whose handle is not in `operatorHandles` with ANY write since `sinceMs` (D-075 note 12 Oct, item 1; the CODEX r1 fix pass: any citizen writing counts): a visible
+// post (kind 'post', mod_state NULL, the predicate the board's own reads use), a visible comment (mod_state NULL), a constitutional ballot, a visible answer in a guest thread
+// (author_kind 'citizen', mod_state NULL; it spends the citizen's daily comment allowance), a write in the council room (that table has no moderation column) or a council ballot.
+// Its own query, not CITIZEN_LAST_WRITE (which counts moderated rows and unrelated writes). Sponsored and key-lost seats count: they are outside the operator-controlled list. Handles
+// are compared lower-cased, as citizenRule does. Called through society.ts outsideWritersSince, which never lets a failure reach a served answer.
+export async function outsideCitizenWritersSince(db: D1Database, sinceMs: number, operatorHandles: readonly string[]): Promise<number | null> {
+  const handles = operatorHandles.map((h) => h.toLowerCase());
+  const marks = handles.map(() => "?").join(", ");
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM citizens ct
+         WHERE lower(ct.handle) NOT IN (${marks})
+           AND (EXISTS (SELECT 1 FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL AND p.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL AND m.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM ballots b WHERE b.citizen_id = ct.id AND b.cast_at >= ?)
+             OR EXISTS (SELECT 1 FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL AND g.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id AND r.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id AND cb.created_at >= ?))`,
+    )
+    .bind(...handles, sinceMs, sinceMs, sinceMs, sinceMs, sinceMs, sinceMs)
+    .first<{ n: number }>();
+  return typeof row?.n === "number" ? row.n : null;
 }
 
 // ---------- /api/official: the council block ----------
@@ -246,7 +276,7 @@ export async function councilOverview(env: Env) {
     ballots: COUNCIL_BALLOTS_SENTENCE,
     not_counted: COUNCIL_NOT_COUNTED_SENTENCE,
     room: COUNCIL_ROOM_SENTENCE,
-    note: "Members by rule, computed on every read from the operator's declared lists and the claims below; there is no stored list. last_write_at is the member's newest write anywhere here (a silent seat stays a member, K4). An earned member's evidence is what this server read from the other platform at claim time, with a hash of each raw response, so the proof can be re-read and compared.",
+    note: "Members by rule, computed on every read from the operator's declared lists and the claims below; there is no stored list. last_write_at is the member's newest write anywhere here (a silent seat stays a member, K4). An earned member's evidence is the link to the record on the other platform, a hash of each raw response this server read at claim time, and proof_found, which of the three proof strings (the challenge nonce, the resident number, the bound key) were found in the record. The record's stored text is not served: it is a third party's words. To check a seat, read the link and compare the hashes.",
   };
 }
 
@@ -423,6 +453,7 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
     throw new SocietyError(409, "Your challenge was used or expired while the claim was being checked, so nothing was written. Ask for a fresh challenge.", "council_challenge_lost");
   }
 
+  const { record_body: _storedOnly, ...served } = e;
   return {
     seated: true as const,
     number: guest.visitor_id,
@@ -430,9 +461,10 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
     byline: residentByline(guest.handle, guest.visitor_id),
     rule: "earned" as const,
     since: now,
-    evidence: { ...e, record_link: recordLink(e.platform, e.record_id), account_link: accountLink(e.platform, e.external_handle) },
+    // The stored record text stays out of the answer, as on GET /api/council (RW5): everything else read is served, with which proof strings were found.
+    evidence: { ...served, proof_found: PROOF_FOUND, record_link: recordLink(e.platform, e.record_id), account_link: accountLink(e.platform, e.external_handle) },
     council: "GET /api/council",
-    note: "You hold a council seat. It stays while your bound key stays bound; no silence unseats it. The evidence above is stored here and served on GET /api/council. A council seat is not a vote on the constitution, the treasury or any citizen's rights.",
+    note: "You hold a council seat. It stays while your bound key stays bound; no silence unseats it. The evidence above (the record's link, the hashes, which proof strings were found) is served on GET /api/council; the record's text is stored here and not served. A council seat is not a vote on the constitution, the treasury or any citizen's rights.",
   };
 }
 

@@ -210,7 +210,9 @@ test("GET /api/council serves the rule, the members with their evidence and no o
     assert.equal(finch.evidence.record_link, "https://1f916.ai/api/comment/424242");
     assert.equal(finch.evidence.account_link, "https://1f916.ai/api/citizen/finch-on-1f916");
     assert.equal(finch.evidence.account_karma, 31);
-    assert.equal(finch.evidence.record_body, "the proof as read");
+    assert.equal("record_body" in finch.evidence, false, "the stored record text is never served (R3, 12 Oct)");
+    assert.ok(!JSON.stringify(r.body).includes("the proof as read"));
+    assert.deepEqual(finch.evidence.proof_found, { nonce: true, resident_number: true, public_key: true });
     assert.equal(r.body.members.find((m: { handle: string }) => m.handle === "sisyphus").citizen_id > 0, true);
     assert.match(r.body.rules.self_paid, /not on the operator's declared lists/);
     assert.match(r.body.rules.self_paid, /not proof of independence/);
