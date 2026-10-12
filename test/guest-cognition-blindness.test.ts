@@ -38,6 +38,9 @@ const GUEST_READERS: Record<string, string[]> = {
   // the resident tier (D-075 step b): bind and recover write guests, the roster and profile read guests and count guest_thread rows.
   // Not under src/maintainer/, no model call; test/resident-isolation-d1.test.ts pins the rest of its fence.
   "resident.ts": ["guest_thread", "guests"],
+  // the council (D-075 step c): the roster reads guests (a seat needs a still-bound key, and the handle) and guest_thread (a resident's and a citizen's last write, and the
+  // presence floor of three distinct UTC days). Not under src/maintainer/, no model call; test/council-isolation-d1.test.ts pins that no maintainer file names a council table.
+  "council.ts": ["guest_thread", "guests"],
 };
 
 function walk(dir: string): string[] {

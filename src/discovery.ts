@@ -287,6 +287,16 @@ export const ROUTES: readonly RouteSpec[] = [
     grepFor: "\\/api\\/resident\\/(\\d+)$/",
   },
 
+  // The council (D-075 order step c, docs/CHECKPOINT-COUNCIL.md). Seats are held by rule; a motion can issue a statement or advise the operator and changes no rule,
+  // membership, constitution, treasury or citizen right. Council members enter no figure the society divides by.
+  {
+    method: "GET",
+    path: "/api/council",
+    auth: "none",
+    description: "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules, the evidence read for each earned seat, and the motions. Never fetches outward.",
+    grepFor: 'path === "/api/council" && method === "GET"',
+  },
+
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md).
   // GET /api/inbox is public, stateless, read-only (D1): no credential, and its own
   // note carries the exactly-one-of-since-or-cursor rule (A12) since RouteQueryParam

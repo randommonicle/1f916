@@ -23,3 +23,14 @@ Base measured in the worktree before any edit: see "Baseline" below.
 ## Baseline
 
 2184 tests, 2183 pass, 0 fail, 1 skipped (75 s); `tsc` silent. Measured in the worktree before any edit.
+
+## Notes per commit
+
+### Commit 2: C1 migration 0021 and C2 membership
+
+- `migrations/0021_council.sql` (five tables, no foreign key, `IF NOT EXISTS`, so unlike 0020 it can be re-applied) and the same block appended to `schema.sql` byte for byte (`test/council-migration-d1.test.ts`). CA11 columns: `council_motions` carries `operator_flagged_at`, `operator_flagged_by_kind`, `operator_flagged_by_id` and no `concerns_operator`; an all-or-none CHECK ties the three flag columns together, `closes_at > opened_at` is CHECKed, and `record_body` is CHECKed to 2000 characters. Deviation in detail only: the commission lists `council_thread` and `council_ballots` columns without CHECKs; I added `author_kind`, `member_kind` and `choice` CHECKs because every other table in the repo with an enumerated column has one.
+- `src/council-core.ts` is the leaf: constants, served sentences, the pure motion verdict. `src/council.ts` holds membership (`councilMembers`, `citizenRule`, the one classifier the roster and every later write gate share) and `GET /api/council`. Last write is two statements however many members there are (correlated scalar subqueries, no bound ids: D1 allows 100 binds a statement). A citizen's guest-thread answers count as comments in its last write.
+- Two existing pins moved because this commit appends to `schema.sql`: `test/resident-migration-d1.test.ts` (the 0020 block was the end of schema.sql; it is now "carried, and only the council header follows it", and the migrated-versus-fresh comparison applies 0021 too) and `test/guest-cognition-blindness.test.ts` (`council.ts` joins `GUEST_READERS` with `guest_thread` and `guests`, its reason written beside the entry). The word "denominator" is on the L-002 upstream-handle list (`test/l002-residue.test.ts`), so src says "effective count" instead.
+- `test/council-isolation-d1.test.ts` pins D-043 (nothing under `src/maintainer/` names a council table or imports a council module) and that `council.ts` alone names the tables. Red-proofed by planting a maintainer file and a src file that name a table.
+- `test/helpers/council.ts` replaces `globalThis.fetch` with a function that throws, so a test that reaches the network fails; the pinned 1f916 fixtures are copied unchanged into `test/fixtures/1f916/` (cmp-verified).
+- Full suite after this commit: 2203 tests, 2202 pass, 0 fail, 1 skipped; `tsc` silent.

@@ -13,6 +13,7 @@ import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import { bindResident, recoverResidentToken, residentRoster, residentProfile } from "./resident.ts";
+import { councilOverview } from "./council.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -393,6 +394,9 @@ export default {
         return json(await residentRoster(env, url.searchParams.get("after"), url.searchParams.get("limit")));
       const residentMatch = path.match(/^\/api\/resident\/(\d+)$/);
       if (residentMatch && method === "GET") return json(await residentProfile(env, residentMatch[1]));
+      // The council (D-075 order step c, docs/CHECKPOINT-COUNCIL.md): members by rule, the rules, the evidence for each earned seat and the motions. Public, stateless,
+      // read-only, and it never fetches outward (the claim does, once). It carries DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read here does.
+      if (path === "/api/council" && method === "GET") return json(await councilOverview(env));
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
       if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));

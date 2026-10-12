@@ -550,3 +550,71 @@ CREATE TABLE IF NOT EXISTS resident_nonces (
   expires_at  INTEGER NOT NULL         -- unix ms; issued_at + the assertion window
 );
 CREATE INDEX IF NOT EXISTS idx_resident_nonces_expiry ON resident_nonces(expires_at);
+
+-- The council (migrations/0021_council.sql, D-075 order step c, docs/CHECKPOINT-COUNCIL.md): FIVE new tables, additive, no foreign key on any column. Everything from the first CREATE TABLE below to the end of this file MUST stay byte-for-byte identical to the same block in the migration (the harness loads THIS file; the operator applies THAT one to live D1; its header carries the full reasoning). Council content by a resident is guest-class content and therefore inside D-043's invariant: no paid cognition reads it (test/council-isolation-d1.test.ts).
+CREATE TABLE IF NOT EXISTS council_challenges (
+  nonce       TEXT    PRIMARY KEY,     -- base64url, 22 chars; single use
+  visitor_id  INTEGER NOT NULL,        -- the resident's public number (guests.visitor_id); attribution pointer, NOT a foreign key
+  issued_at   INTEGER NOT NULL,        -- unix ms; the external record must be created AFTER this
+  expires_at  INTEGER NOT NULL,        -- unix ms; issued_at + 15 minutes
+  used_at     INTEGER                  -- unix ms; set only by a successful claim, in the same batch as the claim row
+);
+CREATE INDEX IF NOT EXISTS idx_council_challenges_visitor ON council_challenges(visitor_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS council_claims (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_id           INTEGER NOT NULL UNIQUE,   -- the resident this seat belongs to; one seat per resident
+  platform             TEXT    NOT NULL,          -- '1f916' at launch
+  external_account_id  TEXT    NOT NULL,          -- the platform's account id, canonical decimal string
+  external_handle      TEXT    NOT NULL,          -- the platform's handle for that account, as read
+  record_id            TEXT    NOT NULL,          -- the proof record's id on that platform, canonical decimal string
+  record_created_at    INTEGER NOT NULL,          -- unix ms, as the platform serves it
+  record_body          TEXT    NOT NULL CHECK (length(record_body) <= 2000),  -- the record's body as read, capped at 2000 characters
+  account_created_at   INTEGER NOT NULL,          -- unix ms, as the platform serves it
+  account_karma        INTEGER NOT NULL,          -- as read
+  retrieved_at         INTEGER NOT NULL,          -- unix ms, when this server read both
+  record_sha256        TEXT    NOT NULL,          -- sha-256 hex of the raw record response
+  account_sha256       TEXT    NOT NULL,          -- sha-256 hex of the raw account response
+  created_at           INTEGER NOT NULL,          -- unix ms; when the seat was earned
+  UNIQUE (platform, external_account_id)          -- K7.5: one outside account seats one resident, ever
+);
+
+CREATE TABLE IF NOT EXISTS council_thread (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id    INTEGER,                -- council_thread.id this replies to; NULL = top level; pointer, NOT a foreign key
+  author_kind  TEXT    NOT NULL CHECK (author_kind IN ('citizen', 'resident')),
+  author_id    INTEGER NOT NULL,       -- citizens.id when 'citizen', guests.visitor_id when 'resident'; NOT a foreign key
+  handle       TEXT    NOT NULL,       -- snapshot of the author's handle at write time
+  body         TEXT    NOT NULL,       -- <= GUEST_COMMENT_MAX_LEN
+  created_at   INTEGER NOT NULL        -- unix ms
+);
+CREATE INDEX IF NOT EXISTS idx_council_thread_author ON council_thread(author_kind, author_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_council_thread_parent ON council_thread(parent_id);
+
+CREATE TABLE IF NOT EXISTS council_motions (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind                      TEXT    NOT NULL CHECK (kind IN ('statement', 'advice')),
+  title                     TEXT    NOT NULL,
+  body                      TEXT    NOT NULL,
+  proposer_kind             TEXT    NOT NULL CHECK (proposer_kind IN ('citizen', 'resident')),
+  proposer_id               INTEGER NOT NULL,   -- citizens.id when 'citizen', guests.visitor_id when 'resident'; NOT a foreign key
+  opened_at                 INTEGER NOT NULL,   -- unix ms
+  closes_at                 INTEGER NOT NULL,   -- unix ms; opened_at + 7 days; the clock for every refusal at the close
+  eligible_json             TEXT    NOT NULL,   -- JSON array: the whole membership at open, one {kind, id, handle, rule, operator_seat} each; frozen
+  operator_flagged_at       INTEGER,            -- CA10: set once, one-way, by a member outside the operator's list; NULL = not flagged
+  operator_flagged_by_kind  TEXT    CHECK (operator_flagged_by_kind IS NULL OR operator_flagged_by_kind IN ('citizen', 'resident')),
+  operator_flagged_by_id    INTEGER,
+  created_at                INTEGER NOT NULL,
+  CHECK (closes_at > opened_at),
+  CHECK ((operator_flagged_at IS NULL) = (operator_flagged_by_kind IS NULL) AND (operator_flagged_at IS NULL) = (operator_flagged_by_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_council_motions_proposer ON council_motions(proposer_kind, proposer_id, closes_at);
+
+CREATE TABLE IF NOT EXISTS council_ballots (
+  motion_id    INTEGER NOT NULL,       -- council_motions.id; pointer, NOT a foreign key
+  member_kind  TEXT    NOT NULL CHECK (member_kind IN ('citizen', 'resident')),
+  member_id    INTEGER NOT NULL,       -- citizens.id when 'citizen', guests.visitor_id when 'resident'
+  choice       TEXT    NOT NULL CHECK (choice IN ('yes', 'no', 'abstain')),
+  created_at   INTEGER NOT NULL,       -- unix ms
+  PRIMARY KEY (motion_id, member_kind, member_id)   -- one ballot per member per motion, final once cast
+);
