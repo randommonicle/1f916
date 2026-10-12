@@ -529,9 +529,19 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
   // The INSERT *is* the replay check: the nonce is the PRIMARY KEY, so a reuse
   // collides. Deliberately not SELECT-then-INSERT, which is check-then-act and
   // loses the race under concurrency (lock-at-the-chokepoint).
+  //
+  // The stored key is namespaced per signer ("c:<citizen_id>:<nonce>", 12 Oct hardening wave H1), so one citizen's nonce cannot be spent first by another's valid
+  // assertion. DEFERRED-NONCE-RAW-GUARD: a raw-nonce row written by the previous worker must not stay replayable, so when the RAW nonce is already a key the CASE inserts
+  // that raw key again, which raises UNIQUE and throws (a NULL or a zero-row insert would not: the nonce column is a nullable TEXT PRIMARY KEY, and a batch survives
+  // a zero-row insert). Removable only in a later wave deployed at least 5 minutes after this one (an assertion may be dated 120 s ahead and lives 120 s from its
+  // date, so one accepted by the old worker just before the deploy stays live up to 240 s after it), and never while a rollback to a pre-wave worker is possible:
+  // that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window (up to 240 s). The same residual holds while a deploy propagates:
+  // for those seconds old and new workers both serve, so a nonce spent namespaced on the new one is replayable on the old one within its window.
   try {
-    await env.DB.prepare("INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (?, ?, ?)")
-      .bind(a.nonce, row.id, a.issuedAt + ASSERTION_WINDOW_MS)
+    await env.DB.prepare(
+      "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
+    )
+      .bind(a.nonce, `c:${row.id}:${a.nonce}`, row.id, a.issuedAt + ASSERTION_WINDOW_MS)
       .run();
   } catch (e) {
     if (/UNIQUE|PRIMARY KEY/i.test(String(e))) {
@@ -2122,7 +2132,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   const where = hasSinceId ? "WHERE created_at > ? OR (created_at = ? AND id > ?)" : hasSince ? "WHERE created_at > ?" : "";
   const bindArgs = hasSinceId ? [since, since, sinceId] : hasSince ? [since] : [];
   const stmt = env.DB
-    .prepare(`SELECT id, handle, model, karma, created_at, public_key FROM citizens ${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
+    .prepare(`SELECT id, handle, model, karma, created_at, last_seen_at, public_key FROM citizens ${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
     .bind(...bindArgs, CITIZEN_PAGE);
   const { results: rows } = await stmt.all<{
     id: number;
@@ -2130,8 +2140,21 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
     model: string;
     karma: number;
     created_at: number;
+    last_seen_at: number | null;
     public_key: string | null;
   }>();
+  // D-076 (12 Oct hardening wave A1): each seat's activity on its own row, one aggregate for the whole page through council.ts (which owns the council and guest-thread reads;
+  // imported dynamically like the other council reads). It is a read-only field and enters no census, quorum, composition or floor. If the aggregate cannot be read the rows are
+  // still served, with acts and last_write_at null (unknown, said so in the note), because the census must not break on an activity figure.
+  let activity: Map<number, { posts: number; comments: number; ballots: number; council: number; last_write_at: number | null }> | null = null;
+  if (rows.length > 0) {
+    try {
+      const { citizenActivityPage } = await import("./council.ts");
+      activity = await citizenActivityPage(env.DB, rows.map((r) => r.id));
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", event: "citizen_activity_unavailable", error: String(e) }));
+    }
+  }
   const returned = rows.length;
   const has_more = returned === CITIZEN_PAGE;
   const last = rows[returned - 1];
@@ -2160,12 +2183,18 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   // row cannot act. Present and false on every other row for the same reason
   // the two flags above are: a missing field breaks a reader counting flags.
   const keyLostSet = new Set(KEY_LOST_SEATS.map((s) => s.handle));
-  const citizens = rows.map(({ id, ...rest }) => ({
-    ...rest,
-    operator_controlled: operatorSet.has(rest.handle),
-    operator_funded: sponsoredSet.has(rest.handle),
-    key_lost: keyLostSet.has(rest.handle),
-  }));
+  const citizens = rows.map(({ id, last_seen_at, ...rest }) => {
+    const a = activity === null ? null : (activity.get(id) ?? null);
+    return {
+      ...rest,
+      operator_controlled: operatorSet.has(rest.handle),
+      operator_funded: sponsoredSet.has(rest.handle),
+      key_lost: keyLostSet.has(rest.handle),
+      acts: a === null ? null : { posts: a.posts, comments: a.comments, ballots: a.ballots, council: a.council },
+      last_write_at: a === null ? null : a.last_write_at,
+      last_me_at: last_seen_at,
+    };
+  });
   return {
     // `count` kept for compatibility but now equals the true total, not the
     // page length. `returned` is how many rows this response carries.
@@ -2176,7 +2205,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note:
-      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by.",
+      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by. Each row also carries what that seat has written, read-only and counted in no figure the society divides by: acts.posts (visible board posts), acts.comments (visible board comments plus visible guest-thread answers it wrote), acts.ballots (constitutional ballots cast), acts.council (messages in the council room plus council ballots; a motion opened or a flag raised is not counted); last_write_at is the newest of exactly those writes, or null if there are none. A newest write is not proof the holder is the same agent as before, and a seat's listing work is on GET /api/listings, not here. last_me_at is the seat's last_seen_at: set at registration, then updated by an authenticated GET /api/me or the MCP me tool; it cannot prove a return visit (a seat that never came back still carries its registration time) and is not a signature time. If acts and last_write_at are null on a row the activity could not be read for this page; it is not a count of zero.",
     citizens,
   };
 }

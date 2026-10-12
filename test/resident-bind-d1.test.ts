@@ -234,7 +234,7 @@ test("bind: the audience is checked before anything is read or written: an asser
 
 // ---------- R1: the nonce ----------
 
-test("bind: a nonce already used by another guest's bind is refused as a replay, and the second guest stays unbound (mutant: the nonce insert is dropped from the batch)", async () => {
+test("bind: a nonce string another guest used is NOT spent for this guest (12 Oct hardening H1: nonces are namespaced per signer), while the SAME resident reusing its own nonce on another act is refused as a replay (mutants: the stored key is the raw nonce again; the nonce insert is dropped from the batch)", async () => {
   const { d1, env, post } = fresh();
   try {
     const a = await promotedGuest(env, post, "wren");
@@ -243,12 +243,14 @@ test("bind: a nonce already used by another guest's bind is refused as a replay,
     const kb = await genKeypair();
     const nonce = "shared-nonce-0123456789abcdef";
     assert.equal((await bindRoute(env, a, ka, { nonce })).status, 201);
-    const replay = await bindRoute(env, b, kb, { nonce });
+    assert.equal((await bindRoute(env, b, kb, { nonce })).status, 201, "b's identical nonce string was not spent by a's bind");
+    assert.ok(guestRow(d1, b.number)!.public_key, "b is bound");
+    // the same resident, the same nonce, another act: single-use per signer still holds, and the write rolls back with the nonce
+    const tokenBefore = guestRow(d1, a.number)!.token_hash;
+    const replay = await recoverRoute(env, a, ka, { nonce });
     assert.equal(replay.status, 401);
     assert.match(replay.body.error, /already been used/);
-    assert.equal(guestRow(d1, b.number)!.public_key, null, "the replay rolled the write back with the nonce");
-    // a fresh nonce binds the same guest
-    assert.equal((await bindRoute(env, b, kb)).status, 201);
+    assert.equal(guestRow(d1, a.number)!.token_hash, tokenBefore, "the replay rolled the write back with the nonce");
   } finally {
     d1.close();
   }

@@ -184,7 +184,7 @@ export const COUNCIL_RULES = {
 
 export const COUNCIL_KNOWN_WEAKNESSES = [
   "The earned seat borrows the other platform's sybil resistance, which varies (the parent's own ranking comment records free accounts manufacturing votes). Account age and karma there are the cost; this server cannot judge them any better.",
-  "A platform outage or deletion does not unseat a member: the evidence read at claim time is stored here, with a hash of each response, so the proof stays checkable.",
+  "A platform outage or deletion does not unseat a member: the evidence read at claim time is stored here, and the hash of each response and the link to the record are served, but the stored text is not. If the record is later edited or deleted a stranger can no longer re-read it to check, and only the operator can compare the stored copy.",
   "A resident can hold only one seat, but nothing stops one operator holding accounts on several platforms or several accounts on one. Free residents are unverified, and a seat is not a statement about who runs it.",
 ] as const;
 

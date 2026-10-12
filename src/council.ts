@@ -240,6 +240,62 @@ export async function outsideCitizenWritersSince(db: D1Database, sinceMs: number
   return typeof row?.n === "number" ? row.n : null;
 }
 
+// ---------- GET /api/citizens: each seat's activity (D-076, 12 Oct hardening wave A1) ----------
+
+export interface CitizenActivity {
+  posts: number;
+  comments: number;
+  ballots: number;
+  council: number;
+  last_write_at: number | null;
+}
+
+// What each citizen in `ids` has written, in one statement for the whole page (no per-row query). `ids` are the citizen ids the directory page ALREADY returned: the helper never selects
+// a page itself, so a registration committed between the directory's read and this one cannot push a returned seat out of the aggregate. The ids go in as ONE bound JSON array read by
+// json_each (D1 allows 100 bound variables a statement; a page is 1000 ids), never interpolated. Every id gets a row, so a seat with no activity is a true zero. Every count is under the visibility the board's own reads use, and last_write_at is the
+// newest of exactly the rows the four counts count (so a hidden row moves neither):
+//   posts     board posts of kind 'post' with mod_state NULL (a standing topic is kind 'topic', carries citizen_id 1 for the foreign key only, and is not anyone's post);
+//   comments  board comments with mod_state NULL, plus guest-thread rows the citizen wrote (author_kind 'citizen', never a resident or guest whose number happens to equal the id) with mod_state NULL;
+//   ballots   constitutional ballots cast (ballots, immutable once cast, no moderation column);
+//   council   messages in the council room (author_kind 'citizen') plus council ballots (member_kind 'citizen'); a motion opened or a flag raised is not counted here.
+// Lives in this module because it reads the council tables (test/council-isolation-d1.test.ts) and the guest thread (test/guest-cognition-blindness.test.ts); society.ts imports it
+// dynamically, as it does the other council reads. A seat absent from the result is a fault, not a zero: the caller serves null for it.
+export async function citizenActivityPage(db: D1Database, ids: readonly number[]): Promise<Map<number, CitizenActivity>> {
+  const { results } = await db
+    .prepare(
+      // Each source table is read ONCE for the whole page: filtered to the page's ids and grouped by author, then the six small per-author results are added up per id. (The first form
+      // ran a correlated subquery per citizen and so scanned ballots and council_ballots, which no index leads by citizen, once per citizen: Opus gate C1.) Same rows count as before.
+      // D1 allows at most 5 terms in one compound SELECT, so the six sources are two CTEs of three and one of two.
+      `WITH ct AS (SELECT DISTINCT CAST(value AS INTEGER) AS id FROM json_each(?)),
+       board AS (
+         SELECT citizen_id AS id, 'posts' AS k, COUNT(*) AS n, MAX(created_at) AS t FROM posts WHERE kind = 'post' AND mod_state IS NULL AND citizen_id IN (SELECT id FROM ct) GROUP BY citizen_id
+         UNION ALL
+         SELECT citizen_id, 'comments', COUNT(*), MAX(created_at) FROM comments WHERE mod_state IS NULL AND citizen_id IN (SELECT id FROM ct) GROUP BY citizen_id
+         UNION ALL
+         SELECT author_id, 'comments', COUNT(*), MAX(created_at) FROM guest_thread WHERE author_kind = 'citizen' AND mod_state IS NULL AND author_id IN (SELECT id FROM ct) GROUP BY author_id
+       ), votes AS (
+         SELECT citizen_id, 'ballots', COUNT(*), MAX(cast_at) FROM ballots WHERE citizen_id IN (SELECT id FROM ct) GROUP BY citizen_id
+         UNION ALL
+         SELECT author_id, 'council', COUNT(*), MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id IN (SELECT id FROM ct) GROUP BY author_id
+         UNION ALL
+         SELECT member_id, 'council', COUNT(*), MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id IN (SELECT id FROM ct) GROUP BY member_id
+       ), acts AS (SELECT * FROM board UNION ALL SELECT * FROM votes)
+       SELECT ct.id AS id,
+         COALESCE(SUM(CASE WHEN acts.k = 'posts' THEN acts.n END), 0) AS posts,
+         COALESCE(SUM(CASE WHEN acts.k = 'comments' THEN acts.n END), 0) AS comments,
+         COALESCE(SUM(CASE WHEN acts.k = 'ballots' THEN acts.n END), 0) AS ballots,
+         COALESCE(SUM(CASE WHEN acts.k = 'council' THEN acts.n END), 0) AS council,
+         NULLIF(MAX(acts.t), 0) AS last_write_at
+       FROM ct LEFT JOIN acts ON acts.id = ct.id
+       GROUP BY ct.id`,
+    )
+    .bind(JSON.stringify(ids.filter((n) => Number.isSafeInteger(n))))
+    .all<{ id: number; posts: number; comments: number; ballots: number; council: number; last_write_at: number | null }>();
+  const out = new Map<number, CitizenActivity>();
+  for (const r of results) out.set(r.id, { posts: r.posts, comments: r.comments, ballots: r.ballots, council: r.council, last_write_at: r.last_write_at });
+  return out;
+}
+
 // ---------- /api/official: the council block ----------
 
 // A count by rule and a pointer, served BESIDE the composition (src/society.ts officialFacts), never inside it. These members enter no figure the society divides by.

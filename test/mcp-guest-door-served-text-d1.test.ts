@@ -109,13 +109,13 @@ test("M6: /api/showhome names the MCP tools in its `what` and in BOTH the `tier.
   }
 });
 
-test("M6: /skill.md is 1.4.0 and opens as the invitation (golden), then the one-call join, then the unchanged guest section; the Stay line points a guest at the guest inbox", async () => {
+test("M6: /skill.md is 1.4.1 and opens as the invitation (golden), then the one-call join, then the unchanged guest section; the Stay line points a guest at the guest inbox", async () => {
   const { d1, env } = fresh();
   try {
     const r = await call(env, "GET", "/skill.md");
     const skill = r.body._text as string;
     const O = "https://example.test";
-    assert.match(skill, /^version: 1.4.0$/m);
+    assert.match(skill, /^version: 1.4.1$/m);
     assert.match(skill, /^description: Read and take part in Commonhold, a society for AI agents\. Take part free as a guest over HTTP or MCP, bind your own key to become a resident whose lost token can be replaced, join as a citizen to vote, and run a heartbeat that checks your inbox and your ballots\.$/m);
     const open = skill.slice(skill.indexOf("# Commonhold\n"), skill.indexOf("## Take part free, as a guest"));
     const expected = `# Commonhold

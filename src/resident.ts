@@ -22,7 +22,7 @@
 // Trigger: a resident or a registry reviewer asks for signed comments.
 //
 // Order of every resident write, asserted by test: the per-address cap (records the attempt) -> token or number resolves a guests row ->
-// assertion parsed -> audience -> freshness window -> handle -> intent binding -> signature -> the across-all-addresses cap (its own path,
+// assertion parsed -> audience -> freshness window -> handle -> intent binding -> signature -> an advisory read of the nonce (a replay is refused here, before a global slot is charged; the batch stays the real guard) -> the across-all-addresses cap (its own path,
 // charged only for a request that verified: test/resident-caps-order-d1.test.ts) -> ONE batch carrying the write and the nonce. The nonce is burnt only AFTER the signature verifies, in the same batch as the write it authorises (R1): an unsigned or
 // wrongly signed request cannot spend a resident's nonce space, and a replay is a UNIQUE violation that rolls the whole batch back.
 // A lost race (changes() = 0) leaves the nonce burnt, as D-056's refusal-burn does; the assertion was valid and is spent.
@@ -49,6 +49,12 @@ export const RESIDENT_BIND_PER_IP_PER_HOUR = 5;
 export const RESIDENT_BIND_GLOBAL_PER_HOUR = 100;
 export const RESIDENT_RECOVER_PER_IP_PER_HOUR = 10;
 export const RESIDENT_RECOVER_GLOBAL_PER_HOUR = 200;
+// The ceiling on attempt rows (12 Oct hardening wave H2, HW6): at most this many showhome_rate rows stand per path ("bind", "recover") in the last hour, across ALL
+// addresses and the no-address bucket. At the ceiling the per-address step writes no row and does not refuse (assertShowhomeAddressCap). Arithmetic: a verified request also
+// leaves one attempt row, so legitimate traffic at the GLOBAL caps alone (100 binds, 200 recoveries an hour) is at most 100 and 200 rows; 1000 is at least five times either,
+// so honest traffic never reaches the ceiling by itself. It also bounds the junk the log can hold: 1000 rows an hour for a path, kept at most a day by the path-scoped
+// collector, so at most 24 000 rows per path. Above it the per-address cap stops applying (see assertShowhomeAddressCap for what that gives up).
+export const RESIDENT_ATTEMPT_ROWS_PER_HOUR = 1000;
 export const RESIDENT_ROSTER_PAGE = 50;
 export const RESIDENT_ROSTER_MAX_PAGE = 100;
 
@@ -122,8 +128,27 @@ export async function verifyResidentAssertion(env: Env, raw: unknown, op: Reside
 
 // The nonce insert and its garbage collect, as batch statements. The INSERT is the replay check (the nonce is the PRIMARY KEY);
 // the DELETE rides last in the batch so it can never disturb an earlier statement's result.
+//
+// The stored key is namespaced per signer ("r:<visitor_id>:<nonce>", 12 Oct hardening wave H1), so one resident's nonce cannot be spent first by another's valid assertion.
+// DEFERRED-NONCE-RAW-GUARD: a raw-nonce row written by the previous worker must not stay replayable, so when the RAW nonce is already a key the CASE inserts that raw key
+// again, which raises UNIQUE and aborts the whole batch (a NULL or a zero-row insert would not: the nonce column is a nullable TEXT PRIMARY KEY, and a D1 batch survives a
+// zero-row insert, so the write after it would commit). Removable only in a later wave deployed at least 5 minutes after this one (an assertion may be dated 120 s ahead
+// and lives 120 s from its date, so one accepted by the old worker just before the deploy stays live up to 240 s after it), and never while a rollback to a pre-wave worker
+// is possible: that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window (up to 240 s). The same residual holds while a deploy
+// propagates: for those seconds old and new workers both serve, so a nonce spent namespaced on the new one is replayable on the old one within its window.
 export function nonceStatement(env: Env, a: ParsedAssertion, visitorId: number) {
-  return env.DB.prepare("INSERT INTO resident_nonces (nonce, visitor_id, expires_at) VALUES (?, ?, ?)").bind(a.nonce, visitorId, a.issuedAt + ASSERTION_WINDOW_MS);
+  return env.DB.prepare(
+    "INSERT INTO resident_nonces (nonce, visitor_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM resident_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
+  ).bind(a.nonce, residentNonceKey(visitorId, a.nonce), visitorId, a.issuedAt + ASSERTION_WINDOW_MS);
+}
+export const residentNonceKey = (visitorId: number, nonce: string): string => `r:${visitorId}:${nonce}`;
+
+// H4 (advisory, the batch stays the real guard): has this assertion's nonce, namespaced or raw, already been spent? Called after the signature verifies and before the
+// across-all-addresses slot is charged, so a replayed but signature-valid assertion is refused without taking a global slot. Check-then-act on its own; the nonce insert in
+// the write batch is what actually refuses a concurrent replay.
+export async function assertResidentNonceUnspent(env: Env, a: ParsedAssertion, visitorId: number): Promise<void> {
+  const seen = await env.DB.prepare("SELECT 1 AS x FROM resident_nonces WHERE nonce = ?1 OR nonce = ?2 LIMIT 1").bind(a.nonce, residentNonceKey(visitorId, a.nonce)).first<{ x: number }>();
+  if (seen) throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
 }
 export function nonceGcStatement(env: Env) {
   return env.DB.prepare("DELETE FROM resident_nonces WHERE expires_at < ?").bind(Date.now());
@@ -151,7 +176,7 @@ function positiveInteger(value: unknown, what: string): number {
 
 export async function bindResident(env: Env, input: Record<string, unknown>, ip: string | null) {
   // (1) the per-address slot, on every attempt; (2) the assertion verifies below; (3) the global slot, only for a request that verified; (4) the nonce and write batch.
-  await assertShowhomeAddressCap(env, ip, "bind", RESIDENT_BIND_PER_IP_PER_HOUR);
+  await assertShowhomeAddressCap(env, ip, "bind", RESIDENT_BIND_PER_IP_PER_HOUR, RESIDENT_ATTEMPT_ROWS_PER_HOUR);
 
   // R3: the token proves the guest, and only a PROMOTED guest (a guests row, made by a first accepted comment) can bind. authenticateGuest
   // never calls the citizen authenticate(), so a citizen credential in an Authorization header identifies nothing here.
@@ -177,7 +202,9 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
   // The signature is checked against the SUPPLIED key (R3): the assertion proves the signer holds the private half of the key being bound.
   const a = await verifyResidentAssertion(env, input.assertion, "resident_bind", subject, bindParts(guest.visitor_id, guest.handle, publicKey), publicKey);
 
-  // (3) After the signature, before the nonce: a request refused here has burnt no nonce and written nothing but its step-1 row.
+  // (2b) A replayed, signature-valid assertion is refused here, before it takes a global slot (the batch below still decides). (3) After the signature, before the nonce: a
+  // request refused here has burnt no nonce and written nothing but its step-1 row.
+  await assertResidentNonceUnspent(env, a, guest.visitor_id);
   await assertShowhomeGlobalCap(env, "bind_global", RESIDENT_BIND_GLOBAL_PER_HOUR);
 
   const now = Date.now();
@@ -224,7 +251,7 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
 
 export async function recoverResidentToken(env: Env, input: Record<string, unknown>, ip: string | null) {
   // (1) the per-address slot, on every attempt; (2) the assertion verifies below; (3) the global slot, only for a request that verified; (4) the nonce and write batch.
-  await assertShowhomeAddressCap(env, ip, "recover", RESIDENT_RECOVER_PER_IP_PER_HOUR);
+  await assertShowhomeAddressCap(env, ip, "recover", RESIDENT_RECOVER_PER_IP_PER_HOUR, RESIDENT_ATTEMPT_ROWS_PER_HOUR);
 
   const number = positiveInteger(input.number, "number");
   const row = await env.DB.prepare("SELECT visitor_id, handle, model, token_hash, public_key FROM guests WHERE visitor_id = ?")
@@ -237,7 +264,9 @@ export async function recoverResidentToken(env: Env, input: Record<string, unkno
   // Signed by the STORED key: the caller never supplies the key at recovery.
   const a = await verifyResidentAssertion(env, input.assertion, "resident_recover", { visitorId: row.visitor_id, handle: row.handle }, recoverParts(row.visitor_id, row.handle), row.public_key);
 
-  // (3) After the signature, before the nonce: a request refused here has burnt no nonce and written nothing but its step-1 row.
+  // (2b) A replayed, signature-valid assertion is refused here, before it takes a global slot (the batch below still decides). (3) After the signature, before the nonce: a
+  // request refused here has burnt no nonce and written nothing but its step-1 row.
+  await assertResidentNonceUnspent(env, a, row.visitor_id);
   await assertShowhomeGlobalCap(env, "recover_global", RESIDENT_RECOVER_GLOBAL_PER_HOUR);
 
   // Minted before the batch (the batch needs its hash) but returned ONLY if the batch took effect: a lost race discards it, and it was never stored.

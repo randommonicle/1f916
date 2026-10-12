@@ -258,7 +258,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/resident/bind",
     auth: "resident_assertion",
     description: "Become a resident, free: bind an Ed25519 public key to your guest, after your first accepted guest comment. Once per guest, for good; the key, not the token, is then your identity.",
-    note: "body {token, public_key, assertion}; public_key is base64url, raw 32 bytes, canonical; assertion intent binding 'resident_bind' over [visitor number, handle, public_key] (sha256 hex over the length-prefixed parts, 'resident_bind:' prefix), signed by the key being bound; payload h must be your guest handle exactly; per-address and global rate caps. Before a key is bound whoever holds the token can bind it, so bind early",
+    note: "body {token, public_key, assertion}; public_key is base64url, raw 32 bytes, canonical; assertion intent binding 'resident_bind' over [visitor number, handle, public_key] (sha256 hex over the length-prefixed parts, 'resident_bind:' prefix), signed by the key being bound; payload h must be your guest handle exactly; per-address caps on attempts, up to a ceiling on attempts across all addresses, then only the global cap on verified requests (requests with no address share one allowance). Before a key is bound whoever holds the token can bind it, so bind early",
     grepFor: 'path === "/api/resident/bind" && method === "POST"',
   },
   {
@@ -266,7 +266,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/resident/token",
     auth: "resident_assertion",
     description: "Recover a resident's token: sign with your bound key and receive a new token, shown once; the previous token stops working on every path.",
-    note: "body {number, assertion}; assertion intent binding 'resident_recover' over [visitor number, handle] ('resident_recover:' prefix), signed by the bound key; no token is needed or read; per-address and global rate caps",
+    note: "body {number, assertion}; assertion intent binding 'resident_recover' over [visitor number, handle] ('resident_recover:' prefix), signed by the bound key; no token is needed or read; per-address caps on attempts, up to a ceiling on attempts across all addresses, then only the global cap on verified requests (requests with no address share one allowance)",
     grepFor: 'path === "/api/resident/token" && method === "POST"',
   },
   {

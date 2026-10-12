@@ -1,0 +1,330 @@
+// D-076 (12 Oct hardening wave A1; docs/CHECKPOINT-HARDENING.md C4): GET /api/citizens serves per row what the seat has written (acts), the newest of those writes (last_write_at) and its
+// last_seen_at under the honest name last_me_at. Real local D1 through the real router and the real MCP doors. Seeding is raw SQL (scaffolding, uncounted); the code under test reads it.
+// Each block names the mutant that turns it red; the checkpoint records each run.
+//
+// Run just this file: node --experimental-strip-types --test "test/citizen-activity-d1.test.ts"
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createLocalD1, seedCitizens, seedPost, guestEnv, call, count } from "./helpers/guest.ts";
+import { insertCitizen, insertProposal } from "./helpers/local-d1.ts";
+import { seedSecretCitizen } from "./helpers/council.ts";
+import { CITIZEN_PAGE, citizenDirectory, register } from "../src/society.ts";
+import { encodeBase64Url } from "../src/keyauth.ts";
+
+type D1 = ReturnType<typeof createLocalD1>;
+const T = Date.UTC(2026, 9, 1);
+
+function fresh() {
+  const d1 = createLocalD1();
+  const { alice } = seedCitizens(d1);
+  return { d1, env: guestEnv(d1), alice };
+}
+const comment = (d1: D1, postId: number, citizenId: number, mod: string | null, at: number) =>
+  d1.raw.prepare("INSERT INTO comments (post_id, citizen_id, body, depth, mod_state, author_model, created_at) VALUES (?, ?, 'c', 0, ?, 'm', ?)").run(postId, citizenId, mod, at);
+const guestRow = (d1: D1, postId: number, kind: "guest" | "citizen", id: number, mod: string | null, at: number) =>
+  d1.raw.prepare("INSERT INTO guest_thread (post_id, depth, author_kind, author_id, handle, model, kind, body, mod_state, created_at) VALUES (?, 0, ?, ?, 'h', 'm', 'comment', 'b', ?, ?)").run(postId, kind, id, mod, at);
+const councilMsg = (d1: D1, kind: "citizen" | "resident", id: number, at: number) =>
+  d1.raw.prepare("INSERT INTO council_thread (author_kind, author_id, handle, body, created_at) VALUES (?, ?, 'h', 'b', ?)").run(kind, id, at);
+const motion = (d1: D1, proposerKind: "citizen" | "resident", proposerId: number, at: number) =>
+  Number(
+    d1.raw
+      .prepare("INSERT INTO council_motions (kind, title, body, proposer_kind, proposer_id, opened_at, closes_at, eligible_json, created_at) VALUES ('statement', 't', 'b', ?, ?, ?, ?, '[]', ?)")
+      .run(proposerKind, proposerId, at, at + 7 * 86_400_000, at).lastInsertRowid,
+  );
+const councilBallot = (d1: D1, motionId: number, kind: "citizen" | "resident", id: number, at: number) =>
+  d1.raw.prepare("INSERT INTO council_ballots (motion_id, member_kind, member_id, choice, created_at) VALUES (?, ?, ?, 'yes', ?)").run(motionId, kind, id, at);
+const ballot = (d1: D1, proposalId: number, citizenId: number, at: number) =>
+  d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'yes', ?)").run(proposalId, citizenId, at);
+
+const row = (body: any, handle: string) => body.citizens.find((c: { handle: string }) => c.handle === handle);
+
+test("counts and visibility: only visible writes are counted, a standing topic is nobody's post, a motion or a flag is not a council count, and last_write_at is the newest of exactly the counted rows (mutants: a moderation predicate is dropped; the topic kind is not excluded; last_write_at reads hidden rows or motions)", async () => {
+  const { d1, env, alice } = fresh();
+  try {
+    const x = insertCitizen(d1, { handle: "writer", created_at: T });
+    const p1 = seedPost(d1, x, { created_at: T + 1_000 });
+    seedPost(d1, x, { created_at: T + 2_000 });
+    seedPost(d1, x, { created_at: T + 90_000, mod_state: "collapsed" });
+    seedPost(d1, x, { created_at: T + 91_000, mod_state: "removed" });
+    d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at, kind, topic_state) VALUES (?, 'a topic', 'b', 'dupe-t', 0, NULL, ?, 'topic', 'open')").run(x, T + 92_000);
+    comment(d1, p1, x, null, T + 3_000);
+    comment(d1, p1, x, null, T + 4_000);
+    comment(d1, p1, x, "collapsed", T + 93_000);
+    guestRow(d1, p1, "citizen", x, null, T + 5_000);
+    guestRow(d1, p1, "citizen", x, "removed", T + 94_000);
+    const prop = insertProposal(d1, { proposer_id: alice } as never);
+    const prop2 = insertProposal(d1, { proposer_id: alice } as never);
+    ballot(d1, prop, x, T + 6_000);
+    ballot(d1, prop2, x, T + 7_000);
+    councilMsg(d1, "citizen", x, T + 8_000);
+    councilMsg(d1, "citizen", x, T + 9_000);
+    const m = motion(d1, "citizen", alice, T + 10_000);
+    councilBallot(d1, m, "citizen", x, T + 11_000); // the newest counted row
+    motion(d1, "citizen", x, T + 95_000); // a motion opened: not counted, and not in last_write_at
+    d1.raw.prepare("UPDATE council_motions SET operator_flagged_at = ?, operator_flagged_by_kind = 'citizen', operator_flagged_by_id = ? WHERE id = ?").run(T + 96_000, x, m);
+
+    const dir = await citizenDirectory(env);
+    const r = row(dir, "writer");
+    assert.deepEqual(r.acts, { posts: 2, comments: 3, ballots: 2, council: 3 }, JSON.stringify(r.acts));
+    assert.equal(r.last_write_at, T + 11_000, "the newest COUNTED write: no hidden row, topic, motion or flag moves it");
+  } finally {
+    d1.close();
+  }
+});
+
+test("citizen-kind predicates: a guest, a resident or a council resident whose number equals a citizen's id is not counted for that citizen (mutants: author_kind or member_kind is dropped from a predicate)", async () => {
+  const { d1, env, alice } = fresh();
+  try {
+    const x = insertCitizen(d1, { handle: "quiet", created_at: T });
+    const post = seedPost(d1, alice);
+    guestRow(d1, post, "guest", x, null, T + 1_000); // a guest whose visitor number equals x's citizen id
+    councilMsg(d1, "resident", x, T + 2_000);
+    const m = motion(d1, "resident", x, T + 3_000);
+    councilBallot(d1, m, "resident", x, T + 4_000);
+    const r = row(await citizenDirectory(env), "quiet");
+    assert.deepEqual(r.acts, { posts: 0, comments: 0, ballots: 0, council: 0 });
+    assert.equal(r.last_write_at, null);
+  } finally {
+    d1.close();
+  }
+});
+
+test("a seat with no writes serves zeros and a null last_write_at, not an absent field (mutant: the default for a seat missing from the aggregate is dropped)", async () => {
+  const { d1, env } = fresh();
+  try {
+    const r = row(await citizenDirectory(env), "alice");
+    assert.deepEqual(r.acts, { posts: 0, comments: 0, ballots: 0, council: 0 });
+    assert.equal(r.last_write_at, null);
+    assert.equal(typeof r.last_me_at, "number");
+    assert.equal("last_seen_at" in r, false, "the raw column name is not served: it is served as last_me_at");
+  } finally {
+    d1.close();
+  }
+});
+
+test("last_me_at is set at registration and moved by me(), on REST and on the MCP me tool; it is last_seen_at under an honest name (mutants: the field serves created_at; me() does not bump)", async () => {
+  const { d1, env } = fresh();
+  try {
+    const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+    const pub = encodeBase64Url(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey)));
+    const before = Date.now();
+    await register(env, "newcomer", "test-model", null, pub);
+    const reg = row(await citizenDirectory(env), "newcomer");
+    assert.ok(reg.last_me_at >= before && reg.last_me_at <= Date.now(), "set at registration, before any return visit");
+
+    const s = await seedSecretCitizen(d1, "returner");
+    d1.raw.prepare("UPDATE citizens SET last_seen_at = ? WHERE id = ?").run(T, s.id);
+    assert.equal(row(await citizenDirectory(env), "returner").last_me_at, T);
+    const rest = await call(env, "GET", "/api/me", undefined, { Authorization: `Bearer ${s.secret}` });
+    assert.equal(rest.status, 200, JSON.stringify(rest.body));
+    const afterRest = row(await citizenDirectory(env), "returner").last_me_at;
+    assert.ok(afterRest > T, "GET /api/me moved it");
+    d1.raw.prepare("UPDATE citizens SET last_seen_at = ? WHERE id = ?").run(T, s.id);
+    const mcp = await call(env, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "me", arguments: {} } }, { Authorization: `Bearer ${s.secret}`, "CF-Connecting-IP": "203.0.113.5" });
+    assert.equal(mcp.status, 200, JSON.stringify(mcp.body));
+    const afterMcp = row(await citizenDirectory(env), "returner").last_me_at;
+    assert.ok(afterMcp > T, "the MCP me tool moved it");
+    // a write does not move it: it is not a write time, and last_write_at is the field for that
+    seedPost(d1, s.id, { created_at: Date.now() + 5_000 });
+    const after = row(await citizenDirectory(env), "returner");
+    assert.equal(after.last_me_at, afterMcp);
+    assert.ok(after.last_write_at > afterMcp);
+  } finally {
+    d1.close();
+  }
+});
+
+test("REST and both MCP doors serve the same rows with the new fields (mutant: the MCP tool projects its own columns)", async () => {
+  const { d1, env, alice } = fresh();
+  try {
+    seedPost(d1, alice, { created_at: T + 1_000 });
+    const rest = await call(env, "GET", "/api/citizens");
+    assert.equal(rest.status, 200);
+    const a = row(rest.body, "alice");
+    assert.deepEqual(a.acts, { posts: 1, comments: 0, ballots: 0, council: 0 });
+    assert.equal(a.last_write_at, T + 1_000);
+    for (const door of ["/mcp", "/mcp/read"]) {
+      const r = await call(env, "POST", door, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "citizens", arguments: {} } }, { "CF-Connecting-IP": "203.0.113.6" });
+      assert.equal(r.status, 200, door);
+      const body = JSON.parse(r.body.result.content[0].text);
+      assert.deepEqual(row(body, "alice"), a, `${door} serves alice's row exactly as REST does`);
+    }
+    // the note says what each field is and is not
+    const note = rest.body.note as string;
+    for (const phrase of ["acts.posts", "acts.council", "last_write_at", "is not proof the holder is the same agent", "GET /api/listings", "last_me_at", "cannot prove a return visit", "not a signature time", "could not be read"]) {
+      assert.ok(note.includes(phrase), `the note carries: ${phrase}`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("paging: the aggregate covers the page it serves, on every page (mutants: the aggregate ignores the cursor and reads the first page; the page size in the aggregate differs)", async () => {
+  const { d1, env, alice } = fresh();
+  try {
+    seedPost(d1, alice, { created_at: T + 500 });
+    // CITIZEN_PAGE + 1 citizens in all (maintainer, alice and the fillers), so page 2 holds exactly the last one
+    const F = Date.now() - 10_000_000;
+    for (let i = 0; i < CITIZEN_PAGE - 2; i++) insertCitizen(d1, { handle: `filler-${i}`, created_at: F + i });
+    const L = Date.now() + 100_000;
+    const last = insertCitizen(d1, { handle: "the-last", created_at: L });
+    const lastPost = seedPost(d1, last, { created_at: L + 500 });
+    comment(d1, lastPost, last, null, L + 600);
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM citizens"), CITIZEN_PAGE + 1);
+    const p1 = await citizenDirectory(env);
+    assert.equal(p1.returned, CITIZEN_PAGE);
+    assert.deepEqual(row(p1, "alice").acts, { posts: 1, comments: 0, ballots: 0, council: 0 }, "page 1 carries alice's activity");
+    assert.equal(row(p1, "the-last"), undefined);
+    const p2 = await citizenDirectory(env, (p1 as any).next_since, (p1 as any).next_since_id);
+    assert.equal(p2.returned, 1);
+    assert.deepEqual(p2.citizens[0].acts, { posts: 1, comments: 1, ballots: 0, council: 0 }, "page 2 carries the last seat's activity, not zeros");
+    assert.equal(p2.citizens[0].last_write_at, L + 600);
+  } finally {
+    d1.close();
+  }
+});
+
+test("CODEX r1 M1: a registration committed between the directory's page SELECT and the activity aggregate cannot push a returned citizen out of it (a full page; the last seat has one visible post; a citizen is inserted ordered just before it; the last seat still shows posts 1) (mutant: the aggregate re-selects the page itself, ORDER BY created_at, id LIMIT)", async () => {
+  const { d1 } = fresh();
+  try {
+    const F = Date.now() - 10_000_000;
+    for (let i = 0; i < CITIZEN_PAGE - 3; i++) insertCitizen(d1, { handle: `filler-${i}`, created_at: F + i });
+    const L = Date.now() + 100_000;
+    const last = insertCitizen(d1, { handle: "the-last", created_at: L });
+    seedPost(d1, last, { created_at: L + 500 });
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM citizens"), CITIZEN_PAGE, "a full page: maintainer, alice, fillers and the last seat");
+    // the racing registration lands right after the directory's page SELECT returns and before anything else reads
+    const db = d1.DB as any;
+    let raced = false;
+    const DB = {
+      ...db,
+      prepare(sql: string) {
+        const st = db.prepare(sql);
+        if (!/FROM citizens/.test(sql) || !/public_key FROM citizens/.test(sql)) return st;
+        return {
+          ...st,
+          bind: (...a: unknown[]) => {
+            const bound = st.bind(...a);
+            return {
+              ...bound,
+              all: async () => {
+                const res = await bound.all();
+                if (!raced) {
+                  raced = true;
+                  insertCitizen(d1, { handle: "racer", created_at: L - 1 });
+                }
+                return res;
+              },
+            };
+          },
+        };
+      },
+    };
+    const dir = await citizenDirectory({ ...guestEnv(d1), DB } as never);
+    assert.equal(raced, true, "the interleaving happened");
+    assert.equal(dir.returned, CITIZEN_PAGE);
+    const r = row(dir, "the-last");
+    assert.ok(r, "the last seat was returned by the page");
+    assert.deepEqual(r.acts, { posts: 1, comments: 0, ballots: 0, council: 0 }, "and its activity is its own, not a re-paged zero");
+    assert.equal(r.last_write_at, L + 500);
+    assert.equal(row(dir, "racer"), undefined, "the racer is not on this page");
+  } finally {
+    d1.close();
+  }
+});
+
+// The per-citizen correlated form the aggregate was first written as (every table scanned once PER citizen: gate C1). Kept here verbatim as the reference the single-pass form must equal.
+const PER_CITIZEN_REFERENCE_SQL = `SELECT ct.id AS id,
+         (SELECT COUNT(*) FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL) AS posts,
+         (SELECT COUNT(*) FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL)
+           + (SELECT COUNT(*) FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL) AS comments,
+         (SELECT COUNT(*) FROM ballots b WHERE b.citizen_id = ct.id) AS ballots,
+         (SELECT COUNT(*) FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id)
+           + (SELECT COUNT(*) FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id) AS council,
+         NULLIF(MAX(
+           COALESCE((SELECT MAX(created_at) FROM posts WHERE citizen_id = ct.id AND kind = 'post' AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(created_at) FROM comments WHERE citizen_id = ct.id AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(created_at) FROM guest_thread WHERE author_kind = 'citizen' AND author_id = ct.id AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(cast_at) FROM ballots WHERE citizen_id = ct.id), 0),
+           COALESCE((SELECT MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id = ct.id), 0),
+           COALESCE((SELECT MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id = ct.id), 0)
+         ), 0) AS last_write_at
+       FROM (SELECT DISTINCT CAST(value AS INTEGER) AS id FROM json_each(?)) ct`;
+
+test("the single-pass aggregate equals the per-citizen correlated form on a mixed fixture: every count, every last_write_at, for seats with writes in one table, in all, in none, and for an id that is no citizen (mutants: a visibility or kind predicate differs between the two forms)", async () => {
+  const { d1, alice } = fresh();
+  try {
+    const { citizenActivityPage } = await import("../src/council.ts");
+    const a = alice;
+    const b = insertCitizen(d1, { handle: "b-all", created_at: T });
+    const c = insertCitizen(d1, { handle: "c-posts", created_at: T });
+    const d = insertCitizen(d1, { handle: "d-council", created_at: T });
+    const e = insertCitizen(d1, { handle: "e-none", created_at: T });
+    const p = seedPost(d1, b, { created_at: T + 1 });
+    seedPost(d1, b, { created_at: T + 2, mod_state: "collapsed" });
+    seedPost(d1, c, { created_at: T + 3 });
+    seedPost(d1, c, { created_at: T + 4 });
+    d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at, kind, topic_state) VALUES (?, 'a topic', 'b', 'dupe-eq', 0, NULL, ?, 'topic', 'open')").run(c, T + 500);
+    comment(d1, p, b, null, T + 5);
+    comment(d1, p, b, "removed", T + 600);
+    comment(d1, p, a, null, T + 6);
+    guestRow(d1, p, "citizen", b, null, T + 7);
+    guestRow(d1, p, "citizen", b, "collapsed", T + 700);
+    guestRow(d1, p, "guest", d, null, T + 800); // a guest whose number equals d's id
+    const pr1 = insertProposal(d1, { proposer_id: a });
+    const pr2 = insertProposal(d1, { proposer_id: a });
+    ballot(d1, pr1, b, T + 8);
+    ballot(d1, pr2, b, T + 9);
+    ballot(d1, pr1, a, T + 10);
+    councilMsg(d1, "citizen", b, T + 11);
+    councilMsg(d1, "citizen", d, T + 12);
+    councilMsg(d1, "citizen", d, T + 13);
+    councilMsg(d1, "resident", d, T + 900);
+    const m1 = motion(d1, "citizen", a, T + 14);
+    const m2 = motion(d1, "citizen", a, T + 15);
+    councilBallot(d1, m1, "citizen", b, T + 16);
+    councilBallot(d1, m1, "citizen", d, T + 17);
+    councilBallot(d1, m2, "citizen", d, T + 18);
+    councilBallot(d1, m1, "resident", e, T + 1000); // a resident whose number equals e's id
+    const ids = [1, a, b, c, d, e, 999_999];
+
+    const got = await citizenActivityPage(d1.DB as never, ids);
+    const ref = (await d1.DB.prepare(PER_CITIZEN_REFERENCE_SQL).bind(JSON.stringify(ids)).all()).results as Array<Record<string, number | null>>;
+    assert.equal(ref.length, ids.length, "the unknown id is a row in the reference too");
+    for (const r of ref) assert.deepEqual(got.get(r.id as number), { posts: r.posts, comments: r.comments, ballots: r.ballots, council: r.council, last_write_at: r.last_write_at }, `citizen ${r.id}`);
+    assert.equal(got.size, ref.length, "the same ids come back");
+    // and the fixture is not vacuous: the forms agree on non-trivial numbers
+    assert.deepEqual(got.get(b), { posts: 1, comments: 2, ballots: 2, council: 2, last_write_at: T + 16 });
+    assert.deepEqual(got.get(d), { posts: 0, comments: 0, ballots: 0, council: 4, last_write_at: T + 18 });
+    assert.deepEqual(got.get(e), { posts: 0, comments: 0, ballots: 0, council: 0, last_write_at: null });
+  } finally {
+    d1.close();
+  }
+});
+
+test("D1 refuses a compound SELECT of more than 5 terms (found by running the aggregate on Miniflare's D1: node:sqlite allows 500, so this suite cannot see it): no CTE in the aggregate chains more than 4 UNION ALLs (mutant: the six sources are chained in one CTE)", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../src/council.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const sql = /`(WITH ct AS[\s\S]*?GROUP BY ct\.id)`/.exec(src)![1];
+  const bodies = sql.split(/^\s*(?:\), )?\w+ AS \(/m);
+  assert.ok(bodies.length >= 4, "the CTEs were found");
+  for (const body of bodies) assert.ok((body.match(/\bUNION ALL\b/g) ?? []).length <= 4, `a CTE chains too many terms: ${body.slice(0, 80)}`);
+  assert.ok((sql.match(/\bUNION ALL\b/g) ?? []).length >= 5, "positive control: the six sources are still combined");
+});
+
+test("if the activity cannot be read the census still serves, with acts and last_write_at null and the note saying so (mutant: the failure is swallowed into zeros, or breaks the census)", async () => {
+  const { d1, env, alice } = fresh();
+  try {
+    seedPost(d1, alice);
+    d1.raw.exec("DROP TABLE council_ballots");
+    const dir = await citizenDirectory(env);
+    assert.equal(dir.total, 2);
+    const a = row(dir, "alice");
+    assert.equal(a.acts, null);
+    assert.equal(a.last_write_at, null);
+    assert.equal(typeof a.last_me_at, "number", "the registration-derived field does not depend on the aggregate");
+    assert.equal(a.handle, "alice");
+  } finally {
+    d1.close();
+  }
+});
