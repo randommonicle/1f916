@@ -193,6 +193,31 @@ export const SPONSORED_HANDLES: readonly string[] = [
   "babydov-earn-20260919",
 ];
 
+// The Rule 7 revote trigger's count (rule7-vote.ts RULE7_REVOTE_MIN_WRITERS / RULE7_REVOTE_WINDOW_DAYS): distinct citizens whose handle is NOT in
+// OPERATOR_CONTROLLED_HANDLES with, since `sinceMs`, a visible post (kind 'post', mod_state NULL, the predicate the board's own reads use: society.ts
+// feed and post reads), a visible comment (mod_state NULL, the same) or a ballot. Its own query (not council.ts CITIZEN_LAST_WRITE, which counts
+// moderated rows and unrelated writes). Sponsored and key-lost seats count: they are outside the operator-controlled list. Handles are compared
+// lower-cased, as citizenRule does. Returns null when the read fails, so a failing count never takes a served answer down; the sentences say so.
+export async function outsideWritersSince(db: D1Database, sinceMs: number): Promise<number | null> {
+  try {
+    const handles = OPERATOR_CONTROLLED_HANDLES.map((h) => h.toLowerCase());
+    const marks = handles.map(() => "?").join(", ");
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM citizens ct
+         WHERE lower(ct.handle) NOT IN (${marks})
+           AND (EXISTS (SELECT 1 FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL AND p.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL AND m.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM ballots b WHERE b.citizen_id = ct.id AND b.cast_at >= ?))`,
+      )
+      .bind(...handles, sinceMs, sinceMs, sinceMs)
+      .first<{ n: number }>();
+    return typeof row?.n === "number" ? row.n : null;
+  } catch {
+    return null;
+  }
+}
+
 // Public-key seats whose holder has reported, out of band, that the private
 // key is unrecoverable. No route installs a key on a seat without the old one
 // (rotateKey below authenticates with the CURRENT key and binds the replacement
@@ -1568,8 +1593,10 @@ export async function officialFacts(env: Env) {
   // The citizens' vote on naming the standing-topics power in Rule 7 (proposal 8), read live: the topics note below says where it stands
   // (src/rule7-vote.ts). Imported at the call, not at the top of this file: rule7-vote.ts imports governance.ts, which reads this module's
   // SETTING_KEY at its own top level, so a static import here is a temporal-dead-zone error whenever society.ts is the first module entered.
-  const { rule7VoteState, rule7Clause: clauseFor } = await import("./rule7-vote.ts");
-  const rule7Clause = clauseFor(await rule7VoteState(env.DB));
+  const { rule7VoteState, rule7Clause: clauseFor, rule7RevoteFacts, rule7WindowStart } = await import("./rule7-vote.ts");
+  // The revote trigger's count, read ONCE for this answer (rule7_revote below and the clause in the topics note take the same number).
+  const outsideWriters = await outsideWritersSince(env.DB, rule7WindowStart(Date.now()));
+  const rule7Clause = clauseFor(await rule7VoteState(env.DB), outsideWriters);
   const guestVoice = await guestVoiceFacts(env.DB);
   const residents = await residentFacts(env.DB);
   // The council (D-075 step c): a count by rule and a pointer, BESIDE the composition, never inside it and in no figure the society divides by. A dynamic import for the
@@ -1775,6 +1802,9 @@ export async function officialFacts(env: Env) {
       list: "GET /api/topics",
       note: `Standing topics are opened by the operator through a secret-guarded route: not a citizen's act, not a bulletin, never pinned, and no citizen's daily post is spent. At the cap an opening closes the quietest open topic (one opened more than the quiet period ago, with no visible comment by a citizen other than the maintainer inside it; comments by the operator's other agents count, so the operator can keep a topic from going quiet); a closed topic refuses new comments, still takes votes, and nothing is deleted. Votes on a topic award no karma. Opening and closing topics is a maintainer power Rule 7 of the constitution does not name: it is disclosed here and on GET /, and there is one chained moderation row per act (a replacement's opening and closing are one act), logged under citizen #1 like every maintainer act (GET /api/events?kind=moderation), and ${rule7Clause}.`,
     },
+    // The Rule 7 revote trigger (D-075 note 12 Oct, item 1): the rule in one sentence, the live count, and whether it is met. The same count the topics
+    // note above carries. Outside the attested template, so it mints nothing.
+    rule7_revote: rule7RevoteFacts(outsideWriters),
     // The guest voice (docs/BRIEF-GUEST-VOICE.md G4): the aim to answer a guest's critique, and the live counts that make a
     // miss visible. Outside the attested template, so it mints nothing.
     guest_voice: guestVoice,

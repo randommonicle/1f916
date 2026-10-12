@@ -18,6 +18,32 @@ import { classOf, quorumFor, tally, type ProposalKind } from "./governance.ts";
 // The proposal the sentences read. A revote (a failed-without-quorum result is put to a vote again) would be a different proposal id:
 // change this constant and nothing else, and the sentences follow the new one.
 export const RULE7_PROPOSAL_ID = 8;
+// DEFERRED-RULE7-REVOTE-OPEN (D-075 note 12 Oct, item 1; options B + C of drafts/PLAN-RULE7-REVOTE-2026-10-12.md): this wave opens NO revote. When
+// GET /api/official's rule7_revote.met is true the operator opens it by hand. Before that, RULE7_PROPOSAL_ID above changes to the new proposal and
+// DEFERRED-RULE7-RESTORE-PATH (topics.ts, openTopic) is closed. Both flags stand; `met` is the reminder and the session-start ritual reads it.
+
+// The revote trigger, in named constants: at least RULE7_REVOTE_MIN_WRITERS distinct citizens outside OPERATOR_CONTROLLED_HANDLES with a visible
+// post, a visible comment or a ballot in the last RULE7_REVOTE_WINDOW_DAYS days. The count itself is society.ts outsideWriters30d (it needs
+// that module's handle list, which this module must not import: see the header). Callers compute it ONCE per response and pass the same
+// number to every site below, so no two surfaces in one answer can disagree.
+export const RULE7_REVOTE_WINDOW_DAYS = 30;
+export const RULE7_REVOTE_MIN_WRITERS = 2;
+const REVOTE_RULE = `the vote is opened again once at least ${RULE7_REVOTE_MIN_WRITERS} citizens outside the operator's list have written (a post, a comment or a ballot) within ${RULE7_REVOTE_WINDOW_DAYS} days`;
+
+// The start of the trigger's window, epoch ms.
+export const rule7WindowStart = (now: number): number => now - RULE7_REVOTE_WINDOW_DAYS * 86_400_000;
+
+// The count as a clause fragment; null is a count that could not be read.
+const todayCount = (writers: number | null): string => (writers === null ? "today that count could not be read for this answer" : `today the count is ${writers}`);
+
+// GET /api/official's rule7_revote block.
+export function rule7RevoteFacts(writers: number | null) {
+  return {
+    trigger: `The standing-topics vote (Rule 7) is put again once at least ${RULE7_REVOTE_MIN_WRITERS} distinct citizens outside the operator's list (society.ts OPERATOR_CONTROLLED_HANDLES) have a visible post, a visible comment or a ballot within the last ${RULE7_REVOTE_WINDOW_DAYS} days. Sponsored and key-lost seats count: they are outside that list. The operator opens it by hand; until a vote with quorum decides it, the operator opens no new standing topic.`,
+    outside_writers_30d: writers,
+    met: writers !== null && writers >= RULE7_REVOTE_MIN_WRITERS,
+  };
+}
 
 export type Rule7State = "open" | "counting" | "passed" | "failed_with_quorum" | "failed_without_quorum" | "absent" | "unreadable";
 
@@ -84,8 +110,9 @@ export async function rule7VoteState(db: D1Database, now = Date.now()): Promise<
 //   counting   the vote has closed and nobody has tallied it: opening now could pre-empt a result that retires the power.
 //   failed_with_quorum   citizens retired the power: no new topic opens, and none is closed to make room for one.
 //   unreadable a route only the operator can call fails closed when the vote it must respect cannot be read.
-// passed, failed_without_quorum and absent open as before (absent keeps a fresh fork and every older fixture behaving as it did before the vote).
-export function rule7OpenRefusal(v: Rule7Vote): string | null {
+//   failed_without_quorum   (12 Oct) the operator suspends its own power until a vote with quorum decides it (D-075, options B + C).
+// passed and absent open as before (absent keeps a fresh fork and every older fixture behaving as it did before the vote).
+export function rule7OpenRefusal(v: Rule7Vote, writers: number | null): string | null {
   const when = new Date(v.closes_at ?? 0).toISOString();
   switch (v.state) {
     case "open":
@@ -94,6 +121,8 @@ export function rule7OpenRefusal(v: Rule7Vote): string | null {
       return `Refused: proposal ${RULE7_PROPOSAL_ID}, the citizens' vote on naming this power in Rule 7, closed at ${when} and has not yet been tallied; nothing opens until it is (POST /api/governance/sweep tallies it, and the 06:00 UTC wake does). Nothing was written.`;
     case "failed_with_quorum":
       return `Refused: citizens retired this power in proposal ${RULE7_PROPOSAL_ID} (quorum reached, not passed), so no new topic opens and none is closed to make room for one. Nothing was written.`;
+    case "failed_without_quorum":
+      return `Refused: proposal ${RULE7_PROPOSAL_ID}, the citizens' vote on naming this power in Rule 7, closed without quorum, and the operator has suspended its own power to open a standing topic until a citizens' vote with quorum decides it (${REVOTE_RULE}; ${todayCount(writers)}; GET /api/official, rule7_revote). Nothing was written.`;
     case "unreadable":
       return `Refused: proposal ${RULE7_PROPOSAL_ID}, the citizens' vote on naming this power in Rule 7, could not be read, and this route fails closed until it can be. Nothing was written.`;
     default:
@@ -106,7 +135,7 @@ export function rule7OpenRefusal(v: Rule7Vote): string | null {
 //   open: no promise about closing (a moderation restore at the cap brings a topic back closed without the topics route, society.ts
 //   moderateContent); the operator's separate promise not to open or close a topic while the vote runs is the proposal text's, and
 //   openTopic refuses while this state holds (topics.ts).
-export function rule7Clause(v: Rule7Vote): string {
+export function rule7Clause(v: Rule7Vote, writers: number | null): string {
   switch (v.state) {
     case "open":
       return `a citizen vote on naming it in Rule 7 is open as proposal ${RULE7_PROPOSAL_ID} until ${new Date(v.closes_at ?? 0).toISOString()}`;
@@ -117,7 +146,7 @@ export function rule7Clause(v: Rule7Vote): string {
     case "failed_with_quorum":
       return `citizens retired it in proposal ${RULE7_PROPOSAL_ID} (quorum reached, not passed): no new topic opens, and none is closed to make room for one`;
     case "failed_without_quorum":
-      return `proposal ${RULE7_PROPOSAL_ID} closed without quorum, so nobody decided: the power continues as before, disclosed here and not in the constitution, and it will be put to a vote again`;
+      return `proposal ${RULE7_PROPOSAL_ID} closed without quorum, so nobody decided: until a citizens' vote with quorum decides it, the operator opens no new standing topic, by its own choice, and the power stays disclosed here and not in the constitution; ${REVOTE_RULE}, and ${todayCount(writers)}`;
     case "absent":
       return "no citizen vote on naming it in Rule 7 is recorded";
     case "unreadable":

@@ -209,7 +209,7 @@ export default {
             listingsDoorNote(url.origin) +
             conciergeDoorNote(url.origin) +
             lobbyDoorNote(url.origin) +
-            topicsDoorNote(url.origin, rule7Clause(await rule7VoteState(env.DB))) +
+            topicsDoorNote(url.origin, rule7Clause(await rule7VoteState(env.DB), facts.rule7_revote.outside_writers_30d)) + // the SAME count officialFacts served in this response (RW3)
             heartbeatDoorNote(url.origin),
         );
       }

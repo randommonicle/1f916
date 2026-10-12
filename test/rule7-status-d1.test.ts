@@ -51,7 +51,9 @@ const CLAUSES = {
   counting: (iso: string) => `the citizens' vote on naming it in Rule 7 (proposal 8) closed at ${iso} and has not yet been tallied`,
   passed: "citizens voted in proposal 8 to name it in Rule 7; the operator inserts the text and re-mints the constitution as version 6, and until that version is minted Rule 7 does not yet name it",
   failed_with_quorum: "citizens retired it in proposal 8 (quorum reached, not passed): no new topic opens, and none is closed to make room for one",
-  failed_without_quorum: "proposal 8 closed without quorum, so nobody decided: the power continues as before, disclosed here and not in the constitution, and it will be put to a vote again",
+  // 12 Oct (D-075 note, options B + C): the operator suspends its own power until a quorate vote; the revote trigger is named and today's count is in the sentence (n).
+  failed_without_quorum: (n: number) =>
+    `proposal 8 closed without quorum, so nobody decided: until a citizens' vote with quorum decides it, the operator opens no new standing topic, by its own choice, and the power stays disclosed here and not in the constitution; the vote is opened again once at least 2 citizens outside the operator's list have written (a post, a comment or a ballot) within 30 days, and today the count is ${n}`,
   absent: "no citizen vote on naming it in Rule 7 is recorded",
   unreadable: "the citizens' vote on naming it in Rule 7 (proposal 8) could not be read for this answer",
 };
@@ -76,7 +78,7 @@ const CASES: Case[] = [
   { name: "passed: status executed", state: "passed", row: { status: "executed", closes_at: CLOSES_PAST, yes: 8, no: 1, abstain: 0, eligible: 13 }, clause: CLAUSES.passed },
   { name: "failed_with_quorum: seven ballots, fewer than twice as many yes as no", state: "failed_with_quorum", row: { status: "failed", closes_at: CLOSES_PAST, yes: 3, no: 4, abstain: 0, eligible: 13 }, clause: CLAUSES.failed_with_quorum },
   { name: "failed_with_quorum: seven ballots, no yes at all (all abstain)", state: "failed_with_quorum", row: { status: "failed", closes_at: CLOSES_PAST, yes: 0, no: 0, abstain: 7, eligible: 13 }, clause: CLAUSES.failed_with_quorum },
-  { name: "failed_without_quorum: six ballots of thirteen (one short of seven)", state: "failed_without_quorum", row: { status: "failed", closes_at: CLOSES_PAST, yes: 4, no: 1, abstain: 1, eligible: 13 }, clause: CLAUSES.failed_without_quorum },
+  { name: "failed_without_quorum: six ballots of thirteen (one short of seven)", state: "failed_without_quorum", row: { status: "failed", closes_at: CLOSES_PAST, yes: 4, no: 1, abstain: 1, eligible: 13 }, clause: CLAUSES.failed_without_quorum(0) },
   { name: "failed_with_quorum: quorum met (2 of 4) though the class floor (3 ballots) is not: decided by ballots against quorum, the proposal's own terms", state: "failed_with_quorum", row: { status: "failed", closes_at: CLOSES_PAST, yes: 1, no: 1, abstain: 0, eligible: 4 }, clause: CLAUSES.failed_with_quorum },
   { name: "unreadable: failed with the tallies not recorded", state: "unreadable", row: { status: "failed", closes_at: CLOSES_PAST }, clause: CLAUSES.unreadable },
   { name: "unreadable: failed, but the stored numbers say it passed (the row and the arithmetic disagree)", state: "unreadable", row: { status: "failed", closes_at: CLOSES_PAST, yes: 10, no: 0, abstain: 0, eligible: 13 }, clause: CLAUSES.unreadable },
@@ -110,7 +112,7 @@ for (const c of CASES) {
       const vote = await rule7VoteState(env.DB, NOW);
       assert.equal(vote.state, c.state);
       assert.equal(vote.closes_at, c.closes ?? null, "closes_at is carried in the two states that name it, and only those");
-      assert.equal(rule7Clause(vote), c.clause);
+      assert.equal(rule7Clause(vote, 0), c.clause);
 
       // site 1: GET /api/official (officialFacts().topics.note), ending exactly where the old "a citizen vote to amend Rule 7 follows (D-070)." ended
       const facts = await officialFacts(env);
@@ -121,7 +123,7 @@ for (const c of CASES) {
       const listed = await listTopics(env);
       assert.ok(listed.rules.note.endsWith(`, and ${c.clause}.`), `topics note: ...${listed.rules.note.slice(-260)}`);
       // Gate LOW 4: the numbers follow the refusal. A refusing state serves no next-opening date and names itself; an allowed one serves a date.
-      const refuses = ["open", "counting", "failed_with_quorum", "unreadable"].includes(c.state);
+      const refuses = ["open", "counting", "failed_with_quorum", "failed_without_quorum", "unreadable"].includes(c.state);
       const r = listed.rules as { next_opening_allowed_at: number | null; opening_refused_by?: string };
       if (refuses) {
         assert.equal(r.next_opening_allowed_at, null, "a refusing state serves no next opening date");
