@@ -38,7 +38,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "fded8bc0cc9987063a9fe1f7114492bc62e19bd9"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "2b7f4e708770c931929d69a9b8ed04c3d76c8b5e"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-rulings-wave.ps1", "test/deploy-rulings-wave-script.test.ts", "docs/")
 # The propagation poll waits for THIS block to appear on GET /api/official (a key only this wave serves); the pre-deploy probe proves it is absent first.
