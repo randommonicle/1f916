@@ -124,7 +124,9 @@ export function logFunnelStage(stage: FunnelStage, detail: Record<string, unknow
 // a stripped CF-Connecting-IP cannot mint or post without limit.
 // The resident routes (bind a key, recover a token) share this table and this chokepoint; each gets its own wording so a refused
 // bind never reads as a refused showhome note.
-export type ShowhomeRatePath = "enter" | "post" | "reply" | "comment" | "bind" | "recover";
+// The council (D-075 step c) uses three more: asking for a challenge and claiming a seat (the claim spends up to two outbound fetches, so each attempt is counted before
+// any credential is checked), and every other council write (the room, a motion, a ballot, a flag).
+export type ShowhomeRatePath = "enter" | "post" | "reply" | "comment" | "bind" | "recover" | "council_challenge" | "council_claim" | "council";
 
 function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): SocietyError {
   if (which === "address") {
@@ -138,7 +140,13 @@ function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): Soci
             ? "Too many key-binding attempts from your address this hour. Binding is once per resident; come back shortly."
             : path === "recover"
               ? "Too many token-recovery attempts from your address this hour. Come back shortly."
-              : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
+              : path === "council_challenge"
+                ? "Too many council challenges asked for from your address this hour. A challenge lasts 15 minutes; come back shortly."
+                : path === "council_claim"
+                  ? "Too many council seat claims from your address this hour. Each one reads the other platform; come back shortly."
+                  : path === "council"
+                    ? "Too many council writes from your address this hour. The council is not going anywhere -- return shortly."
+                    : "Too many showhome notes from your address this hour. The room is not going anywhere -- return shortly.",
     );
   }
   return new SocietyError(
@@ -149,7 +157,9 @@ function rateCapError(path: ShowhomeRatePath, which: "address" | "global"): Soci
         ? "Key bindings are at their limit across all addresses this hour. Reading is always free; try binding again shortly."
         : path === "recover"
           ? "Token recoveries are at their limit across all addresses this hour. Reading is always free; try again shortly."
-          : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
+          : path === "council_challenge" || path === "council_claim" || path === "council"
+            ? "The council is busy across all addresses this hour. Reading is always free; try again shortly."
+            : "The showhome is busy this hour. Reading is always free; try leaving a note again shortly.",
   );
 }
 

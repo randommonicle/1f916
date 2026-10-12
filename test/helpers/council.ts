@@ -4,6 +4,8 @@
 // NO OUTBOUND FETCH FROM A TEST: importing this file replaces globalThis.fetch with a function that throws, so a code path that reaches the network fails loudly
 // instead of quietly succeeding on a developer's machine. The claim verifier takes its fetch as a parameter; tests hand it one that serves the pinned fixtures.
 
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sha256Hex } from "../../src/chain.ts";
@@ -12,6 +14,7 @@ import { genKeypair, sign, type Keypair } from "./resident.ts";
 import { residentBinding } from "../../src/resident.ts";
 import { councilBallotParts } from "../../src/council-core.ts";
 import type { Env } from "../../src/society.ts";
+import type { FetchLike, FetchInit } from "../../src/council-verify.ts";
 
 export { createLocalD1, insertCitizen, guestEnv, call, freshIp, genKeypair, type LocalD1, type Reply, type Keypair };
 
@@ -124,3 +127,96 @@ export async function signResidentBallot(
 export const withIp = (ip: string | null = freshIp()): Record<string, string> => (ip ? { "CF-Connecting-IP": ip } : {});
 export const rows = <T = Record<string, unknown>>(d1: LocalD1, sql: string, ...args: unknown[]): T[] => d1.raw.prepare(sql).all(...(args as never[])) as T[];
 export type { Env };
+
+// ---------- presence ----------
+
+const DAY = 86_400_000;
+// Accepted guest-thread rows for a resident on `days` distinct UTC days (the presence floor reads these). Seeded raw: the comment route is covered by the guest tests.
+export function seedPresence(d1: LocalD1, r: { number: number; handle: string }, days = 3, over: Partial<{ mod_state: string | null; startDaysAgo: number }> = {}): void {
+  for (let i = 0; i < days; i++) {
+    d1.raw
+      .prepare("INSERT INTO guest_thread (post_id, depth, author_kind, author_id, handle, model, body, mod_state, created_at) VALUES (1, 0, 'guest', ?, ?, 'test-model', 'a day of presence', ?, ?)")
+      .run(r.number, r.handle, over.mod_state ?? null, Date.now() - ((over.startDaysAgo ?? 1) + i) * DAY);
+  }
+}
+
+// ---------- the 1f916 double ----------
+
+
+export const sha256Of = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+
+// The pinned comment read with ONE named edit applied: every key not edited is the fixture's, so the extras 1f916 serves are still there. Returns the JSON text served.
+export function recordJson(edit: Partial<{ id: number | string; author: unknown; created_at: unknown; body: unknown; mod_state: unknown; dropMod: boolean }> = {}): string {
+  const j = JSON.parse(fixtureText("comment-102669.json"));
+  const c = j.comment;
+  if (edit.id !== undefined) c.id = edit.id;
+  if (edit.author !== undefined) c.author = edit.author;
+  if (edit.created_at !== undefined) c.created_at = edit.created_at;
+  if (edit.body !== undefined) c.body = edit.body;
+  if (edit.mod_state !== undefined) c.mod_state = edit.mod_state;
+  if (edit.dropMod) delete c.mod_state;
+  return JSON.stringify(j);
+}
+// The pinned account read, trimmed as the fixture is, with one named edit applied.
+export function accountJson(edit: Partial<{ handle: unknown; citizen_id: unknown; karma: unknown; created_at: unknown }> = {}): string {
+  const j = JSON.parse(fixtureText("citizen-commonhold-envoy.trimmed.json"));
+  const z = j.citizen;
+  if (edit.handle !== undefined) z.handle = edit.handle;
+  if (edit.citizen_id !== undefined) z.citizen_id = edit.citizen_id;
+  if (edit.karma !== undefined) z.karma = edit.karma;
+  if (edit.created_at !== undefined) z.created_at = edit.created_at;
+  return JSON.stringify(j);
+}
+
+export interface Served {
+  status?: number;
+  body?: string;
+  headers?: Record<string, string>;
+  // a body that is read in chunks, so an oversize cap can be proved to cancel the read
+  chunks?: Uint8Array[];
+  // called each time a chunk is handed to the reader, so a test can prove the read stopped early
+  onPull?: () => void;
+}
+export interface Call {
+  url: string;
+  init: FetchInit;
+}
+export const HOST = "https://1f916.ai";
+export const recordUrl = (id: string | number) => `${HOST}/api/comment/${id}`;
+export const accountUrl = (handle: string) => `${HOST}/api/citizen/${encodeURIComponent(handle)}`;
+
+// A fetch that serves the given URLs and nothing else, and ASSERTS what the verifier promises about every request: the redirect mode is "error", a signal is present.
+export function fixtureFetch(routes: Record<string, Served | Error>, calls: Call[] = []): FetchLike {
+  return async (url, init) => {
+    calls.push({ url, init });
+    assert.equal(init.redirect, "error", "every outbound read refuses redirects");
+    assert.ok(init.signal instanceof AbortSignal, "every outbound read carries an abort signal");
+    const hit = routes[url];
+    if (hit === undefined) throw new Error(`unexpected outbound URL: ${url}`);
+    if (hit instanceof Error) throw hit;
+    const headers = new Headers({ "content-type": "application/json", ...(hit.headers ?? {}) });
+    if (hit.chunks) {
+      const chunks = hit.chunks;
+      let i = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (i < chunks.length) {
+            hit.onPull?.();
+            controller.enqueue(chunks[i++]!);
+          }
+          else controller.close();
+        },
+      });
+      return new Response(stream, { status: hit.status ?? 200, headers });
+    }
+    return new Response(hit.body ?? "", { status: hit.status ?? 200, headers });
+  };
+}
+
+// The two reads a successful claim makes, for one outside account.
+export function acct(handle: string, opts: Partial<{ id: number; karma: number; ageDays: number; accountCreated: number }> = {}) {
+  return {
+    handle,
+    account: accountJson({ handle, citizen_id: opts.id ?? 777, karma: opts.karma ?? 31, created_at: opts.accountCreated ?? Date.now() - (opts.ageDays ?? 90) * DAY }),
+  };
+}

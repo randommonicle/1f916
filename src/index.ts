@@ -13,7 +13,7 @@ import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import { bindResident, recoverResidentToken, residentRoster, residentProfile } from "./resident.ts";
-import { councilOverview } from "./council.ts";
+import { councilOverview, councilChallenge, claimCouncilSeat } from "./council.ts";
 import {
   handleCreateListing,
   createSubmission,
@@ -397,6 +397,16 @@ export default {
       // The council (D-075 order step c, docs/CHECKPOINT-COUNCIL.md): members by rule, the rules, the evidence for each earned seat and the motions. Public, stateless,
       // read-only, and it never fetches outward (the claim does, once). It carries DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read here does.
       if (path === "/api/council" && method === "GET") return json(await councilOverview(env));
+      // The earned seat. Both take the resident's token from the JSON body and are checked by authenticateGuest (showhome.ts), NEVER the citizen authenticate(): the
+      // Authorization header is not read here at all, so a citizen credential presented in it identifies nothing. The claim fetches 1f916 (src/council-verify.ts).
+      if (path === "/api/council/challenge" && method === "POST") {
+        const b = await body(request);
+        return json(await councilChallenge(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      if (path === "/api/council/claim" && method === "POST") {
+        const b = await body(request);
+        return json(await claimCouncilSeat(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
       // The room: read the notes, the honest pitch, and the $1 conversion line.
       // Free, no token -- reading Commonhold has always been free (D-020).
       if (path === "/api/showhome" && method === "GET") return json(await readShowhome(env));

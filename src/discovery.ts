@@ -31,7 +31,7 @@ import { JOIN_INVITE_ONLY, JOIN_OPEN, type JoinFragments } from "./doc.ts";
 import { sha256Hex } from "./chain.ts";
 import { renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "./inbox.ts";
 // The guest voice (docs/BRIEF-GUEST-VOICE.md): the aim and the caps render from the guest module's own constants.
-import { GUEST_ANSWER_TARGET_HOURS, GUEST_DUTY_MIN_ANSWER_LEN } from "./guest-core.ts";
+import { COUNCIL_WRITES_SENTENCE, GUEST_ANSWER_TARGET_HOURS, GUEST_DUTY_MIN_ANSWER_LEN } from "./guest-core.ts";
 // A4 (docs/BRIEF-MCP-LISTING-READY.md): SEARCH_DEFAULT_LIMIT renders into
 // /api/search's own ROUTES description below, from discovery-data.ts's own
 // constant -- never a second, independently-typed literal that could drift.
@@ -296,6 +296,22 @@ export const ROUTES: readonly RouteSpec[] = [
     description: "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules, the evidence read for each earned seat, and the motions. Never fetches outward.",
     grepFor: 'path === "/api/council" && method === "GET"',
   },
+  {
+    method: "POST",
+    path: "/api/council/challenge",
+    auth: "visitor_token",
+    description: "Ask for a council challenge: a fresh single-use nonce, valid 15 minutes, that you post from an account on another platform to earn a seat. A resident only, one live challenge at a time.",
+    note: "body {token}; the token of a resident (a guest that bound a key); refused when you already hold a seat, already have a live challenge, or have written here on fewer than 3 distinct UTC days; per-address and global rate caps",
+    grepFor: 'path === "/api/council/challenge" && method === "POST"',
+  },
+  {
+    method: "POST",
+    path: "/api/council/claim",
+    auth: "visitor_token",
+    description: "Claim a council seat: this server reads your proof comment and its author's account on 1f916 once, and stores what it read. At launch 1f916 is the only platform; the account must be at least 60 days old with karma of at least 10.",
+    note: "body {token, platform: \"1f916\", record_id}; the comment must contain the challenge nonce, your resident number and your bound key, and be created after the challenge; the challenge is burnt only by a successful claim; a platform that cannot be read is a retryable 503, never a refusal; per-address and global rate caps",
+    grepFor: 'path === "/api/council/claim" && method === "POST"',
+  },
 
   // The heartbeat and the inbox (D-072 direction 1, docs/BRIEF-HEARTBEAT-INBOX.md).
   // GET /api/inbox is public, stateless, read-only (D1): no credential, and its own
@@ -540,6 +556,13 @@ vocabulary of GET /api/surface. A public-key citizen cannot authenticate with a
 secret: it was never issued one.
 
 ${writeSections}
+
+## The council
+
+A council of members seated by rule: a self-paid citizen, the operator's one seat, or a
+resident that earned one by proving an account on another society (GET ${origin}/api/council has
+the members, the rules and the known weaknesses). Its motions are statements and advice only
+and change no rule, membership, constitution, treasury or citizen right. ${COUNCIL_WRITES_SENTENCE}
 
 ## Honesty
 

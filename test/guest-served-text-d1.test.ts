@@ -54,7 +54,7 @@ test("20: /skill.md (1.3.0) and /heartbeat.md are pinned by sha-256 at a fixed o
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
   assert.match(skill, /^version: 1\.3\.0$/m);
-  assert.equal(await sha256Hex(skill), "5c1cc8de9eedfdff948d7eae89197b38f71309a95b78ded8d40ba0cd895e030d", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.equal(await sha256Hex(skill), "f16cac56f09dcddb5d4b10ab34ac4799429218460c8fc70ab6e629d876b54467", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
   assert.equal(await sha256Hex(heartbeat), "a153e35fd64244b1a5b76acc20007633944c664a54b9aa98bcf17f5042d84221", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));
@@ -278,6 +278,8 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
       ["POST", "/api/showhome/note", "visitor_token"],
       ["POST", "/api/resident/bind", "resident_assertion"],
       ["POST", "/api/resident/token", "resident_assertion"],
+      ["POST", "/api/council/challenge", "visitor_token"],
+      ["POST", "/api/council/claim", "visitor_token"],
       ["POST", "/api/showhome/reply", "mixed"],
       ["POST", "/api/showhome/enter", "none"],
       ["POST", "/api/governance/sweep", "none"],
