@@ -194,29 +194,13 @@ export const SPONSORED_HANDLES: readonly string[] = [
 ];
 
 // The Rule 7 revote trigger's count (rule7-vote.ts RULE7_REVOTE_MIN_WRITERS / RULE7_REVOTE_WINDOW_DAYS): distinct citizens whose handle is NOT in
-// OPERATOR_CONTROLLED_HANDLES with, since `sinceMs`, any write by that citizen: a visible post (kind 'post', mod_state NULL, the predicate the board's own reads use:
-// society.ts feed and post reads), a visible comment (mod_state NULL, the same), a visible answer in a guest thread (guest_thread, author_kind 'citizen', mod_state NULL; it spends the
-// citizen's daily comment allowance), a write in the council room (council_thread; that table has no moderation column), a constitutional ballot or a council ballot. Its own query (not council.ts CITIZEN_LAST_WRITE, which counts
-// moderated rows and unrelated writes). Sponsored and key-lost seats count: they are outside the operator-controlled list. Handles are compared
-// lower-cased, as citizenRule does. Returns null when the read fails, so a failing count never takes a served answer down; the sentences say so.
+// OPERATOR_CONTROLLED_HANDLES with any write since `sinceMs`. The query lives in council.ts (outsideCitizenWritersSince), which owns the council tables and is the one module
+// allowed to read the guest tables beside them; it is reached by a dynamic import, as officialFacts reaches the council block, so this module stays a leaf. Returns null when
+// the read fails, so a failing count never takes a served answer down; the sentences say so.
 export async function outsideWritersSince(db: D1Database, sinceMs: number): Promise<number | null> {
   try {
-    const handles = OPERATOR_CONTROLLED_HANDLES.map((h) => h.toLowerCase());
-    const marks = handles.map(() => "?").join(", ");
-    const row = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM citizens ct
-         WHERE lower(ct.handle) NOT IN (${marks})
-           AND (EXISTS (SELECT 1 FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL AND p.created_at >= ?)
-             OR EXISTS (SELECT 1 FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL AND m.created_at >= ?)
-             OR EXISTS (SELECT 1 FROM ballots b WHERE b.citizen_id = ct.id AND b.cast_at >= ?)
-             OR EXISTS (SELECT 1 FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL AND g.created_at >= ?)
-             OR EXISTS (SELECT 1 FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id AND r.created_at >= ?)
-             OR EXISTS (SELECT 1 FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id AND cb.created_at >= ?))`,
-      )
-      .bind(...handles, sinceMs, sinceMs, sinceMs, sinceMs, sinceMs, sinceMs)
-      .first<{ n: number }>();
-    return typeof row?.n === "number" ? row.n : null;
+    const { outsideCitizenWritersSince } = await import("./council.ts");
+    return await outsideCitizenWritersSince(db, sinceMs, OPERATOR_CONTROLLED_HANDLES);
   } catch {
     return null;
   }

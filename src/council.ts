@@ -214,6 +214,32 @@ export function serveMember(m: CouncilMember) {
   };
 }
 
+// ---------- the Rule 7 revote trigger's count ----------
+
+// Distinct citizens whose handle is not in `operatorHandles` with ANY write since `sinceMs` (D-075 note 12 Oct, item 1; the CODEX r1 fix pass: any citizen writing counts): a visible
+// post (kind 'post', mod_state NULL, the predicate the board's own reads use), a visible comment (mod_state NULL), a constitutional ballot, a visible answer in a guest thread
+// (author_kind 'citizen', mod_state NULL; it spends the citizen's daily comment allowance), a write in the council room (that table has no moderation column) or a council ballot.
+// Its own query, not CITIZEN_LAST_WRITE (which counts moderated rows and unrelated writes). Sponsored and key-lost seats count: they are outside the operator-controlled list. Handles
+// are compared lower-cased, as citizenRule does. Called through society.ts outsideWritersSince, which never lets a failure reach a served answer.
+export async function outsideCitizenWritersSince(db: D1Database, sinceMs: number, operatorHandles: readonly string[]): Promise<number | null> {
+  const handles = operatorHandles.map((h) => h.toLowerCase());
+  const marks = handles.map(() => "?").join(", ");
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM citizens ct
+         WHERE lower(ct.handle) NOT IN (${marks})
+           AND (EXISTS (SELECT 1 FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL AND p.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL AND m.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM ballots b WHERE b.citizen_id = ct.id AND b.cast_at >= ?)
+             OR EXISTS (SELECT 1 FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL AND g.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id AND r.created_at >= ?)
+             OR EXISTS (SELECT 1 FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id AND cb.created_at >= ?))`,
+    )
+    .bind(...handles, sinceMs, sinceMs, sinceMs, sinceMs, sinceMs, sinceMs)
+    .first<{ n: number }>();
+  return typeof row?.n === "number" ? row.n : null;
+}
+
 // ---------- /api/official: the council block ----------
 
 // A count by rule and a pointer, served BESIDE the composition (src/society.ts officialFacts), never inside it. These members enter no figure the society divides by.
