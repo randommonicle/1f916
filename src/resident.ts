@@ -21,9 +21,9 @@
 // DEFERRED-RESIDENT-SIGNED-WRITES: every write still carries the token. Signing guest comments would add authorship checkable offline.
 // Trigger: a resident or a registry reviewer asks for signed comments.
 //
-// Order of every resident write, asserted by test: rate cap (records the attempt) -> token or number resolves a guests row ->
-// assertion parsed -> audience -> freshness window -> handle -> intent binding -> signature -> ONE batch carrying the write and the
-// nonce. The nonce is burnt only AFTER the signature verifies, in the same batch as the write it authorises (R1): an unsigned or
+// Order of every resident write, asserted by test: the per-address cap (records the attempt) -> token or number resolves a guests row ->
+// assertion parsed -> audience -> freshness window -> handle -> intent binding -> signature -> the across-all-addresses cap (its own path,
+// charged only for a request that verified: test/resident-caps-order-d1.test.ts) -> ONE batch carrying the write and the nonce. The nonce is burnt only AFTER the signature verifies, in the same batch as the write it authorises (R1): an unsigned or
 // wrongly signed request cannot spend a resident's nonce space, and a replay is a UNIQUE violation that rolls the whole batch back.
 // A lost race (changes() = 0) leaves the nonce burnt, as D-056's refusal-burn does; the assertion was valid and is spent.
 
@@ -40,7 +40,7 @@ import {
   withinWindow,
   type ParsedAssertion,
 } from "./keyauth.ts";
-import { assertShowhomeRateCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement } from "./showhome.ts";
+import { assertShowhomeAddressCap, assertShowhomeGlobalCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement } from "./showhome.ts";
 import { RESIDENTS_NOTE, residentByline } from "./guest-core.ts";
 
 // ---------- caps (the showhome cap pattern: per address, per hour, and across all addresses) ----------
@@ -150,7 +150,8 @@ function positiveInteger(value: unknown, what: string): number {
 // ---------- POST /api/resident/bind ----------
 
 export async function bindResident(env: Env, input: Record<string, unknown>, ip: string | null) {
-  await assertShowhomeRateCap(env, ip, "bind", RESIDENT_BIND_PER_IP_PER_HOUR, RESIDENT_BIND_GLOBAL_PER_HOUR);
+  // (1) the per-address slot, on every attempt; (2) the assertion verifies below; (3) the global slot, only for a request that verified; (4) the nonce and write batch.
+  await assertShowhomeAddressCap(env, ip, "bind", RESIDENT_BIND_PER_IP_PER_HOUR);
 
   // R3: the token proves the guest, and only a PROMOTED guest (a guests row, made by a first accepted comment) can bind. authenticateGuest
   // never calls the citizen authenticate(), so a citizen credential in an Authorization header identifies nothing here.
@@ -175,6 +176,9 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
   const subject: Subject = { visitorId: guest.visitor_id, handle: guest.handle };
   // The signature is checked against the SUPPLIED key (R3): the assertion proves the signer holds the private half of the key being bound.
   const a = await verifyResidentAssertion(env, input.assertion, "resident_bind", subject, bindParts(guest.visitor_id, guest.handle, publicKey), publicKey);
+
+  // (3) After the signature, before the nonce: a request refused here has burnt no nonce and written nothing but its step-1 row.
+  await assertShowhomeGlobalCap(env, "bind_global", RESIDENT_BIND_GLOBAL_PER_HOUR);
 
   const now = Date.now();
   let results: Array<{ meta: { changes: number } }>;
@@ -219,7 +223,8 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
 // ---------- POST /api/resident/token ----------
 
 export async function recoverResidentToken(env: Env, input: Record<string, unknown>, ip: string | null) {
-  await assertShowhomeRateCap(env, ip, "recover", RESIDENT_RECOVER_PER_IP_PER_HOUR, RESIDENT_RECOVER_GLOBAL_PER_HOUR);
+  // (1) the per-address slot, on every attempt; (2) the assertion verifies below; (3) the global slot, only for a request that verified; (4) the nonce and write batch.
+  await assertShowhomeAddressCap(env, ip, "recover", RESIDENT_RECOVER_PER_IP_PER_HOUR);
 
   const number = positiveInteger(input.number, "number");
   const row = await env.DB.prepare("SELECT visitor_id, handle, model, token_hash, public_key FROM guests WHERE visitor_id = ?")
@@ -231,6 +236,9 @@ export async function recoverResidentToken(env: Env, input: Record<string, unkno
 
   // Signed by the STORED key: the caller never supplies the key at recovery.
   const a = await verifyResidentAssertion(env, input.assertion, "resident_recover", { visitorId: row.visitor_id, handle: row.handle }, recoverParts(row.visitor_id, row.handle), row.public_key);
+
+  // (3) After the signature, before the nonce: a request refused here has burnt no nonce and written nothing but its step-1 row.
+  await assertShowhomeGlobalCap(env, "recover_global", RESIDENT_RECOVER_GLOBAL_PER_HOUR);
 
   // Minted before the batch (the batch needs its hash) but returned ONLY if the batch took effect: a lost race discards it, and it was never stored.
   const token = newVisitorToken();
