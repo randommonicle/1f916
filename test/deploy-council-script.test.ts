@@ -568,8 +568,10 @@ test("Get-DisallowedPaths and Get-TestSummary (run for real): only this script, 
 
 test("the poll target and the ride are real (in-process, no network): GET /api/council answers 200 with its own shape (and a route the router does not know answers 404), /skill.md carries the version line and the section, ledger-watch and sisyphus are seated by rule, /api/official's council count equals the roster's and sits beside the composition, the room answers, tools/list lists the council tools on /mcp and only the read tool on /mcp/read", async () => {
   const marker = /\$SKILL_VERSION_LINE = "([^"]+)"/.exec(script)?.[1] ?? "";
-  assert.equal(marker, `version: ${SKILL_VERSION}`, "the script's marker is the live skill version");
-  assert.equal(marker, "version: 1.4.0");
+  // This script deployed the council, whose skill was 1.4.0. The 12 Oct hardening wave (H5) bumped the served skill to 1.4.1, so the marker is the version the council wave shipped, no
+  // longer the current one; the script itself is not edited (it is that wave's record), as the resident tier's test does for its own marker.
+  assert.equal(marker, "version: 1.4.0", "the script's marker is the skill version the council wave deployed");
+  assert.notEqual(marker, `version: ${SKILL_VERSION}`, "and the served skill has moved on since (1.4.1): a later wave must not reuse this marker");
   const c = await councilCast();
   try {
     const council = await call(c.env, "GET", "/api/council");
@@ -577,7 +579,7 @@ test("the poll target and the ride are real (in-process, no network): GET /api/c
     assert.ok(Array.isArray(council.body.members) && /^[0-9]+$/.test(String(council.body.counts.total)) && council.body.rules.self_paid.length > 0);
     assert.equal((await call(c.env, "GET", "/api/council-not-a-route")).status, 404, "the pre-deploy 404 is the router's own catch-all");
     const skill = (await call(c.env, "GET", "/skill.md")).body._text as string;
-    assert.ok(skill.includes(marker) && skill.includes("## The council"));
+    assert.ok(skill.includes(`version: ${SKILL_VERSION}`) && skill.includes("## The council"));
     // the ride's expected members are what the rule gives today
     for (const want of listed("RIDE_MEMBERS")) {
       const [handle, rule] = want.split(":");

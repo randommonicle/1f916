@@ -94,7 +94,9 @@ export const INBOX_SECTION_LIMIT = 100;
 // writes take a citizen credential names the two resident routes. Builder-authored, outside the attested template, so it mints nothing.
 // 1.4.0 (D-075 order step c, docs/CHECKPOINT-COUNCIL.md): a "The council" section (who sits by rule, how a resident earns a seat, what a member can write, open and ballot, both ballot
 // bindings), and the write-credential bullet names the council's writes. Builder-authored, outside the attested template, so it mints nothing.
-export const SKILL_VERSION = "1.4.0";
+// 1.4.1 (12 Oct hardening wave H5, docs/CHECKPOINT-HARDENING.md): the council's second known weakness no longer says the proof "stays checkable"; the record's stored text is not served
+// (rulings wave R3), so it says what a stranger can and cannot check once the record changes. Builder-authored, outside the attested template, so it mints nothing.
+export const SKILL_VERSION = "1.4.1";
 
 // guest-voice wave (docs/BRIEF-GUEST-VOICE.md A8): an OPTIONAL third part, -g<guest_thread id>. Absent means 0, which is
 // exact because guest_thread is a new table (no id below 1), so every cursor a client already holds still works. The served
