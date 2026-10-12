@@ -155,19 +155,26 @@ test("A7: step 0a STOPS before ANY git, npm, wrangler or network command while E
   assert.match(good!.out, /PAST-PINS/, "positive control: two real shas pass the block");
 });
 
-test("as committed, the script STOPS at step 0a: its reviewed commit is still the hub's placeholder, so nothing can be fetched, tested, read or deployed until the hub sets it", (t) => {
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m, "the builder leaves the placeholder, as the commission says");
+test("as committed, the pins block decides on the value the file holds: the hub's placeholder STOPS at step 0a before anything is fetched, tested, read or deployed; a full 40-hex sha set by the hub after the review passes it", (t) => {
+  const reviewed = /^\$REVIEWED_COMMIT = "([^"]+)"$/m.exec(script)![1];
+  const isPlaceholder = reviewed === "TO-BE-SET-BY-HUB";
+  assert.ok(isPlaceholder || /^[0-9a-f]{40}$/.test(reviewed), "$REVIEWED_COMMIT is the placeholder or a full 40-hex sha, not '" + reviewed + "'");
   const r = runPs([
     ...PS_DEFS,
     `$LIVE_BASE_COMMIT = '${/^\$LIVE_BASE_COMMIT = "([^"]+)"$/m.exec(script)![1]}'`,
-    `$REVIEWED_COMMIT = '${/^\$REVIEWED_COMMIT = "([^"]+)"$/m.exec(script)![1]}'`,
+    `$REVIEWED_COMMIT = '${reviewed}'`,
     pinBlock,
     "Write-Output 'PAST-PINS'",
   ]);
   if (!r) return t.skip("powershell is not available on this machine");
-  assert.equal(r.code, 1);
-  assert.match(r.out, /REVIEWED_COMMIT still holds the placeholder/);
-  assert.equal(/PAST-PINS/.test(r.out), false);
+  if (isPlaceholder) {
+    assert.equal(r.code, 1);
+    assert.match(r.out, /REVIEWED_COMMIT still holds the placeholder/);
+    assert.equal(/PAST-PINS/.test(r.out), false);
+  } else {
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /PAST-PINS/, "the hub's sha passes the pins block");
+  }
 });
 
 test("the steps are in the load-bearing order: pins, fetch, branch, clean tree, ancestry, template check, migration check, reviewed source, gates, probes (live base proved), (dry-run exit), migration to the REMOTE D1, the catalogue read, deploy, version id, poll, attest, ride", () => {
