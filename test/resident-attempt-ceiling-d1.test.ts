@@ -20,7 +20,7 @@ import {
   residentNonceKey,
 } from "../src/resident.ts";
 import { assertShowhomeAddressCap } from "../src/showhome.ts";
-import { SocietyError } from "../src/society.ts";
+import { SocietyError, type Env } from "../src/society.ts";
 
 type D1 = ReturnType<typeof createLocalD1>;
 const HOUR = 3_600_000;
@@ -92,7 +92,51 @@ test("the ceiling: one below it a row is written; an address already at its OWN 
   }
 });
 
-test("the ceiling is inside the one INSERT: concurrent attempts from many addresses against a ceiling of 3 leave exactly 3 rows and refuse nobody; concurrent attempts from ONE address against a per-address cap of 2 leave 2 rows and refuse 3 (mutant: the ceiling is a separate count before an unconditional insert)", async () => {
+// The local D1 runs a statement to completion before the next starts, so a test cannot make two requests overlap. It CAN land other requests' rows in the exact window between a
+// helper's last read and its INSERT: this wraps env.DB so `beforeInsert` runs immediately before any INSERT INTO showhome_rate executes (the database is still the real one).
+function racingEnv(d1: D1, beforeInsert: () => void): Env {
+  const db = d1.DB as any;
+  const DB = {
+    ...db,
+    prepare(sql: string) {
+      const st = db.prepare(sql);
+      if (!/INSERT INTO showhome_rate/.test(sql)) return st;
+      return {
+        ...st,
+        bind: (...a: unknown[]) => {
+          const bound = st.bind(...a);
+          return { ...bound, run: async () => (beforeInsert(), bound.run()) };
+        },
+      };
+    },
+  };
+  return { ...guestEnv(d1), DB } as unknown as Env;
+}
+
+test("the ceiling and the per-address cap are decided INSIDE the one INSERT: rows that land after the helper's last read but before its INSERT are still counted (ceiling of 3 filled in that window: no row, no refusal; a per-address cap of 2 filled in that window: refused 429) (mutants: the ceiling is a separate count read before an unconditional insert; the per-address count is read before the insert)", async () => {
+  const { d1 } = fresh();
+  try {
+    const fillCeiling = () => {
+      const stmt = d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('bind', ?, ?)");
+      for (let i = 0; i < 3; i++) stmt.run("racer" + i, Date.now() - 100);
+    };
+    await assertShowhomeAddressCap(racingEnv(d1, fillCeiling), "192.0.2.50", "bind", 5, 3);
+    assert.equal(pathRows(d1, "bind"), 3, "the racing rows filled the ceiling; this request wrote none and was not refused");
+
+    const ip = "198.51.100.9";
+    const key = await sha256Hex("showhome:" + ip);
+    const fillAddress = () => {
+      const stmt = d1.raw.prepare("INSERT INTO showhome_rate (path, ip_hash, created_at) VALUES ('recover', ?, ?)");
+      for (let i = 0; i < 2; i++) stmt.run(key, Date.now() - 100);
+    };
+    await assert.rejects(() => assertShowhomeAddressCap(racingEnv(d1, fillAddress), ip, "recover", 2, 100), (e: unknown) => e instanceof SocietyError && e.status === 429);
+    assert.equal(pathRows(d1, "recover"), 2, "and it wrote no third row");
+  } finally {
+    d1.close();
+  }
+});
+
+test("the ceiling: attempts from many addresses against a ceiling of 3 leave exactly 3 rows and refuse nobody; attempts from ONE address against a per-address cap of 2 leave 2 rows and refuse 3, each a 429", async () => {
   const { d1, env } = fresh();
   try {
     const many = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => assertShowhomeAddressCap(env, `192.0.2.${i + 1}`, "bind", 5, 3)));
