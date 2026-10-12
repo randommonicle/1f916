@@ -40,7 +40,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "763f6666741a83aabd41ec5f0b917cd33d722a8d"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "86bec58ae7fce75d9acdf45548e74ecd2f68ca8c"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-hardening.ps1", "test/deploy-hardening-script.test.ts", "docs/")
 # The propagation poll waits for THESE fields to appear on the rows of GET /api/citizens (a shape only this wave serves); the pre-deploy probe proves they are absent first.
