@@ -234,6 +234,84 @@ test("CODEX r1 M1: a registration committed between the directory's page SELECT 
   }
 });
 
+// The per-citizen correlated form the aggregate was first written as (every table scanned once PER citizen: gate C1). Kept here verbatim as the reference the single-pass form must equal.
+const PER_CITIZEN_REFERENCE_SQL = `SELECT ct.id AS id,
+         (SELECT COUNT(*) FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL) AS posts,
+         (SELECT COUNT(*) FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL)
+           + (SELECT COUNT(*) FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL) AS comments,
+         (SELECT COUNT(*) FROM ballots b WHERE b.citizen_id = ct.id) AS ballots,
+         (SELECT COUNT(*) FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id)
+           + (SELECT COUNT(*) FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id) AS council,
+         NULLIF(MAX(
+           COALESCE((SELECT MAX(created_at) FROM posts WHERE citizen_id = ct.id AND kind = 'post' AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(created_at) FROM comments WHERE citizen_id = ct.id AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(created_at) FROM guest_thread WHERE author_kind = 'citizen' AND author_id = ct.id AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(cast_at) FROM ballots WHERE citizen_id = ct.id), 0),
+           COALESCE((SELECT MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id = ct.id), 0),
+           COALESCE((SELECT MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id = ct.id), 0)
+         ), 0) AS last_write_at
+       FROM (SELECT DISTINCT CAST(value AS INTEGER) AS id FROM json_each(?)) ct`;
+
+test("the single-pass aggregate equals the per-citizen correlated form on a mixed fixture: every count, every last_write_at, for seats with writes in one table, in all, in none, and for an id that is no citizen (mutants: a visibility or kind predicate differs between the two forms)", async () => {
+  const { d1, alice } = fresh();
+  try {
+    const { citizenActivityPage } = await import("../src/council.ts");
+    const a = alice;
+    const b = insertCitizen(d1, { handle: "b-all", created_at: T });
+    const c = insertCitizen(d1, { handle: "c-posts", created_at: T });
+    const d = insertCitizen(d1, { handle: "d-council", created_at: T });
+    const e = insertCitizen(d1, { handle: "e-none", created_at: T });
+    const p = seedPost(d1, b, { created_at: T + 1 });
+    seedPost(d1, b, { created_at: T + 2, mod_state: "collapsed" });
+    seedPost(d1, c, { created_at: T + 3 });
+    seedPost(d1, c, { created_at: T + 4 });
+    d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at, kind, topic_state) VALUES (?, 'a topic', 'b', 'dupe-eq', 0, NULL, ?, 'topic', 'open')").run(c, T + 500);
+    comment(d1, p, b, null, T + 5);
+    comment(d1, p, b, "removed", T + 600);
+    comment(d1, p, a, null, T + 6);
+    guestRow(d1, p, "citizen", b, null, T + 7);
+    guestRow(d1, p, "citizen", b, "collapsed", T + 700);
+    guestRow(d1, p, "guest", d, null, T + 800); // a guest whose number equals d's id
+    const pr1 = insertProposal(d1, { proposer_id: a });
+    const pr2 = insertProposal(d1, { proposer_id: a });
+    ballot(d1, pr1, b, T + 8);
+    ballot(d1, pr2, b, T + 9);
+    ballot(d1, pr1, a, T + 10);
+    councilMsg(d1, "citizen", b, T + 11);
+    councilMsg(d1, "citizen", d, T + 12);
+    councilMsg(d1, "citizen", d, T + 13);
+    councilMsg(d1, "resident", d, T + 900);
+    const m1 = motion(d1, "citizen", a, T + 14);
+    const m2 = motion(d1, "citizen", a, T + 15);
+    councilBallot(d1, m1, "citizen", b, T + 16);
+    councilBallot(d1, m1, "citizen", d, T + 17);
+    councilBallot(d1, m2, "citizen", d, T + 18);
+    councilBallot(d1, m1, "resident", e, T + 1000); // a resident whose number equals e's id
+    const ids = [1, a, b, c, d, e, 999_999];
+
+    const got = await citizenActivityPage(d1.DB as never, ids);
+    const ref = (await d1.DB.prepare(PER_CITIZEN_REFERENCE_SQL).bind(JSON.stringify(ids)).all()).results as Array<Record<string, number | null>>;
+    assert.equal(ref.length, ids.length, "the unknown id is a row in the reference too");
+    for (const r of ref) assert.deepEqual(got.get(r.id as number), { posts: r.posts, comments: r.comments, ballots: r.ballots, council: r.council, last_write_at: r.last_write_at }, `citizen ${r.id}`);
+    assert.equal(got.size, ref.length, "the same ids come back");
+    // and the fixture is not vacuous: the forms agree on non-trivial numbers
+    assert.deepEqual(got.get(b), { posts: 1, comments: 2, ballots: 2, council: 2, last_write_at: T + 16 });
+    assert.deepEqual(got.get(d), { posts: 0, comments: 0, ballots: 0, council: 4, last_write_at: T + 18 });
+    assert.deepEqual(got.get(e), { posts: 0, comments: 0, ballots: 0, council: 0, last_write_at: null });
+  } finally {
+    d1.close();
+  }
+});
+
+test("D1 refuses a compound SELECT of more than 5 terms (found by running the aggregate on Miniflare's D1: node:sqlite allows 500, so this suite cannot see it): no CTE in the aggregate chains more than 4 UNION ALLs (mutant: the six sources are chained in one CTE)", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../src/council.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const sql = /`(WITH ct AS[\s\S]*?GROUP BY ct\.id)`/.exec(src)![1];
+  const bodies = sql.split(/^\s*(?:\), )?\w+ AS \(/m);
+  assert.ok(bodies.length >= 4, "the CTEs were found");
+  for (const body of bodies) assert.ok((body.match(/\bUNION ALL\b/g) ?? []).length <= 4, `a CTE chains too many terms: ${body.slice(0, 80)}`);
+  assert.ok((sql.match(/\bUNION ALL\b/g) ?? []).length >= 5, "positive control: the six sources are still combined");
+});
+
 test("if the activity cannot be read the census still serves, with acts and last_write_at null and the note saying so (mutant: the failure is swallowed into zeros, or breaks the census)", async () => {
   const { d1, env, alice } = fresh();
   try {

@@ -113,6 +113,9 @@ test("the pins: the v5 hash, the live base (the rulings wave's deployed commit),
   assert.equal([...code.matchAll(/\$ALLOWED_PATHS_AFTER_REVIEW = /g)].length, 1, "stated once");
   assert.match(code, /\$ROLLBACK_LINE = .*\$rollbackTarget/, "the rollback line names the version read from the live worker");
   assert.match(code, /\$ROLLBACK_LINE = .*re-accepts raw nonces/, "and names the residual a rollback leaves (HW4)");
+  assert.match(code, /\$ROLLBACK_LINE = .*replayable there for up to 240 s/, "as up to 240 s, the real replay window (gate C2), never 120 s");
+  assert.equal(/\$ROLLBACK_LINE = .*within its 120 s window/.test(code), false);
+  assert.match(code, /\$ROLLBACK_LINE = .*while the deploy propagates/, "and names the propagation residual beside it (gate L2)");
   assert.equal(/\$ROLLBACK_WORKER_VERSION/.test(code), false, "no typed-in rollback version: it is read live, before the deploy");
 });
 

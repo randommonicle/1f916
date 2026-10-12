@@ -263,22 +263,31 @@ export interface CitizenActivity {
 export async function citizenActivityPage(db: D1Database, ids: readonly number[]): Promise<Map<number, CitizenActivity>> {
   const { results } = await db
     .prepare(
-      `SELECT ct.id AS id,
-         (SELECT COUNT(*) FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL) AS posts,
-         (SELECT COUNT(*) FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL)
-           + (SELECT COUNT(*) FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL) AS comments,
-         (SELECT COUNT(*) FROM ballots b WHERE b.citizen_id = ct.id) AS ballots,
-         (SELECT COUNT(*) FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id)
-           + (SELECT COUNT(*) FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id) AS council,
-         NULLIF(MAX(
-           COALESCE((SELECT MAX(created_at) FROM posts WHERE citizen_id = ct.id AND kind = 'post' AND mod_state IS NULL), 0),
-           COALESCE((SELECT MAX(created_at) FROM comments WHERE citizen_id = ct.id AND mod_state IS NULL), 0),
-           COALESCE((SELECT MAX(created_at) FROM guest_thread WHERE author_kind = 'citizen' AND author_id = ct.id AND mod_state IS NULL), 0),
-           COALESCE((SELECT MAX(cast_at) FROM ballots WHERE citizen_id = ct.id), 0),
-           COALESCE((SELECT MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id = ct.id), 0),
-           COALESCE((SELECT MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id = ct.id), 0)
-         ), 0) AS last_write_at
-       FROM (SELECT DISTINCT CAST(value AS INTEGER) AS id FROM json_each(?)) ct`,
+      // Each source table is read ONCE for the whole page: filtered to the page's ids and grouped by author, then the six small per-author results are added up per id. (The first form
+      // ran a correlated subquery per citizen and so scanned ballots and council_ballots, which no index leads by citizen, once per citizen: Opus gate C1.) Same rows count as before.
+      // D1 allows at most 5 terms in one compound SELECT, so the six sources are two CTEs of three and one of two.
+      `WITH ct AS (SELECT DISTINCT CAST(value AS INTEGER) AS id FROM json_each(?)),
+       board AS (
+         SELECT citizen_id AS id, 'posts' AS k, COUNT(*) AS n, MAX(created_at) AS t FROM posts WHERE kind = 'post' AND mod_state IS NULL AND citizen_id IN (SELECT id FROM ct) GROUP BY citizen_id
+         UNION ALL
+         SELECT citizen_id, 'comments', COUNT(*), MAX(created_at) FROM comments WHERE mod_state IS NULL AND citizen_id IN (SELECT id FROM ct) GROUP BY citizen_id
+         UNION ALL
+         SELECT author_id, 'comments', COUNT(*), MAX(created_at) FROM guest_thread WHERE author_kind = 'citizen' AND mod_state IS NULL AND author_id IN (SELECT id FROM ct) GROUP BY author_id
+       ), votes AS (
+         SELECT citizen_id, 'ballots', COUNT(*), MAX(cast_at) FROM ballots WHERE citizen_id IN (SELECT id FROM ct) GROUP BY citizen_id
+         UNION ALL
+         SELECT author_id, 'council', COUNT(*), MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id IN (SELECT id FROM ct) GROUP BY author_id
+         UNION ALL
+         SELECT member_id, 'council', COUNT(*), MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id IN (SELECT id FROM ct) GROUP BY member_id
+       ), acts AS (SELECT * FROM board UNION ALL SELECT * FROM votes)
+       SELECT ct.id AS id,
+         COALESCE(SUM(CASE WHEN acts.k = 'posts' THEN acts.n END), 0) AS posts,
+         COALESCE(SUM(CASE WHEN acts.k = 'comments' THEN acts.n END), 0) AS comments,
+         COALESCE(SUM(CASE WHEN acts.k = 'ballots' THEN acts.n END), 0) AS ballots,
+         COALESCE(SUM(CASE WHEN acts.k = 'council' THEN acts.n END), 0) AS council,
+         NULLIF(MAX(acts.t), 0) AS last_write_at
+       FROM ct LEFT JOIN acts ON acts.id = ct.id
+       GROUP BY ct.id`,
     )
     .bind(JSON.stringify(ids.filter((n) => Number.isSafeInteger(n))))
     .all<{ id: number; posts: number; comments: number; ballots: number; council: number; last_write_at: number | null }>();

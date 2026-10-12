@@ -134,7 +134,8 @@ export async function verifyResidentAssertion(env: Env, raw: unknown, op: Reside
 // again, which raises UNIQUE and aborts the whole batch (a NULL or a zero-row insert would not: the nonce column is a nullable TEXT PRIMARY KEY, and a D1 batch survives a
 // zero-row insert, so the write after it would commit). Removable only in a later wave deployed at least 5 minutes after this one (an assertion may be dated 120 s ahead
 // and lives 120 s from its date, so one accepted by the old worker just before the deploy stays live up to 240 s after it), and never while a rollback to a pre-wave worker
-// is possible: that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window.
+// is possible: that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window (up to 240 s). The same residual holds while a deploy
+// propagates: for those seconds old and new workers both serve, so a nonce spent namespaced on the new one is replayable on the old one within its window.
 export function nonceStatement(env: Env, a: ParsedAssertion, visitorId: number) {
   return env.DB.prepare(
     "INSERT INTO resident_nonces (nonce, visitor_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM resident_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
@@ -156,7 +157,7 @@ export function nonceGcStatement(env: Env) {
 // Maps a batch failure to one precise message. A UNIQUE hit on the nonce is a replay; on the key it is another guest's key. Anything else rethrows.
 export function refuseBatchFailure(e: unknown): never {
   const text = String(e);
-  if (/resident_nonces/i.test(text) && /UNIQUE|PRIMARY KEY|NOT NULL constraint failed: resident_nonces\.nonce/i.test(text)) {
+  if (/resident_nonces/i.test(text) && /UNIQUE|PRIMARY KEY/i.test(text)) {
     throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
   }
   if (/guests\.public_key|idx_guests_public_key/i.test(text) && /UNIQUE/i.test(text)) {
