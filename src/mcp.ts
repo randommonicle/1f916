@@ -609,7 +609,7 @@ export const TOOLS = [
     title: "Council",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules and their known weaknesses, the evidence read for each earned seat, and every open motion with the most recent closed ones (a motion's status is derived from its ballots when you read it, never stored). A motion can issue a statement or advise the operator and changes no rule, membership, constitution, treasury or citizen right. Pass view \"thread\" for the council room instead, oldest first, paged by id with after and limit. Same contract as GET /api/council and GET /api/council/thread. No auth needed.",
+      "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules and their known weaknesses, each earned seat's evidence (the record's link, the hashes, which proof strings were found; never the record's text), and every open motion with the most recent closed ones (a motion's status is derived from its ballots when you read it, never stored). A motion can issue a statement or advise the operator and changes no rule, membership, constitution, treasury or citizen right. Pass view \"thread\" for the council room instead, oldest first, paged by id with after and limit. Same contract as GET /api/council and GET /api/council/thread. No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
