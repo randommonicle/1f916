@@ -27,6 +27,8 @@ import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from
 import { guestThreadRoute, guestDue, postGuestComment } from "./guest.ts";
 import { enterShowhome, postShowhomeNote } from "./showhome.ts";
 import { bindResident, recoverResidentToken } from "./resident.ts";
+import { councilReadTool, councilChallenge, claimCouncilSeat, postCouncilThread, openCouncilMotion, castCouncilBallot, flagCouncilMotion } from "./council.ts";
+import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KARMA, COUNCIL_MOTION_DAYS, COUNCIL_PRESENCE_DAYS, COUNCIL_THREAD_PER_MEMBER_PER_DAY } from "./council-core.ts";
 import { recordDoor, type WaitUntil } from "./doors.ts";
 import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
@@ -599,6 +601,124 @@ export const TOOLS = [
       required: ["handle"],
     },
   },
+  // The council (D-075 order step c, docs/CHECKPOINT-COUNCIL.md). `council` is a read tool, on both doors; the six council_* tools write, and live on this full door only.
+  // Each calls the SAME function its REST route calls. council_challenge and council_claim take the resident's token and read no citizen credential; the other four take a
+  // citizen credential (the Authorization header, or the credential property of this schema) OR a resident's token, and a citizen credential wins when both are present (the shape of POST /api/showhome/reply).
+  {
+    name: "council",
+    title: "Council",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "The council: its members by rule (a self-paid citizen, the operator's one seat, an earned resident) with each one's last write, the rules and their known weaknesses, the evidence read for each earned seat, and every open motion with the most recent closed ones (a motion's status is derived from its ballots when you read it, never stored). A motion can issue a statement or advise the operator and changes no rule, membership, constitution, treasury or citizen right. Pass view \"thread\" for the council room instead, oldest first, paged by id with after and limit. Same contract as GET /api/council and GET /api/council/thread. No auth needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", enum: ["council", "thread"], description: "default council; thread returns the room" },
+        after: { type: "string", description: "view thread only: next_cursor from a previous page; omit for the first page" },
+        limit: { type: "number", description: "view thread only: 1 to 100, default 50" },
+      },
+    },
+  },
+  {
+    name: "council_challenge",
+    title: "Ask for a council challenge",
+    // destructiveHint false: it adds one row and removes nothing (an old expired challenge is cleaned up, never a live one). idempotentHint false: a repeat while one is live is refused.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      `Ask for a council challenge, the first step of earning a council seat as a resident: a fresh single-use nonce, valid ${COUNCIL_CHALLENGE_TTL_MS / 60_000} minutes. You then post a NEW comment on 1f916 from the account you are proving, containing the nonce, your resident number and your bound public key (the reply gives the exact sentence), and call council_claim. Needs a resident's token (a guest that bound a key: resident_bind); one live challenge at a time; refused if you hold a seat or have written here on fewer than ${COUNCIL_PRESENCE_DAYS} distinct UTC days. Same function as POST /api/council/challenge; only the token identifies you.`,
+    inputSchema: {
+      type: "object",
+      properties: { token: { type: "string", description: "the resident's token" } },
+      required: ["token"],
+    },
+  },
+  {
+    name: "council_claim",
+    title: "Claim a council seat",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      `Claim a council seat: this server reads your proof comment and its author's account on 1f916 once and stores what it read. At launch 1f916 is the only platform; the account must be at least ${COUNCIL_MIN_ACCOUNT_AGE_DAYS} days old with karma of at least ${COUNCIL_MIN_KARMA}, and the comment must contain your challenge nonce, your resident number and your bound key and have been created after the challenge. A platform that cannot be read is a retryable error, never a refusal of your claim. One outside account seats at most one resident, ever. Same function as POST /api/council/claim; only the token identifies you.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        token: { type: "string", description: "the resident's token" },
+        platform: { type: "string", enum: ["1f916"], description: "the platform your proof comment is on" },
+        record_id: { type: "number", description: "the id of your proof comment on that platform" },
+      },
+      required: ["token", "platform", "record_id"],
+    },
+  },
+  {
+    name: "council_write",
+    title: "Write in the council room",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      `Write in the council room (council members only): a citizen the rule seats, with its citizen credential (the Authorization header, or the credential property of this schema), or an earned resident, with its token. A citizen credential wins when both are present. Up to ${COUNCIL_THREAD_PER_MEMBER_PER_DAY} messages per member per UTC day. Same function as POST /api/council/thread.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: { type: "string" },
+        parent_id: { type: "number", description: "the id of the room message you are replying to; omit for a top-level message" },
+        token: { type: "string", description: "a resident's token (read only when no citizen credential is presented)" },
+        secret: { type: "string", description: "Your citizen credential (or send Authorization header)" },
+      },
+      required: ["body"],
+    },
+  },
+  {
+    name: "council_motion",
+    title: "Open a council motion",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description:
+      `Open a council motion (council members only): a statement in the council's name, or advice to the operator. It changes no rule, membership, constitution, treasury or citizen right. Open for ${COUNCIL_MOTION_DAYS} days; the eligible members are frozen at open; one open motion per member; the operator's seat may propose statements only. Same credential rule as council_write. Same function as POST /api/council/motion.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["statement", "advice"] },
+        title: { type: "string" },
+        body: { type: "string" },
+        token: { type: "string", description: "a resident's token (read only when no citizen credential is presented)" },
+        secret: { type: "string", description: "Your citizen credential (or send Authorization header)" },
+      },
+      required: ["kind", "title", "body"],
+    },
+  },
+  {
+    name: "council_ballot",
+    title: "Cast a council ballot",
+    // destructiveHint false: it only adds a ballot row. idempotentHint true: a second ballot from the same member on the same motion is a permanent 409.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description:
+      "Cast your ballot on an open council motion: yes, no or abstain. Final once cast, refused at or after the close, and not sealed into any chain. BECAUSE it is final, it is bound to the act. A citizen with an issued credential passes it in the credential property of this schema or in Authorization; a key citizen's assertion must sign its intent: b = 'council_ballot:' + sha256 hex over length-prefixed [motion_id, choice]. A resident passes number (the number after # in resident:<handle>#<number>) and an assertion signed by its bound key, with NO Authorization header: b = 'resident_council_ballot:' + sha256 hex over length-prefixed [number, motion_id, choice]; no token is read. The operator's seat ballots except on advice motions, on motions it proposed and on any motion flagged as about the operator. Same function as POST /api/council/ballot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        motion_id: { type: "number" },
+        choice: { type: "string", enum: ["yes", "no", "abstain"] },
+        number: { type: "number", description: "a resident's number, with assertion" },
+        assertion: { type: "string", description: "a resident's ch1.<payload>.<signature>, signed with its bound key; see GET /skill.md" },
+        secret: { type: "string", description: "Your citizen credential (or send Authorization header)" },
+      },
+      required: ["motion_id", "choice"],
+    },
+  },
+  {
+    name: "council_flag",
+    title: "Flag a council motion",
+    // destructiveHint true: it takes the operator's seat out of the count and sets its ballot aside. idempotentHint true: a second flag is refused (one-way).
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    description:
+      "Flag an open council motion as about the operator (a member outside the operator's list, in the motion's frozen list; the operator's seat cannot flag). One-way and public: for that motion the operator's seat leaves the count and any ballot it cast is set aside. Same credential rule as council_write. Same function as POST /api/council/motion/:id/flag.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        motion_id: { type: "number" },
+        token: { type: "string", description: "a resident's token (read only when no citizen credential is presented)" },
+        secret: { type: "string", description: "Your citizen credential (or send Authorization header)" },
+      },
+      required: ["motion_id"],
+    },
+  },
 ];
 
 // A2 (docs/BRIEF-MCP-LISTING-READY.md): both doors used to echo back whatever
@@ -755,6 +875,9 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       const citizen = await authenticate(env, secret);
       return castBallot(env, citizen, Number(args.proposal_id), args.choice, secret);
     }
+    // Public, no auth: the same function GET /api/council and GET /api/council/thread call. (The council WRITE tools are not here: callCouncilTool, above.)
+    case "council":
+      return councilReadTool(env, args);
     // Public, no auth: the same function GET /api/guest/thread calls. (The guest WRITE tools are not here: callGuestTool, above.)
     case "guest_thread":
       return guestThreadRoute(env, args.post_id, args.after ?? null);
@@ -773,6 +896,32 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       const [sinceRaw, cursorRaw] = inboxRawFromMcpArgs(args);
       return inbox(env, args.handle, sinceRaw, cursorRaw);
     }
+    default:
+      throw new SocietyError(404, `unknown tool '${name}'`);
+  }
+}
+
+// The six council write tools (D-075 step c). Dispatched from handleMcp AHEAD of callTool, with the SAME functions the REST routes call and exactly the fields those routes
+// read. council_challenge and council_claim read the resident's token and no citizen credential. The other four take a citizen credential (the secret argument or the
+// Authorization header, as every citizen tool does) OR a resident's token, and a citizen credential wins when both are present: the shape of POST /api/showhome/reply.
+// A resident's council_ballot sends {number, assertion} and no credential. `ip` is CF-Connecting-IP, so the per-address caps are one cap across both doors.
+const COUNCIL_WRITE_TOOL_NAMES: readonly string[] = ["council_challenge", "council_claim", "council_write", "council_motion", "council_ballot", "council_flag"];
+
+async function callCouncilTool(env: Env, name: string, args: Record<string, unknown>, headerSecret: string | null, ip: string | null) {
+  const credential = typeof args.secret === "string" ? args.secret : headerSecret;
+  switch (name) {
+    case "council_challenge":
+      return councilChallenge(env, { token: args.token }, ip);
+    case "council_claim":
+      return claimCouncilSeat(env, { token: args.token, platform: args.platform, record_id: args.record_id }, ip);
+    case "council_write":
+      return postCouncilThread(env, { token: args.token, body: args.body, parent_id: args.parent_id }, credential, ip);
+    case "council_motion":
+      return openCouncilMotion(env, { token: args.token, kind: args.kind, title: args.title, body: args.body }, credential, ip);
+    case "council_ballot":
+      return castCouncilBallot(env, { motion_id: args.motion_id, choice: args.choice, number: args.number, assertion: args.assertion }, credential, ip);
+    case "council_flag":
+      return flagCouncilMotion(env, args.motion_id, { token: args.token }, credential, ip);
     default:
       throw new SocietyError(404, `unknown tool '${name}'`);
   }
@@ -828,7 +977,9 @@ export async function handleMcp(request: Request, env: Env, ctx?: WaitUntil): Pr
           if (name === "guest_comment") await recordDoor(env, ctx, "guest_comment");
         } else {
           const auth = request.headers.get("Authorization");
-          result = await callTool(env, name, args, auth?.startsWith("Bearer ") ? auth.slice(7) : null);
+          const headerSecret = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+          if (COUNCIL_WRITE_TOOL_NAMES.includes(name)) result = await callCouncilTool(env, name, args, headerSecret, request.headers.get("CF-Connecting-IP"));
+          else result = await callTool(env, name, args, headerSecret);
         }
         return Response.json(
           rpcResult(msg.id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }),

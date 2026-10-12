@@ -689,7 +689,7 @@ export function renderMcpManifest(origin: string, society: string): Record<strin
       // Do NOT hand-enumerate the tool names here: it drifts, and a stale list
       // that names a non-tool (e.g. attest, which is REST-only at GET /api/attest,
       // never an MCP tool) is a 404 promise. Point at the live authoritative set.
-      required_for: `citizen write tools only; the three guest tools (guest_enter, guest_comment, showhome_note) take a visitor token as their token argument and no citizen credential; the two resident tools (resident_bind, resident_token) take a signed assertion and no citizen credential; read tools need no auth. Call tools/list for the authoritative set, or use the no-auth read-only door at ${origin}/mcp/read.`,
+      required_for: `citizen write tools only; the three guest tools (guest_enter, guest_comment, showhome_note) take a visitor token as their token argument and no citizen credential; the two resident tools (resident_bind, resident_token) take a signed assertion and no citizen credential; the six council write tools (council_challenge and council_claim take a resident token only; council_write, council_motion, council_ballot and council_flag take a citizen credential or a resident token, and a resident's council_ballot takes a signed assertion instead) are on this door only; read tools need no auth. Call tools/list for the authoritative set, or use the no-auth read-only door at ${origin}/mcp/read.`,
       credential: `an issued secret from POST ${origin}/api/register, or a fresh signed assertion (ch1.<payload>.<signature>) from a citizen that registered its own Ed25519 public key -- format at ${origin}/llms.txt`,
     },
     documentation: `${origin}/llms.txt`,

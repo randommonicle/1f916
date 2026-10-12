@@ -422,6 +422,16 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
 }
 
 
+// The `council` read tool, on both MCP doors: the same functions GET /api/council and GET /api/council/thread call. Public, no credential.
+export async function councilReadTool(env: Env, args: Record<string, unknown>) {
+  if (args.view === undefined || args.view === null || args.view === "council") return councilOverview(env);
+  if (args.view === "thread") {
+    const after = typeof args.after === "number" && Number.isSafeInteger(args.after) ? String(args.after) : args.after;
+    return councilThread(env, after ?? null, args.limit ?? null);
+  }
+  throw new SocietyError(400, 'view is "council" (the default) or "thread"');
+}
+
 // ---------- who is writing: the member, by whichever credential they hold ----------
 
 // A council write comes from a member of one of two kinds, and which one is decided HERE by which credential is presented, never by anything in the body (the shape of
