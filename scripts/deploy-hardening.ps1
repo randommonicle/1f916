@@ -346,5 +346,5 @@ if ($skill.Body -cnotmatch ('(?m)^' + [regex]::Escape($SKILL_VERSION_LINE) + '\r
 if (-not $skill.Body.Contains($SKILL_WEAKNESS_PHRASE)) { Stop-Here "GET /skill.md does not carry the reworded council weakness ('$SKILL_WEAKNESS_PHRASE'). $ROLLBACK_LINE" }
 if ($skill.Body.Contains("stays checkable")) { Stop-Here "GET /skill.md still says the proof stays checkable. $ROLLBACK_LINE" }
 Say "[ride] /skill.md: $SKILL_VERSION_LINE, the reworded weakness, no 'stays checkable'"
-Say "[note] No live write was made. The nonce namespaces and the raw guard, the resident attempt ceiling, the no-address bucket and the replay pre-check are proved by tests only: each needs a credential this script must not hold."
+Say "[note] No live write was made beyond the one door count the /skill.md read added. The nonce namespaces and the raw guard, the resident attempt ceiling, the no-address bucket and the replay pre-check are proved by tests only: each needs a credential this script must not hold."
 Say "[done] Hardening wave deployed and ridden (reads only). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."

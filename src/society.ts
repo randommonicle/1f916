@@ -2149,7 +2149,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   if (rows.length > 0) {
     try {
       const { citizenActivityPage } = await import("./council.ts");
-      activity = await citizenActivityPage(env.DB, where, bindArgs, CITIZEN_PAGE);
+      activity = await citizenActivityPage(env.DB, rows.map((r) => r.id));
     } catch (e) {
       console.log(JSON.stringify({ level: "warn", event: "citizen_activity_unavailable", error: String(e) }));
     }
@@ -2183,7 +2183,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
   // the two flags above are: a missing field breaks a reader counting flags.
   const keyLostSet = new Set(KEY_LOST_SEATS.map((s) => s.handle));
   const citizens = rows.map(({ id, last_seen_at, ...rest }) => {
-    const a = activity === null ? null : (activity.get(id) ?? { posts: 0, comments: 0, ballots: 0, council: 0, last_write_at: null });
+    const a = activity === null ? null : (activity.get(id) ?? null);
     return {
       ...rest,
       operator_controlled: operatorSet.has(rest.handle),

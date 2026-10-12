@@ -252,7 +252,8 @@ test("the ride is public GETs only and makes NO live write at all: no POST, no t
   assert.ok(readAt > at("$councilRaw = Get-Text"), "after every other read");
   assert.match(script, /THE RIDE IS PUBLIC GETs ONLY AND MAKES NO LIVE WRITE AT ALL/, "the header says so");
   assert.match(script, /THE NONCE, CAP AND REPLAY CHANGES ARE PROVED BY TESTS ONLY/, "and that the nonce, cap and replay changes are proved by tests only");
-  assert.match(code, /No live write was made/, "and so does the log");
+  assert.match(code, /No live write was made beyond the one door count the \/skill\.md read added/, "and so does the log, without the categorical claim");
+  assert.equal(/No live write was made\. /.test(code), false, "the log does not claim no write at all");
 });
 
 test("it stops unless main, origin/main and -ExpectedCommit are ONE commit, after a fetch, on a clean tree, and HEAD is 40 lower-case hex (the stamp)", () => {

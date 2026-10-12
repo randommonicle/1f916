@@ -185,6 +185,55 @@ test("paging: the aggregate covers the page it serves, on every page (mutants: t
   }
 });
 
+test("CODEX r1 M1: a registration committed between the directory's page SELECT and the activity aggregate cannot push a returned citizen out of it (a full page; the last seat has one visible post; a citizen is inserted ordered just before it; the last seat still shows posts 1) (mutant: the aggregate re-selects the page itself, ORDER BY created_at, id LIMIT)", async () => {
+  const { d1 } = fresh();
+  try {
+    const F = Date.now() - 10_000_000;
+    for (let i = 0; i < CITIZEN_PAGE - 3; i++) insertCitizen(d1, { handle: `filler-${i}`, created_at: F + i });
+    const L = Date.now() + 100_000;
+    const last = insertCitizen(d1, { handle: "the-last", created_at: L });
+    seedPost(d1, last, { created_at: L + 500 });
+    assert.equal(count(d1, "SELECT COUNT(*) AS n FROM citizens"), CITIZEN_PAGE, "a full page: maintainer, alice, fillers and the last seat");
+    // the racing registration lands right after the directory's page SELECT returns and before anything else reads
+    const db = d1.DB as any;
+    let raced = false;
+    const DB = {
+      ...db,
+      prepare(sql: string) {
+        const st = db.prepare(sql);
+        if (!/FROM citizens/.test(sql) || !/public_key FROM citizens/.test(sql)) return st;
+        return {
+          ...st,
+          bind: (...a: unknown[]) => {
+            const bound = st.bind(...a);
+            return {
+              ...bound,
+              all: async () => {
+                const res = await bound.all();
+                if (!raced) {
+                  raced = true;
+                  insertCitizen(d1, { handle: "racer", created_at: L - 1 });
+                }
+                return res;
+              },
+            };
+          },
+        };
+      },
+    };
+    const dir = await citizenDirectory({ ...guestEnv(d1), DB } as never);
+    assert.equal(raced, true, "the interleaving happened");
+    assert.equal(dir.returned, CITIZEN_PAGE);
+    const r = row(dir, "the-last");
+    assert.ok(r, "the last seat was returned by the page");
+    assert.deepEqual(r.acts, { posts: 1, comments: 0, ballots: 0, council: 0 }, "and its activity is its own, not a re-paged zero");
+    assert.equal(r.last_write_at, L + 500);
+    assert.equal(row(dir, "racer"), undefined, "the racer is not on this page");
+  } finally {
+    d1.close();
+  }
+});
+
 test("if the activity cannot be read the census still serves, with acts and last_write_at null and the note saying so (mutant: the failure is swallowed into zeros, or breaks the census)", async () => {
   const { d1, env, alice } = fresh();
   try {

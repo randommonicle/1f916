@@ -250,16 +250,17 @@ export interface CitizenActivity {
   last_write_at: number | null;
 }
 
-// What each citizen on ONE directory page has written, in one statement for the whole page (no per-row query). `pageWhere` and `pageArgs` are citizenDirectory's own page selector,
-// so the aggregate covers exactly the rows the page serves; `pageLimit` is its page size. Every count is under the visibility the board's own reads use, and last_write_at is the
+// What each citizen in `ids` has written, in one statement for the whole page (no per-row query). `ids` are the citizen ids the directory page ALREADY returned: the helper never selects
+// a page itself, so a registration committed between the directory's read and this one cannot push a returned seat out of the aggregate. The ids go in as ONE bound JSON array read by
+// json_each (D1 allows 100 bound variables a statement; a page is 1000 ids), never interpolated. Every id gets a row, so a seat with no activity is a true zero. Every count is under the visibility the board's own reads use, and last_write_at is the
 // newest of exactly the rows the four counts count (so a hidden row moves neither):
 //   posts     board posts of kind 'post' with mod_state NULL (a standing topic is kind 'topic', carries citizen_id 1 for the foreign key only, and is not anyone's post);
 //   comments  board comments with mod_state NULL, plus guest-thread rows the citizen wrote (author_kind 'citizen', never a resident or guest whose number happens to equal the id) with mod_state NULL;
 //   ballots   constitutional ballots cast (ballots, immutable once cast, no moderation column);
 //   council   messages in the council room (author_kind 'citizen') plus council ballots (member_kind 'citizen'); a motion opened or a flag raised is not counted here.
 // Lives in this module because it reads the council tables (test/council-isolation-d1.test.ts) and the guest thread (test/guest-cognition-blindness.test.ts); society.ts imports it
-// dynamically, as it does the other council reads. A seat's absence from the result means it has written nothing counted: the caller defaults it to zeros.
-export async function citizenActivityPage(db: D1Database, pageWhere: string, pageArgs: readonly unknown[], pageLimit: number): Promise<Map<number, CitizenActivity>> {
+// dynamically, as it does the other council reads. A seat absent from the result is a fault, not a zero: the caller serves null for it.
+export async function citizenActivityPage(db: D1Database, ids: readonly number[]): Promise<Map<number, CitizenActivity>> {
   const { results } = await db
     .prepare(
       `SELECT ct.id AS id,
@@ -277,9 +278,9 @@ export async function citizenActivityPage(db: D1Database, pageWhere: string, pag
            COALESCE((SELECT MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id = ct.id), 0),
            COALESCE((SELECT MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id = ct.id), 0)
          ), 0) AS last_write_at
-       FROM (SELECT id FROM citizens ${pageWhere} ORDER BY created_at ASC, id ASC LIMIT ?) ct`,
+       FROM (SELECT DISTINCT CAST(value AS INTEGER) AS id FROM json_each(?)) ct`,
     )
-    .bind(...pageArgs, pageLimit)
+    .bind(JSON.stringify(ids.filter((n) => Number.isSafeInteger(n))))
     .all<{ id: number; posts: number; comments: number; ballots: number; council: number; last_write_at: number | null }>();
   const out = new Map<number, CitizenActivity>();
   for (const r of results) out.set(r.id, { posts: r.posts, comments: r.comments, ballots: r.ballots, council: r.council, last_write_at: r.last_write_at });
