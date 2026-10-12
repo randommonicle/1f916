@@ -257,3 +257,44 @@ test("a council_ballot assertion presented to the resident ballot route is refus
     c.d1.close();
   }
 });
+
+test("both directions against the resident's own ops: a council_ballot assertion (a citizen's) and a resident_council_ballot assertion are each refused by resident_bind and by resident_recover, and a resident_bind or resident_recover assertion is refused by the council ballot; no nonce is spent and nothing changes (mutants: either resident verifier accepts a council op; the council ballot accepts a resident op)", async () => {
+  const { enterGuest, bindRoute, recoverRoute, nonceCount } = await import("./helpers/resident.ts");
+  const { seedPost } = await import("./helpers/guest.ts");
+  const { guestComment } = await import("./helpers/guest.ts");
+  const c = await councilCast();
+  try {
+    const m = (await openMotion(c.env, c.sis, "statement", "Cross resident ops")).body.id as number;
+    const citizenCouncil = await buildIntentBinding("council_ballot", [String(m), "yes"]);
+    const residentCouncil = await residentBinding("resident_council_ballot", councilBallotParts(c.wren.number, m, "yes"));
+    // against resident_recover (wren is a resident with a stored key)
+    const recoverWith = (binding: string) => recoverRoute(c.env, { number: c.wren.number, handle: c.wren.handle, token: c.wren.token }, c.wren.kp, { binding });
+    for (const [name, binding] of [["a citizen council_ballot binding", citizenCouncil], ["a resident_council_ballot binding", residentCouncil]] as const) {
+      const r = await recoverWith(binding);
+      assert.equal(r.status, 403, `recover with ${name}: ${JSON.stringify(r.body)}`);
+      assert.match(r.body.error, /resident_recover:/);
+    }
+    // against resident_bind (a promoted guest with no key yet)
+    const post = seedPost(c.d1, c.sis.id);
+    const g = await enterGuest(c.env, "newcomer");
+    assert.equal((await guestComment(c.env, g.token, { post_id: post, body: "a first comment" })).status, 201);
+    const kp = await genKeypair();
+    for (const [name, binding] of [["a citizen council_ballot binding", citizenCouncil], ["a resident_council_ballot binding", residentCouncil]] as const) {
+      const r = await bindRoute(c.env, g, kp, { binding });
+      assert.equal(r.status, 403, `bind with ${name}: ${JSON.stringify(r.body)}`);
+      assert.match(r.body.error, /resident_bind:/);
+    }
+    assert.equal((c.d1.raw.prepare("SELECT public_key FROM guests WHERE visitor_id = ?").get(g.number) as { public_key: string | null }).public_key, null, "the guest is still unbound");
+    assert.equal(nonceCount(c.d1), 0, "no refused assertion spent a nonce");
+    // and the other way: a resident_bind or a resident_recover assertion is not a council ballot
+    for (const binding of [await residentBinding("resident_bind", bindParts(c.wren.number, c.wren.handle, c.wren.kp.publicKey)), await residentBinding("resident_recover", recoverParts(c.wren.number, c.wren.handle))]) {
+      const r = await castBallot(c.env, c.wren, m, "yes", { binding });
+      assert.equal(r.status, 403);
+      assert.match(r.body.error, /resident_council_ballot:/);
+    }
+    assert.equal(ballots(c.d1).length, 0);
+    assert.equal(nonceCount(c.d1), 0);
+  } finally {
+    c.d1.close();
+  }
+});

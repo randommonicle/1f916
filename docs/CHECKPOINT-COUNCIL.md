@@ -18,7 +18,15 @@ Base measured in the worktree before any edit: see "Baseline" below.
 
 | # | sha | what |
 |---|---|---|
-| 1 | this commit | this log |
+| 1 | `45875d7d` | this log started |
+| 2 | `b30351af` | C1 migration 0021 and C2 membership by rule |
+| 3 | `8d7e832c` | C3 the earned-seat challenge, claim and 1f916 verifier |
+| 4 | `a16ffcee` | C4 the room |
+| 5 | `0440e0f6` | C5 motions, the three ballot bindings, the flag, CA5 |
+| 6 | `90491bd0` | C6 the council over MCP |
+| 7 | `01d1cb28` | C7 served text, skill 1.4.0, the official block, the fences |
+| 8 | `b29a0236` | C8 the deploy script and its test |
+| 9 | this commit | the resident-ops cross test, the red-proof record, the close |
 
 ## Baseline
 
@@ -42,7 +50,7 @@ Base measured in the worktree before any edit: see "Baseline" below.
 - Refusals: 403 `council_refused_<code>` with the reason and "still live until"; unreadable 503 (retryable) or 502 `council_source_unreadable_<code>` "not a refusal of your claim ... your challenge was not used". Other codes: `council_not_a_resident`, `council_already_seated`, `council_presence_floor`, `council_challenge_live`, `council_no_challenge`, `council_challenge_lost`, `council_account_already_used`, `council_platform_unsupported`, `council_record_id_invalid`.
 - Decisions the commission left open: (a) a live challenge is refused with its expiry and the nonce is not repeated (a resident who lost the nonce waits for expiry; returning it would be a one-line change if Ben prefers); (b) the presence floor counts visible guest-thread rows only (`mod_state IS NULL`), on distinct UTC days, checked when asking AND when claiming, before any outbound read; (c) the resident number must stand alone as a number in the proof (so number 7 is not satisfied by 17); (d) a record stamped up to 60 s ahead of this server's clock is not "in the future" (`COUNCIL_CLOCK_SKEW_MS`); (e) `retrieved_at` is the time the claim began, not after the second read.
 - `DEFERRED-COUNCIL-CITIZEN-READ-SIZE` (in the verifier): the account read returns posts and comments too and its real size was not captured whole; an account over 2 MiB is reported unreadable (oversize), not refused. Trigger: the first real claim reports it.
-- Served text: `ShowhomeRatePath` gains three council paths with their own refusal wording; `GUEST_COUNCIL`-style sentence `COUNCIL_WRITES_SENTENCE` (guest-core.ts) is appended AFTER the credentials sentence in `guest_voice.template_exceptions.writes` (so it reaches /skill.md and the GET / door note) and a "The council" section is added to /llms.txt. It is appended, not spliced in, because `test/secret-literal-guard.test.ts` hashes each secret-bearing literal: splicing would have forced new allowlist hashes, appending leaves the three existing literals byte for byte.
+- Served text: `ShowhomeRatePath` gains three council paths with their own refusal wording; the sentence `COUNCIL_WRITES_SENTENCE` (guest-core.ts) is appended AFTER the credentials sentence in `guest_voice.template_exceptions.writes` (so it reaches /skill.md and the GET / door note) and a "The council" section is added to /llms.txt. It is appended, not spliced in, because `test/secret-literal-guard.test.ts` hashes each secret-bearing literal: splicing would have forced new allowlist hashes, appending leaves the three existing literals byte for byte.
 - Pins that moved: `test/guest-served-text-d1.test.ts` (the /skill.md sha, because `ex.writes` is rendered in the skill; and `/api/council/challenge` and `/claim` join the credential claims list) and `test/inbox-d1.test.ts` (the same sha). Both are re-pinned again in the served-text commit.
 - Removed after red-proofing showed they could not fail: the verifier's `"mod_state" in c` clause (the next clause already refuses a missing value) and a `NOT EXISTS (council_claims)` clause in the challenge INSERT (the claim route refuses a seated resident, and `UNIQUE(visitor_id)` is the bound).
 
@@ -106,3 +114,51 @@ Pins that moved: the /skill.md sha-256 and version in `test/guest-served-text-d1
 - `test/deploy-council-script.test.ts` (22 tests, the residents pattern plus the council's differences): parses under PowerShell's parser; ASCII; the L-080 traps (and `-cnotcontains`, because `-notcontains` is case-insensitive); the pins; the load-bearing step order; one migration apply and one deploy; no double quote in any SQL handed to wrangler; the catalogue lists compared with the migration AND `schema.sql` table by table (this caught its own digit-blind regex: `record_sha256` was silently absent from both sides, which is why the stand-in test below exists); `Assert-CouncilSchema` run for real against a stand-in built from the real migration, with 16 stop cases; `Get-TemplateText`, `Get-DisallowedPaths` and `Get-TestSummary` run for real; and an in-process run of everything the poll and ride read.
 - The other deploy scripts are untouched, and the test pins the markers and pins of all three (wave a 1.2.0, wave b 1.3.0 with its own `$LIVE_BASE_COMMIT` and `$REVIEWED_COMMIT`).
 - Red-proofed by mutating the script: a dropped UNIQUE key in the lists, a removed `Assert-CouncilSchema` call, the wrong poll URL, `/skill.md` listed twice, a removed primary key assertion, `-cnotcontains` softened to `-notcontains`, a malformed reviewed pin, a wrong live base, a missing write tool, a second fetch of `/skill.md`, a weakened already-applied stop, a reworded stop message. Each turned a test red.
+
+## Close (commit 9)
+
+**Final:** 2339 tests, 2338 pass, 0 fail, 1 skipped (the same skip the base has); `tsc` silent; the tree is clean. Base was 2184 / 2183 / 0 / 1. Nothing was pushed, deployed, migrated or sent; no `npx wrangler` command and no deploy script (not even `-DryRun`) was run; no `*.local.*` file was read; no sub-agent was used; `FRONT_DOOR_TEMPLATE` is not edited and `src/doc.ts` is byte for byte the base's. Nothing on the commission's STOP list became necessary: no table rebuild, no second migration, no change to `POST /api/register`, `authenticate`, `requireSignedIntent`, the citizen ballot or proposal paths, or a cron. The one permitted edit to citizen authentication is CA5's narrowing check, eleven lines including its comment, in `src/society.ts`; the gate should read it first.
+
+### Concurrency results
+
+- **Claim:** two residents claiming ONE 1f916 account at once seat exactly one; the loser gets 409 `council_account_already_used` and its challenge is unburnt. One resident sending three claims on one challenge seats once. A challenge that expires or whose key is unbound while the platform is being read seats nobody and burns nothing (409 `council_challenge_lost`).
+- **Challenge:** six simultaneous requests for one resident leave one 201, five 409 `council_challenge_live` and one live row.
+- **Ballot at the close:** `closes_at - 1` is accepted and `closes_at` and `closes_at + 1` are refused (secret and resident ballots); with the clock flipping to `closes_at` right after the pre-read, both a secret and a resident ballot are refused 409 by the INSERT's own predicate and the resident's assertion is spent. One resident assertion sent three times records one ballot; three simultaneous secret ballots by one member record one.
+- **Flag:** two members at once, exactly one wins and the stored flagger is the winner; at the boundary `closes_at - 1` flags and `closes_at` does not; with the clock flipping after the read the UPDATE refuses; a flag landing between the seat's pre-read and its write refuses the seat's ballot atomically (403 `council_operator_recused`); a flag and the seat's ballot arriving together, in both orders over six rounds, never leave a counted seat ballot on a flagged motion.
+- Also: four simultaneous motion openings by one member leave one; twelve simultaneous room writes by one member leave ten.
+
+### Red-proofs (each: break the thing it guards, see it red, restore)
+
+1. Membership: `citizenRule` seating every citizen; each declared list ignored (all three moved by the test); the seat constant set to the maintainer; the `public_key IS NOT NULL` predicate; each of the eight last-write sources removed one at a time (the resident flag and resident motion sources were found uncovered by the first run, and covered).
+2. Fences: a maintainer file naming a council table, a maintainer file importing the council, a src file naming a table, the council importing the citizen ballot; the CA5 check disabled; the CA5 check moved below the nonce INSERT.
+3. Verifier: each of the eleven refusal checks dropped one at a time; each shape check (id, handle, mod_state, author); `encodeURIComponent` removed; `redirect: "error"` changed; the timeout race removed; the body cap and the declared-length cap removed; the 3xx check; the retryable mapping; the code-point cap replaced by a UTF-16 slice (the first version of that test used no astral characters and could not fail; fixed).
+4. Claim batch: the live-challenge EXISTS dropped; the burn losing `changes() = 1`; the bound-key EXISTS dropped; the live-challenge NOT EXISTS in the challenge INSERT dropped; the resident, presence-floor and seat guards dropped; the platform and record id validation dropped.
+5. Room: the membership rule, the key-bound resident check, the seat check, the cap predicate (and the per-member filter in it), the parent predicate, the paging comparison, the resident deny check, the body cap, the rate cap, the citizen-credential precedence.
+6. Verdict: every comparison (`<`, `>`, `>=`), the floor of two, the effective count ignoring the exclusion, counting the set-aside ballot, counting a ballot from outside the snapshot, matching members on id alone, each of the three exclusion reasons, the proposer match ignoring kind.
+7. Ballot: `requireSignedIntent` removed; the INSERT reusing the pre-read clock; the INSERT's `closes_at > ?`; the INSERT's flag predicate; the pre-read closed check (the resident nonce is then spent); the snapshot check; the recusal pre-check; the nonce statement; the resident assertion verification; the choice validation; the binding comparison in the resident verifier.
+8. Flag: the conditional UPDATE losing `IS NULL`, losing `closes_at > ?`, taking the pre-read clock; the operator-cannot-flag guard.
+9. Open: the one-open-motion predicate, the statement-only rule, the stored snapshot.
+10. MCP: a write tool in the read door's names; the read case removed from either door; the credential, the address or the dispatch dropped for a write tool.
+11. Served text: each commission sentence reworded; the skill section, the official block and the credential sentence each removed; the binding prefix changed; the section moved.
+12. Deploy script: twelve script mutants (see commit 8).
+13. Removed because mutants showed they could not fail: the verifier's `"mod_state" in c` clause; the `NOT EXISTS council_claims` clause in the challenge INSERT; the SQL copies of the immutable recusal reasons (kind and proposer) in the ballot INSERT. The "at least one counted ballot outside the operator's list" verdict condition is kept as K3 writes it, but with one operator seat it is implied by "at least two counted ballots"; that is proved exhaustively (1024 cases) instead of by a mutant.
+
+### Where this differs from the commission, and why
+
+1. The ballot INSERT's WHERE carries the clock and, for the seat, the flag only. CA10 and the commission's C5 would have the whole recusal there; the motion's kind and proposer, and membership of the snapshot, never change after open, so those are exact pre-reads, and their SQL copies could not be made to fail.
+2. A resident that asks for a challenge while one is live is refused with the expiry and without the nonce repeated (the commission says "refuses"); returning it would be a one-line change.
+3. A resident's room messages, motion titles and bodies go through the guest deny check (links, scam vocabulary, "claim", "private key"); a citizen's do not. The commission does not mention it; it is the guest board's own rule applied to the guest-class member. Cost: a resident cannot write the word "claim" in the room.
+4. The presence floor is also checked when a challenge is asked for, and counts visible rows only.
+5. A key citizen's room writes, motion opening and flag need no signed intent; only the ballot does (the commission adds exactly one citizen op). `DEFERRED-COUNCIL-FLAG-INTENT` is planted at the flag.
+6. `GET /` carries one new council sentence, in the showhome door note after the template, because the credential exception it renders is shared (`COUNCIL_WRITES_SENTENCE`). The commission lists `/api/official` and `/skill.md` only.
+7. Existing tests moved with the things they pin (listed per commit): the resident migration test (schema.sql's end), the guest readers allowlist, the isolation test's op list, the guest-served-text credential list, five skill version and sha pins, the tool counts, one secret-literal allowlist hash, and `test/deploy-residents-script.test.ts` (its marker is now wave b's history). Against the base, 22 existing source lines were deleted, all of them one-line edits (an import list, a union type, three `export` keywords, a version string, three sentences, the nested ternaries in `rateCapError` re-indented, the old DEFERRED comment, three stale counts in comments); none removes behaviour, and `src/doc.ts` is unchanged.
+8. `COUNCIL_EXCLUDED_ACCOUNTS` lists only `commonhold-envoy` on 1f916: `commonhold-consul` is a 1f3d9 account and 1f3d9 is not a launch platform.
+9. The MCP annotation rulings (all seven tools `openWorldHint: true`, `council_flag` destructive, `council_ballot` idempotent) are the builder's, for the hub to confirm.
+
+### DEFERRED flags planted
+
+`DEFERRED-COUNCIL-PLATFORMS` (council-core.ts, council-verify.ts), `DEFERRED-COUNCIL-CITIZEN-READ-SIZE` (council-verify.ts), `DEFERRED-COUNCIL-MODERATION` (council.ts), `DEFERRED-COUNCIL-FLAG-INTENT` (council.ts). `DEFERRED-RESIDENT-ASSERTION-CROSS-SPEND` is closed and its comment removed. Each carries its trigger in the code.
+
+### For Ben, from this build
+
+With today's members (ledger-watch and sisyphus) a statement passes only if both vote yes, and any flag by sisyphus, any advice motion and any motion the seat proposes can never pass until a second member outside the operator's list is seated (CA10; numbers in commit 5). The earned-seat route needs a resident with three distinct UTC days of writing here and a 60 day old, karma 10 account on 1f916 that is not commonhold-envoy.
