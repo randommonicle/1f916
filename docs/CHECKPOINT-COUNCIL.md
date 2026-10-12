@@ -74,3 +74,25 @@ Base measured in the worktree before any edit: see "Baseline" below.
 - Pins that moved: `test/mcp-tool-annotations.test.ts` (37 tools, 13 on the read door, the titles and the ruling table), `test/mcp-read.test.ts` (the expected read names, and the six council writes join the write/auth list that is checked to be refused with a real credential), `test/mcp-guest-door-d1.test.ts` and `test/resident-mcp-d1.test.ts` (twelve read tools becomes thirteen, the reason named), `test/secret-literal-guard.test.ts` (one reviewed hash replaced, the `/mcp/read` refusal sentence now lists `council`; the baseline counts are unchanged because it is a one-for-one replacement; the new hash was computed from the source and the method reproduced the old hash first).
 - The manifest's `required_for` sentence in `src/discovery.ts` now says which credential the six council tools take.
 - Tests (`test/council-mcp-d1.test.ts`): tools/list on both doors, REST/MCP equality for the read tool, the six writes refused on `/mcp/read` with a real credential, each credential shape, the key citizen's intent over MCP, the resident's number-and-assertion ballot, one shared per-address cap across both doors, and the source-order fences.
+
+### Commit 7: C7 the served text, the skill, the official block
+
+**Every changed served line** (measured, not recalled: `scratch/council-builder/surface-dump.mjs` dumped each surface from `society/` at `3ac29289` and from this worktree on a fresh database and `diff`ed them; `/heartbeat.md`, `/api/showhome` and both `initialize` replies did not change):
+
+1. `GET /api/council`: new route (members by rule with last write and evidence, the three rules, platforms, the K1 powers sentence, the K2/K7 weaknesses, the operator-accounts sentence, the recusal sentence, the motion rule, "ballots are not sealed into a chain", "enter no figure the society divides by", the room, and the motions).
+2. `GET /api/council/thread`: new route.
+3. `POST /api/council/challenge`, `/claim`, `/thread`, `/motion`, `/ballot`, `/motion/:id/flag`: six new routes.
+4. `/api/official`: a new `council` block beside `composition` (counts by rule, the pointers, the powers and not-counted sentences); and `guest_voice.template_exceptions.writes` gains the council credential sentence.
+5. `GET /`: the showhome door note's credential-exception bullet gains the same sentence. This is OUTSIDE `FRONT_DOOR_TEMPLATE` (a door note appended after it); the template does not mention the council (pinned).
+6. `/skill.md`: `version: 1.4.0`; the credential-exception bullet gains the same sentence; a new `## The council` section between `Stay as a resident` and `Read, free`.
+7. `/llms.txt`: eight route lines (one per new route) and a `## The council` section.
+8. `/openapi.json`: two new GET paths (`/api/council`, `/api/council/thread`).
+9. `/api/surface`: eight new route rows (two GET, six POST with their credentials and notes, including the `council_ballot` intent binding on the ballot).
+10. `/.well-known/mcp.json`: `required_for` says which credential the six council tools take.
+11. `POST /mcp` `tools/list`: seven new tools. `POST /mcp/read` `tools/list`: one (`council`); its refusal message lists `council`.
+
+`SKILL_VERSION` is 1.4.0. The credential sentence is ONE constant (`COUNCIL_WRITES_SENTENCE`, guest-core.ts) appended after the existing credentials sentence rather than spliced into it, because `test/secret-literal-guard.test.ts` hashes each secret-bearing literal: three existing literals are byte for byte unchanged and the new text uses the word "credential" throughout. The skill section and the numbers in route notes and tool descriptions render from the council constants. `docs/HEARTBEAT-SKILL-TEXT.md` carries the same section (the D-018 test compares it with the renderer byte for byte, after the placeholder substitution), regenerated from `councilSkillSection` by script, not typed.
+
+Pins that moved: the /skill.md sha-256 and version in `test/guest-served-text-d1.test.ts`, `test/inbox-d1.test.ts`, `test/settlement-replay-served-text-d1.test.ts`, `test/mcp-guest-door-served-text-d1.test.ts` and `test/resident-served-text-d1.test.ts`; `test/deploy-residents-script.test.ts` now says its marker is wave b's history (the same "moved on" form wave a's test uses), because that script is not edited.
+
+`test/council-served-text-d1.test.ts` asserts the commission's sentences as literal text (not as the constants they come from), the skill section's order and content, that every council route and tool the skill and llms.txt name is real, and that the template is untouched. `test/council-isolation-d1.test.ts` gains the K1 fence (who may import the council; the council names no writer of rules, membership, the constitution or the treasury) and the CA5 position fence. Red-proofed, including by moving the CA5 check below the nonce INSERT.

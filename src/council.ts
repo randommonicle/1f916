@@ -210,6 +210,21 @@ export function serveMember(m: CouncilMember) {
   };
 }
 
+// ---------- /api/official: the council block ----------
+
+// A count by rule and a pointer, served BESIDE the composition (src/society.ts officialFacts), never inside it. These members enter no figure the society divides by.
+export async function councilFacts(env: Env) {
+  const members = await councilMembers(env, Date.now());
+  const count = (rule: MemberRule) => members.filter((m) => m.rule === rule).length;
+  return {
+    members: members.length,
+    by_rule: { self_paid: count("self_paid"), operator_seat: count("operator_seat"), earned: count("earned") },
+    list: "GET /api/council",
+    room: "GET /api/council/thread",
+    note: `${COUNCIL_POWERS_SENTENCE} ${COUNCIL_NOT_COUNTED_SENTENCE} ${COUNCIL_RULES.self_paid}`,
+  };
+}
+
 // ---------- GET /api/council ----------
 
 export async function councilOverview(env: Env) {

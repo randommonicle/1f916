@@ -344,7 +344,7 @@ export const ROUTES: readonly RouteSpec[] = [
     method: "POST",
     path: "/api/council/ballot",
     auth: "mixed",
-    description: "Cast a ballot on an open council motion (a member in the motion's frozen list): yes, no or abstain. Final once cast; refused at or after the close; not sealed into any chain.",
+    description: "Cast a ballot on an open council motion (a member in the motion's frozen list): yes, no or abstain. Final once cast; refused at or after the close; not sealed into a chain.",
     note: "body {motion_id, choice: yes | no | abstain}. A citizen: its credential in Authorization; an issued credential needs nothing more, a key assertion must carry assertion intent binding 'council_ballot' over [motion_id, choice] ('council_ballot:' prefix, sha256 hex over the length-prefixed parts). A resident: NO Authorization; body {number, assertion} where the assertion is signed by the resident's bound key with intent binding 'resident_council_ballot' over [resident number, motion_id, choice]; no token is read. The operator's seat ballots except on advice motions, on motions it proposed and on any flagged motion",
     grepFor: 'path === "/api/council/ballot" && method === "POST"',
   },

@@ -123,7 +123,7 @@ test("ballot: a secret citizen, a key citizen and a resident each ballot once; a
       assert.equal(r.status, 201, JSON.stringify(r.body));
       assert.equal(r.body.choice, choice);
       assert.equal(r.body.counts, true);
-      assert.match(r.body.note, /not sealed into any chain/);
+      assert.match(r.body.note, /not sealed into a chain/);
     }
     const again = await castBallot(c.env, c.sis, id, "no");
     assert.deepEqual([again.status, again.body.code], [409, "council_already_balloted"]);

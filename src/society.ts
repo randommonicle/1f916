@@ -1571,6 +1571,10 @@ export async function officialFacts(env: Env) {
   const rule7Clause = clauseFor(await rule7VoteState(env.DB));
   const guestVoice = await guestVoiceFacts(env.DB);
   const residents = await residentFacts(env.DB);
+  // The council (D-075 step c): a count by rule and a pointer, BESIDE the composition, never inside it and in no figure the society divides by. A dynamic import for the
+  // same reason as rule7-vote.ts above: council.ts imports this module's lists, so a static import here would be a cycle.
+  const { councilFacts } = await import("./council.ts");
+  const council = await councilFacts(env);
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
@@ -1769,6 +1773,7 @@ export async function officialFacts(env: Env) {
     // The resident tier (D-075 step b, ruling 4): a count and a note BESIDE the composition, never inside it, and in no figure the
     // society divides by. Outside the attested template, so it mints nothing.
     residents,
+    council,
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the

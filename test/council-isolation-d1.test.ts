@@ -35,3 +35,34 @@ test("the council tables are named by src/council.ts alone (and nowhere else in 
   const named = walk(SRC).filter((f) => TABLES.test(code(f))).map(rel).sort();
   assert.deepEqual(named, ["council.ts"]);
 });
+
+test("K1: the council is imported only by the router, the two MCP doors, the route table and the skill text; officialFacts reads it by a DYNAMIC import so society.ts stays a leaf (no cycle); nothing that changes a rule, a membership, the constitution or the treasury imports it", () => {
+  const importers = walk(SRC)
+    .filter((f) => !/\/council[^/]*\.ts$/.test(f.replace(/\\/g, "/")))
+    .filter((f) => /from\s+["']\.\.?\/council(?:-core|-verify)?\.ts["']/.test(readFileSync(f, "utf8")))
+    .map(rel)
+    .sort();
+  assert.deepEqual(importers, ["discovery.ts", "inbox.ts", "index.ts", "mcp-read.ts", "mcp.ts"]);
+  const society = readFileSync(join(SRC, "society.ts"), "utf8");
+  assert.ok(!/from\s+["']\.\/council(?:-core|-verify)?\.ts["']/.test(society), "society.ts has no static import of the council");
+  assert.ok(/await import\(["']\.\/council\.ts["']\)/.test(society), "and reads the council block by a dynamic import");
+  // the powers a motion must never reach are not importable from the council: it names none of the writers of rules, membership, the constitution or the treasury
+  for (const f of ["council.ts", "council-core.ts", "council-verify.ts"]) {
+    const text = code(join(SRC, f));
+    for (const banned of ["castBallot", "createProposal", "governance.ts", "setSetting", "governance_settings", "constitution_versions", "recordLedger", "recordPayout", "declareWallet", "payAndSettle", "INSERT INTO citizens", "UPDATE citizens"]) {
+      assert.equal(new RegExp(banned.replace(/\./g, "\\.")).test(text), false, `${f} must not name ${banned}`);
+    }
+  }
+});
+
+test("the citizen verifier is touched by the council wave in exactly one place: a single narrowing check in authenticateByAssertion (CA5); authenticate, requireSignedIntent and the citizen ballot are byte-for-byte what they were (the gate examines the one edit first)", () => {
+  const society = readFileSync(join(SRC, "society.ts"), "utf8");
+  const checks = society.match(/startsWith\("resident_"\)/g) ?? [];
+  assert.equal(checks.length, 1, "one resident_ prefix check in all of society.ts");
+  const fn = society.slice(society.indexOf("async function authenticateByAssertion("), society.indexOf("export function assertValidHandle"));
+  const verifyAt = fn.indexOf("verifyAssertion(row.public_key, a)");
+  const checkAt = fn.indexOf('startsWith("resident_")');
+  const nonceAt = fn.indexOf("INSERT INTO auth_nonces");
+  assert.ok(verifyAt > 0 && checkAt > verifyAt && nonceAt > checkAt, "the check sits after the signature check and before the nonce INSERT, nowhere else");
+  assert.equal(readFileSync(join(SRC, "governance.ts"), "utf8").includes("council"), false, "the citizen ballot and proposal paths never mention the council");
+});
