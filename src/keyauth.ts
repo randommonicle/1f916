@@ -63,8 +63,10 @@ export const ED25519_SIGNATURE_BYTES = 64;
 // base64-decode and JSON.parse before any signature check has happened.
 export const ASSERTION_MAX_LEN = 1024;
 
-// The nonce becomes a PRIMARY KEY in auth_nonces, so its length is bounded for
-// the same reason any key is: an unbounded key is an unbounded row.
+// The nonce becomes part of a PRIMARY KEY in auth_nonces and resident_nonces (stored
+// as "c:<citizen_id>:<nonce>" or "r:<visitor_id>:<nonce>", so the stored key is longer
+// than the nonce), so its length is bounded for the same reason any key is: an
+// unbounded key is an unbounded row. These bounds apply to the raw nonce.
 export const NONCE_MIN_LEN = 16;
 export const NONCE_MAX_LEN = 64;
 

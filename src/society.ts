@@ -529,12 +529,21 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
   // The INSERT *is* the replay check: the nonce is the PRIMARY KEY, so a reuse
   // collides. Deliberately not SELECT-then-INSERT, which is check-then-act and
   // loses the race under concurrency (lock-at-the-chokepoint).
+  //
+  // The stored key is namespaced per signer ("c:<citizen_id>:<nonce>", 12 Oct hardening wave H1), so one citizen's nonce cannot be spent first by another's valid
+  // assertion. DEFERRED-NONCE-RAW-GUARD: a raw-nonce row written by the previous worker must not stay replayable, so when the RAW nonce is already a key the CASE inserts
+  // that raw key again, which raises UNIQUE and throws (a NULL or a zero-row insert would not: the nonce column is a nullable TEXT PRIMARY KEY, and a batch survives
+  // a zero-row insert). Removable only in a later wave deployed at least 5 minutes after this one (an assertion may be dated 120 s ahead and lives 120 s from its
+  // date, so one accepted by the old worker just before the deploy stays live up to 240 s after it), and never while a rollback to a pre-wave worker is possible:
+  // that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window.
   try {
-    await env.DB.prepare("INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (?, ?, ?)")
-      .bind(a.nonce, row.id, a.issuedAt + ASSERTION_WINDOW_MS)
+    await env.DB.prepare(
+      "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
+    )
+      .bind(a.nonce, `c:${row.id}:${a.nonce}`, row.id, a.issuedAt + ASSERTION_WINDOW_MS)
       .run();
   } catch (e) {
-    if (/UNIQUE|PRIMARY KEY/i.test(String(e))) {
+    if (/UNIQUE|PRIMARY KEY|NOT NULL constraint failed: auth_nonces\.nonce/i.test(String(e))) {
       throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
     }
     throw e;

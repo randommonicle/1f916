@@ -122,8 +122,26 @@ export async function verifyResidentAssertion(env: Env, raw: unknown, op: Reside
 
 // The nonce insert and its garbage collect, as batch statements. The INSERT is the replay check (the nonce is the PRIMARY KEY);
 // the DELETE rides last in the batch so it can never disturb an earlier statement's result.
+//
+// The stored key is namespaced per signer ("r:<visitor_id>:<nonce>", 12 Oct hardening wave H1), so one resident's nonce cannot be spent first by another's valid assertion.
+// DEFERRED-NONCE-RAW-GUARD: a raw-nonce row written by the previous worker must not stay replayable, so when the RAW nonce is already a key the CASE inserts that raw key
+// again, which raises UNIQUE and aborts the whole batch (a NULL or a zero-row insert would not: the nonce column is a nullable TEXT PRIMARY KEY, and a D1 batch survives a
+// zero-row insert, so the write after it would commit). Removable only in a later wave deployed at least 5 minutes after this one (an assertion may be dated 120 s ahead
+// and lives 120 s from its date, so one accepted by the old worker just before the deploy stays live up to 240 s after it), and never while a rollback to a pre-wave worker
+// is possible: that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window.
 export function nonceStatement(env: Env, a: ParsedAssertion, visitorId: number) {
-  return env.DB.prepare("INSERT INTO resident_nonces (nonce, visitor_id, expires_at) VALUES (?, ?, ?)").bind(a.nonce, visitorId, a.issuedAt + ASSERTION_WINDOW_MS);
+  return env.DB.prepare(
+    "INSERT INTO resident_nonces (nonce, visitor_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM resident_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
+  ).bind(a.nonce, residentNonceKey(visitorId, a.nonce), visitorId, a.issuedAt + ASSERTION_WINDOW_MS);
+}
+export const residentNonceKey = (visitorId: number, nonce: string): string => `r:${visitorId}:${nonce}`;
+
+// H4 (advisory, the batch stays the real guard): has this assertion's nonce, namespaced or raw, already been spent? Called after the signature verifies and before the
+// across-all-addresses slot is charged, so a replayed but signature-valid assertion is refused without taking a global slot. Check-then-act on its own; the nonce insert in
+// the write batch is what actually refuses a concurrent replay.
+export async function assertResidentNonceUnspent(env: Env, a: ParsedAssertion, visitorId: number): Promise<void> {
+  const seen = await env.DB.prepare("SELECT 1 AS x FROM resident_nonces WHERE nonce = ?1 OR nonce = ?2 LIMIT 1").bind(a.nonce, residentNonceKey(visitorId, a.nonce)).first<{ x: number }>();
+  if (seen) throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
 }
 export function nonceGcStatement(env: Env) {
   return env.DB.prepare("DELETE FROM resident_nonces WHERE expires_at < ?").bind(Date.now());
@@ -132,7 +150,7 @@ export function nonceGcStatement(env: Env) {
 // Maps a batch failure to one precise message. A UNIQUE hit on the nonce is a replay; on the key it is another guest's key. Anything else rethrows.
 export function refuseBatchFailure(e: unknown): never {
   const text = String(e);
-  if (/resident_nonces/i.test(text) && /UNIQUE|PRIMARY KEY/i.test(text)) {
+  if (/resident_nonces/i.test(text) && /UNIQUE|PRIMARY KEY|NOT NULL constraint failed: resident_nonces\.nonce/i.test(text)) {
     throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
   }
   if (/guests\.public_key|idx_guests_public_key/i.test(text) && /UNIQUE/i.test(text)) {
