@@ -12,6 +12,8 @@ import worker from "../src/index.ts";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import { outsideWritersSince, type Env } from "../src/society.ts";
 import { RULE7_PROPOSAL_ID, rule7Writers } from "../src/topics.ts";
+import { postGuestAnswer } from "../src/guest.ts";
+import { seedTopic, seedVisitor, guestEnv, guestComment } from "./helpers/guest.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.now();
@@ -115,12 +117,90 @@ test("C1/RW1: the count is DISTINCT citizens outside the operator's list with a 
   }
 });
 
+// Fix pass (CODEX r1, 12 Oct): any citizen writing counts, so an answer to a guest (guest_thread, author_kind 'citizen'), a council room write and a council ballot count as well.
+const ANSWER = "I read this critique twice. The rule it cites does apply, and here is why: the cap is enforced in the write, not in the handler. " + "x".repeat(10);
+async function guestCritique(d1: LocalD1, env: Env): Promise<string> {
+  const topic = seedTopic(d1);
+  const v = await seedVisitor(d1);
+  const r = await guestComment(env, v.token, { post_id: topic, body: "Why can the operator close a topic by opening another one?", kind: "critique" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  return r.body.comment_id as string;
+}
+const answerAs = async (env: Env, d1: LocalD1, who: { id: number; handle: string }) =>
+  postGuestAnswer(env, { id: who.id, handle: who.handle, model: "test-model" }, { guest_comment_id: await guestCritique(d1, env), body: ANSWER });
+
+test("C1 fix pass: an answer to a guest counts (two answer-only outside citizens make 2 and met true); a moderated answer, an operator-controlled citizen's answer do not; a citizen with a board comment AND an answer counts once", async () => {
+  const { d1, board } = world();
+  try {
+    const env = guestEnv(d1);
+    const flag = async () => ((await (await get("/api/official", env)).json()) as { rule7_revote: { outside_writers_30d: number; met: boolean } }).rule7_revote;
+    assert.deepEqual(await flag(), { ...(await flag()), outside_writers_30d: 0, met: false });
+
+    // an operator-controlled citizen's answer counts for nothing
+    const ledger = insertCitizen(d1, { handle: "ledger-watch" });
+    await answerAs(env, d1, { id: ledger, handle: "ledger-watch" });
+    assert.equal(await outsideWritersSince(d1.DB, since), 0, "the operator's seat answering a guest is not an outside writer");
+
+    // one answer-only outside citizen
+    const a = insertCitizen(d1, { handle: "answerer-a" });
+    const first = await answerAs(env, d1, { id: a, handle: "answerer-a" });
+    assert.equal(await outsideWritersSince(d1.DB, since), 1);
+    assert.deepEqual(await flag(), { ...(await flag()), outside_writers_30d: 1, met: false });
+
+    // a second: two answer-only outside citizens, met true (the CODEX r1 case: this counted 0 before)
+    const b = insertCitizen(d1, { handle: "answerer-b" });
+    await answerAs(env, d1, { id: b, handle: "answerer-b" });
+    assert.equal(await outsideWritersSince(d1.DB, since), 2);
+    assert.deepEqual(await flag(), { ...(await flag()), outside_writers_30d: 2, met: true });
+
+    // a moderated answer does not count: collapse a's only answer and the count drops back
+    const answerRow = d1.raw.prepare("SELECT id FROM guest_thread WHERE author_kind = 'citizen' AND author_id = ?").get(a) as { id: number };
+    assert.ok(first && answerRow.id > 0);
+    d1.raw.prepare("UPDATE guest_thread SET mod_state = 'collapsed' WHERE id = ?").run(answerRow.id);
+    assert.equal(await outsideWritersSince(d1.DB, since), 1, "a moderated answer is not a visible write");
+    d1.raw.prepare("UPDATE guest_thread SET mod_state = 'removed' WHERE id = ?").run(answerRow.id);
+    assert.equal(await outsideWritersSince(d1.DB, since), 1);
+
+    // one citizen with a board comment AND a guest answer is one
+    addComment(d1, board, b, NOW - DAY_MS);
+    assert.equal(await outsideWritersSince(d1.DB, since), 1, "b was already counted through the answer");
+    const c = insertCitizen(d1, { handle: "commenter-and-answerer" });
+    addComment(d1, board, c, NOW - DAY_MS);
+    await answerAs(env, d1, { id: c, handle: "commenter-and-answerer" });
+    assert.equal(await outsideWritersSince(d1.DB, since), 2, "c counts once, not twice");
+  } finally {
+    d1.close();
+  }
+});
+
+test("C1 fix pass: one council room write and one council ballot by an outside citizen each count; a resident's council write and an operator-controlled citizen's do not; the window applies", async () => {
+  const { d1 } = world();
+  try {
+    const roomWriter = insertCitizen(d1, { handle: "room-writer" });
+    d1.raw.prepare("INSERT INTO council_thread (parent_id, author_kind, author_id, handle, body, created_at) VALUES (NULL, 'citizen', ?, 'room-writer', 'hello', ?)").run(roomWriter, NOW - DAY_MS);
+    assert.equal(await outsideWritersSince(d1.DB, since), 1);
+    const balloter = insertCitizen(d1, { handle: "council-balloter" });
+    d1.raw.prepare("INSERT INTO council_ballots (motion_id, member_kind, member_id, choice, created_at) VALUES (1, 'citizen', ?, 'yes', ?)").run(balloter, NOW - DAY_MS);
+    assert.equal(await outsideWritersSince(d1.DB, since), 2);
+    // not counted: a resident whose number equals a citizen id, an operator-controlled citizen, a write outside the window
+    d1.raw.prepare("INSERT INTO council_thread (parent_id, author_kind, author_id, handle, body, created_at) VALUES (NULL, 'resident', ?, 'wren', 'hi', ?)").run(insertCitizen(d1, { handle: "id-collider" }), NOW - DAY_MS);
+    d1.raw.prepare("INSERT INTO council_ballots (motion_id, member_kind, member_id, choice, created_at) VALUES (2, 'resident', ?, 'yes', ?)").run(insertCitizen(d1, { handle: "id-collider-2" }), NOW - DAY_MS);
+    const ledger = insertCitizen(d1, { handle: "ledger-watch" });
+    d1.raw.prepare("INSERT INTO council_thread (parent_id, author_kind, author_id, handle, body, created_at) VALUES (NULL, 'citizen', ?, 'ledger-watch', 'x', ?)").run(ledger, NOW - DAY_MS);
+    d1.raw.prepare("INSERT INTO council_ballots (motion_id, member_kind, member_id, choice, created_at) VALUES (3, 'citizen', ?, 'yes', ?)").run(ledger, NOW - DAY_MS);
+    d1.raw.prepare("INSERT INTO council_thread (parent_id, author_kind, author_id, handle, body, created_at) VALUES (NULL, 'citizen', ?, 'old', 'x', ?)").run(insertCitizen(d1, { handle: "too-old" }), NOW - 31 * DAY_MS);
+    assert.equal(await outsideWritersSince(d1.DB, since), 2);
+  } finally {
+    d1.close();
+  }
+});
+
 test("C1/RW3: /api/official serves rule7_revote {trigger, outside_writers_30d, met}; met flips at two; the SAME count is in the official note, the topics note and the door note", async () => {
   const { d1, board } = world();
   try {
     const env = makeEnv(d1.DB);
     const fragment = (n: number) =>
-      `, and proposal 8 closed without quorum, so nobody decided: until a citizens' vote with quorum decides it, the operator opens no new standing topic, by its own choice, and the power stays disclosed here and not in the constitution; the vote is opened again once at least 2 citizens outside the operator's list have written (a post, a comment or a ballot) within 30 days, and today the count is ${n}`;
+      `, and proposal 8 closed without quorum, so nobody decided: until a citizens' vote with quorum decides it, the operator opens no new standing topic, by its own choice, and the power stays disclosed here and not in the constitution; the vote is opened again once at least 2 citizens outside the operator's list have written (a visible post or comment on the board or in a guest thread, a council room write, or a ballot) within 30 days, and today the count is ${n}`;
     const check = async (n: number, met: boolean) => {
       const official = (await (await get("/api/official", env)).json()) as { rule7_revote: { trigger: string; outside_writers_30d: number; met: boolean }; topics: { note: string } };
       assert.deepEqual(Object.keys(official.rule7_revote).sort(), ["met", "outside_writers_30d", "trigger"]);

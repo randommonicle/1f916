@@ -53,7 +53,7 @@ const CLAUSES = {
   failed_with_quorum: "citizens retired it in proposal 8 (quorum reached, not passed): no new topic opens, and none is closed to make room for one",
   // 12 Oct (D-075 note, options B + C): the operator suspends its own power until a quorate vote; the revote trigger is named and today's count is in the sentence (n).
   failed_without_quorum: (n: number) =>
-    `proposal 8 closed without quorum, so nobody decided: until a citizens' vote with quorum decides it, the operator opens no new standing topic, by its own choice, and the power stays disclosed here and not in the constitution; the vote is opened again once at least 2 citizens outside the operator's list have written (a post, a comment or a ballot) within 30 days, and today the count is ${n}`,
+    `proposal 8 closed without quorum, so nobody decided: until a citizens' vote with quorum decides it, the operator opens no new standing topic, by its own choice, and the power stays disclosed here and not in the constitution; the vote is opened again once at least 2 citizens outside the operator's list have written (a visible post or comment on the board or in a guest thread, a council room write, or a ballot) within 30 days, and today the count is ${n}`,
   absent: "no citizen vote on naming it in Rule 7 is recorded",
   unreadable: "the citizens' vote on naming it in Rule 7 (proposal 8) could not be read for this answer",
 };

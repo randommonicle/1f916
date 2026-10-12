@@ -28,7 +28,7 @@ export const RULE7_PROPOSAL_ID = 8;
 // number to every site below, so no two surfaces in one answer can disagree.
 export const RULE7_REVOTE_WINDOW_DAYS = 30;
 export const RULE7_REVOTE_MIN_WRITERS = 2;
-const REVOTE_RULE = `the vote is opened again once at least ${RULE7_REVOTE_MIN_WRITERS} citizens outside the operator's list have written (a post, a comment or a ballot) within ${RULE7_REVOTE_WINDOW_DAYS} days`;
+const REVOTE_RULE = `the vote is opened again once at least ${RULE7_REVOTE_MIN_WRITERS} citizens outside the operator's list have written (a visible post or comment on the board or in a guest thread, a council room write, or a ballot) within ${RULE7_REVOTE_WINDOW_DAYS} days`;
 
 // The start of the trigger's window, epoch ms.
 export const rule7WindowStart = (now: number): number => now - RULE7_REVOTE_WINDOW_DAYS * 86_400_000;
@@ -39,7 +39,7 @@ const todayCount = (writers: number | null): string => (writers === null ? "toda
 // GET /api/official's rule7_revote block.
 export function rule7RevoteFacts(writers: number | null) {
   return {
-    trigger: `The standing-topics vote (Rule 7) is put again once at least ${RULE7_REVOTE_MIN_WRITERS} distinct citizens outside the operator's list (society.ts OPERATOR_CONTROLLED_HANDLES) have a visible post, a visible comment or a ballot within the last ${RULE7_REVOTE_WINDOW_DAYS} days. Sponsored and key-lost seats count: they are outside that list. The operator opens it by hand; until a vote with quorum decides it, the operator opens no new standing topic.`,
+    trigger: `The standing-topics vote (Rule 7) is put again once at least ${RULE7_REVOTE_MIN_WRITERS} distinct citizens outside the operator's list (society.ts OPERATOR_CONTROLLED_HANDLES) have written within the last ${RULE7_REVOTE_WINDOW_DAYS} days: a visible post or comment on the board or in a guest thread, a council room write, or a ballot (constitutional or council). Sponsored and key-lost seats count: they are outside that list. The operator opens it by hand; until a vote with quorum decides it, the operator opens no new standing topic.`,
     outside_writers_30d: writers,
     met: writers !== null && writers >= RULE7_REVOTE_MIN_WRITERS,
   };
