@@ -123,10 +123,13 @@ test("last_me_at is set at registration and moved by me(), on REST and on the MC
     d1.raw.prepare("UPDATE citizens SET last_seen_at = ? WHERE id = ?").run(T, s.id);
     const mcp = await call(env, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "me", arguments: {} } }, { Authorization: `Bearer ${s.secret}`, "CF-Connecting-IP": "203.0.113.5" });
     assert.equal(mcp.status, 200, JSON.stringify(mcp.body));
-    assert.ok(row(await citizenDirectory(env), "returner").last_me_at > T, "the MCP me tool moved it");
-    // a write does not move it: it is not a write time
+    const afterMcp = row(await citizenDirectory(env), "returner").last_me_at;
+    assert.ok(afterMcp > T, "the MCP me tool moved it");
+    // a write does not move it: it is not a write time, and last_write_at is the field for that
     seedPost(d1, s.id, { created_at: Date.now() + 5_000 });
-    assert.equal(row(await citizenDirectory(env), "returner").last_me_at > T, true);
+    const after = row(await citizenDirectory(env), "returner");
+    assert.equal(after.last_me_at, afterMcp);
+    assert.ok(after.last_write_at > afterMcp);
   } finally {
     d1.close();
   }
