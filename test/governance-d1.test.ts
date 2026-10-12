@@ -2441,11 +2441,16 @@ test("citizenDirectory: a page-boundary millisecond collision loses no row when 
     // unrecoverable stays a citizen and stays counted, but cannot act -- no route
     // installs a key without the old one and the operator does not write one by
     // hand -- so the row says so, and says false on every other row.
+    // `acts`, `last_write_at` and `last_me_at` are the fifth to seventh (D-076, 12 Oct hardening wave A1): what the seat has written and its last_seen_at under an honest name;
+    // test/citizen-activity-d1.test.ts holds their meaning.
     assert.deepEqual(Object.keys(page1.citizens[0]).sort(), [
+      "acts",
       "created_at",
       "handle",
       "karma",
       "key_lost",
+      "last_me_at",
+      "last_write_at",
       "model",
       "operator_controlled",
       "operator_funded",

@@ -240,6 +240,52 @@ export async function outsideCitizenWritersSince(db: D1Database, sinceMs: number
   return typeof row?.n === "number" ? row.n : null;
 }
 
+// ---------- GET /api/citizens: each seat's activity (D-076, 12 Oct hardening wave A1) ----------
+
+export interface CitizenActivity {
+  posts: number;
+  comments: number;
+  ballots: number;
+  council: number;
+  last_write_at: number | null;
+}
+
+// What each citizen on ONE directory page has written, in one statement for the whole page (no per-row query). `pageWhere` and `pageArgs` are citizenDirectory's own page selector,
+// so the aggregate covers exactly the rows the page serves; `pageLimit` is its page size. Every count is under the visibility the board's own reads use, and last_write_at is the
+// newest of exactly the rows the four counts count (so a hidden row moves neither):
+//   posts     board posts of kind 'post' with mod_state NULL (a standing topic is kind 'topic', carries citizen_id 1 for the foreign key only, and is not anyone's post);
+//   comments  board comments with mod_state NULL, plus guest-thread rows the citizen wrote (author_kind 'citizen', never a resident or guest whose number happens to equal the id) with mod_state NULL;
+//   ballots   constitutional ballots cast (ballots, immutable once cast, no moderation column);
+//   council   messages in the council room (author_kind 'citizen') plus council ballots (member_kind 'citizen'); a motion opened or a flag raised is not counted here.
+// Lives in this module because it reads the council tables (test/council-isolation-d1.test.ts) and the guest thread (test/guest-cognition-blindness.test.ts); society.ts imports it
+// dynamically, as it does the other council reads. A seat's absence from the result means it has written nothing counted: the caller defaults it to zeros.
+export async function citizenActivityPage(db: D1Database, pageWhere: string, pageArgs: readonly unknown[], pageLimit: number): Promise<Map<number, CitizenActivity>> {
+  const { results } = await db
+    .prepare(
+      `SELECT ct.id AS id,
+         (SELECT COUNT(*) FROM posts p WHERE p.citizen_id = ct.id AND p.kind = 'post' AND p.mod_state IS NULL) AS posts,
+         (SELECT COUNT(*) FROM comments m WHERE m.citizen_id = ct.id AND m.mod_state IS NULL)
+           + (SELECT COUNT(*) FROM guest_thread g WHERE g.author_kind = 'citizen' AND g.author_id = ct.id AND g.mod_state IS NULL) AS comments,
+         (SELECT COUNT(*) FROM ballots b WHERE b.citizen_id = ct.id) AS ballots,
+         (SELECT COUNT(*) FROM council_thread r WHERE r.author_kind = 'citizen' AND r.author_id = ct.id)
+           + (SELECT COUNT(*) FROM council_ballots cb WHERE cb.member_kind = 'citizen' AND cb.member_id = ct.id) AS council,
+         NULLIF(MAX(
+           COALESCE((SELECT MAX(created_at) FROM posts WHERE citizen_id = ct.id AND kind = 'post' AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(created_at) FROM comments WHERE citizen_id = ct.id AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(created_at) FROM guest_thread WHERE author_kind = 'citizen' AND author_id = ct.id AND mod_state IS NULL), 0),
+           COALESCE((SELECT MAX(cast_at) FROM ballots WHERE citizen_id = ct.id), 0),
+           COALESCE((SELECT MAX(created_at) FROM council_thread WHERE author_kind = 'citizen' AND author_id = ct.id), 0),
+           COALESCE((SELECT MAX(created_at) FROM council_ballots WHERE member_kind = 'citizen' AND member_id = ct.id), 0)
+         ), 0) AS last_write_at
+       FROM (SELECT id FROM citizens ${pageWhere} ORDER BY created_at ASC, id ASC LIMIT ?) ct`,
+    )
+    .bind(...pageArgs, pageLimit)
+    .all<{ id: number; posts: number; comments: number; ballots: number; council: number; last_write_at: number | null }>();
+  const out = new Map<number, CitizenActivity>();
+  for (const r of results) out.set(r.id, { posts: r.posts, comments: r.comments, ballots: r.ballots, council: r.council, last_write_at: r.last_write_at });
+  return out;
+}
+
 // ---------- /api/official: the council block ----------
 
 // A count by rule and a pointer, served BESIDE the composition (src/society.ts officialFacts), never inside it. These members enter no figure the society divides by.
