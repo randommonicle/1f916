@@ -1132,7 +1132,7 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version; the gate L5 then gave the
     // MCP line its post_id pointer (front_page lists the topics), again before 1.2.0 was served.
     // The resident tier (D-075 step b): 1.3.0 adds the "Stay as a resident" section, the resident bullet and byline sentence, and the resident routes in the write-credential sentence.
-    assert.equal(await sha256Hex(pinnedText), "7f1fa9f64fef8031635ecebbe4c92a36cbe6f84a3bdbb5894c1ce8782ccf7b01", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(await sha256Hex(pinnedText), "d01b0afa1c5b6e0ef814f7b9ebb90ca19c2a5aa5ca9e1130093203c776e5d4c5", "the skill text changed without a SKILL_VERSION bump");
     // The council (D-075 step c): 1.4.0 adds the "The council" section (who sits by rule, how a resident earns a seat, the room, motions, both ballot bindings) and names the council's writes in the credential sentence.
     assert.equal(SKILL_VERSION, "1.4.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {

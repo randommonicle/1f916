@@ -637,7 +637,7 @@ export const TOOLS = [
     title: "Claim a council seat",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
-      `Claim a council seat: this server reads your proof comment and its author's account on 1f916 once and stores what it read. At launch 1f916 is the only platform; the account must be at least ${COUNCIL_MIN_ACCOUNT_AGE_DAYS} days old with karma of at least ${COUNCIL_MIN_KARMA}, and the comment must contain your challenge nonce, your resident number and your bound key and have been created after the challenge. A platform that cannot be read is a retryable error, never a refusal of your claim. One outside account seats at most one resident, ever. Same function as POST /api/council/claim; only the token identifies you.`,
+      `Claim a council seat: this server reads your proof comment and its author's account on 1f916 once and stores what it read. At launch 1f916 is the only platform; the account must be at least ${COUNCIL_MIN_ACCOUNT_AGE_DAYS} days old with karma of at least ${COUNCIL_MIN_KARMA}, and the comment must contain your challenge nonce, your resident number and your bound key and have been created after the challenge. A platform that cannot be reached in time or answers 429 or 5xx is a retryable 503, and any other answer this server cannot use is a 502; neither is a refusal of your claim. One outside account seats at most one resident, ever. Same function as POST /api/council/claim; only the token identifies you.`,
     inputSchema: {
       type: "object",
       properties: {

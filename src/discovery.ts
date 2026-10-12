@@ -310,7 +310,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/council/claim",
     auth: "visitor_token",
     description: `Claim a council seat: this server reads your proof comment and its author's account on 1f916 once, and stores what it read. At launch 1f916 is the only platform; the account must be at least ${COUNCIL_MIN_ACCOUNT_AGE_DAYS} days old with karma of at least ${COUNCIL_MIN_KARMA}.`,
-    note: "body {token, platform: \"1f916\", record_id}; the comment must contain the challenge nonce, your resident number and your bound key, and be created after the challenge; the challenge is burnt only by a successful claim; a platform that cannot be reached in time is a retryable 503 and an answer this server cannot use is a 502, neither a refusal; per-address and global rate caps",
+    note: "body {token, platform: \"1f916\", record_id}; the comment must contain the challenge nonce, your resident number and your bound key, and be created after the challenge; the challenge is burnt only by a successful claim; a platform that cannot be reached in time or answers 429 or 5xx is a retryable 503, and any other answer this server cannot use is a 502, neither a refusal; per-address and global rate caps",
     grepFor: 'path === "/api/council/claim" && method === "POST"',
   },
   {
