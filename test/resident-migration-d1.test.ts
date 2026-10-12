@@ -39,6 +39,8 @@ test("0020 on the pre-0020 schema lands on exactly what schema.sql builds, colum
   try {
     migrated.exec(preResidentSchema());
     migrated.exec(migrationSql());
+    // schema.sql also carries every LATER migration's block (0021, the council, was appended after this wave's block), so the comparison applies it too.
+    migrated.exec(norm(readFileSync(join(ROOT, "migrations", "0021_council.sql"), "utf8")));
     fresh.exec(schemaSql());
     assert.deepEqual(columnsInOrder(migrated, "guests"), columnsInOrder(fresh, "guests"));
     assert.deepEqual(columnsInOrder(migrated, "guests").slice(-2), ["public_key", "resident_at"], "the two new columns are appended, in this order");
@@ -115,13 +117,15 @@ test("re-applying 0020 fails LOUDLY and changes nothing: ALTER TABLE ADD COLUMN 
   }
 });
 
-test("schema.sql carries the migration's statements byte for byte (CRLF-normalised) from the first ALTER to the end of the file, and the 0018 guests table above it is unchanged (mutant: one character differs)", () => {
+test("schema.sql carries the migration's statements byte for byte (CRLF-normalised) from the first ALTER to the end of the block, and the 0018 guests table above it is unchanged (mutant: one character differs)", () => {
   const mig = migrationSql();
   const block = mig.slice(mig.indexOf("ALTER TABLE guests ADD COLUMN public_key"));
   assert.ok(block.length > 400, "the migration's statements were found");
   const schema = schemaSql();
-  assert.ok(schema.endsWith(block), "schema.sql ends with exactly the migration's block");
-  assert.ok(!schema.replace("resident_at INTEGER;", "resident_at  INTEGER;").endsWith(block), "a one-character drift in either copy fails the comparison");
+  // This block was the END of schema.sql when wave b shipped; the council's block (0021) is appended after it, so the pin is now "contains, and what follows is the council header".
+  assert.ok(schema.includes(block), "schema.sql carries exactly the migration's block");
+  assert.ok(schema.slice(schema.indexOf(block) + block.length).trimStart().startsWith("-- The council (migrations/0021_council.sql"), "and only the council's block follows it");
+  assert.ok(!schema.replace("resident_at INTEGER;", "resident_at  INTEGER;").includes(block), "a one-character drift in either copy fails the comparison");
   // the 0018 guests table is still exactly as that migration made it (nothing was spliced into it)
   const m18 = norm(readFileSync(join(ROOT, "migrations", "0018_guest_voice.sql"), "utf8"));
   const guestsTable = /CREATE TABLE IF NOT EXISTS guests \([\s\S]*?\n\);/.exec(m18)![0];

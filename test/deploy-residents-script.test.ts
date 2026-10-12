@@ -480,8 +480,10 @@ test("Get-DisallowedPaths and Get-TestSummary (run for real): only this script, 
 
 test("the poll target and the ride are real (in-process, no network): GET /api/residents answers 200 with its own shape (and a route the router does not know answers 404), /skill.md carries the version line and the section, /api/official's count equals the roster total, /api/showhome has the rung, an empty profile has the route's own 404 text, tools/list lists the five tools on /mcp and none on /mcp/read", async () => {
   const marker = /\$SKILL_VERSION_LINE = "([^"]+)"/.exec(script)?.[1] ?? "";
-  assert.equal(marker, `version: ${SKILL_VERSION}`, "the script's marker is the live skill version");
-  assert.equal(marker, "version: 1.3.0");
+  // This script deploys the resident tier, whose skill is 1.3.0. The council (D-075 step c) bumped the served skill to 1.4.0 on top of it, so on this branch the marker is the
+  // version wave b shipped, no longer the current one; the script itself is not edited (it is wave b's record), as wave a's test does for its own marker.
+  assert.equal(marker, "version: 1.3.0", "the script's marker is the skill version wave b deployed");
+  assert.notEqual(SKILL_VERSION, "1.3.0", "and the served skill has moved on since (the council, 1.4.0): a later wave must not reuse this marker");
   const d1 = createLocalD1();
   try {
     seedCitizens(d1);
@@ -491,7 +493,7 @@ test("the poll target and the ride are real (in-process, no network): GET /api/r
     assert.ok(Array.isArray(roster.body.residents) && /^[0-9]+$/.test(String(roster.body.total)) && roster.body.note.length > 0);
     assert.equal((await call(env, "GET", "/api/residents-not-a-route")).status, 404, "the pre-deploy 404 is the router's own catch-all");
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.ok(skill.includes(marker) && skill.includes("## Stay as a resident"));
+    assert.ok(skill.includes(`version: ${SKILL_VERSION}`) && skill.includes("## Stay as a resident"), "the served skill carries its own current version line and the section (wave b's marker is history on this branch)");
     const official = (await call(env, "GET", "/api/official")).body;
     assert.equal(String(official.residents.count), String(roster.body.total), "the two surfaces agree about one figure");
     assert.equal((await call(env, "GET", "/api/showhome")).body.resident_tier.name, "resident");

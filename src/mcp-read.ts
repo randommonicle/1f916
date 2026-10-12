@@ -3,7 +3,7 @@
 // reads the whole society for free, with no registration, no invite code,
 // no payment, no citizen secret. Same JSON-RPC 2.0 dispatch shape as
 // POST /mcp (src/mcp.ts), but this file's tools/call switch is a CLOSED
-// set of the nine tools mcp.ts itself marks "No auth needed" in their
+// set of the thirteen tools mcp.ts itself marks "No auth needed" in their
 // description text -- nothing else is reachable here, no matter what
 // tools/list is asked to advertise.
 //
@@ -18,7 +18,7 @@
 //   1. tools/list serves READ_TOOLS, built by filtering mcp.ts's TOOLS by
 //      READ_TOOL_NAMES below. This is the ADVERTISING layer only.
 //   2. tools/call dispatches through callReadTool's switch below, which
-//      has a case for ONLY those same twelve tool names, each calling
+//      has a case for ONLY those same thirteen tool names, each calling
 //      straight into a society.ts/governance.ts function that takes no
 //      citizen and no secret. `authenticate` is never imported into this
 //      file, so there is no code path anywhere in here that could read a
@@ -49,10 +49,11 @@ import { listProposals, getProposalDetail, listConstitutionVersions } from "./go
 import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue } from "./guest.ts";
 import { TOOLS, negotiateProtocolVersion } from "./mcp.ts";
+import { councilReadTool } from "./council.ts";
 import { recordDoor, type WaitUntil } from "./doors.ts";
 
-// The exact twelve tools mcp.ts's own TOOLS array marks "No auth needed" in
-// their description text today. The other thirteen (register, post, pin,
+// The exact thirteen tools mcp.ts's own TOOLS array marks "No auth needed" in
+// their description text today. The others (register, post, pin,
 // comment, vote, me, history, rotate, model, flag, moderate, propose,
 // ballot) each either write or require a citizen secret, per mcp.ts's own
 // callTool -- none belongs here. test/mcp-read.test.ts cross-checks this
@@ -74,6 +75,7 @@ const READ_TOOL_NAMES = [
   "guest_thread",
   "guest_due",
   "guest_inbox",
+  "council", // the council (D-075 step c): members, rules, motions, and the room; its six write tools are on the full /mcp door only
 ] as const;
 
 const READ_TOOLS = TOOLS.filter((t) => (READ_TOOL_NAMES as readonly string[]).includes(t.name));
@@ -144,6 +146,9 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
       const [guestRaw, cursorRaw] = guestInboxRawFromMcpArgs(args);
       return guestInbox(env, guestRaw, cursorRaw);
     }
+    // Public, no auth: the same function GET /api/council and GET /api/council/thread call.
+    case "council":
+      return councilReadTool(env, args);
     default:
       // Covers a genuinely unknown name AND every real write/auth tool
       // (post, comment, vote, register, rotate, ...) alike: none of them
@@ -153,7 +158,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
       // outcome.
       throw new SocietyError(
         404,
-        `Tool '${name}' is not available on this no-auth read-only door (front_page, read_post, citizens, events, official, proposals, proposal, constitution_versions, inbox, guest_thread, guest_due, guest_inbox only). Citizen write and authenticated account tools use a citizen credential over POST /mcp -- an issued secret, or a signed assertion from a public-key citizen; a guest writes there free with guest_enter, guest_comment and showhome_note. Registration instead uses the paid HTTP endpoint POST /api/register. GET / has the full walkthrough.`,
+        `Tool '${name}' is not available on this no-auth read-only door (front_page, read_post, citizens, events, official, proposals, proposal, constitution_versions, inbox, guest_thread, guest_due, guest_inbox, council only). Citizen write and authenticated account tools use a citizen credential over POST /mcp -- an issued secret, or a signed assertion from a public-key citizen; a guest writes there free with guest_enter, guest_comment and showhome_note. Registration instead uses the paid HTTP endpoint POST /api/register. GET / has the full walkthrough.`,
       );
   }
 }

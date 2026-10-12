@@ -501,6 +501,18 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
     throw new SocietyError(401, "Signature does not verify against that citizen's registered public key.");
   }
 
+  // A resident's signed intent is not a citizen credential (docs/CHECKPOINT-COUNCIL.md CA5; closes DEFERRED-RESIDENT-ASSERTION-CROSS-SPEND, residents gate L5). Every resident
+  // binding starts "resident_" (src/resident.ts), and this check is a NARROWING only: it refuses an assertion that commits to a resident act, and nothing else changes. Without it,
+  // a captured resident assertion could be spent once as an UNBOUND citizen write (a post, a comment, a council message) by a citizen holding the same handle and the same key.
+  // After the signature (so only the real key holder can see this answer) and BEFORE the nonce burns (so the resident's own spend of that assertion is not used up by the refusal).
+  // Matched as a whole resident binding, "resident_<op>:", so a bare rotation key that happened to begin "resident_" is not caught (gate L1, 12 Oct).
+  if (a.binding !== null && /^resident_[a-z_]+:/.test(a.binding)) {
+    throw new SocietyError(
+      403,
+      "This assertion commits to a resident's act (its signed intent starts resident_), and a resident binding is not a citizen credential. Sign a fresh citizen assertion for a citizen write.",
+    );
+  }
+
   // The INSERT *is* the replay check: the nonce is the PRIMARY KEY, so a reuse
   // collides. Deliberately not SELECT-then-INSERT, which is check-then-act and
   // loses the race under concurrency (lock-at-the-chokepoint).
@@ -1560,6 +1572,17 @@ export async function officialFacts(env: Env) {
   const rule7Clause = clauseFor(await rule7VoteState(env.DB));
   const guestVoice = await guestVoiceFacts(env.DB);
   const residents = await residentFacts(env.DB);
+  // The council (D-075 step c): a count by rule and a pointer, BESIDE the composition, never inside it and in no figure the society divides by. A dynamic import for the
+  // same reason as rule7-vote.ts above: council.ts imports this module's lists, so a static import here would be a cycle.
+  const { councilFacts } = await import("./council.ts");
+  // Contained (gate L8, 12 Oct): a failing council read must not take the whole disclosure endpoint down with it.
+  let council: Awaited<ReturnType<typeof councilFacts>> | { unavailable: string };
+  try {
+    council = await councilFacts(env);
+  } catch (e) {
+    console.log(JSON.stringify({ level: "warn", event: "council_facts_failed", message: String(e) }));
+    council = { unavailable: "The council could not be read for this response; GET /api/council answers for itself." };
+  }
   const { results } = await env.DB.prepare("SELECT key, value, expires_at FROM governance_settings WHERE key IN (?, ?, ?, ?, ?)")
     .bind(SETTING_KEY.name, SETTING_KEY.dividendUplift, SETTING_KEY.controlFloorPercent, SETTING_KEY.split, SETTING_KEY.firstLawsRatified)
     .all<{ key: string; value: string; expires_at: number | null }>();
@@ -1758,6 +1781,7 @@ export async function officialFacts(env: Env) {
     // The resident tier (D-075 step b, ruling 4): a count and a note BESIDE the composition, never inside it, and in no figure the
     // society divides by. Outside the attested template, so it mints nothing.
     residents,
+    council,
     sanctioned_money_in: [
       // Branches on the SAME `=== "invite_only"` comparison as
       // register-gate.ts:107, governance.ts:580 and doc.ts's frontDoor, for the

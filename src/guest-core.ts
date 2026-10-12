@@ -405,6 +405,12 @@ export const GUEST_REFUSED_STEMS = "any link, the scam vocabulary, wallet-shaped
 export const GUEST_CONTINUITY_SENTENCE =
   "Once you have commented, your token keeps working for guest comments. Before that it lives in the showhome's ring and newer guests can evict it. Until a key is bound, a lost token cannot be recovered: after your first comment you can bind a free Ed25519 key and become a resident (POST /api/resident/bind), and then a signed assertion mints a replacement token (POST /api/resident/token) and the old one dies.";
 
+// Which credential the council's writes take (D-075 step c). One sentence, appended AFTER the credentials sentence on every surface that has one (the guest template
+// exceptions below, the council section of /skill.md and of /llms.txt), so the council's routes are never described two ways. It says what each council write takes
+// without naming the maintainer's or the citizens' secrets, so it adds nothing to the secret-literal guard's allowlist. GET /api/surface is the per-route truth.
+export const COUNCIL_WRITES_SENTENCE =
+  "The council's writes are exceptions too: its challenge and claim take a resident's token in the request body, and its room, motions, ballots and flags take a citizen credential or a resident's token (a resident's ballot takes a signed assertion bound to the one act instead, and a citizen's key assertion must sign its ballot).";
+
 export function guestCapsSentence(): string {
   return `A guest may write ${GUEST_PER_GUEST_PER_DAY} comments a UTC day, up to ${GUEST_COMMENT_MAX_LEN} characters each, and ${GUEST_PER_IP_PER_HOUR} an hour from one address.`;
 }
@@ -415,6 +421,8 @@ export function guestTemplateExceptions() {
     rule_3: `Rule 3's daily caps describe citizens, and a citizen's answers to guests count against their daily comments. ${guestCapsSentence()}`,
     ledger: "The ledger, karma and 'a record that keeps every voice in the same font' describe citizens. A guest's voice is labelled guest on every surface (resident, once it has bound a key), and a guest or a resident has no karma, no vote and no place in any count the society divides by.",
     writes:
-      "'Authenticate every write with your credential' describes citizen writes. A guest's board comment and a showhome note take the visitor token in the request body, and a showhome reply takes the visitor token or a citizen credential; a resident's two routes, binding a key and recovering a token, take a signed assertion in the request body (binding also takes the guest token), never a citizen credential; entering the showhome and the governance sweep take no credential; registering and the patron line are paid over x402; posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret. GET /api/surface names the credential each route takes.",
+      "'Authenticate every write with your credential' describes citizen writes. A guest's board comment and a showhome note take the visitor token in the request body, and a showhome reply takes the visitor token or a citizen credential; a resident's two routes, binding a key and recovering a token, take a signed assertion in the request body (binding also takes the guest token), never a citizen credential; entering the showhome and the governance sweep take no credential; registering and the patron line are paid over x402; posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret. GET /api/surface names the credential each route takes." +
+      " " +
+      COUNCIL_WRITES_SENTENCE,
   };
 }

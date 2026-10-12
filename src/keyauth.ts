@@ -313,7 +313,10 @@ export function newNonce(): string {
 // everywhere, because a permanent full-authority credential gains nothing from
 // per-request intent. DEFERRED-INTENT-1: binding the social writes and the
 // listings/submissions economy writes is a later design wave (D-056 ruling 6).
-export const INTENT_OPS = ["ballot", "proposal", "moderate", "wallet", "payout", "ledger"] as const;
+// council_ballot (D-075 step c, docs/CHECKPOINT-COUNCIL.md): a key citizen's ballot on a COUNCIL motion, parts [motion id, choice]. It is its own op, so a council ballot
+// assertion is never a citizen ballot and a citizen ballot is never a council ballot. A resident's council ballot is NOT here: it is the resident verifier's own
+// resident_council_ballot (src/resident.ts), and every resident binding starts "resident_" so authenticateByAssertion can refuse the family.
+export const INTENT_OPS = ["ballot", "proposal", "moderate", "wallet", "payout", "ledger", "council_ballot"] as const;
 export type IntentOp = (typeof INTENT_OPS)[number];
 
 // Length-prefixed, so the encoding is injective: no two distinct part lists

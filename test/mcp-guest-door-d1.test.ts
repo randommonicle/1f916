@@ -43,13 +43,13 @@ function fresh() {
 
 // ---------- M1, M4: the tools are listed on /mcp and only on /mcp ----------
 
-test("M1/M4: /mcp lists the three guest tools; /mcp/read lists none of them and stays exactly twelve", async () => {
+test("M1/M4: /mcp lists the three guest tools; /mcp/read lists none of them and is exactly the thirteen read tools", async () => {
   const { d1, env } = fresh();
   try {
     const full = await toolNames(env, "/mcp");
     for (const t of GUEST_TOOLS) assert.ok(full.includes(t), `${t} is listed on /mcp`);
     const read = await toolNames(env, "/mcp/read");
-    assert.equal(read.length, 12, "the read door stays twelve tools");
+    assert.equal(read.length, 13, "the read door is thirteen tools: the twelve it had and the council's read tool (the council wave, CA4)");
     for (const t of GUEST_TOOLS) assert.ok(!read.includes(t), `${t} must never be listed on /mcp/read`);
   } finally {
     d1.close();

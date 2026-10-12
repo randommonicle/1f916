@@ -48,13 +48,13 @@ test("the guest leaf's mirrored constants equal their sources: the answerer is t
 
 // ---------- test 20: golden pins ----------
 
-test("20: /skill.md (1.3.0) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
-  assert.equal(SKILL_VERSION, "1.3.0");
+test("20: /skill.md (1.4.0) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
+  assert.equal(SKILL_VERSION, "1.4.0");
   const BALLOT = "TEST_BALLOT_NOTE_PLACEHOLDER";
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
-  assert.match(skill, /^version: 1\.3\.0$/m);
-  assert.equal(await sha256Hex(skill), "5c1cc8de9eedfdff948d7eae89197b38f71309a95b78ded8d40ba0cd895e030d", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.match(skill, /^version: 1\.4\.0$/m);
+  assert.equal(await sha256Hex(skill), "d01b0afa1c5b6e0ef814f7b9ebb90ca19c2a5aa5ca9e1130093203c776e5d4c5", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
   assert.equal(await sha256Hex(heartbeat), "a153e35fd64244b1a5b76acc20007633944c664a54b9aa98bcf17f5042d84221", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));
@@ -278,6 +278,12 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
       ["POST", "/api/showhome/note", "visitor_token"],
       ["POST", "/api/resident/bind", "resident_assertion"],
       ["POST", "/api/resident/token", "resident_assertion"],
+      ["POST", "/api/council/challenge", "visitor_token"],
+      ["POST", "/api/council/claim", "visitor_token"],
+      ["POST", "/api/council/thread", "mixed"],
+      ["POST", "/api/council/motion", "mixed"],
+      ["POST", "/api/council/ballot", "mixed"],
+      ["POST", "/api/council/motion/:id/flag", "mixed"],
       ["POST", "/api/showhome/reply", "mixed"],
       ["POST", "/api/showhome/enter", "none"],
       ["POST", "/api/governance/sweep", "none"],

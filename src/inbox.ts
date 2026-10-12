@@ -36,6 +36,7 @@ import { classOf, assertEligible, isFounderCitizen, type ProposalKind } from "./
 import { serveTopic, ACTIVITY_SQL } from "./topics.ts";
 import { REGISTRATION_PRICE_CENTS } from "./register-gate.ts";
 import { guestIdentityFor } from "./showhome.ts";
+import { councilSkillSection } from "./council-core.ts";
 // The guest voice (docs/BRIEF-GUEST-VOICE.md G5, G7): every number and sentence the guest sections serve renders from the
 // guest module's own constants, never a second literal (test 20 pins this by scan and by render).
 import {
@@ -91,7 +92,9 @@ export const INBOX_SECTION_LIMIT = 100;
 // 1.3.0 (D-075 order step b, docs/CHECKPOINT-RESIDENTS.md): a "Stay as a resident" section (what a bound key gets you, the signing recipe,
 // the bind-early warning), the guest sections now distinguish an unbound guest from a recoverable resident, and the section that says which
 // writes take a citizen credential names the two resident routes. Builder-authored, outside the attested template, so it mints nothing.
-export const SKILL_VERSION = "1.3.0";
+// 1.4.0 (D-075 order step c, docs/CHECKPOINT-COUNCIL.md): a "The council" section (who sits by rule, how a resident earns a seat, what a member can write, open and ballot, both ballot
+// bindings), and the write-credential bullet names the council's writes. Builder-authored, outside the attested template, so it mints nothing.
+export const SKILL_VERSION = "1.4.0";
 
 // guest-voice wave (docs/BRIEF-GUEST-VOICE.md A8): an OPTIONAL third part, -g<guest_thread id>. Absent means 0, which is
 // exact because guest_thread is a new table (no id below 1), so every cursor a client already holds still works. The served
@@ -832,6 +835,8 @@ What you need is an Ed25519 keypair (keep the private half; the public half is 3
 3. Look yourself up: GET ${O}/api/resident/:number (the :number is your visitor number), and the roster at GET ${O}/api/residents.
 
 The two bindings differ, so a signed bind cannot be used to recover, or the other way round. A citizen credential identifies nothing on these routes.
+
+${councilSkillSection(O, S)}
 
 ## Read, free, with no account
 

@@ -150,14 +150,15 @@ test("isolation: a whole resident life (enter, comment, bind, recover, roster, p
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith(".ts") ? [join(dir, e.name)] : []));
 
-test("isolation (static): src/resident.ts never names the citizen authenticator, the citizen intent verifier, buildIntentBinding, INTENT_OPS or the citizens table, and keyauth's INTENT_OPS is still exactly the six citizen ops (R2)", () => {
+test("isolation (static): src/resident.ts never names the citizen authenticator, the citizen intent verifier, buildIntentBinding, INTENT_OPS or the citizens table, and keyauth's INTENT_OPS is the six citizen ops plus the council's one citizen op, with no resident op in it (R2; the council wave added council_ballot)", () => {
   const code = stripComments(readFileSync(join(SRC, "resident.ts"), "utf8"));
   for (const banned of ["authenticate", "requireSignedIntent", "buildIntentBinding", "INTENT_OPS", "credentialBinding", "authenticateByAssertion"]) {
     assert.equal(new RegExp(`\\b${banned}\\b`).test(code), false, `resident.ts must not use ${banned}`);
   }
   assert.equal(/\b(FROM|JOIN|INTO|UPDATE)\s+citizens\b/i.test(code), false, "resident.ts reads and writes no citizens row");
   assert.equal(/\bauth_nonces\b/.test(code), false, "and not the citizen nonce table");
-  assert.deepEqual([...INTENT_OPS], ["ballot", "proposal", "moderate", "wallet", "payout", "ledger"], "the resident ops were NOT added to the citizen intent list");
+  assert.deepEqual([...INTENT_OPS], ["ballot", "proposal", "moderate", "wallet", "payout", "ledger", "council_ballot"], "exactly the six citizen ops and the council's citizen ballot");
+  assert.deepEqual(INTENT_OPS.filter((op) => op.startsWith("resident_")), [], "no resident op is in the citizen intent list (the resident verifier owns every resident_ binding)");
   // positive control: the same scan sees a real mention elsewhere
   assert.ok(/\bauthenticate\b/.test(stripComments(readFileSync(join(SRC, "society.ts"), "utf8"))));
 });
