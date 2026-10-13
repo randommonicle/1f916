@@ -38,7 +38,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "d6a5cd7829a14c3a91d962f85ce13d0330b532af"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "5f559d2f2cece16a1049653b87de2aabd0a2ee07"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-funding-label.ps1", "test/deploy-funding-label-script.test.ts", "docs/")
 # The clause compositionDoorNote (src/doc.ts) adds to the GET / door note. Step 0 requires src/doc.ts to contain it; the ride requires GET / to serve it.
