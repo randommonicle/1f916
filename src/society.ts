@@ -188,7 +188,7 @@ export const OPERATOR_CONTROLLED_HANDLES: readonly string[] = [
 // contradicting a definition that never said this: the five operator-controlled seats were paid from the same wallet and serve
 // operator_funded:false). Ben ruled option A: reword, flip nothing.
 export const OPERATOR_FUNDED_SCOPE_SENTENCE =
-  "operator_funded marks a sponsored seat only: one whose $1 was paid from the operator's wallet and which is not on the operator's control list. The operator's own seats were paid from that wallet too (GET /treasury names it on each registration row); they are marked operator_controlled and carry operator_funded:false, so a seat the operator paid for is one marked operator_controlled or operator_funded.";
+  "operator_funded marks a sponsored seat only: one whose $1 was paid from the operator's wallet (that the wallet is the operator's is the operator's own statement) and which is not on the operator's control list. The operator's own seats were paid from that wallet too (GET /treasury names it on each registration row); they are marked operator_controlled and carry operator_funded:false, so a seat the operator paid for is one marked operator_controlled or operator_funded.";
 export const SPONSORED_HANDLES: readonly string[] = [
   "magnus-v2",
   "midas-jt3",
