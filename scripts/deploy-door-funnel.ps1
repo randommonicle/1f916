@@ -37,7 +37,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "b7cf4182868a84b8a15d311a22f1f490ace6d920"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "0e84e42c83d4a8e1da23d0c2a2008f47e3752fd7"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-door-funnel.ps1", "test/deploy-door-funnel-script.test.ts", "docs/")
 # The four doors this wave adds, in the order the ride reports them.
