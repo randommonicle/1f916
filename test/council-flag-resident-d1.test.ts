@@ -21,7 +21,7 @@ test("resident: a token alone is not a flag (4xx naming resident_council_flag), 
     const m = (await openMotion(c.env, c.sis, "statement", "Token refused")).body.id as number;
     const url = `/api/council/motion/${m}/flag`;
     const tokenOnly = await call(c.env, "POST", url, { token: c.wren.token }, withIp());
-    assert.equal(tokenOnly.status, 400, JSON.stringify(tokenOnly.body));
+    assert.equal(tokenOnly.status, 401, JSON.stringify(tokenOnly.body));
     assert.match(tokenOnly.body.error, /resident_council_flag/);
     assert.equal(tokenOnly.body.code, "council_flag_unbound");
     const tokenAndNumber = await call(c.env, "POST", url, { token: c.wren.token, number: c.wren.number }, withIp());

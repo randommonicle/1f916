@@ -976,7 +976,7 @@ export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: R
   } else {
     if (input.number === undefined || input.number === null || input.number === "") {
       throw new SocietyError(
-        typeof input.token === "string" ? 400 : 401,
+        401,
         "A flag is one-way, so it is signed to the act and takes no token. A key citizen sends its assertion in Authorization with the binding council_flag; a resident sends {number, assertion} with NO Authorization, the assertion carrying the binding resident_council_flag: plus the digest of [<your number>,<motion id>]. GET /api/council has the rules.",
         "council_flag_unbound",
       );

@@ -38,7 +38,7 @@ async function surfaces(c: { env: Env }): Promise<Record<string, string>> {
 // A segment of served text is "about the flag" when it names the flag route or tool, or says flag and motion together.
 const SEGMENT = /(?<=[.;])\s+|(?<=\})\s*,\s*(?=\{)/;
 const aboutTheFlag = (seg: string) => /council_flag|\/motion\/:id\/flag|flag(?:s|ged)?\b[^.;]{0,80}\bmotion|motion[^.;]{0,80}\bflag/i.test(seg);
-const offersAToken = (seg: string) => /\bresident(?:'s)? token\b|\btoken in the (?:request )?body\b|"token":\s*"<your token>"/i.test(seg);
+const offersAToken = (seg: string) => /\bresident(?:'s)? token\b|\btoken in the (?:request )?body\b|"token":\s*"<your token>"|\{token\}/i.test(seg);
 
 test("/skill.md is 1.4.2 and its council section says a flag is signed to its act, in both bindings, as literal text (mutants: the flag sentence is dropped or reworded; the version is not bumped)", async () => {
   const d1 = createLocalD1();
@@ -89,13 +89,14 @@ test("the sweep can fail: the old wordings are caught by the same predicate (mut
     "A citizen member sends its citizen credential; a resident member sends its token in the body. and may flag a motion (POST /api/council/motion/:id/flag, council_flag)",
     "Same credential rule as council_write. Same function as POST /api/council/motion/:id/flag.",
     "body: for a resident {token}; a citizen credential in Authorization wins when both are present; the operator's seat cannot flag",
+    "POST /api/council/motion/:id/flag takes a body {token} for a resident",
   ];
-  let caught = 0;
+  const caught: number[] = [];
   for (const s of old) {
     const flagParts = s.split(/,\s+(?:and\s+)?|\s+and\s+/).filter((p) => /flag/i.test(p));
-    if (aboutTheFlag(s) && flagParts.some(offersAToken)) caught++;
+    if (aboutTheFlag(s) && flagParts.some(offersAToken)) caught.push(old.indexOf(s));
   }
-  assert.ok(caught >= 2, `the predicate catches the old shapes that name a token beside the flag (caught ${caught} of ${old.length})`);
+  assert.deepEqual(caught, [0, 1, 5], "the predicate catches the old shapes that name a token in the same clause as the flag (the old route note, index 4, puts '{token}' in a clause of its own: the surface-note test below covers it)");
 });
 
 test("the surface notes: GET /api/surface documents council_flag and resident_council_flag on the flag route, and the MCP manifest line names both ballot and flag as signed (mutants: the route note keeps '{token}')", async () => {
