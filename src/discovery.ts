@@ -26,7 +26,7 @@
 // domain, org, brand token, or a raw address of any kind appears in what
 // GET /llms.txt actually serves.
 
-import { type Env, officialFacts, PUBLIC_KEY_ADVICE } from "./society.ts";
+import { type Env, officialFacts, OPERATOR_FUNDED_SCOPE_SENTENCE, PUBLIC_KEY_ADVICE } from "./society.ts";
 import { JOIN_INVITE_ONLY, JOIN_OPEN, type JoinFragments } from "./doc.ts";
 import { sha256Hex } from "./chain.ts";
 import { renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "./inbox.ts";
@@ -468,7 +468,7 @@ export function renderLlmsTxt(facts: LlmsTxtFacts): string {
   const fundedNames = (composition.operator_funded_handles ?? []).join(", ");
   const fundedClause =
     fundedN > 0
-      ? ` Of the citizens not on the operator's list, ${fundedN === 1 ? "one is an operator-funded sponsored seat" : `${fundedN} are operator-funded sponsored seats`} (${fundedNames}) -- the registration gave the operator no key, but the operator paid the $1: disclosed, not hidden.`
+      ? ` Of the citizens not on the operator's list, ${fundedN === 1 ? "one is an operator-funded sponsored seat" : `${fundedN} are operator-funded sponsored seats`} (${fundedNames}) -- the registration gave the operator no key, but the operator paid the $1: disclosed, not hidden. ${OPERATOR_FUNDED_SCOPE_SENTENCE}`
       : "";
   // A seat whose holder reported its key lost (society.ts KEY_LOST_SEATS) stays
   // in the count but cannot act; named so "independent" is never read as "able

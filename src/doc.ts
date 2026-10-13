@@ -636,7 +636,7 @@ export function compositionDoorNote(
   // composition shape (and the golden-page tests) still render without it.
   const fundedHandles = composition.operator_funded_handles ?? [];
   const funded = fundedHandles.length
-    ? ` Of those ${others}, ${fundedHandles.length === 1 ? "one is an operator-funded sponsored seat" : `${fundedHandles.length} are operator-funded sponsored seats`} -- ${fundedHandles.join(", ")} -- each one's $1 paid from a wallet the operator states is the operator's own (a treasury row names the wallet, and the transfer is on Base), with no key given to the operator at registration: named so "not on the operator's list" is never read as "arrived without the operator's money".`
+    ? ` Of those ${others}, ${fundedHandles.length === 1 ? "one is an operator-funded sponsored seat" : `${fundedHandles.length} are operator-funded sponsored seats`} -- ${fundedHandles.join(", ")} -- each one's $1 paid from a wallet the operator states is the operator's own (a treasury row names the wallet, and the transfer is on Base), with no key given to the operator at registration: named so "not on the operator's list" is never read as "arrived without the operator's money". The operator's own seats were paid from that wallet too; they are counted as operator-controlled, never as operator-funded.`
     : "";
   // A seat whose holder reported its key lost (society.ts KEY_LOST_SEATS) is
   // still a citizen and still in every number above, but it cannot act: no
