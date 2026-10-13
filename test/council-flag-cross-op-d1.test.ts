@@ -1,4 +1,4 @@
-// The cross-op matrix for the council flag (DEFERRED-COUNCIL-FLAG-INTENT, F3/A7): each binding is refused everywhere else, in BOTH directions, so a captured assertion cannot be
+// The cross-op matrix for the council flag (the 13 Oct flag-binding wave, F3/A7): each binding is refused everywhere else, in BOTH directions, so a captured assertion cannot be
 // redirected into another act. council_flag and resident_council_flag are two new ops beside council_ballot and resident_council_ballot, resident_bind and resident_recover.
 // Each block names the mutant that turns it red.
 //

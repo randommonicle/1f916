@@ -1,4 +1,4 @@
-// The two doors of the council flag (DEFERRED-COUNCIL-FLAG-INTENT, F4): POST /api/council/motion/:id/flag and the MCP council_flag tool call the SAME function, so the same inputs
+// The two doors of the council flag (the 13 Oct flag-binding wave, F4): POST /api/council/motion/:id/flag and the MCP council_flag tool call the SAME function, so the same inputs
 // give the same answer on both. Real local D1, the real router and the real MCP dispatch. Each block names the mutant that turns it red.
 //
 // Run: npm test

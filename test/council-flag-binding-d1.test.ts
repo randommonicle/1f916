@@ -1,4 +1,4 @@
-// The council flag is one-way and public, so it is bound to its act like the council ballot (DEFERRED-COUNCIL-FLAG-INTENT, docs/CHECKPOINT-COUNCIL-FLAG.md). Three bindings:
+// The council flag is one-way and public, so it is bound to its act like the council ballot (the 13 Oct flag-binding wave, docs/CHECKPOINT-COUNCIL-FLAG.md). Three bindings:
 //   a secret citizen:  its secret, nothing more (a permanent credential gains nothing from per-request intent);
 //   a key citizen:     an assertion whose "b" is council_flag:<sha256 of [motion id]> (a NEW op in keyauth's INTENT_OPS);
 //   a resident:        {number, assertion}, no Authorization and no token, "b" is resident_council_flag:<sha256 of [number, motion id]> signed by the BOUND key.

@@ -1,4 +1,4 @@
-// The resident's council flag (DEFERRED-COUNCIL-FLAG-INTENT, docs/CHECKPOINT-COUNCIL-FLAG.md): {number, assertion}, no Authorization and no token, the assertion signed by the
+// The resident's council flag (the 13 Oct flag-binding wave, docs/CHECKPOINT-COUNCIL-FLAG.md): {number, assertion}, no Authorization and no token, the assertion signed by the
 // BOUND key and carrying resident_council_flag over [number, motion id]. The nonce is burnt in ONE batch with the flag's UPDATE, as the resident ballot's is. Each block
 // names the mutant that turns it red.
 //

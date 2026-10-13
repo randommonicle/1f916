@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parsePowerShellFile } from "./helpers/ps-parse.ts";
 import { createLocalD1, insertCitizen, guestEnv, call, seedWorld, seedEarned } from "./helpers/council.ts";
+import { SKILL_VERSION } from "../src/inbox.ts";
 
 const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
 const SCRIPT_PATH = here("../scripts/deploy-hardening.ps1");
@@ -474,7 +475,12 @@ test("the poll target and the ride are real (in-process, no network): every /api
     assert.ok(councilText.includes("only the operator can compare the stored copy"));
 
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.match(skill, new RegExp("^" + /\$SKILL_VERSION_LINE = "([^"]+)"/.exec(script)![1] + "$", "m"));
+    // The hardening script deployed 1.4.1. The 13 Oct council flag wave bumped the served skill to 1.4.2, so the script's marker is the version that wave shipped, no longer the
+    // current one; the script itself is not edited (it is that wave's record), as the council script's test does for its own marker.
+    const marker = /\$SKILL_VERSION_LINE = "([^"]+)"/.exec(script)![1];
+    assert.equal(marker, "version: 1.4.1", "the script's marker is the skill version the hardening wave deployed");
+    assert.notEqual(marker, `version: ${SKILL_VERSION}`, "and the served skill has moved on since (1.4.2): a later wave must not reuse this marker");
+    assert.match(skill, new RegExp("^version: " + SKILL_VERSION.replace(/\./g, "\.") + "$", "m"));
     assert.ok(skill.includes("only the operator can compare the stored copy"));
     assert.equal(skill.includes("stays checkable"), false);
   } finally {
