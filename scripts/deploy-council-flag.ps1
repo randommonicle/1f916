@@ -41,7 +41,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "5c04ca34588ffca279e246e6865920b4b5164e0f"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "e888a57e7f12a24d9b44ce42b4d6d62bf769e9eb"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-council-flag.ps1", "test/deploy-council-flag-script.test.ts", "docs/")
 # The propagation poll waits for THIS to appear on GET /api/surface (a note only this wave serves); the pre-deploy probe proves it is absent first.
