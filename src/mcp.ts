@@ -965,9 +965,13 @@ export async function handleMcp(request: Request, env: Env, ctx?: WaitUntil): Pr
     case "ping":
       return Response.json(rpcResult(msg.id, {}));
     case "tools/list":
+      await recordDoor(env, ctx, "mcp_tools_list");
       return Response.json(rpcResult(msg.id, { tools: TOOLS }));
     case "tools/call": {
       const name = String(msg.params?.name ?? "");
+      // Door funnel (docs/BRIEF-DOOR-FUNNEL-2026-10-13.md A2): counted on RECEIPT, before dispatch, so a refusal or an unexpected exception still counts;
+      // a name this door does not advertise counts nothing. Membership is TOOLS itself, never a second list.
+      if (TOOLS.some((t) => t.name === name)) await recordDoor(env, ctx, "mcp_tool_call");
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
         // A guest tool ignores both credentials: callGuestTool is dispatched before callTool can compute `secret`, and the header is extracted only for the rest.

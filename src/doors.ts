@@ -7,15 +7,28 @@
 // COUNTING MUST NEVER FAIL OR SLOW A REQUEST. countDoor catches every error and logs it once at warn; recordDoor hands the write to
 // ctx.waitUntil so the response does not wait for it. With no ctx (a test calling worker.fetch(request, env) directly; production always
 // has one) it returns the promise and the caller awaits it. A hook is placed only AFTER the shared function it counts has returned
-// success, never before it: a refused write counts nothing.
+// success, never before it: a refused write counts nothing. The one exception is the tools/call pair (mcp_tool_call, mcp_read_tool_call): they
+// count a RECEIVED call of a listed tool before dispatch, whatever its outcome, so a refusal or an exception still counts (the door funnel).
 //
-// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. Six doors at DOOR_DAILY_CAP can never take more than
-// 12,000 of them, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
+// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. Ten doors at DOOR_DAILY_CAP can never take more than
+// 20,000 of them, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
 // concurrent requests cannot pass it together. A figure at the cap is a FLOOR, and the read says so (at_cap).
 
 import type { Env } from "./society.ts";
 
-export const DOORS = ["skill_md", "heartbeat_md", "mcp_initialize", "mcp_read_initialize", "showhome_enter", "guest_comment"] as const;
+// DEFERRED-LISTING-ATTRIBUTION: these doors do not say which registry listing sent a connection; that needs a distinct URL per listing (for example /mcp?via=smithery) and every listing republished, Ben's decision (docs/BRIEF-DOOR-FUNNEL-2026-10-13.md A6, A7).
+export const DOORS = [
+  "skill_md",
+  "heartbeat_md",
+  "mcp_initialize",
+  "mcp_read_initialize",
+  "showhome_enter",
+  "guest_comment",
+  "mcp_tools_list",
+  "mcp_read_tools_list",
+  "mcp_tool_call",
+  "mcp_read_tool_call",
+] as const;
 export type Door = (typeof DOORS)[number];
 
 export const DOOR_DAILY_CAP = 2000;
@@ -58,7 +71,7 @@ export function recordDoor(env: Env, ctx: WaitUntil | undefined, door: Door): Pr
 export const DOOR_WINDOW_DAYS = 30;
 
 export const DOORS_NOTE =
-  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at ${DOOR_DAILY_CAP} a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door.`;
+  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at ${DOOR_DAILY_CAP} a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). None of them says which listing or which agent sent the request.`;
 
 export interface DoorRow {
   day: string;

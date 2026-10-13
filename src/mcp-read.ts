@@ -163,7 +163,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
   }
 }
 
-// `ctx`: the Worker's execution context, optional (see handleMcp); used only to count the initialize (src/doors.ts).
+// `ctx`: the Worker's execution context, optional (see handleMcp); used only to count the initialize, tools/list and tools/call (src/doors.ts).
 export async function handleMcpRead(request: Request, env: Env, ctx?: WaitUntil): Promise<Response> {
   if (request.method === "GET") {
     // No server-initiated stream; clients that probe with GET get a polite 405 (mirrors handleMcp).
@@ -201,9 +201,12 @@ export async function handleMcpRead(request: Request, env: Env, ctx?: WaitUntil)
     case "ping":
       return Response.json(rpcResult(msg.id, {}));
     case "tools/list":
+      await recordDoor(env, ctx, "mcp_read_tools_list");
       return Response.json(rpcResult(msg.id, { tools: READ_TOOLS }));
     case "tools/call": {
       const name = String(msg.params?.name ?? "");
+      // Door funnel (docs/BRIEF-DOOR-FUNNEL-2026-10-13.md A2): counted on receipt, before dispatch, when the name is one this door advertises (READ_TOOLS).
+      if (READ_TOOLS.some((t) => t.name === name)) await recordDoor(env, ctx, "mcp_read_tool_call");
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
         const result = await callReadTool(env, name, args);

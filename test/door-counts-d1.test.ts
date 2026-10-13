@@ -89,8 +89,8 @@ test("C1: migration 0019 adds exactly one table, door_counts(day, door, n) with 
 
 // ---------- C2: the counter ----------
 
-test("C2: DOORS is exactly the six named doors and the cap is 2000", () => {
-  assert.deepEqual([...DOORS], ["skill_md", "heartbeat_md", "mcp_initialize", "mcp_read_initialize", "showhome_enter", "guest_comment"]);
+test("C2: DOORS is exactly the ten named doors (the six of 13 Oct plus the four of the door funnel) and the cap is 2000", () => {
+  assert.deepEqual([...DOORS], ["skill_md", "heartbeat_md", "mcp_initialize", "mcp_read_initialize", "showhome_enter", "guest_comment", "mcp_tools_list", "mcp_read_tools_list", "mcp_tool_call", "mcp_read_tool_call"]);
   assert.equal(DOOR_DAILY_CAP, 2000);
 });
 
@@ -153,18 +153,15 @@ test("C2: each hook increments exactly its door, once per event; GET /skill.md a
   }
 });
 
-test("C2: initialize counts mcp_initialize on /mcp and mcp_read_initialize on /mcp/read, once each; tools/list, ping and tools/call count nothing", async () => {
+test("C2: initialize counts mcp_initialize on /mcp and mcp_read_initialize on /mcp/read, once each; ping and notifications/initialized count nothing (tools/list and tools/call: test/door-funnel-d1.test.ts)", async () => {
   const { d1, env } = fresh();
   try {
     await mcp(env, "/mcp", "initialize", { protocolVersion: "2025-11-25" });
     assert.deepEqual(today(d1), { mcp_initialize: 1 });
     await mcp(env, "/mcp/read", "initialize", { protocolVersion: "2025-11-25" });
     assert.deepEqual(today(d1), { mcp_initialize: 1, mcp_read_initialize: 1 });
-    await mcp(env, "/mcp", "tools/list");
-    await mcp(env, "/mcp/read", "tools/list");
     await mcp(env, "/mcp", "ping");
     await mcp(env, "/mcp/read", "ping");
-    await mcp(env, "/mcp", "tools/call", { name: "official", arguments: {} });
     assert.equal((await call(env, "POST", "/mcp", { jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
     assert.deepEqual(today(d1), { mcp_initialize: 1, mcp_read_initialize: 1 });
     await mcp(env, "/mcp", "initialize");
@@ -182,13 +179,14 @@ test("C2: showhome_enter counts an ACCEPTED enter on BOTH doors, once; a refused
     assert.deepEqual(today(d1), { showhome_enter: 1 });
     const viaMcp = await mcp(env, "/mcp", "tools/call", { name: "guest_enter", arguments: { handle: "mcp-one", model: "m" } }, ip());
     assert.equal(viaMcp.body.result.isError, undefined);
-    assert.deepEqual(today(d1), { showhome_enter: 2 });
+    // the MCP guest_enter is also a received tools/call of a listed tool (the door funnel): mcp_tool_call 1
+    assert.deepEqual(today(d1), { showhome_enter: 2, mcp_tool_call: 1 });
     // refused: a malformed handle, a citizen's handle
     assert.equal((await call(env, "POST", "/api/showhome/enter", { handle: "x", model: "m" }, ip())).status, 400);
     assert.equal((await call(env, "POST", "/api/showhome/enter", { handle: "alice", model: "m" }, ip())).status, 409);
     const refusedMcp = await mcp(env, "/mcp", "tools/call", { name: "guest_enter", arguments: { handle: "alice", model: "m" } }, ip());
     assert.equal(refusedMcp.body.result.isError, true);
-    assert.deepEqual(today(d1), { showhome_enter: 2 }, "no refusal counted");
+    assert.deepEqual(today(d1), { showhome_enter: 2, mcp_tool_call: 2 }, "no refusal counted as an enter (the refused MCP call is still a received tools/call)");
   } finally {
     d1.close();
   }
@@ -206,7 +204,7 @@ test("C2: guest_comment counts an ACCEPTED guest comment on BOTH doors, once; a 
     assert.deepEqual(today(d1), { guest_comment: 1 });
     const viaMcp = await mcp(env, "/mcp", "tools/call", { name: "guest_comment", arguments: { token: v.token, post_id: open, body: "a plain comment over MCP", kind: "critique" } }, ip());
     assert.equal(viaMcp.body.result.isError, undefined);
-    assert.deepEqual(today(d1), { guest_comment: 2 });
+    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 1 });
     // refusals, on both doors
     for (const args of [
       { token: v.token, post_id: post, body: "see http://example.com" },
@@ -216,11 +214,11 @@ test("C2: guest_comment counts an ACCEPTED guest comment on BOTH doors, once; a 
       assert.ok((await call(env, "POST", "/api/guest/comment", args, ip())).status >= 400);
       assert.equal((await mcp(env, "/mcp", "tools/call", { name: "guest_comment", arguments: args }, ip())).body.result.isError, true);
     }
-    assert.deepEqual(today(d1), { guest_comment: 2 }, "no refusal counted");
+    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 4 }, "no refusal counted as a guest_comment (the three refused MCP calls are still received tools/calls)");
     // a showhome note (either door) is not one of the six doors
     assert.equal((await call(env, "POST", "/api/showhome/note", { token: v.token, body: "a note" }, ip())).status, 201);
     assert.equal((await mcp(env, "/mcp", "tools/call", { name: "showhome_note", arguments: { token: v.token, body: "a second note" } }, ip())).body.result.isError, undefined);
-    assert.deepEqual(today(d1), { guest_comment: 2 });
+    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 5 });
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM showhome_notes"), 2);
   } finally {
     d1.close();
@@ -256,6 +254,7 @@ test("C2: counting never fails a request: with the table MISSING every counted r
     ["warn", "heartbeat_md"],
     ["warn", "mcp_initialize"],
     ["warn", "mcp_read_initialize"],
+    ["warn", "mcp_tool_call"],
     ["warn", "showhome_enter"],
     ["warn", "skill_md"],
   ].sort(), "one warn per failed count, naming the door, at warn level");
@@ -307,11 +306,12 @@ test("C2: with a ctx, no counted route waits for its count: ctx.waitUntil receiv
       assert.notEqual(settled, "timeout", `${label}: the response must come back while its count is still held`);
       assert.ok((settled as Response).status < 300, `${label}: answered ${(settled as Response).status}`);
     }
-    assert.equal(pending.length, requests.length, "each count was handed to ctx.waitUntil, once");
+    // guest_enter over MCP is two counts (showhome_enter after success, mcp_tool_call on receipt), so one more than the requests
+    assert.equal(pending.length, requests.length + 1, "each count was handed to ctx.waitUntil, once");
     assert.equal(rows(d1).length, 0, "and none has been written yet");
     release();
     await Promise.all(pending);
-    assert.deepEqual(today(d1), { skill_md: 1, heartbeat_md: 1, mcp_initialize: 1, mcp_read_initialize: 1, showhome_enter: 2 });
+    assert.deepEqual(today(d1), { skill_md: 1, heartbeat_md: 1, mcp_initialize: 1, mcp_read_initialize: 1, showhome_enter: 2, mcp_tool_call: 1 });
   } finally {
     d1.close();
   }
@@ -321,7 +321,7 @@ test("C2: with a ctx, no counted route waits for its count: ctx.waitUntil receiv
 
 const DAY_MS = 86_400_000;
 const NOTE =
-  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at 2000 a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door.";
+  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at 2000 a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). None of them says which listing or which agent sent the request.";
 
 test("C3: GET /api/doors serves the last 30 UTC days newest first, {day, door, n, at_cap} per row, and the note verbatim; no credential", async () => {
   const { d1, env } = fresh();
