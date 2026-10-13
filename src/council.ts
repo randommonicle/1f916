@@ -47,6 +47,7 @@ import {
   citizenCouncilBallotParts,
   citizenCouncilFlagParts,
   councilBallotParts,
+  councilFlagParts,
   type Choice,
   type MemberKind,
   type MotionKind,
@@ -956,16 +957,39 @@ export async function castCouncilBallot(env: Env, input: Record<string, unknown>
 
 // ---------- motions: POST /api/council/motion/:id/flag ----------
 
-// DEFERRED-COUNCIL-FLAG-INTENT: a flag is one-way and public, but it is not an op in INTENT_OPS (the commission adds exactly one, council_ballot), so a key citizen's flag
-// needs no signed intent: a captured assertion could be redirected into a flag within its 120 seconds. Trigger: the first flag, or Ben ruling that a flag binds like a ballot
-// (then one more citizen op and one more resident op, each tested both ways).
+// A flag is one-way and public, so it is bound to its act like a ballot (13 Oct, docs/CHECKPOINT-COUNCIL-FLAG.md): a key citizen's assertion carries council_flag over
+// [motion id] (a secret citizen is exempt, D-056), and a resident sends {number, assertion} with NO Authorization and no token, the assertion carrying resident_council_flag
+// over [number, motion id] and signed by the bound key.
 export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: Record<string, unknown>, credential: string | null, ip: string | null) {
   await assertShowhomeRateCap(env, ip, "council", COUNCIL_WRITE_PER_IP_PER_HOUR, COUNCIL_WRITE_GLOBAL_PER_HOUR);
   const motionId = positiveIntegerField(motionIdRaw, "motion id");
-  const actor = await resolveActor(env, input, credential);
-  // A flag is one-way and public, so a key citizen signs the exact act (council_flag over [motion id]); a secret is exempt (D-056). Checked before the motion is read, so an
-  // unbound credential learns nothing about it.
-  if (actor.credential !== null) await requireSignedIntent(actor.credential, "council_flag", citizenCouncilFlagParts(motionId));
+  // Who is flagging. The branch is decided HERE by the credential presented, before anything in the body is read (resolveActor would read input.token when none is presented,
+  // and a flag never reads a token).
+  let actor: { kind: MemberKind; id: number; operator_seat: boolean };
+  let residentAssertion: Awaited<ReturnType<typeof verifyResidentAssertion>> | null = null;
+  const presented = typeof credential === "string" && credential.trim().length > 0 ? credential : null;
+  if (presented !== null) {
+    const resolved = await resolveActor(env, input, presented);
+    // Checked before the motion is read, so an unbound credential learns nothing about it.
+    await requireSignedIntent(presented, "council_flag", citizenCouncilFlagParts(motionId));
+    actor = resolved;
+  } else {
+    if (input.number === undefined || input.number === null || input.number === "") {
+      throw new SocietyError(
+        typeof input.token === "string" ? 400 : 401,
+        "A flag is one-way, so it is signed to the act and takes no token. A key citizen sends its assertion in Authorization with the binding council_flag; a resident sends {number, assertion} with NO Authorization, the assertion carrying the binding resident_council_flag: plus the digest of [<your number>,<motion id>]. GET /api/council has the rules.",
+        "council_flag_unbound",
+      );
+    }
+    const number = positiveIntegerField(input.number, "number");
+    const row = await env.DB.prepare("SELECT visitor_id, handle, public_key FROM guests WHERE visitor_id = ?").bind(number).first<{ visitor_id: number; handle: string; public_key: string | null }>();
+    if (!row || row.public_key === null) throw notAMember();
+    const seat = await env.DB.prepare("SELECT 1 AS x FROM council_claims WHERE visitor_id = ?").bind(row.visitor_id).first();
+    if (!seat) throw notAMember();
+    // The key is the identity here, as at the resident's ballot, so no token is read.
+    residentAssertion = await verifyResidentAssertion(env, input.assertion, "resident_council_flag", { visitorId: row.visitor_id, handle: row.handle }, councilFlagParts(row.visitor_id, motionId), row.public_key);
+    actor = { kind: "resident", id: row.visitor_id, operator_seat: false };
+  }
   if (actor.operator_seat) {
     throw new SocietyError(403, "The operator's seat cannot flag a motion as being about the operator: the flag is a check on it, set by a member outside the operator's list. Nothing was written.", "council_operator_cannot_flag");
   }
@@ -979,12 +1003,25 @@ export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: R
   }
   // ONE conditional UPDATE: one winner however many members flag at once, never after the close, never twice. The clock is the server's AT THE WRITE.
   const at = Date.now();
-  const res = await env.DB.prepare(
+  const flagUpdate = env.DB.prepare(
     "UPDATE council_motions SET operator_flagged_at = ?1, operator_flagged_by_kind = ?2, operator_flagged_by_id = ?3 WHERE id = ?4 AND operator_flagged_at IS NULL AND closes_at > ?1",
-  )
-    .bind(at, actor.kind, actor.id, motionId)
-    .run();
-  if (res.meta.changes !== 1) {
+  ).bind(at, actor.kind, actor.id, motionId);
+  let changes: number;
+  if (residentAssertion !== null) {
+    // The nonce is burnt in the same batch as the flag, only after the signature verified (src/resident.ts); a replayed assertion is a UNIQUE violation on the nonce that rolls
+    // the batch back, so it flags nothing. "Already flagged" and "closed in flight" are a ZERO-CHANGE update, not a constraint error: the batch commits and the assertion
+    // stays spent, as a refused signed act leaves it spent elsewhere (the ballot's clock and recusal losses).
+    let results: Array<{ meta: { changes: number } }>;
+    try {
+      results = await env.DB.batch<{ meta: { changes: number } }>([nonceStatement(env, residentAssertion, actor.id), flagUpdate, nonceGcStatement(env)]);
+    } catch (e) {
+      return refuseBatchFailure(e);
+    }
+    changes = results[1]?.meta?.changes ?? 0;
+  } else {
+    changes = (await flagUpdate.run()).meta.changes;
+  }
+  if (changes !== 1) {
     const again = await readMotion(env, motionId);
     if (again && again.row.operator_flagged_at !== null) {
       throw new SocietyError(409, `Motion ${motionId} was already flagged at ${new Date(again.row.operator_flagged_at).toISOString()}. A flag is one-way; nothing was written.`, "council_already_flagged");
