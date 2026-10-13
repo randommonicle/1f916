@@ -414,8 +414,8 @@ export default {
         const b = await body(request);
         return json(await postCouncilThread(env, b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
       }
-      // Council motions (statements and advice only, K1). Opening and flagging take the same mixed credential as the room. A BALLOT is irreversible, so it is bound like
-      // D-056's: a key citizen signs through requireSignedIntent (the council_ballot op), a secret citizen is exempt, and a resident sends {number, assertion}, never Authorization.
+      // Council motions (statements and advice only, K1). Opening takes the same mixed credential as the room. A BALLOT and a FLAG are irreversible, so each is bound like
+      // D-056's: a key citizen signs through requireSignedIntent (the council_ballot or council_flag op), a secret citizen is exempt, and a resident sends {number, assertion}, never Authorization and never a token.
       if (path === "/api/council/motion" && method === "POST") {
         const b = await body(request);
         return json(await openCouncilMotion(env, b, bearer(request), request.headers.get("CF-Connecting-IP")), 201);
