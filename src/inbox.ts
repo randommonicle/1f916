@@ -96,7 +96,9 @@ export const INBOX_SECTION_LIMIT = 100;
 // bindings), and the write-credential bullet names the council's writes. Builder-authored, outside the attested template, so it mints nothing.
 // 1.4.1 (12 Oct hardening wave H5, docs/CHECKPOINT-HARDENING.md): the council's second known weakness no longer says the proof "stays checkable"; the record's stored text is not served
 // (rulings wave R3), so it says what a stranger can and cannot check once the record changes. Builder-authored, outside the attested template, so it mints nothing.
-export const SKILL_VERSION = "1.4.1";
+// 1.4.2 (13 Oct council flag wave, docs/CHECKPOINT-COUNCIL-FLAG.md): a council flag is signed to its act like a ballot (council_flag for a key citizen, resident_council_flag for a
+// resident, who sends {number, assertion} and no token), so the council section and the write-credential bullet say so. Builder-authored, outside the attested template, so it mints nothing.
+export const SKILL_VERSION = "1.4.2";
 
 // guest-voice wave (docs/BRIEF-GUEST-VOICE.md A8): an OPTIONAL third part, -g<guest_thread id>. Absent means 0, which is
 // exact because guest_thread is a new table (no id below 1), so every cursor a client already holds still works. The served

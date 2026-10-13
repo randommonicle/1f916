@@ -12,7 +12,7 @@ import { sha256Hex } from "../../src/chain.ts";
 import { insertCitizen, createLocalD1, guestEnv, type LocalD1, call, freshIp, type Reply } from "./guest.ts";
 import { genKeypair, sign, type Keypair } from "./resident.ts";
 import { residentBinding } from "../../src/resident.ts";
-import { councilBallotParts } from "../../src/council-core.ts";
+import { councilBallotParts, councilFlagParts } from "../../src/council-core.ts";
 import { buildIntentBinding } from "../../src/keyauth.ts";
 import type { Env } from "../../src/society.ts";
 import type { FetchLike, FetchInit } from "../../src/council-verify.ts";
@@ -122,6 +122,16 @@ export async function signResidentBallot(
   over: Partial<{ binding: string | null; t: number; nonce: string; claimHandle: string; numberInBinding: number }> = {},
 ) {
   const binding = over.binding !== undefined ? over.binding : await residentBinding("resident_council_ballot", councilBallotParts(over.numberInBinding ?? r.number, motionId, choice));
+  return sign(r.kp, { handle: over.claimHandle ?? r.handle, binding, t: over.t, nonce: over.nonce });
+}
+
+// A resident's council flag assertion: the binding is resident_council_flag: over [visitor number, motion id].
+export async function signResidentFlag(
+  r: SeededResident,
+  motionId: number,
+  over: Partial<{ binding: string | null; t: number; nonce: string; claimHandle: string; numberInBinding: number }> = {},
+) {
+  const binding = over.binding !== undefined ? over.binding : await residentBinding("resident_council_flag", councilFlagParts(over.numberInBinding ?? r.number, motionId));
   return sign(r.kp, { handle: over.claimHandle ?? r.handle, binding, t: over.t, nonce: over.nonce });
 }
 
@@ -292,9 +302,23 @@ export async function openMotion(env: Env, w: Who, kind: string, title = "a moti
   const c = await credential(w);
   return call(env, "POST", "/api/council/motion", { kind, title, body, ...c.extra }, c.headers);
 }
-export async function flagMotion(env: Env, w: Who, motionId: number | string): Promise<Reply> {
-  const c = await credential(w);
-  return call(env, "POST", `/api/council/motion/${motionId}/flag`, { ...c.extra }, c.headers);
+// A flag, built the way each kind of member must build it (it is one-way, so it is bound like a ballot): a secret needs nothing more; a key citizen signs the exact act
+// (council_flag over [motion id]); a resident sends {number, assertion} with NO Authorization and no token. `over` swaps any part to build a wrong one.
+export async function flagMotion(
+  env: Env,
+  w: Who,
+  motionId: number | string,
+  over: Partial<{ binding: string | null; headers: Record<string, string>; body: Record<string, unknown>; ip: string | null; t: number; nonce: string }> = {},
+): Promise<Reply> {
+  const ip = over.ip === undefined ? freshIp() : over.ip;
+  const url = `/api/council/motion/${motionId}/flag`;
+  if (isSecret(w)) return call(env, "POST", url, { ...(over.body ?? {}) }, over.headers ?? bearerHeader(w.secret, ip));
+  if (isKey(w)) {
+    const binding = over.binding !== undefined ? over.binding : await buildIntentBinding("council_flag", [String(motionId)]);
+    return call(env, "POST", url, { ...(over.body ?? {}) }, over.headers ?? bearerHeader(await citizenAssertion(w, binding, { t: over.t, nonce: over.nonce }), ip));
+  }
+  const { assertion } = await signResidentFlag(w, Number(motionId), { binding: over.binding, t: over.t, nonce: over.nonce });
+  return call(env, "POST", url, { number: w.number, assertion, ...(over.body ?? {}) }, over.headers ?? withIp(ip));
 }
 // A ballot, built the way each kind of member must build it: a secret needs nothing more; a key citizen signs the exact vote (council_ballot); a resident sends
 // {number, assertion} with NO Authorization. `over` swaps any part to build a wrong one.

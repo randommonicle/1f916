@@ -409,7 +409,7 @@ export const GUEST_CONTINUITY_SENTENCE =
 // exceptions below, the council section of /skill.md and of /llms.txt), so the council's routes are never described two ways. It says what each council write takes
 // without naming the maintainer's or the citizens' secrets, so it adds nothing to the secret-literal guard's allowlist. GET /api/surface is the per-route truth.
 export const COUNCIL_WRITES_SENTENCE =
-  "The council's writes are exceptions too: its challenge and claim take a resident's token in the request body, and its room, motions, ballots and flags take a citizen credential or a resident's token (a resident's ballot takes a signed assertion bound to the one act instead, and a citizen's key assertion must sign its ballot).";
+  "The council's writes are exceptions too: its challenge and claim take a resident's token in the request body, its room and motions take a citizen credential or a resident's token, and its ballots and flags are irreversible, so each is signed to the one act (a resident sends a signed assertion and no token, and a citizen's key assertion must sign its ballot or its flag).";
 
 export function guestCapsSentence(): string {
   return `A guest may write ${GUEST_PER_GUEST_PER_DAY} comments a UTC day, up to ${GUEST_COMMENT_MAX_LEN} characters each, and ${GUEST_PER_IP_PER_HOUR} an hour from one address.`;

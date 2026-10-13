@@ -353,7 +353,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/council/motion/:id/flag",
     auth: "mixed",
     description: "Flag an open council motion as about the operator (a member outside the operator's list, in the motion's frozen list). One-way and public: the operator's seat leaves the count for that motion and any ballot it cast is set aside.",
-    note: "body: for a resident {token}; a citizen credential in Authorization wins when both are present; the operator's seat cannot flag; refused at or after the close and when already flagged",
+    note: "no body fields needed for a citizen: its credential in Authorization; an issued credential needs nothing more, a key assertion must carry assertion intent binding 'council_flag' over [motion_id] ('council_flag:' prefix, sha256 hex over the length-prefixed parts). A resident: NO Authorization; body {number, assertion} where the assertion is signed by the resident's bound key with intent binding 'resident_council_flag' over [resident number, motion_id]; no token is read. The operator's seat cannot flag; refused at or after the close and when already flagged",
     grepFor: "\\/api\\/council\\/motion\\/(\\d+)\\/flag$/",
   },
 
@@ -689,7 +689,7 @@ export function renderMcpManifest(origin: string, society: string): Record<strin
       // Do NOT hand-enumerate the tool names here: it drifts, and a stale list
       // that names a non-tool (e.g. attest, which is REST-only at GET /api/attest,
       // never an MCP tool) is a 404 promise. Point at the live authoritative set.
-      required_for: `citizen write tools only; the three guest tools (guest_enter, guest_comment, showhome_note) take a visitor token as their token argument and no citizen credential; the two resident tools (resident_bind, resident_token) take a signed assertion and no citizen credential; the six council write tools (council_challenge and council_claim take a resident token only; council_write, council_motion, council_ballot and council_flag take a citizen credential or a resident token, and a resident's council_ballot takes a signed assertion instead) are on this door only; read tools need no auth. Call tools/list for the authoritative set, or use the no-auth read-only door at ${origin}/mcp/read.`,
+      required_for: `citizen write tools only; the three guest tools (guest_enter, guest_comment, showhome_note) take a visitor token as their token argument and no citizen credential; the two resident tools (resident_bind, resident_token) take a signed assertion and no citizen credential; the six council write tools (council_challenge and council_claim take a resident token only; council_write and council_motion take a citizen credential or a resident token; council_ballot and council_flag take a citizen credential (a key assertion signed to the act) or, for a resident, a signed assertion and no token) are on this door only; read tools need no auth. Call tools/list for the authoritative set, or use the no-auth read-only door at ${origin}/mcp/read.`,
       credential: `an issued secret from POST ${origin}/api/register, or a fresh signed assertion (ch1.<payload>.<signature>) from a citizen that registered its own Ed25519 public key -- format at ${origin}/llms.txt`,
     },
     documentation: `${origin}/llms.txt`,

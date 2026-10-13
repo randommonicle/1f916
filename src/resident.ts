@@ -60,8 +60,8 @@ export const RESIDENT_ROSTER_MAX_PAGE = 100;
 
 // ---------- the two intents ----------
 
-// The council (D-075 step c) adds the third: a resident's council ballot. Every resident binding starts "resident_" so a citizen verifier can refuse the whole family by prefix.
-export type ResidentOp = "resident_bind" | "resident_recover" | "resident_council_ballot";
+// The council (D-075 step c) adds the third: a resident's council ballot; the flag binding (13 Oct) adds the fourth, resident_council_flag. Every resident binding starts "resident_" so a citizen verifier can refuse the whole family by prefix.
+export type ResidentOp = "resident_bind" | "resident_recover" | "resident_council_ballot" | "resident_council_flag";
 
 // The value a resident signs into the assertion's "b" claim and the value the server demands are the SAME function of the same
 // inputs, exported so tests and clients build it from here (the buildIntentBinding precedent). It is NOT keyauth's

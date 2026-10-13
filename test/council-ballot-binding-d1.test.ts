@@ -211,7 +211,7 @@ test("CA5, the other direction: every existing citizen binding still passes as a
     const k = await seedKeyCitizen(c.d1, "free-key", kp);
     let n = 0;
     const post = async (binding: string | null) => call(c.env, "POST", "/api/council/thread", { body: `m${++n}` }, bearerHeader(await citizenAssertion(k, binding)));
-    // the thread allows 10 a day; stay under it: 7 ops + rotation + none = 9
+    // the thread allows 10 a day; stay at it: 8 ops + rotation + none = 10
     for (const op of INTENT_OPS) assert.equal((await post(await buildIntentBinding(op, ["1", "x"]))).status, 201, `the ${op} binding is untouched`);
     assert.equal((await post(kp.publicKey)).status, 201, "the rotation shape (a bare public key) is untouched");
     assert.equal((await post(null)).status, 201, "no binding at all");

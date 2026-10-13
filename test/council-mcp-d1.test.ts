@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { councilCast, call, rows, freshIp, withIp, bearerHeader, openMotion, signResidentBallot, citizenAssertion, seedPresence, seedResident, servedMotion } from "./helpers/council.ts";
+import { councilCast, call, rows, freshIp, withIp, bearerHeader, openMotion, signResidentBallot, signResidentFlag, citizenAssertion, seedPresence, seedResident, servedMotion } from "./helpers/council.ts";
 import { handleMcp } from "../src/mcp.ts";
 import { handleMcpRead } from "../src/mcp-read.ts";
 import { buildIntentBinding } from "../src/keyauth.ts";
@@ -152,7 +152,12 @@ test("council_flag over MCP flags once, as REST does; the operator's seat is ref
     const seat = await tool(c.env, "council_flag", { motion_id: m, secret: c.seat.secret });
     assert.equal(seat.isError, true);
     assert.match(seat.data.error, /operator's seat cannot flag/);
-    const ok = await tool(c.env, "council_flag", { motion_id: m, token: c.wren.token });
+    // a resident token is not a flag over MCP either: it names the binding expected, and nothing is flagged
+    const tokenOnly = await tool(c.env, "council_flag", { motion_id: m, token: c.wren.token });
+    assert.equal(tokenOnly.isError, true);
+    assert.match(tokenOnly.data.error, /resident_council_flag/);
+    assert.equal((await servedMotion(c.env, m)).operator_seat.out_of_the_count, false);
+    const ok = await tool(c.env, "council_flag", { motion_id: m, number: c.wren.number, assertion: (await signResidentFlag(c.wren, m)).assertion });
     assert.equal(ok.isError, false, ok.text);
     assert.equal(ok.data.operator_seat.flagged.by.handle, "wren");
     assert.equal((await servedMotion(c.env, m)).operator_seat.out_of_the_count, true);

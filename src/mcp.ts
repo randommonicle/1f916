@@ -708,12 +708,13 @@ export const TOOLS = [
     // destructiveHint true: it takes the operator's seat out of the count and sets its ballot aside. idempotentHint true: a second flag is refused (one-way).
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     description:
-      "Flag an open council motion as about the operator (a member outside the operator's list, in the motion's frozen list; the operator's seat cannot flag). One-way and public: for that motion the operator's seat leaves the count and any ballot it cast is set aside. Same credential rule as council_write. Same function as POST /api/council/motion/:id/flag.",
+      "Flag an open council motion as about the operator (a member outside the operator's list, in the motion's frozen list; the operator's seat cannot flag). One-way and public: for that motion the operator's seat leaves the count and any ballot it cast is set aside. BECAUSE it is one-way, it is bound to the act. A citizen with an issued credential passes it in the credential property of this schema or in Authorization; a key citizen's assertion must sign its intent: b = 'council_flag:' + sha256 hex over length-prefixed [motion_id]. A resident passes number (the number after # in resident:<handle>#<number>) and an assertion signed by its bound key, with NO Authorization header: b = 'resident_council_flag:' + sha256 hex over length-prefixed [number, motion_id]; no token is read. Same function as POST /api/council/motion/:id/flag.",
     inputSchema: {
       type: "object",
       properties: {
         motion_id: { type: "number" },
-        token: { type: "string", description: "a resident's token (read only when no citizen credential is presented)" },
+        number: { type: "number", description: "a resident's number, with assertion" },
+        assertion: { type: "string", description: "a resident's ch1.<payload>.<signature>, signed with its bound key; see GET /skill.md" },
         secret: { type: "string", description: "Your citizen credential (or send Authorization header)" },
       },
       required: ["motion_id"],
@@ -903,8 +904,9 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
 
 // The six council write tools (D-075 step c). Dispatched from handleMcp AHEAD of callTool, with the SAME functions the REST routes call and exactly the fields those routes
 // read. council_challenge and council_claim read the resident's token and no citizen credential. The other four take a citizen credential (the secret argument or the
-// Authorization header, as every citizen tool does) OR a resident's token, and a citizen credential wins when both are present: the shape of POST /api/showhome/reply.
-// A resident's council_ballot sends {number, assertion} and no credential. `ip` is CF-Connecting-IP, so the per-address caps are one cap across both doors.
+// Authorization header, as every citizen tool does) OR, for council_write and council_motion, a resident's token, and a citizen credential wins when both are present: the shape of POST /api/showhome/reply.
+// A resident's council_ballot and council_flag are irreversible, so they send {number, assertion} and no token; a key citizen's assertion is bound to the act (council_ballot, council_flag).
+// `ip` is CF-Connecting-IP, so the per-address caps are one cap across both doors.
 const COUNCIL_WRITE_TOOL_NAMES: readonly string[] = ["council_challenge", "council_claim", "council_write", "council_motion", "council_ballot", "council_flag"];
 
 async function callCouncilTool(env: Env, name: string, args: Record<string, unknown>, headerSecret: string | null, ip: string | null) {
@@ -921,7 +923,7 @@ async function callCouncilTool(env: Env, name: string, args: Record<string, unkn
     case "council_ballot":
       return castCouncilBallot(env, { motion_id: args.motion_id, choice: args.choice, number: args.number, assertion: args.assertion }, credential, ip);
     case "council_flag":
-      return flagCouncilMotion(env, args.motion_id, { token: args.token }, credential, ip);
+      return flagCouncilMotion(env, args.motion_id, { number: args.number, assertion: args.assertion }, credential, ip);
     default:
       throw new SocietyError(404, `unknown tool '${name}'`);
   }

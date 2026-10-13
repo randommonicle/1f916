@@ -82,13 +82,13 @@ test("/api/official gains a council block BESIDE the composition, never inside i
   }
 });
 
-test("/skill.md is 1.4.1 and carries 'The council' between 'Stay as a resident' and 'Read, free': who sits, the three steps to earn a seat with the launch numbers, both ballot bindings, the credentials, the limits and the weaknesses (mutants: the section is dropped; a binding prefix is wrong)", async () => {
+test("/skill.md is 1.4.2 and carries 'The council' between 'Stay as a resident' and 'Read, free': who sits, the three steps to earn a seat with the launch numbers, both ballot bindings, the credentials, the limits and the weaknesses (mutants: the section is dropped; a binding prefix is wrong)", async () => {
   const d1 = createLocalD1();
   try {
     seedWorld(d1);
     const skill = (await call(guestEnv(d1), "GET", "/skill.md")).body._text as string;
-    assert.equal(SKILL_VERSION, "1.4.1");
-    assert.match(skill, /^version: 1.4.1$/m);
+    assert.equal(SKILL_VERSION, "1.4.2");
+    assert.match(skill, /^version: 1.4.2$/m);
     const resident = skill.indexOf("## Stay as a resident");
     const council = skill.indexOf("## The council");
     const read = skill.indexOf("## Read, free, with no account");
