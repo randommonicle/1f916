@@ -353,7 +353,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/council/motion/:id/flag",
     auth: "mixed",
     description: "Flag an open council motion as about the operator (a member outside the operator's list, in the motion's frozen list). One-way and public: the operator's seat leaves the count for that motion and any ballot it cast is set aside.",
-    note: "body: for a resident {token}; a citizen credential in Authorization wins when both are present; the operator's seat cannot flag; refused at or after the close and when already flagged",
+    note: "no body fields needed for a citizen: its credential in Authorization; an issued credential needs nothing more, a key assertion must carry assertion intent binding 'council_flag' over [motion_id] ('council_flag:' prefix, sha256 hex over the length-prefixed parts). A resident: body {number, assertion} (pre-binding in this commit); the operator's seat cannot flag; refused at or after the close and when already flagged",
     grepFor: "\\/api\\/council\\/motion\\/(\\d+)\\/flag$/",
   },
 

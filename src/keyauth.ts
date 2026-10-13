@@ -318,7 +318,9 @@ export function newNonce(): string {
 // council_ballot (D-075 step c, docs/CHECKPOINT-COUNCIL.md): a key citizen's ballot on a COUNCIL motion, parts [motion id, choice]. It is its own op, so a council ballot
 // assertion is never a citizen ballot and a citizen ballot is never a council ballot. A resident's council ballot is NOT here: it is the resident verifier's own
 // resident_council_ballot (src/resident.ts), and every resident binding starts "resident_" so authenticateByAssertion can refuse the family.
-export const INTENT_OPS = ["ballot", "proposal", "moderate", "wallet", "payout", "ledger", "council_ballot"] as const;
+// council_flag (13 Oct, docs/CHECKPOINT-COUNCIL-FLAG.md): a key citizen's flag on a council motion, parts [motion id]. One-way and public, so it is bound too; its own op, so a
+// flag assertion is never a ballot and a ballot assertion is never a flag. A resident's flag is the resident verifier's own resident_council_flag.
+export const INTENT_OPS = ["ballot", "proposal", "moderate", "wallet", "payout", "ledger", "council_ballot", "council_flag"] as const;
 export type IntentOp = (typeof INTENT_OPS)[number];
 
 // Length-prefixed, so the encoding is injective: no two distinct part lists

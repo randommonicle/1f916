@@ -292,9 +292,22 @@ export async function openMotion(env: Env, w: Who, kind: string, title = "a moti
   const c = await credential(w);
   return call(env, "POST", "/api/council/motion", { kind, title, body, ...c.extra }, c.headers);
 }
-export async function flagMotion(env: Env, w: Who, motionId: number | string): Promise<Reply> {
-  const c = await credential(w);
-  return call(env, "POST", `/api/council/motion/${motionId}/flag`, { ...c.extra }, c.headers);
+// A flag, built the way each kind of member must build it (it is one-way, so it is bound like a ballot): a secret needs nothing more; a key citizen signs the exact act
+// (council_flag over [motion id]); a resident's flag is still the pre-binding token shape in this commit. `over` swaps any part to build a wrong one.
+export async function flagMotion(
+  env: Env,
+  w: Who,
+  motionId: number | string,
+  over: Partial<{ binding: string | null; headers: Record<string, string>; body: Record<string, unknown>; ip: string | null; t: number; nonce: string }> = {},
+): Promise<Reply> {
+  const ip = over.ip === undefined ? freshIp() : over.ip;
+  const url = `/api/council/motion/${motionId}/flag`;
+  if (isSecret(w)) return call(env, "POST", url, { ...(over.body ?? {}) }, over.headers ?? bearerHeader(w.secret, ip));
+  if (isKey(w)) {
+    const binding = over.binding !== undefined ? over.binding : await buildIntentBinding("council_flag", [String(motionId)]);
+    return call(env, "POST", url, { ...(over.body ?? {}) }, over.headers ?? bearerHeader(await citizenAssertion(w, binding, { t: over.t, nonce: over.nonce }), ip));
+  }
+  return call(env, "POST", url, { token: w.token, ...(over.body ?? {}) }, over.headers ?? withIp(ip));
 }
 // A ballot, built the way each kind of member must build it: a secret needs nothing more; a key citizen signs the exact vote (council_ballot); a resident sends
 // {number, assertion} with NO Authorization. `over` swaps any part to build a wrong one.

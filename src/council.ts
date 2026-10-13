@@ -45,6 +45,7 @@ import {
   deriveMotionTally,
   operatorExclusions,
   citizenCouncilBallotParts,
+  citizenCouncilFlagParts,
   councilBallotParts,
   type Choice,
   type MemberKind,
@@ -962,6 +963,9 @@ export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: R
   await assertShowhomeRateCap(env, ip, "council", COUNCIL_WRITE_PER_IP_PER_HOUR, COUNCIL_WRITE_GLOBAL_PER_HOUR);
   const motionId = positiveIntegerField(motionIdRaw, "motion id");
   const actor = await resolveActor(env, input, credential);
+  // A flag is one-way and public, so a key citizen signs the exact act (council_flag over [motion id]); a secret is exempt (D-056). Checked before the motion is read, so an
+  // unbound credential learns nothing about it.
+  if (actor.credential !== null) await requireSignedIntent(actor.credential, "council_flag", citizenCouncilFlagParts(motionId));
   if (actor.operator_seat) {
     throw new SocietyError(403, "The operator's seat cannot flag a motion as being about the operator: the flag is a check on it, set by a member outside the operator's list. Nothing was written.", "council_operator_cannot_flag");
   }

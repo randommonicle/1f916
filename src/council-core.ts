@@ -168,6 +168,10 @@ export function deriveMotionTally(
 export const councilBallotParts = (visitorId: number, motionId: number, choice: string): string[] => [String(visitorId), String(motionId), choice];
 // A citizen's council ballot is bound through keyauth's INTENT_OPS: op "council_ballot", parts [motion_id, choice].
 export const citizenCouncilBallotParts = (motionId: number, choice: string): string[] => [String(motionId), choice];
+// A flag has no choice, so its parts are the motion alone (the act is "flag this motion"). A citizen's: keyauth op "council_flag", parts [motion_id]. A resident's:
+// resident_council_flag, parts [visitor_id, motion_id].
+export const citizenCouncilFlagParts = (motionId: number): string[] => [String(motionId)];
+export const councilFlagParts = (visitorId: number, motionId: number): string[] => [String(visitorId), String(motionId)];
 
 // ---------- the served sentences (one place; GET /api/council, /api/official, /skill.md and the tool descriptions render from here) ----------
 
