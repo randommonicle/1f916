@@ -5,7 +5,7 @@
 //
 // Run just this file: node --experimental-strip-types --test "test/seat-counts-d1.test.ts"
 
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -14,6 +14,13 @@ import worker from "../src/index.ts";
 import { createLocalD1, insertCitizen, type LocalD1 } from "./helpers/local-d1.ts";
 import { officialFacts, actedWritersSince, outsideWritersSince, COMPOSITION_PROVENANCE, KEY_LOST_SEATS, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES, type Env } from "../src/society.ts";
 import { citizenWritersSince } from "../src/council.ts";
+
+// treasury() and nothing else here may reach the network: any fetch is an answer that is never ok, so a test cannot leave the machine.
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async () => new Response("network stubbed in test", { status: 500 })) as typeof fetch;
+after(() => {
+  globalThis.fetch = realFetch;
+});
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ORIGIN = "https://example.test";
@@ -457,6 +464,75 @@ test("T6: llms.txt names the three fields and the deprecated name; the /api/citi
     assert.doesNotMatch(skill, /\bindependent\b/, "nor the old field name (the word independently in two comments is not it)");
     const served = await (await get("/skill.md", env)).text();
     for (const name of ["act_capable", "acted_30d", "operator_paid"]) assert.equal(served.includes(name), false, `the served /skill.md must not name ${name}`);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- C4 / T5: GET /api/treasury is GET /treasury ----------
+
+import { LEDGER_PAGE } from "../src/society.ts";
+import { ROUTES } from "../src/discovery.ts";
+
+test("T5: GET /api/treasury answers byte-for-byte what GET /treasury answers, on the first page, on a cursor page, and on a refused cursor", async () => {
+  const d1 = createLocalD1();
+  try {
+    const n = LEDGER_PAGE + 7;
+    d1.raw.exec("BEGIN");
+    const stmt = d1.raw.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at, prev_hash, hash) VALUES (?, ?, ?, ?, NULL, NULL)");
+    for (let i = 1; i <= n; i++) stmt.run(new Date(Date.UTC(2025, 0, 1) + Math.floor((i - 1) / 3) * DAY_MS).toISOString().slice(0, 10), `entry ${i}`, i, 1_000 + i);
+    d1.raw.exec("COMMIT");
+    const env = makeEnv(d1.DB);
+
+    const a1 = await get("/treasury", env);
+    const b1 = await get("/api/treasury", env);
+    assert.equal(b1.status, 200);
+    const text1 = await a1.text();
+    assert.equal(await b1.text(), text1, "the first page is identical");
+    const page1 = JSON.parse(text1) as { has_more: boolean; returned: number; total_entries: number; next_before_entry_date: string; next_before_id: number; entries: unknown[] };
+    assert.equal(page1.total_entries, n);
+    assert.equal(page1.returned, LEDGER_PAGE);
+    assert.equal(page1.has_more, true, "the fixture really pages, so the cursor case below is not an empty comparison");
+
+    const cursor = `?before_entry_date=${page1.next_before_entry_date}&before_id=${page1.next_before_id}`;
+    const a2 = await (await get(`/treasury${cursor}`, env)).text();
+    const b2res = await get(`/api/treasury${cursor}`, env);
+    assert.equal(b2res.status, 200);
+    const b2 = await b2res.text();
+    assert.equal(b2, a2, "the cursor page is identical");
+    assert.equal((JSON.parse(b2) as { returned: number }).returned, 7, "and it is the second page, not the first again");
+
+    // a half cursor is refused identically (the same cursor parsing)
+    const a3 = await get("/treasury?before_id=3", env);
+    const b3 = await get("/api/treasury?before_id=3", env);
+    assert.equal(b3.status, a3.status);
+    assert.ok(a3.status >= 400 && a3.status < 500, `a half cursor is a client error, got ${a3.status}`);
+    assert.equal(await b3.text(), await a3.text());
+
+    // GET only: a POST to the alias is not the treasury
+    const post = await fetchWorker(new Request(`${ORIGIN}/api/treasury`, { method: "POST", body: "{}" }), env);
+    assert.notEqual(post.status, 200);
+  } finally {
+    d1.close();
+  }
+});
+
+test("T5: the alias has its own ROUTES entry (same paging parameters, its own grepFor), it is dispatched in index.ts, and llms.txt, /api/surface and /openapi.json list it", async () => {
+  const entry = ROUTES.find((r) => r.method === "GET" && r.path === "/api/treasury");
+  assert.ok(entry, "ROUTES entry");
+  assert.equal(entry!.auth, "none");
+  assert.equal(entry!.grepFor, 'path === "/api/treasury" && method === "GET"');
+  assert.deepEqual(entry!.queryParams, ROUTES.find((r) => r.path === "/treasury")!.queryParams, "the alias takes the same paging parameters");
+  assert.ok(readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8").includes(entry!.grepFor!), "the dispatch line exists in index.ts");
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1.DB);
+    const llms = await (await get("/llms.txt", env)).text();
+    assert.match(llms, /GET\s+https:\/\/example\.test\/api\/treasury\?before_entry_date&before_id\s+The same answer as GET \/treasury/);
+    const surface = await (await get("/api/surface", env)).text();
+    assert.ok(surface.includes('"/api/treasury"'), "/api/surface lists the alias");
+    const openapi = (await (await get("/openapi.json", env)).json()) as { paths: Record<string, unknown> };
+    assert.ok("/api/treasury" in openapi.paths, "/openapi.json lists the alias");
   } finally {
     d1.close();
   }

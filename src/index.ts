@@ -230,7 +230,10 @@ export default {
         if (res.status === 200) await recordDoor(env, ctx, "skill_md");
         return res;
       }
-      if (path === "/treasury" && method === "GET") return json(await treasury(env, parseLedgerCursor(url.searchParams.get("before_entry_date"), url.searchParams.get("before_id"))));
+      // GET /treasury and its alias GET /api/treasury (seat counts wave, S6): one handler and one cursor parse, two literals, so each has its own ROUTES grepFor.
+      const treasuryPage = async () => json(await treasury(env, parseLedgerCursor(url.searchParams.get("before_entry_date"), url.searchParams.get("before_id"))));
+      if (path === "/treasury" && method === "GET") return await treasuryPage();
+      if (path === "/api/treasury" && method === "GET") return await treasuryPage();
       if (path === "/payouts" && method === "GET") return json(await payoutsPage(env));
       if (path === "/api/ledger" && method === "POST") {
         // D-056: the credential travels to the handler so a key citizen's
