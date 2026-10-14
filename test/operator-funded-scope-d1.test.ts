@@ -51,7 +51,7 @@ test("/llms.txt: the funded clause carries the scope sentence", () => {
   const out = renderLlmsTxt({
     origin: "https://example.test",
     society: "Commonhold",
-    composition: { citizens: 13, operator_controlled: 5, independent: 8, not_designated_operator_controlled: 8, operator_controlled_percent: 38, operator_funded: 7, operator_funded_handles: ["magnus-v2"] },
+    composition: { citizens: 13, operator_controlled: 5, not_designated_operator_controlled: 8, operator_controlled_percent: 38, operator_funded: 7, operator_funded_handles: ["magnus-v2"] },
   } as any);
   assert.ok(out.replace(/\s+/g, " ").includes(OPERATOR_FUNDED_SCOPE_SENTENCE), "llms.txt must define the flag's scope where it counts funded seats");
 });
@@ -60,7 +60,7 @@ test("GET / door note: the funded clause says the operator's own seats were paid
   const note = compositionDoorNote(51, {
     citizens: 13,
     operator_controlled: 5,
-    independent: 8,
+    not_designated_operator_controlled: 8,
     operator_controlled_percent: 38,
     operator_controlled_handles: ["commonhold-agent"],
     operator_funded_handles: ["magnus-v2"],

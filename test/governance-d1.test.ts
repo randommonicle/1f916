@@ -2506,7 +2506,7 @@ test("officialFacts.composition: the operator agents plus one independent report
     const c = (await officialFacts(testEnv(d1))).composition;
     assert.equal(c.citizens, total);
     assert.equal(c.operator_controlled, n);
-    assert.equal(c.independent, 1);
+    assert.equal(c.independent.count, 1);
     assert.equal(c.operator_controlled_percent, pct);
     assert.deepEqual([...c.operator_controlled_handles].sort(), [...OPERATOR_CONTROLLED_HANDLES].sort());
     assert.ok(c.note.includes(`${n} of the ${total}`), `the note must state the magnitude plainly, got: ${c.note}`);
@@ -2528,7 +2528,7 @@ test("officialFacts.composition: two independents joining shift the share DOWN a
     const c = (await officialFacts(testEnv(d1))).composition;
     assert.equal(c.citizens, total);
     assert.equal(c.operator_controlled, n);
-    assert.equal(c.independent, 2);
+    assert.equal(c.independent.count, 2);
     assert.equal(c.operator_controlled_percent, Math.round((n / total) * 100));
   } finally {
     d1.close();
@@ -2543,7 +2543,7 @@ test("officialFacts.composition: two independents joining shift the share DOWN a
 const OLD_COMPLEMENT_LABEL =
   /\b\d+ (?:is|are) independent\b|\bOf (?:those|the) (?:\d+ )?independent\b|\bindependent of him\b|tally of citizens independent|counted as independent|"independent" is never read/;
 
-test("officialFacts.composition: the complement is served as not on the operator's list, `independent` is its alias, and each figure names its source", async () => {
+test("officialFacts.composition: the complement is served as not on the operator's list, `independent` is the old name as a marked object, and each figure names its source", async () => {
   const d1 = createLocalD1();
   try {
     for (const handle of OPERATOR_CONTROLLED_HANDLES) insertCitizen(d1, { handle });
@@ -2554,7 +2554,7 @@ test("officialFacts.composition: the complement is served as not on the operator
 
     const c = (await officialFacts(testEnv(d1))).composition;
     assert.equal(c.not_designated_operator_controlled, total - n, "the complement is citizens minus the operator's list");
-    assert.equal(c.independent, c.not_designated_operator_controlled, "`independent` must stay equal to the new field so existing readers do not break");
+    assert.equal(c.independent.count, c.not_designated_operator_controlled, "`independent.count` must stay equal to the real field");
     assert.deepEqual(c.provenance, COMPOSITION_PROVENANCE);
     const sources = new Set(["record", "commonhold_statement", "holder_report", "arithmetic"]);
     for (const f of ["citizens", "operator_controlled", "not_designated_operator_controlled", "operator_funded", "key_lost"] as const) {
@@ -2718,7 +2718,7 @@ test("officialFacts.composition + citizenDirectory: a KEY_LOST_SEATS seat stays 
     assert.equal(c.key_lost, KEY_LOST_SEATS.length);
     // Still counted: a dead seat is a citizen row, so no denominator moves.
     assert.equal(c.citizens, total, "a key-lost seat must stay in the citizen count");
-    assert.equal(c.independent, total - OPERATOR_CONTROLLED_HANDLES.length, "a key-lost seat must stay in `independent`");
+    assert.equal(c.independent.count, total - OPERATOR_CONTROLLED_HANDLES.length, "a key-lost seat must stay in `independent`");
     for (const { handle, reported_utc } of KEY_LOST_SEATS) {
       assert.ok(c.note.includes(handle), `the note must name ${handle} as key-lost`);
       assert.ok(c.note.includes(reported_utc), `the note must carry the report date ${reported_utc}`);

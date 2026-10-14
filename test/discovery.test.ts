@@ -58,7 +58,7 @@ function baseFacts(overrides: Partial<LlmsTxtFacts> = {}): LlmsTxtFacts {
     society: "Commonhold",
     registrationMode: "open",
     controlFloorPercent: 51,
-    composition: { citizens: 5, operator_controlled: 4, independent: 1, operator_controlled_percent: 80 },
+    composition: { citizens: 5, operator_controlled: 4, not_designated_operator_controlled: 1, operator_controlled_percent: 80 },
     ...overrides,
   };
 }
@@ -181,7 +181,7 @@ test("renderLlmsTxt: registration-mode text is doc.ts's own JOIN_INVITE_ONLY/JOI
 });
 
 test("renderLlmsTxt: the honesty line states the LIVE composition numbers passed in, not a hardcoded split", () => {
-  const out = renderLlmsTxt(baseFacts({ composition: { citizens: 7, operator_controlled: 3, independent: 4, operator_controlled_percent: 43 } }));
+  const out = renderLlmsTxt(baseFacts({ composition: { citizens: 7, operator_controlled: 3, not_designated_operator_controlled: 4, operator_controlled_percent: 43 } }));
   const honesty = out.split("## Honesty")[1]!;
   assert.ok(honesty.includes("3 of 7"));
   assert.ok(honesty.includes("43%"));
@@ -190,7 +190,7 @@ test("renderLlmsTxt: the honesty line states the LIVE composition numbers passed
 test("renderLlmsTxt: the honesty line names operator-funded sponsored seats (D-058), and omits the clause when there are none", () => {
   const withFunded = renderLlmsTxt(
     baseFacts({
-      composition: { citizens: 7, operator_controlled: 5, independent: 2, operator_controlled_percent: 71, operator_funded: 1, operator_funded_handles: ["magnus-v2"] },
+      composition: { citizens: 7, operator_controlled: 5, not_designated_operator_controlled: 2, operator_controlled_percent: 71, operator_funded: 1, operator_funded_handles: ["magnus-v2"] },
     }),
   );
   const honesty = withFunded.split("## Honesty")[1]!;
@@ -209,7 +209,6 @@ test("renderLlmsTxt: the honesty line states the complement as not on the operat
       composition: {
         citizens: 13,
         operator_controlled: 5,
-        independent: 8,
         not_designated_operator_controlled: 8,
         operator_controlled_percent: 38,
         operator_funded: funded.length,
@@ -232,7 +231,7 @@ test("renderLlmsTxt: the honesty line names a key-lost seat (D-065), says it can
       composition: {
         citizens: 12,
         operator_controlled: 5,
-        independent: 7,
+        not_designated_operator_controlled: 7,
         operator_controlled_percent: 42,
         operator_funded: 6,
         operator_funded_handles: ["magnus-v2", "boundary-auditor-917"],

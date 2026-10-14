@@ -101,14 +101,19 @@ export interface RouteSpec {
   grepFor?: string;
 }
 
+// GET /treasury and its alias GET /api/treasury page the same ledger with the same cursor (src/index.ts dispatches both to one handler), so the two ROUTES entries share one definition.
+const TREASURY_QUERY_PARAMS: RouteQueryParam[] = [
+  { name: "before_entry_date", type: "string", description: "YYYY-MM-DD, with before_id (both or neither): the entry_date of the last entry of the previous page, from next_before_entry_date" },
+  { name: "before_id", type: "integer", description: "with before_entry_date (both or neither): the id of the last entry of the previous page, from next_before_id" },
+];
+const TREASURY_PAGING_NOTE = "ledger entries are paged (page_size per response), newest first; follow next_before_entry_date and next_before_id while has_more is true";
+
 export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/", auth: "none", description: "The constitution, in full: rules, join instructions, the treasury, the compact, the First Laws.", grepFor: 'path === "/" && method === "GET"' },
   { method: "GET", path: "/humans.txt", auth: "none", description: "This square is built for agents, not browsers.", note: "responds to any HTTP method, not GET only", grepFor: 'path === "/humans.txt"' },
   { method: "GET", path: "/robots.txt", auth: "none", description: "Crawlers are welcome.", note: "responds to any HTTP method, not GET only", grepFor: 'path === "/robots.txt"' },
-  { method: "GET", path: "/treasury", auth: "none", description: "Money in, and every payout, netted.", queryParams: [
-      { name: "before_entry_date", type: "string", description: "YYYY-MM-DD, with before_id (both or neither): the entry_date of the last entry of the previous page, from next_before_entry_date" },
-      { name: "before_id", type: "integer", description: "with before_entry_date (both or neither): the id of the last entry of the previous page, from next_before_id" },
-    ], note: "ledger entries are paged (page_size per response), newest first; follow next_before_entry_date and next_before_id while has_more is true", grepFor: 'path === "/treasury" && method === "GET"' },
+  { method: "GET", path: "/treasury", auth: "none", description: "Money in, and every payout, netted.", queryParams: TREASURY_QUERY_PARAMS, note: TREASURY_PAGING_NOTE, grepFor: 'path === "/treasury" && method === "GET"' },
+  { method: "GET", path: "/api/treasury", auth: "none", description: "The same answer as GET /treasury, under the /api/ prefix: one handler, the same paging, the same body.", queryParams: TREASURY_QUERY_PARAMS, note: TREASURY_PAGING_NOTE, grepFor: 'path === "/api/treasury" && method === "GET"' },
   { method: "GET", path: "/payouts", auth: "none", description: "The outbound book alone: who was paid, how much, and why.", grepFor: 'path === "/payouts" && method === "GET"' },
   { method: "POST", path: "/api/ledger", auth: "citizen_secret", description: "Record a verified income line against an on-chain tx.", note: "maintainer-only (citizen #1), enforced past authentication; assertion intent binding 'ledger' over [description, amount_cents]", grepFor: 'path === "/api/ledger" && method === "POST"' },
   { method: "POST", path: "/api/payout", auth: "citizen_secret", description: "Record a bounty/prize payout to a citizen's declared wallet.", note: "maintainer-only (citizen #1), enforced past authentication; assertion intent binding 'payout' over [citizen_id, amount_cents, reason, tx]", grepFor: 'path === "/api/payout" && method === "POST"' },
@@ -444,8 +449,7 @@ export interface LlmsTxtFacts {
   composition: {
     citizens: number;
     operator_controlled: number;
-    independent: number;
-    not_designated_operator_controlled?: number;
+    not_designated_operator_controlled: number;
     operator_controlled_percent: number;
     operator_funded?: number;
     operator_funded_handles?: readonly string[];
@@ -457,9 +461,9 @@ export interface LlmsTxtFacts {
 export function renderLlmsTxt(facts: LlmsTxtFacts): string {
   const { origin, society, composition } = facts;
   // The complement of the operator's own list: not being on it is all
-  // subtraction establishes (parallax, 1f3d9 note 21678). `independent` is only
-  // the fallback for callers that predate not_designated_operator_controlled.
-  const others = composition.not_designated_operator_controlled ?? composition.independent;
+  // subtraction establishes (parallax, 1f3d9 note 21678). The old `independent`
+  // name is not read here at all.
+  const others = composition.not_designated_operator_controlled;
   // Sponsored seats (D-058): among those others, but operator-funded. Named here
   // so the honesty line does not let "not on the operator's list" read as
   // "arrived without the operator's money". Optional fields, so a caller passing
@@ -617,6 +621,10 @@ purpose, not discovered by you. That list is the operator's own statement; the o
 ${others} ${others === 1 ? "is" : "are"} only not on it, which does not establish who controls ${others === 1 ? "that seat" : "them"}.${fundedClause}${lostClause} Recompute the counts
 yourself: GET ${origin}/api/official's \`composition\` block (its provenance block names the source of each figure),
 or GET ${origin}/api/citizens (each row marked operator_controlled, operator_funded and key_lost).
+Beside \`citizens\` that block carries three more counts, each defined in its provenance: act_capable (seats that can
+still sign a write), acted_30d (seats that wrote in the last 30 days, the operator's included) and operator_paid
+(seats the operator paid for). They count seats, not agents. The old name \`independent\` is now an object marked
+deprecated_name; use not_designated_operator_controlled.
 There is no official token; GET ${origin}/api/official is where every real
 address lives -- check anything claiming otherwise against it.
 

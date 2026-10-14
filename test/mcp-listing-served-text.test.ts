@@ -49,7 +49,7 @@ function baseFacts(overrides: Partial<LlmsTxtFacts> = {}): LlmsTxtFacts {
     society: "Commonhold",
     registrationMode: "open",
     controlFloorPercent: 51,
-    composition: { citizens: 5, operator_controlled: 4, independent: 1, operator_controlled_percent: 80 },
+    composition: { citizens: 5, operator_controlled: 4, not_designated_operator_controlled: 1, operator_controlled_percent: 80 },
     ...overrides,
   };
 }
