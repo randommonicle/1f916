@@ -371,7 +371,8 @@ test("A7: scripts/deploy-composition-split.ps1 prints the RETIRED message and ex
 });
 
 test("A7: the retirement statement is the first executable line after param(...) in deploy-composition-split.ps1", () => {
-  const lines = readFileSync(fileURLToPath(new URL("../scripts/deploy-composition-split.ps1", import.meta.url)), "utf8").split("\n");
+  // CRLF normalised first: under core.autocrlf=true a checkout writes this file with CRLF, and "exit 1\r" is not "exit 1".
+  const lines = readFileSync(fileURLToPath(new URL("../scripts/deploy-composition-split.ps1", import.meta.url)), "utf8").replace(/\r\n/g, "\n").split("\n");
   const p = lines.findIndex((l) => l.startsWith("param("));
   const code = lines.slice(p + 1).filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
   assert.match(code[0], /^Write-Host "\[STOP\] RETIRED by the seat counts wave/);
