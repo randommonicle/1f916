@@ -57,7 +57,8 @@ test("2: after many guest comments and answers, /api/citizens, /api/official com
     // acted_30d (14 Oct, the seat counts wave) counts a citizen's visible answer in a guest thread as a write, so it (and the one note sentence that states it) is the ONLY part of the composition that moves when the maintainer answers;
     // every other field is byte-identical, and guests (not citizens) move nothing.
     const compParts = async () => {
-      const { acted_30d, note, ...rest } = (await officialFacts(env)).composition;
+      // ever_written (penny-three wave) is the same write definition with no window, so the maintainer's answer moves it too; not_designated_ever_written leaves the operator's list out and does not move.
+      const { acted_30d, ever_written: _ever, note, ...rest } = (await officialFacts(env)).composition;
       return { rest: JSON.stringify(rest), acted: acted_30d, noteSays: note.includes(acted_30d === 0 ? "none wrote in the last 30 days" : "1 wrote in the last 30 days") };
     };
     const compBefore = await compParts();

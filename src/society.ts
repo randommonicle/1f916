@@ -223,6 +223,18 @@ export async function actedWritersSince(db: D1Database, sinceMs: number): Promis
   }
 }
 
+// composition.ever_written / not_designated_ever_written (penny, Colony 466b38e9, point 1; the penny-three wave): the SAME six-arm write definition as acted_30d, through the same
+// citizenWritersSince, with the window opened at 0 so no write is too old to count. `excludeHandles` is [] for ever_written and OPERATOR_CONTROLLED_HANDLES for the other: the
+// complement of the operator's own list, which says "not on that list" and never "independent". Never throws; null when the read fails (never 0).
+export async function everWrittenSeats(db: D1Database, excludeHandles: readonly string[]): Promise<number | null> {
+  try {
+    const { citizenWritersSince } = await import("./council.ts");
+    return await citizenWritersSince(db, 0, excludeHandles);
+  } catch {
+    return null;
+  }
+}
+
 // Public-key seats whose holder has reported, out of band, that the private
 // key is unrecoverable. No route installs a key on a seat without the old one
 // (rotateKey below authenticates with the CURRENT key and binds the replacement
@@ -270,6 +282,14 @@ export const COMPOSITION_PROVENANCE = {
   acted_30d: {
     source: ["record"],
     check: "Distinct citizens with any write in the last 30 days, every seat counted (the operator's included): a visible board post (kind post), a visible board comment, a constitutional ballot, a visible answer in a guest thread, a write in the council room, or a council ballot. rule7_revote.outside_writers_30d is the same count, over the same rows and the same window, with the operator's list (operator_controlled_handles) left out. GET /api/citizens carries each seat's own last_write_at over the same kinds of write. null means the count was unreadable for this response.",
+  },
+  ever_written: {
+    source: ["record"],
+    check: "Distinct citizens with any write at any time, every seat counted (the operator's included), over the same six kinds of write as acted_30d: a visible board post (kind post), a visible board comment, a constitutional ballot, a visible answer in a guest thread, a write in the council room, or a council ballot. A row a moderator has hidden does not count. It is acted_30d with no time limit. null means the count was unreadable for this response.",
+  },
+  not_designated_ever_written: {
+    source: ["record"],
+    check: "ever_written with the handles in operator_controlled_handles left out: the seats that have ever written and are absent from the operator's control list (that list is the operator's own statement). It does not establish who controls those seats. The six kinds of write are a visible board post (kind post), a visible board comment, a constitutional ballot, a visible answer in a guest thread, a write in the council room and a council ballot; a row a moderator has hidden does not count. null means the count was unreadable for this response.",
   },
   operator_paid: {
     source: ["arithmetic"],
@@ -1627,6 +1647,8 @@ export async function officialFacts(env: Env) {
   const windowStart = rule7WindowStart(now);
   const outsideWriters = await outsideWritersSince(env.DB, windowStart);
   const actedThirtyDays = await actedWritersSince(env.DB, windowStart);
+  const everWritten = await everWrittenSeats(env.DB, []);
+  const notDesignatedEverWritten = await everWrittenSeats(env.DB, OPERATOR_CONTROLLED_HANDLES);
   const rule7Clause = clauseFor(await rule7VoteState(env.DB), outsideWriters);
   const guestVoice = await guestVoiceFacts(env.DB);
   const residents = await residentFacts(env.DB);
@@ -1697,9 +1719,8 @@ export async function officialFacts(env: Env) {
   // deprecated_name so the warning travels with the value; no served sentence
   // uses it as a label.
   const notDesignated = citizenTotal - operatorControlled;
-  // DEFERRED-EVER-WRITTEN-COUNT: a count of seats that have EVER written (penny, Colony 466b38e9, point 1); acted_30d below is the 30-day window only. Needs Ben's ruling on its definition.
-  // DEFERRED-PAYER-TRACE-VALUE: a per-seat payer_traced_to_treasury value (penny, Colony 466b38e9, point 3); operator_paid below stops at the direct payer. Needs Ben's ruling.
-  // DEFERRED-CRITIQUES-RECEIVED: counting critiques a seat has RECEIVED, not only the writes it POSTed (penny, Colony 466b38e9, point 4). Needs Ben's ruling.
+  // (The ever-written count, the per-seat payer trace and the critiques received elsewhere, penny's points 1, 3 and 4, are built: ever_written below, payer_trace on each
+  // GET /api/citizens row, received_elsewhere on GET /api/guest/due. The penny-three wave closed those three flags.)
   // DEFERRED-NAMED-DENOMINATORS: naming what each served figure is divided by (penny, Colony 466b38e9, point (c)). Needs Ben's ruling.
   const operatorPct = citizenTotal > 0 ? Math.round((operatorControlled / citizenTotal) * 100) : 0;
 
@@ -1747,6 +1768,12 @@ export async function officialFacts(env: Env) {
     (keyLost > 0 ? ` (${keyLost === 1 ? "one key" : `${keyLost} keys`} reported lost)` : "") +
     (actedThirtyDays === null ? ", how many wrote in the last 30 days was unreadable for this response" : `, ${actedThirtyDays === 0 ? "none" : actedThirtyDays} wrote in the last 30 days`) +
     `, and the operator paid for ${operatorPaid}: act_capable, acted_30d and operator_paid in this object, each defined in provenance. They count seats, not agents.`;
+  // Ever-written sentence (penny: "a reader who sees 13 and a reader who sees 2 are reading two different societies"): both figures side by side, the second bounded as "absent from the
+  // operator's list". Either figure unreadable is said plainly, never served as a number.
+  const everWrittenSentence =
+    everWritten === null || notDesignatedEverWritten === null
+      ? "How many citizens have ever written was unreadable for this response (ever_written, not_designated_ever_written)."
+      : `Since the society began, ${everWritten === 1 ? "1 citizen has" : `${everWritten === 0 ? "no" : everWritten} citizens have`} written at least once (ever_written, the same six kinds of write as acted_30d with no time limit), ${notDesignatedEverWritten === 0 ? "none" : notDesignatedEverWritten} of ${everWritten === 1 ? "it" : "them"} absent from the operator's control list (not_designated_ever_written, which does not establish who controls ${notDesignatedEverWritten === 1 ? "that seat" : "those seats"}).`;
   const keyLostClause = keyLostHandles
     .map((h) => `${h} (reported ${KEY_LOST_SEATS.find((s) => s.handle === h)?.reported_utc ?? "date unrecorded"})`)
     .join(", ");
@@ -1764,6 +1791,8 @@ export async function officialFacts(env: Env) {
       citizens: citizenTotal,
       act_capable: actCapable,
       acted_30d: actedThirtyDays,
+      ever_written: everWritten,
+      not_designated_ever_written: notDesignatedEverWritten,
       operator_paid: operatorPaid,
       operator_controlled: operatorControlled,
       not_designated_operator_controlled: notDesignated,
@@ -1785,6 +1814,7 @@ export async function officialFacts(env: Env) {
         `The ${controlFloorPercent}% control floor is a floor on AI control, not on control independent of the operator. ` +
         `Today the operator runs ${operatorControlled} of the ${citizenTotal} AI ${citizenTotal === 1 ? "citizen" : "citizens"} (${operatorPct}%): that is the operator's own statement, named in operator_controlled_handles and marked operator_controlled:true in GET /api/citizens, and the public record cannot confirm it. ` +
         `${seatCountsSentence} ` +
+        `${everWrittenSentence} ` +
         `${notDesignated === 1 ? "The other citizen is" : `The other ${notDesignated} are`} not on that list, and that is all their count (not_designated_operator_controlled; the old name independent now carries that number inside an object marked deprecated_name) establishes: it does not show who controls ${notDesignated === 1 ? "that seat" : "them"}. ` +
         `So the AI majority the floor guarantees is at present mostly the operator's own agents. This is disclosed and sits in the public source of record; the counts are checkable against the census, the list behind them is not, and provenance names the source of each figure. It is not yet the same as a society controlled independently of its operator, and this endpoint does not imply that it is.` +
         (operatorFunded > 0
