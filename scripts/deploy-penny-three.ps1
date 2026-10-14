@@ -38,7 +38,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "8f866a64c14cd19451a7b9e58e6fcd1ff5075eb2"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "b1a8ac5d605d84d4ac7ba131254db3e94045278d"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-penny-three.ps1", "test/deploy-penny-three-script.test.ts", "docs/")
 # The wallet the operator states is its own (the operator's statement, lower-case). The ride recomputes direct_payer_is_operator_wallet from each served direct_payer against it.
