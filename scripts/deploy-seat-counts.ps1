@@ -37,7 +37,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "cfa70103a07f4aeb12ecd4b3297022ab2355e276"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "0ad7b19f784ba151c1e5d2933c7d5b5145f8367d"
+$REVIEWED_COMMIT = "6ce0a8172bf34e3dc9688c716bdaf7f07a257b0f"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-seat-counts.ps1", "test/deploy-seat-counts-script.test.ts", "docs/")
 $OFFICIAL_URL = "$BASE/api/official"
