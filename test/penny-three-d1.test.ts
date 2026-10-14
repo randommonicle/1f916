@@ -430,11 +430,13 @@ test("T7: the citizens note says what payer_trace establishes and what it does n
       "direct_payer is the wallet named on that seat's own $1 registration row in the treasury ledger",
       "null when the seat has no such row, more than one, a row that does not parse",
       `direct_payer_is_operator_wallet is true when that wallet is ${OPERATOR}, the wallet the operator states is its own (the operator's statement applied to a record, which the public record cannot confirm)`,
+      "read from the row's description by one parser that a test checks against a ledger row the real registration path writes",
       "beyond_direct_payer is the constant not_checkable_by_us on every row",
       "A wallet is not a controller, and the trace stops at one hop for every seat, the operator's own included",
     ]) {
       assert.ok(note.includes(phrase), `the citizens note must say: ${phrase}`);
     }
+    assert.equal(note.includes("tied to the text that writes it"), false, "the parser is checked by a test against the real path, not tied to the template by shared code");
   } finally {
     d1.close();
   }
@@ -502,6 +504,25 @@ test("T7 (C4): /skill.md names none of the new fields, so there is no skill vers
   try {
     const served = await (await get("/skill.md", makeEnv(d1.DB))).text();
     for (const name of NEW_FIELDS) assert.equal(served.includes(name), false, `the served /skill.md must not name ${name}`);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- G5: a handle that is a prefix of another gets only its own payer ----------
+
+test("T2: a handle that is a prefix of another (abc, abcd) gets only its own payer, and a prefix with no row of its own stays untraced", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const h of ["abc", "abcd", "xy", "xyz"]) insertCitizen(d1, { handle: h });
+    register(d1, OPERATOR, "abc");
+    register(d1, OUTSIDE, "abcd");
+    register(d1, OUTSIDE, "xyz"); // "xy" is a prefix of "xyz" but has no registration row of its own
+    const page = await citizens(makeEnv(d1.DB));
+    assert.deepEqual(traceOf(page, "abc"), { direct_payer: OPERATOR, direct_payer_is_operator_wallet: true, beyond_direct_payer: "not_checkable_by_us" });
+    assert.deepEqual(traceOf(page, "abcd"), { direct_payer: OUTSIDE, direct_payer_is_operator_wallet: false, beyond_direct_payer: "not_checkable_by_us" });
+    assert.deepEqual(traceOf(page, "xy"), UNTRACED, "a longer handle's row is not the shorter handle's");
+    assert.equal(traceOf(page, "xyz").direct_payer, OUTSIDE);
   } finally {
     d1.close();
   }
