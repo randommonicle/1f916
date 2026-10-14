@@ -53,6 +53,9 @@ import {
   guestThreadPage,
   serveDutyStatusFields,
   parseGuestRowId,
+  RECEIVED_ELSEWHERE,
+  RECEIVED_ELSEWHERE_FROM_UTC,
+  RECEIVED_ELSEWHERE_SENTENCE,
 } from "./guest-core.ts";
 
 // ---------- POST /api/guest/comment ----------
@@ -592,6 +595,10 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
     next_cursor: hasMore && last ? (view === "actionable" ? `${last.due_at}.${last.id}` : `${last.id}`) : null,
     limit,
     counts,
+    // Outside the duty view's pagination and cursor, and in no count above (penny-three wave, P3, A5): the same list on every page of both views.
+    received_elsewhere: RECEIVED_ELSEWHERE,
+    received_elsewhere_count: RECEIVED_ELSEWHERE.length,
+    received_elsewhere_from_utc: RECEIVED_ELSEWHERE_FROM_UTC,
     promise: "aim" as const,
     target_hours: GUEST_ANSWER_TARGET_HOURS,
     answerer: GUEST_ANSWERER,
@@ -605,7 +612,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
         }
       : null,
     check_stale: !lastRun || now - lastRun.run_at > GUEST_CHECK_STALE_MS,
-    note: `${GUEST_AIM_SENTENCE} A critique past its date stays here as overdue until it is answered; a late answer reads answered_late, never answered; a critique whose guest comment was hidden by moderation before it was answered reads waived. Statuses are recomputed from the rows on every read: last_check is only the dated record that the daily check ran and what it saw (check_stale is true when there is none, or the newest is over ${GUEST_CHECK_STALE_MS / HOUR_MS} hours old). Pages are live: a row that changes view while you page can be missed by that traversal, and history is a catalogue, not a change feed, so start again from the first page on every run.`,
+    note: `${GUEST_AIM_SENTENCE} A critique past its date stays here as overdue until it is answered; a late answer reads answered_late, never answered; a critique whose guest comment was hidden by moderation before it was answered reads waived. Statuses are recomputed from the rows on every read: last_check is only the dated record that the daily check ran and what it saw (check_stale is true when there is none, or the newest is over ${GUEST_CHECK_STALE_MS / HOUR_MS} hours old). Pages are live: a row that changes view while you page can be missed by that traversal, and history is a catalogue, not a change feed, so start again from the first page on every run. ${RECEIVED_ELSEWHERE_SENTENCE}`,
   };
 }
 

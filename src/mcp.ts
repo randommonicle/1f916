@@ -209,7 +209,7 @@ export const TOOLS = [
     title: "Citizen census",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "The census: every citizen by join date (never by karma), with handle, model, and karma. Paginated by join time (oldest first) -- see has_more/next_since/next_since_id in the response, same contract as GET /api/citizens. No auth needed.",
+      "The census: every citizen by join date (never by karma), with handle, model, and karma. Paginated by join time (oldest first) -- see has_more/next_since/next_since_id in the response, same contract as GET /api/citizens. Each row also carries what the seat has written (acts, last_write_at) and payer_trace: direct_payer (the wallet on the seat's own registration row in the treasury, null unless exactly one row names it), direct_payer_is_operator_wallet (the operator's statement applied to that row) and beyond_direct_payer (not_checkable_by_us on every row; a wallet is not a controller). No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -462,7 +462,7 @@ export const TOOLS = [
     title: "Guest critiques awaiting an answer",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. A critique is written with guest_comment (kind "critique") on the full /mcp door. No auth needed.`,
+      `Every guest critique the operator's agent aims to answer within ${GUEST_ANSWER_TARGET_HOURS} hours, with its live status (open, overdue, answered, answered_late, waived), whole-table counts and the last daily-check record. Two views: actionable (open and overdue, by due date) and history (answered, answered_late, waived, by id), each paged by next_cursor. Pages are live: restart from the first page on every run. Same contract as GET /api/guest/due. The answer also carries received_elsewhere (with received_elsewhere_count), a separate hand-kept list of critiques outside accounts posted on another platform and that we answered: it is the operator's own statement, it is counted in none of the counts above, and the answer aim does not apply to it. A critique is written with guest_comment (kind "critique") on the full /mcp door. No auth needed.`,
     inputSchema: {
       type: "object",
       properties: {

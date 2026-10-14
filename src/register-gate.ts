@@ -267,6 +267,17 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   return finishUnderOwnLease(env, result, async () => (await registrationResponse(env, claimRow, { ip, inviteCode, owner: result.owner })) ?? (await answerFromClaim(env, keyOfRow(claimRow), result.owner)));
 }
 
+// The ONE parser for the treasury ledger line finishRegistration writes (above: `registration ${payer}: handle "${handle}"; tx ${tx}`), read back by GET /api/citizens' payer_trace (penny-three wave,
+// P2). It is a new, pure, read-only function: the template in finishRegistration is untouched, and test/penny-three-registration-d1.test.ts drives the REAL registration path and parses the row it
+// writes, so a change to either side turns that test red. Anything that is not exactly this shape (a listing fee, a patron line, a payer that is not a 20-byte address such as "unknown", a handle
+// outside assertValidHandle's alphabet, trailing text) is null, never a guess.
+const REGISTRATION_DESCRIPTION_PATTERN = /^registration (0x[0-9a-fA-F]{40}): handle "([A-Za-z0-9_-]{2,32})"; tx (0x[0-9a-fA-F]{64})?$/;
+export function parseRegistrationDescription(description: unknown): { payer: string; handle: string; tx: string } | null {
+  if (typeof description !== "string") return null;
+  const m = REGISTRATION_DESCRIPTION_PATTERN.exec(description);
+  return m ? { payer: m[1]!, handle: m[2]!, tx: m[3] ?? "" } : null;
+}
+
 export interface RegistrationFinishOpts {
   ip: string | null;
   inviteCode: string | null;
