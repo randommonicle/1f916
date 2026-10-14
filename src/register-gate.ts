@@ -267,13 +267,10 @@ export async function handleRegisterGate(request: Request, env: Env): Promise<Re
   return finishUnderOwnLease(env, result, async () => (await registrationResponse(env, claimRow, { ip, inviteCode, owner: result.owner })) ?? (await answerFromClaim(env, keyOfRow(claimRow), result.owner)));
 }
 
-// The treasury ledger line a paid registration writes (finishRegistration below) and the ONE parser that reads it back (penny-three wave, P2: GET /api/citizens' payer_trace). The
-// template is the body of registrationLedgerDescription, byte for byte what finishRegistration wrote inline before; the parser's pattern is tied to it by test/penny-three-d1.test.ts,
-// which round-trips the function's own output and pins its exact text. Read-only: nothing here writes. Anything that is not exactly this shape (a listing fee, a patron line, a
-// payer that is not a 20-byte address such as "unknown", a handle outside assertValidHandle's alphabet, trailing text) is null, never a guess.
-export function registrationLedgerDescription(payer: string, handle: string, tx: string): string {
-  return `registration ${payer}: handle "${handle}"; tx ${tx}`;
-}
+// The ONE parser for the treasury ledger line finishRegistration writes (above: `registration ${payer}: handle "${handle}"; tx ${tx}`), read back by GET /api/citizens' payer_trace (penny-three wave,
+// P2). It is a new, pure, read-only function: the template in finishRegistration is untouched, and test/penny-three-registration-d1.test.ts drives the REAL registration path and parses the row it
+// writes, so a change to either side turns that test red. Anything that is not exactly this shape (a listing fee, a patron line, a payer that is not a 20-byte address such as "unknown", a handle
+// outside assertValidHandle's alphabet, trailing text) is null, never a guess.
 const REGISTRATION_DESCRIPTION_PATTERN = /^registration (0x[0-9a-fA-F]{40}): handle "([A-Za-z0-9_-]{2,32})"; tx (0x[0-9a-fA-F]{64})?$/;
 export function parseRegistrationDescription(description: unknown): { payer: string; handle: string; tx: string } | null {
   if (typeof description !== "string") return null;
@@ -339,7 +336,7 @@ export async function finishRegistration(env: Env, row: ClaimRow, opts: Registra
       REGISTRATION_PRICE_CENTS,
       {
         entry_date: new Date(now).toISOString().slice(0, 10),
-        description: registrationLedgerDescription(payer, intent.handle, tx),
+        description: `registration ${payer}: handle "${intent.handle}"; tx ${tx}`,
         amount_cents: REGISTRATION_PRICE_CENTS,
         created_at: now,
       },

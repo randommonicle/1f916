@@ -205,7 +205,8 @@ test("T8 (A2): ONE failing writer read serves acted_30d, ever_written and not_de
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { registrationLedgerDescription, parseRegistrationDescription } from "../src/register-gate.ts";
+import { parseRegistrationDescription } from "../src/register-gate.ts";
+import { registrationRowText } from "./helpers/registration-row.ts";
 import { OPERATOR_WALLET, BEYOND_DIRECT_PAYER, CITIZEN_PAGE, KEY_LOST_SEATS } from "../src/society.ts";
 
 // Typed here, not imported: the operator's stated wallet (treasury rows 1-4 and 10-17 on 14 Oct) and an outside payer (row 5, sisyphus).
@@ -216,7 +217,7 @@ const TX = "0x" + "ab".repeat(32);
 function ledger(d1: LocalD1, description: string): void {
   d1.raw.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at) VALUES ('2026-10-14', ?, 100, ?)").run(description, ++counter);
 }
-const register = (d1: LocalD1, payer: string, handle: string) => ledger(d1, registrationLedgerDescription(payer, handle, TX));
+const register = (d1: LocalD1, payer: string, handle: string) => ledger(d1, registrationRowText(payer, handle, TX));
 
 interface PayerTrace {
   direct_payer: string | null;
@@ -316,7 +317,7 @@ test("T2: a failing ledger read serves every row with an untraced payer_trace an
 
 // ---------- C2 / T3: the parser, tied to the template ----------
 
-test("T3: the parser round-trips the template's own output, and the template text is pinned", () => {
+test("T3: the parser reads the fixture text of a registration row, and that text is pinned to a live row (the real registration path is driven in penny-three-registration-d1)", () => {
   const cases: [string, string, string][] = [
     [OPERATOR, "commonhold-agent", TX],
     [OUTSIDE, "sisyphus", "0x" + "01".repeat(32)],
@@ -324,18 +325,14 @@ test("T3: the parser round-trips the template's own output, and the template tex
     [OPERATOR, "xy", ""],
   ];
   for (const [payer, handle, tx] of cases) {
-    const text = registrationLedgerDescription(payer, handle, tx);
+    const text = registrationRowText(payer, handle, tx);
     assert.deepEqual(parseRegistrationDescription(text), { payer, handle, tx }, text);
   }
   // the exact bytes (the live treasury rows read this way: GET /treasury entry 17)
   assert.equal(
-    registrationLedgerDescription("0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16", "babydov-earn-20260919", "0xeeb070ec28f832159da0e03add81452af8c7bdafce7c7f04f66511fd5c3f6b7d"),
+    registrationRowText("0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16", "babydov-earn-20260919", "0xeeb070ec28f832159da0e03add81452af8c7bdafce7c7f04f66511fd5c3f6b7d"),
     'registration 0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16: handle "babydov-earn-20260919"; tx 0xeeb070ec28f832159da0e03add81452af8c7bdafce7c7f04f66511fd5c3f6b7d',
   );
-  // finishRegistration writes the ledger line through this function and through no second inline template
-  const src = readFileSync(fileURLToPath(new URL("../src/register-gate.ts", import.meta.url)), "utf8");
-  assert.ok(src.includes("description: registrationLedgerDescription(payer, intent.handle, tx),"));
-  assert.equal(src.split("registration ${").length, 2, "exactly one template literal starts with 'registration ${' (the function body)");
 });
 
 test("T3: the parser refuses a listing-fee row and every malformed or non-registration description", () => {

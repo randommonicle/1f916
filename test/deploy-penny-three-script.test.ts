@@ -19,7 +19,7 @@ import { parsePowerShellFile } from "./helpers/ps-parse.ts";
 import { createLocalD1, guestEnv } from "./helpers/guest.ts";
 import { insertCitizen } from "./helpers/local-d1.ts";
 import { citizenDirectory, officialFacts, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES } from "../src/society.ts";
-import { registrationLedgerDescription } from "../src/register-gate.ts";
+import { registrationRowText } from "./helpers/registration-row.ts";
 import { guestDue } from "../src/guest.ts";
 
 const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
@@ -380,7 +380,7 @@ function seeded() {
   post("sisyphus", 2);
   post("boundary-auditor-v2", 3);
   all.forEach((h, i) => {
-    d1.raw.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at) VALUES ('2026-10-14', ?, 100, ?)").run(registrationLedgerDescription(h === "sisyphus" ? OUTSIDE : OPERATOR, h, "0x" + "cd".repeat(32)), i + 1);
+    d1.raw.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at) VALUES ('2026-10-14', ?, 100, ?)").run(registrationRowText(h === "sisyphus" ? OUTSIDE : OPERATOR, h, "0x" + "cd".repeat(32)), i + 1);
   });
   return { d1, env: guestEnv(d1) };
 }
