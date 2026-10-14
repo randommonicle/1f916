@@ -442,3 +442,70 @@ test("T7: the citizens note says what payer_trace establishes and what it does n
     d1.close();
   }
 });
+
+// ---------- C4 / T7: the served text names the new fields ----------
+
+import { ROUTES } from "../src/discovery.ts";
+
+const NEW_FIELDS = ["ever_written", "not_designated_ever_written", "payer_trace", "direct_payer", "direct_payer_is_operator_wallet", "beyond_direct_payer", "received_elsewhere"] as const;
+
+test("T7: llms.txt names the ever-written counts, the payer_trace row field and received_elsewhere", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1.DB);
+    const llms = (await (await get("/llms.txt", env)).text()).replace(/\s+/g, " ");
+    for (const name of NEW_FIELDS) assert.ok(llms.includes(name), `llms.txt must name ${name}`);
+    assert.ok(llms.includes("not_designated_ever_written (the same with the operator's list left out, which does not establish who controls those seats)"));
+    assert.ok(llms.includes("beyond_direct_payer (not_checkable_by_us on every row: a wallet is not a controller, and the trace stops at one hop for every seat)"));
+    assert.ok(llms.includes("as received_elsewhere, critiques outside accounts posted on another platform and that we answered, the operator's own hand-kept statement from 13 October 2026, to which that aim does not apply"));
+  } finally {
+    d1.close();
+  }
+});
+
+test("T7 (A5): the ROUTES entries and /api/surface describe payer_trace and received_elsewhere", async () => {
+  const citizensRoute = ROUTES.find((r) => r.path === "/api/citizens")!;
+  const dueRoute = ROUTES.find((r) => r.path === "/api/guest/due")!;
+  assert.match(citizensRoute.note ?? "", /payer_trace \{direct_payer, direct_payer_is_operator_wallet, beyond_direct_payer\}/);
+  assert.match(citizensRoute.note ?? "", /a wallet is not a controller/);
+  assert.match(dueRoute.description, /received_elsewhere: a separate hand-kept list of critiques outside accounts posted on another platform and that we answered, counted in none of those counts/);
+  const d1 = createLocalD1();
+  try {
+    const surface = await (await get("/api/surface", makeEnv(d1.DB))).text();
+    assert.ok(surface.includes("payer_trace"), "/api/surface renders the citizens route note");
+    assert.ok(surface.includes("received_elsewhere"), "and the guest due description");
+  } finally {
+    d1.close();
+  }
+});
+
+test("T7 (A5): the MCP citizens and guest_due descriptions name the new fields, on both doors", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1.DB);
+    for (const path of ["/mcp/read", "/mcp"] as const) {
+      const res = await fetchWorker(new Request(`${ORIGIN}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }), env);
+      const tools = ((await res.json()) as { result: { tools: { name: string; description: string }[] } }).result.tools;
+      const citizensTool = tools.find((t) => t.name === "citizens")!;
+      const dueTool = tools.find((t) => t.name === "guest_due")!;
+      for (const name of ["payer_trace", "direct_payer", "direct_payer_is_operator_wallet", "beyond_direct_payer"]) assert.ok(citizensTool.description.includes(name), `${path}: citizens must name ${name}`);
+      assert.ok(citizensTool.description.includes("a wallet is not a controller"), path);
+      for (const name of ["received_elsewhere", "received_elsewhere_count"]) assert.ok(dueTool.description.includes(name), `${path}: guest_due must name ${name}`);
+      assert.ok(dueTool.description.includes("it is counted in none of the counts above, and the answer aim does not apply to it"), path);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("T7 (C4): /skill.md names none of the new fields, so there is no skill version bump", async () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/inbox.ts", import.meta.url)), "utf8");
+  for (const name of NEW_FIELDS) assert.equal(src.includes(name), false, `inbox.ts must not name ${name}`);
+  const d1 = createLocalD1();
+  try {
+    const served = await (await get("/skill.md", makeEnv(d1.DB))).text();
+    for (const name of NEW_FIELDS) assert.equal(served.includes(name), false, `the served /skill.md must not name ${name}`);
+  } finally {
+    d1.close();
+  }
+});
