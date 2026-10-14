@@ -212,6 +212,17 @@ export async function outsideWritersSince(db: D1Database, sinceMs: number): Prom
   }
 }
 
+// composition.acted_30d: the same count with NOBODY excluded (every seat, the operator's included), under the same write definition and the same window start as outsideWritersSince
+// (council.ts citizenWritersSince is the one query behind both). Never throws; null when the read fails, and the composition note says so.
+export async function actedWritersSince(db: D1Database, sinceMs: number): Promise<number | null> {
+  try {
+    const { citizenWritersSince } = await import("./council.ts");
+    return await citizenWritersSince(db, sinceMs, []);
+  } catch {
+    return null;
+  }
+}
+
 // Public-key seats whose holder has reported, out of band, that the private
 // key is unrecoverable. No route installs a key on a seat without the old one
 // (rotateKey below authenticates with the CURRENT key and binds the replacement
@@ -1599,7 +1610,11 @@ export async function officialFacts(env: Env) {
   // SETTING_KEY at its own top level, so a static import here is a temporal-dead-zone error whenever society.ts is the first module entered.
   const { rule7VoteState, rule7Clause: clauseFor, rule7RevoteFacts, rule7WindowStart } = await import("./rule7-vote.ts");
   // The revote trigger's count, read ONCE for this answer (rule7_revote below and the clause in the topics note take the same number).
-  const outsideWriters = await outsideWritersSince(env.DB, rule7WindowStart(Date.now()));
+  // ONE clock reading for the whole answer (seat counts wave, A3): acted_30d in the composition below and the Rule 7 count here start their window from the same `now`.
+  const now = Date.now();
+  const windowStart = rule7WindowStart(now);
+  const outsideWriters = await outsideWritersSince(env.DB, windowStart);
+  const actedThirtyDays = await actedWritersSince(env.DB, windowStart);
   const rule7Clause = clauseFor(await rule7VoteState(env.DB), outsideWriters);
   const guestVoice = await guestVoiceFacts(env.DB);
   const residents = await residentFacts(env.DB);
@@ -1626,7 +1641,6 @@ export async function officialFacts(env: Env) {
   // the effective rate falls back to the deployed default without needing a
   // wake to un-set anything (design doc §8's own reason for storing expiry
   // at all).
-  const now = Date.now();
   const upliftRow = settings.get(SETTING_KEY.dividendUplift);
   const upliftActive = upliftRow != null && (upliftRow.expires_at == null || upliftRow.expires_at > now);
   const dividendPercent = upliftActive ? (JSON.parse(upliftRow!.value) as { total_percent: number }).total_percent : DEFAULT_DIVIDEND_PERCENT;
