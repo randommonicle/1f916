@@ -614,8 +614,7 @@ export function compositionDoorNote(
   composition: {
     citizens: number;
     operator_controlled: number;
-    independent: number;
-    not_designated_operator_controlled?: number;
+    not_designated_operator_controlled: number;
     operator_controlled_percent: number;
     operator_controlled_handles: readonly string[];
     operator_funded_handles?: readonly string[];
@@ -626,9 +625,8 @@ export function compositionDoorNote(
   const names = operator_controlled_handles.length ? operator_controlled_handles.join(", ") : "(none on record)";
   // The complement of the operator's own list: not being on that list is all
   // subtraction establishes, not who controls the seat (parallax, 1f3d9 note
-  // 21678). `independent` is read only as the fallback for callers that predate
-  // not_designated_operator_controlled; it is never rendered as a label.
-  const others = composition.not_designated_operator_controlled ?? composition.independent;
+  // 21678). The old `independent` name is not read here at all.
+  const others = composition.not_designated_operator_controlled;
   // A sponsored seat (D-058) is among those others -- it holds its own key --
   // but its $1 came from the operator's wallet. Naming it here keeps "not on the
   // operator's list" from being read as "arrived without the operator's money",

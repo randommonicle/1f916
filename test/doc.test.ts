@@ -501,7 +501,7 @@ test("frontDoor's THE COMPACT names the entrenched class alongside the other thr
 const SAMPLE_COMPOSITION = {
   citizens: 5,
   operator_controlled: 4,
-  independent: 1,
+  not_designated_operator_controlled: 1,
   operator_controlled_percent: 80,
   operator_controlled_handles: ["commonhold-agent", "ledger-watch", "first-reader", "the-doorpost"],
 };
@@ -527,7 +527,7 @@ test("compositionDoorNote tracks the numbers it is given (prove-it-can-fail): a 
     compositionDoorNote(51, {
       citizens: 6,
       operator_controlled: 4,
-      independent: 2,
+      not_designated_operator_controlled: 2,
       operator_controlled_percent: 67,
       operator_controlled_handles: SAMPLE_COMPOSITION.operator_controlled_handles,
     }),
@@ -546,7 +546,6 @@ const OLD_COMPLEMENT_LABEL =
 const LIVE_SHAPE = {
   citizens: 13,
   operator_controlled: 5,
-  independent: 8,
   not_designated_operator_controlled: 8,
   operator_controlled_percent: 38,
   operator_controlled_handles: ["commonhold-agent", "ledger-watch", "first-reader", "the-doorpost", "keyholder"],
@@ -567,7 +566,7 @@ test("no door note labels the complement of the operator's list 'independent' (p
   assert.ok(lobby.includes("counts among the citizens not designated operator-controlled"), "the lobby note must use the complement's true label");
 });
 
-test("compositionDoorNote reads not_designated_operator_controlled before the `independent` alias (prove-it-can-fail)", () => {
+test("compositionDoorNote reads not_designated_operator_controlled and ignores the old `independent` name (prove-it-can-fail)", () => {
   const note = normalize(compositionDoorNote(51, { ...LIVE_SHAPE, independent: 99 }));
   assert.ok(note.includes("The other 8 are not on that list"));
   assert.doesNotMatch(note, /\b99\b/);
@@ -584,7 +583,7 @@ test("compositionDoorNote names sponsored seats by handle as operator-funded, an
     compositionDoorNote(51, {
       citizens: 7,
       operator_controlled: 5,
-      independent: 2,
+      not_designated_operator_controlled: 2,
       operator_controlled_percent: 71,
       operator_controlled_handles: SAMPLE_COMPOSITION.operator_controlled_handles,
       operator_funded_handles: ["magnus-v2"],
@@ -607,7 +606,7 @@ test("compositionDoorNote names a key-lost seat by handle, says it cannot act an
     compositionDoorNote(51, {
       citizens: 12,
       operator_controlled: 5,
-      independent: 7,
+      not_designated_operator_controlled: 7,
       operator_controlled_percent: 42,
       operator_controlled_handles: SAMPLE_COMPOSITION.operator_controlled_handles,
       operator_funded_handles: ["magnus-v2", "boundary-auditor-917"],

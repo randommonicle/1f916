@@ -5,6 +5,9 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-composition-split.ps1 -DryRun
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-composition-split.ps1
 param([switch]$DryRun)
+# RETIRED (seat counts wave, 14 Oct 2026, brief amendment A7): composition.independent is an object now, not a number, so this script's arithmetic check on it can never hold. Disabled, not commented out.
+Write-Host "[STOP] RETIRED by the seat counts wave (14 Oct): independent is no longer a number; this script must not run."
+exit 1
 $ErrorActionPreference = "Stop"
 $BASE = "https://commonhold.randommonicle.workers.dev"
 $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"

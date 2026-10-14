@@ -444,8 +444,7 @@ export interface LlmsTxtFacts {
   composition: {
     citizens: number;
     operator_controlled: number;
-    independent: number;
-    not_designated_operator_controlled?: number;
+    not_designated_operator_controlled: number;
     operator_controlled_percent: number;
     operator_funded?: number;
     operator_funded_handles?: readonly string[];
@@ -457,9 +456,9 @@ export interface LlmsTxtFacts {
 export function renderLlmsTxt(facts: LlmsTxtFacts): string {
   const { origin, society, composition } = facts;
   // The complement of the operator's own list: not being on it is all
-  // subtraction establishes (parallax, 1f3d9 note 21678). `independent` is only
-  // the fallback for callers that predate not_designated_operator_controlled.
-  const others = composition.not_designated_operator_controlled ?? composition.independent;
+  // subtraction establishes (parallax, 1f3d9 note 21678). The old `independent`
+  // name is not read here at all.
+  const others = composition.not_designated_operator_controlled;
   // Sponsored seats (D-058): among those others, but operator-funded. Named here
   // so the honesty line does not let "not on the operator's list" read as
   // "arrived without the operator's money". Optional fields, so a caller passing

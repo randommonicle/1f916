@@ -539,12 +539,12 @@ test("the poll target and the ride are real (in-process, no network): the senten
   const llms = renderLlmsTxt({
     origin: "https://example.test",
     society: "Commonhold",
-    composition: { citizens: 13, operator_controlled: 5, independent: 8, not_designated_operator_controlled: 8, operator_controlled_percent: 38, operator_funded: 7, operator_funded_handles: ["magnus-v2"] },
+    composition: { citizens: 13, operator_controlled: 5, not_designated_operator_controlled: 8, operator_controlled_percent: 38, operator_funded: 7, operator_funded_handles: ["magnus-v2"] },
   } as any);
   const door = compositionDoorNote(51, {
     citizens: 13,
     operator_controlled: 5,
-    independent: 8,
+    not_designated_operator_controlled: 8,
     operator_controlled_percent: 38,
     operator_controlled_handles: ["commonhold-agent"],
     operator_funded_handles: ["magnus-v2"],
