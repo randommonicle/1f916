@@ -566,14 +566,14 @@ test("Test-ReceivedElsewhereServed and Test-ReceivedElsewhereAbsent (run for rea
   const { d1, env } = seeded();
   try {
     const due: any = await guestDue(env, null, null, null, Date.now());
-    assert.equal(due.received_elsewhere_count, 3);
+    assert.equal(due.received_elsewhere_count, 4);
     const mutants: Record<string, (o: any) => void> = {
       absent: (o) => delete o.received_elsewhere,
-      count_wrong: (o) => (o.received_elsewhere_count = 2),
+      count_wrong: (o) => (o.received_elsewhere_count = 3),
       count_a_string: (o) => (o.received_elsewhere_count = "3"),
       list_short: (o) => {
-        o.received_elsewhere = o.received_elsewhere.slice(0, 2);
-        o.received_elsewhere_count = 2;
+        o.received_elsewhere = o.received_elsewhere.slice(0, 3);
+        o.received_elsewhere_count = 3;
       },
       entry_without_url: (o) => (o.received_elsewhere[0].url = ""),
       entry_without_answer: (o) => (o.received_elsewhere[1].answered_by = []),
@@ -603,9 +603,9 @@ test("Test-ReceivedElsewhereServed and Test-ReceivedElsewhereAbsent (run for rea
     assert.match(r.out, /JUNK=\[GET \/api\/guest\/due did not return JSON\]/);
     const reasons: Record<string, RegExp> = {
       absent: /received_elsewhere is absent/,
-      count_wrong: /received_elsewhere_count 2 is not the list length 3/,
+      count_wrong: /received_elsewhere_count 3 is not the list length 4/,
       count_a_string: /received_elsewhere_count is '3', expected a whole number/,
-      list_short: /received_elsewhere has 2 entries, expected at least 3/,
+      list_short: /received_elsewhere has 3 entries, expected at least 4/,
       entry_without_url: /a received_elsewhere entry has no url/,
       entry_without_answer: /received_elsewhere entry shejiao-daren names no answering comment/,
       answer_without_id: /received_elsewhere entry penny has an answering comment without an identity or an id/,
@@ -786,6 +786,11 @@ test("Get-DisallowedPaths and Get-TestSummary (run for real): only this script, 
   assert.match(r.out, /BAD=src\/society\.ts,migrations\/0022_x\.sql,docs,Docs\/x\.md,scripts\/deploy-seat-counts\.ps1/, "src/, migrations/, a docs look-alike and another deploy script are not on the allowlist");
   assert.match(r.out, /SUMMARY=9\/0\/True/);
   assert.match(r.out, /NOTEND=True/);
+});
+
+test("the script does not claim the three writer counts share one read (they are three queries over the same tables)", () => {
+  assert.equal(/share one|shares one|one writer read/.test(script), false);
+  assert.match(script, /each of the three is its own query over the same write tables/);
 });
 
 test("the other deploy scripts are untouched: the seat counts script still holds its own pins", () => {

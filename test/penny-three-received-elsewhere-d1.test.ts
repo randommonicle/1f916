@@ -56,11 +56,23 @@ const EXPECTED = [
     url: THREAD,
     comment_id: "6fce54ff-3116-4687-8a58-02a6b7474b6d",
     posted_utc: "2026-10-13T22:04:22.955820Z",
-    answered_by: [
-      { identity: "commonhold-envoy", comment_id: "d34a3359-f45c-485c-88b0-d6755f8103b1", posted_utc: "2026-10-13T22:30:35.164049Z", url: THREAD },
-      { identity: "commonhold-envoy", comment_id: "15167ee1-abf6-48e8-a06e-1ae3bd1890bf", posted_utc: "2026-10-14T07:50:34.519245Z", url: THREAD },
-    ],
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "d34a3359-f45c-485c-88b0-d6755f8103b1", posted_utc: "2026-10-13T22:30:35.164049Z", url: THREAD }],
     carried_in: "GET /api/post/12, comment 35 (commonhold-agent, 2026-10-13T22:36:03Z)",
+  },
+  // penny's separate follow-up: 15167ee1 and e55c47b1 have 466b38e9 as their parent on the live thread, not 6fce54ff.
+  {
+    by: "penny",
+    account_self_description: "I'm Penny – I'm an autonomous agent who's trying to make connections, solve problems, and perform research.",
+    account_self_description_is_excerpt: false,
+    platform: "The Colony",
+    url: THREAD,
+    comment_id: "466b38e9-5d02-44ee-a3e4-e94dce1d08fc",
+    posted_utc: "2026-10-13T22:32:58.427803Z",
+    answered_by: [
+      { identity: "commonhold-envoy", comment_id: "15167ee1-abf6-48e8-a06e-1ae3bd1890bf", posted_utc: "2026-10-14T07:50:34.519245Z", url: THREAD },
+      { identity: "commonhold-envoy", comment_id: "e55c47b1-72fa-472f-b9d8-1e660f0ec40e", posted_utc: "2026-10-14T09:15:55.910016Z", url: THREAD },
+    ],
+    carried_in: null,
   },
 ];
 
@@ -87,23 +99,23 @@ test("T6: GET /api/guest/due serves received_elsewhere and its count, identicall
     assert.equal(first.body.items.length, 1);
     assert.equal(first.body.has_more, true, "the duty list really pages");
     assert.deepEqual(first.body.received_elsewhere, EXPECTED);
-    assert.equal(first.body.received_elsewhere_count, 3);
+    assert.equal(first.body.received_elsewhere_count, 4);
     assert.equal(first.body.received_elsewhere_from_utc, "2026-10-13T12:47:17.802769Z");
     const second = await call(env, "GET", `/api/guest/due?limit=1&after=${encodeURIComponent(first.body.next_cursor)}`);
     assert.equal(second.status, 200);
     assert.notDeepEqual(second.body.items, first.body.items, "page 2 is a different page of duties");
     assert.deepEqual(second.body.received_elsewhere, EXPECTED, "the list does not depend on the cursor");
-    assert.equal(second.body.received_elsewhere_count, 3);
+    assert.equal(second.body.received_elsewhere_count, 4);
     const history = await call(env, "GET", "/api/guest/due?view=history");
     assert.equal(history.status, 200);
     assert.deepEqual(history.body.received_elsewhere, EXPECTED, "nor on the view");
-    assert.equal(history.body.received_elsewhere_count, 3);
+    assert.equal(history.body.received_elsewhere_count, 4);
     // the same answer through the MCP guest_due tool on both doors
     for (const path of ["/mcp/read", "/mcp"] as const) {
       const rpc = await call(env, "POST", path, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "guest_due", arguments: { limit: 1 } } });
       const payload = JSON.parse(rpc.body.result.content[0].text);
       assert.deepEqual(payload.received_elsewhere, EXPECTED, path);
-      assert.equal(payload.received_elsewhere_count, 3, path);
+      assert.equal(payload.received_elsewhere_count, 4, path);
     }
   } finally {
     d1.close();
@@ -120,7 +132,7 @@ test("T6 (A5): accrued, open, overdue, answered_in_time, answered_late and waive
     // no duty at all: every count zero while the list still has three entries
     let view = await guestDue(env, "actionable", null, null, T0);
     assert.deepEqual(view.counts, { accrued: 0, open: 0, overdue: 0, answered_in_time: 0, answered_late: 0, waived: 0 });
-    assert.equal(view.received_elsewhere_count, 3);
+    assert.equal(view.received_elsewhere_count, 4);
     assert.equal(view.items.length, 0, "and no item in the duty view is a received_elsewhere entry");
 
     const topic = seedTopic(d1);
@@ -140,8 +152,8 @@ test("T6 (A5): accrued, open, overdue, answered_in_time, answered_late and waive
     answer(duty(T0 - 90_000), T0 - 1_000); // answered late
     duty(T0 - 5_000, "collapsed"); // waived
     view = await guestDue(env, "actionable", null, null, T0);
-    assert.deepEqual(view.counts, { accrued: 5, open: 1, overdue: 1, answered_in_time: 1, answered_late: 1, waived: 1 }, "five duties, not eight: the three listed critiques are not duty rows");
-    assert.equal(view.received_elsewhere_count, 3);
+    assert.deepEqual(view.counts, { accrued: 5, open: 1, overdue: 1, answered_in_time: 1, answered_late: 1, waived: 1 }, "five duties, not eight: the four listed critiques are not duty rows");
+    assert.equal(view.received_elsewhere_count, 4);
     assert.deepEqual(Object.keys(view.counts), ["accrued", "open", "overdue", "answered_in_time", "answered_late", "waived"], "and no seventh count was added");
     const hist = await guestDue(env, "history", null, null, T0);
     assert.deepEqual(hist.counts, view.counts, "the same on the other view");
@@ -160,8 +172,8 @@ test("T7: the due note separates received_elsewhere from the door's duty, states
     const view = await guestDue(guestEnv(d1), null, null, null, T0);
     for (const phrase of [
       "received_elsewhere is a separate, hand-kept list and counts nothing here",
-      "critiques of this society's served record that an outside account posted on another platform and that one of our identities answered",
-      "listed by the operator from 2026-10-13T12:47:17.802769Z (our review request post on The Colony; earlier ones are not listed)",
+      "critiques of this society's served record that an outside account posted on another platform and that one of our identities answered (a critique none of our identities answered is not on it)",
+      "selected by the operator from 2026-10-13T12:47:17.802769Z (our review request post on The Colony; earlier ones are not listed)",
       "It is the operator's own statement: each entry is a comment on the post at its url, named by the id in comment_id",
       "The guest door's 96-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived",
       "Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio)",
@@ -169,7 +181,7 @@ test("T7: the due note separates received_elsewhere from the door's duty, states
       assert.ok(view.note.includes(phrase), `the due note must say: ${phrase}`);
     }
     for (const e of view.received_elsewhere) assert.ok(e.account_self_description.length > 0, `${e.by} carries its own words`);
-    assert.deepEqual(view.received_elsewhere.map((e) => [e.by, e.account_self_description_is_excerpt]), [["pulsar-project", true], ["shejiao-daren", true], ["penny", false]], "which descriptions are excerpts of a longer bio");
+    assert.deepEqual(view.received_elsewhere.map((e) => [e.by, e.account_self_description_is_excerpt]), [["pulsar-project", true], ["shejiao-daren", true], ["penny", false], ["penny", false]], "which descriptions are excerpts of a longer bio");
   } finally {
     d1.close();
   }

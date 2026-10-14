@@ -177,7 +177,7 @@ function Test-ReceivedElsewhereAbsent($body) {
   return ($null -eq $o.PSObject.Properties["received_elsewhere"])
 }
 # "" when the JSON text of GET /api/official serves acted_30d, ever_written and not_designated_ever_written as this wave defines them, otherwise the first reason it does not: each is a whole number (null means the
-# count was unreadable for that response: the three share one writer read, so the ride's retry keys on that reason), ever_written lies between acted_30d and citizens, the not-designated count is bounded by
+# count was unreadable for that response: each of the three is its own query over the same write tables, null when that query fails, so the ride's retry keys on that reason), ever_written lies between acted_30d and citizens, the not-designated count is bounded by
 # ever_written and by the complement of the operator's list, the difference is no more than the operator's own seats, the Rule 7 outside count is no more than the not-designated count, and each new count has its
 # provenance entry with the source tag record and the sentence the wave gave it.
 # $true when a Test-EverWrittenServed reason says a writer count was NULL (its writer read failed for that response): the ONLY reason the ride reads again.
@@ -243,7 +243,7 @@ function Test-PayerTraceServed($body, $operatorPaid) {
   return ""
 }
 # "" when the JSON text of GET /api/guest/due serves received_elsewhere as this wave defines it, otherwise the first reason it does not: the list is there, received_elsewhere_count is a whole number equal to
-# its length and at least 3, every entry names its account, platform, url, comment id, time and at least one answering comment, and the duty counts still add up (accrued is the sum of the other five).
+# its length and at least 4, every entry names its account, platform, url, comment id, time and at least one answering comment, and the duty counts still add up (accrued is the sum of the other five).
 function Test-ReceivedElsewhereServed($body) {
   try { $o = ([string]$body | ConvertFrom-Json) } catch { return "GET /api/guest/due did not return JSON" }
   if ($null -eq $o) { return "GET /api/guest/due did not return a JSON object" }
@@ -251,7 +251,7 @@ function Test-ReceivedElsewhereServed($body) {
   $list = @($o.received_elsewhere)
   if (-not (Test-IsCount $o.received_elsewhere_count)) { return ("received_elsewhere_count is '" + $o.received_elsewhere_count + "', expected a whole number") }
   if ($o.received_elsewhere_count -ne $list.Count) { return ("received_elsewhere_count " + $o.received_elsewhere_count + " is not the list length " + $list.Count) }
-  if ($list.Count -lt 3) { return ("received_elsewhere has " + $list.Count + " entries, expected at least 3") }
+  if ($list.Count -lt 4) { return ("received_elsewhere has " + $list.Count + " entries, expected at least 4") }
   foreach ($e in $list) {
     foreach ($f in "by", "platform", "url", "comment_id", "posted_utc") {
       if ([string]::IsNullOrEmpty([string]$e.$f)) { return ("a received_elsewhere entry has no " + $f) }
@@ -452,7 +452,7 @@ if ($null -eq $snapshotBefore) { Stop-Here "GET /api/official carried no composi
 Say "[live] before: none of the new fields is served (the new code is absent); composition $snapshotBefore"
 
 if ($DryRun) {
-  Say "[dry-run] would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until GET /api/attest serves that commit and version id and GET /api/official serves acted_30d, ever_written and not_designated_ever_written as whole numbers with their provenance, GET /api/citizens serves payer_trace on every row and GET /api/guest/due serves received_elsewhere; re-check attest (v5, template $($V5_HASH.Substring(0, 8)), every chain ok); ride the public reads (GET only: the counts consistent, the composition figures equal the recorded ones, the rows with the operator-wallet flag true equal operator_paid, every beyond_direct_payer not_checkable_by_us, received_elsewhere_count equal to the list length and at least 3, /llms.txt and the three notes name the new fields). NO write request of any kind, NO migration, NO D1 access and no live write at any point. Nothing was deployed."
+  Say "[dry-run] would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until GET /api/attest serves that commit and version id and GET /api/official serves acted_30d, ever_written and not_designated_ever_written as whole numbers with their provenance, GET /api/citizens serves payer_trace on every row and GET /api/guest/due serves received_elsewhere; re-check attest (v5, template $($V5_HASH.Substring(0, 8)), every chain ok); ride the public reads (GET only: the counts consistent, the composition figures equal the recorded ones, the rows with the operator-wallet flag true equal operator_paid, every beyond_direct_payer not_checkable_by_us, received_elsewhere_count equal to the list length and at least 4, /llms.txt and the three notes name the new fields). NO write request of any kind, NO migration, NO D1 access and no live write at any point. Nothing was deployed."
   exit 0
 }
 
@@ -486,7 +486,7 @@ foreach ($p in "/", "/api/official", "/llms.txt", "/openapi.json", "/treasury", 
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after the deploy (version $versionId): " + ($bad -join ", ") + ". If a read that answered before now fails: $ROLLBACK_LINE") }
 Say "[ride] 14 public reads -> 200"
 # the counts: whole numbers, consistent, with provenance
-# Up to three reads, 10 s apart: the three writer counts share one read and are null by design on a response whose writer read failed, so one transient D1 failure must not print the rollback line
+# Up to three reads, 10 s apart: each of the three writer counts is its own query over the same write tables and is null by design on a response whose query failed, so one transient D1 failure must not print the rollback line
 # for a healthy deploy (the poll above already saw the counts served). A null on all three reads is a writer query failing in production, and that stops the script.
 for ($try = 1; $try -le 3; $try++) {
   $officialNow = Get-Text $OFFICIAL_URL 30

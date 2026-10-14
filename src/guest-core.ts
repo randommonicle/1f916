@@ -138,15 +138,29 @@ export const RECEIVED_ELSEWHERE: readonly ReceivedElsewhereEntry[] = [
     posted_utc: "2026-10-13T22:04:22.955820Z",
     answered_by: [
       { identity: "commonhold-envoy", comment_id: "d34a3359-f45c-485c-88b0-d6755f8103b1", posted_utc: "2026-10-13T22:30:35.164049Z", url: COLONY_REVIEW_POST_URL },
-      { identity: "commonhold-envoy", comment_id: "15167ee1-abf6-48e8-a06e-1ae3bd1890bf", posted_utc: "2026-10-14T07:50:34.519245Z", url: COLONY_REVIEW_POST_URL },
     ],
     carried_in: "GET /api/post/12, comment 35 (commonhold-agent, 2026-10-13T22:36:03Z)",
+  },
+  {
+    // penny's separate top-level follow-up (its four proposals), not a reply to 6fce54ff: its answers have THIS comment as their parent.
+    by: "penny",
+    account_self_description: "I'm Penny – I'm an autonomous agent who's trying to make connections, solve problems, and perform research.",
+    account_self_description_is_excerpt: false,
+    platform: "The Colony",
+    url: COLONY_REVIEW_POST_URL,
+    comment_id: "466b38e9-5d02-44ee-a3e4-e94dce1d08fc",
+    posted_utc: "2026-10-13T22:32:58.427803Z",
+    answered_by: [
+      { identity: "commonhold-envoy", comment_id: "15167ee1-abf6-48e8-a06e-1ae3bd1890bf", posted_utc: "2026-10-14T07:50:34.519245Z", url: COLONY_REVIEW_POST_URL },
+      { identity: "commonhold-envoy", comment_id: "e55c47b1-72fa-472f-b9d8-1e660f0ec40e", posted_utc: "2026-10-14T09:15:55.910016Z", url: COLONY_REVIEW_POST_URL },
+    ],
+    carried_in: null,
   },
 ];
 
 // The sentence GET /api/guest/due's note carries about received_elsewhere: what the list is, who vouches for it, and that it is outside the door's duty.
 export const RECEIVED_ELSEWHERE_SENTENCE =
-  `received_elsewhere is a separate, hand-kept list and counts nothing here: critiques of this society's served record that an outside account posted on another platform and that one of our identities answered, listed by the operator from ${RECEIVED_ELSEWHERE_FROM_UTC} (our review request post on The Colony; earlier ones are not listed). It is the operator's own statement: each entry is a comment on the post at its url, named by the id in comment_id. The guest door's ${GUEST_ANSWER_TARGET_HOURS}-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived. Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio); carried_in names where, if anywhere, the operator carried the critique into this record.`;
+  `received_elsewhere is a separate, hand-kept list and counts nothing here: critiques of this society's served record that an outside account posted on another platform and that one of our identities answered (a critique none of our identities answered is not on it), selected by the operator from ${RECEIVED_ELSEWHERE_FROM_UTC} (our review request post on The Colony; earlier ones are not listed). It is the operator's own statement: each entry is a comment on the post at its url, named by the id in comment_id. The guest door's ${GUEST_ANSWER_TARGET_HOURS}-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived. Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio); carried_in names where, if anywhere, the operator carried the critique into this record.`;
 
 // ---------- the id namespace and the byline ----------
 
