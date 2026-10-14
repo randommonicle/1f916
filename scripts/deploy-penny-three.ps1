@@ -180,6 +180,11 @@ function Test-ReceivedElsewhereAbsent($body) {
 # count was unreadable for that response: the three share one writer read, so the ride's retry keys on that reason), ever_written lies between acted_30d and citizens, the not-designated count is bounded by
 # ever_written and by the complement of the operator's list, the difference is no more than the operator's own seats, the Rule 7 outside count is no more than the not-designated count, and each new count has its
 # provenance entry with the source tag record and the sentence the wave gave it.
+# $true when a Test-EverWrittenServed reason says a writer count was NULL (its writer read failed for that response): the ONLY reason the ride reads again.
+# Keyed on the exact text Test-EverWrittenServed returns for a null value; test/deploy-penny-three-script.test.ts runs both functions together on a real null body.
+function Test-IsNullReason($why) {
+  return ([string]$why -match "^composition\.(acted_30d|ever_written|not_designated_ever_written) is '', expected a whole number \(null means the count was unreadable")
+}
 function Test-EverWrittenServed($body) {
   try { $o = ([string]$body | ConvertFrom-Json) } catch { return "GET /api/official did not return JSON" }
   if ($null -eq $o -or $null -eq $o.composition) { return "GET /api/official carries no composition block" }
@@ -487,7 +492,7 @@ for ($try = 1; $try -le 3; $try++) {
   $officialNow = Get-Text $OFFICIAL_URL 30
   if ($officialNow.Code -ne "200") { Stop-Here "GET /api/official answered $($officialNow.Code). $ROLLBACK_LINE" }
   $servedWhy = Test-EverWrittenServed $officialNow.Body
-  if ($servedWhy -eq "" -or -not $servedWhy.Contains("' (null means the count was unreadable")) { break }
+  if ($servedWhy -eq "" -or -not (Test-IsNullReason $servedWhy)) { break }
   if ($try -lt 3) { Say "[ride] a writer count was null on read $try (its writer read failed for that response); reading again in 10 s"; Start-Sleep -Seconds 10 }
 }
 if ($servedWhy -ne "") { Stop-Here "GET /api/official does not serve the ever-written counts as defined: $servedWhy. $ROLLBACK_LINE" }

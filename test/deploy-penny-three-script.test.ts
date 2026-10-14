@@ -437,6 +437,7 @@ test("Test-EverWrittenServed and Test-EverWrittenAbsent (run for real): the body
     lines.push(`Write-Output ('ABSENT_NEW=' + (Test-EverWrittenAbsent ${getFile("ok.json")}))`);
     lines.push("Write-Output ('ABSENT_JUNK=' + (Test-EverWrittenAbsent 'not json'))");
     lines.push(`Write-Output ('SERVED_PRE=[' + (Test-EverWrittenServed ${getFile("pre.json")}) + ']')`);
+    for (const name of Object.keys(mutants)) lines.push(`Write-Output ('NULLKEY_${name}=' + (Test-IsNullReason (Test-EverWrittenServed ${getFile(`m_${name}.json`)})))`);
     const r = runPs(lines, files);
     if (!r) return t.skip("powershell is not available on this machine");
     assert.equal(r.code, 0, r.out);
@@ -464,6 +465,11 @@ test("Test-EverWrittenServed and Test-EverWrittenAbsent (run for real): the body
     for (const [name, pattern] of Object.entries(reasons)) {
       const line = r.out.split("\n").find((l) => l.startsWith(`M_${name}=`)) ?? "";
       assert.match(line, pattern, `${name}: the reason names the broken thing`);
+    }
+    // The ride's retry key, run on the REAL reasons: true for the three null mutants and false for every other refusal (a key that never matches is a dead retry).
+    for (const name of Object.keys(mutants)) {
+      const want = name === "acted_null" || name === "ever_null" || name === "not_designated_null" ? "True" : "False";
+      assert.match(r.out, new RegExp(`NULLKEY_${name}=${want}`), `${name}: Test-IsNullReason must answer ${want} on the reason Test-EverWrittenServed really gives`);
     }
     assert.match(r.out, /ABSENT_PRE=True/, "the live pre-wave composition is 'absent'");
     assert.match(r.out, /ABSENT_NEW=False/, "the new composition is not");
@@ -793,7 +799,7 @@ test("the other deploy scripts are untouched: the seat counts script still holds
 test("the ride reads GET /api/official up to three times when a writer count is null (a transient writer-read failure), keyed on the exact reason Test-EverWrittenServed gives, and stops if it stays null", () => {
   const loop = code.indexOf("for ($try = 1; $try -le 3; $try++)");
   assert.ok(loop > 0 && loop > code.indexOf("Wait-NewWorker $headSha"), "the ride, after the poll, must carry the three-read loop");
-  assert.ok(code.includes(`$servedWhy.Contains("' (null means the count was unreadable")`), "the retry must key on the null reason");
+  assert.ok(code.includes("-not (Test-IsNullReason $servedWhy)"), "the retry must key on Test-IsNullReason (run for real against Test-EverWrittenServed's own null reason in the run-for-real test)");
   // The key must be the text Test-EverWrittenServed really produces for a null count, or the retry never fires.
   assert.ok(defs.includes(`return ("composition." + $f + " is '" + $v.Value + "', expected a whole number (null means the count was unreadable for that response)")`), "Test-EverWrittenServed's null reason format changed: the ride's retry key must follow it");
   // After the loop, a reason that is still set stops the script.
