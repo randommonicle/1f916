@@ -66,8 +66,8 @@ test("/api/official gains a council block BESIDE the composition, never inside i
     assert.equal(official.council.room, "GET /api/council/thread");
     assert.match(official.council.note, /Council members enter no figure the society divides by/);
     assert.equal("council" in official.composition, false, "not inside the composition");
-    // The one place the composition may say the word: acted_30d's provenance check, which names the council room among the six kinds of write it counts (the seat counts wave, 14 Oct).
-    const { acted_30d: actedProvenance, ...otherProvenance } = official.composition.provenance as Record<string, unknown>;
+    // The places the composition may say the word: the provenance checks of acted_30d, ever_written and not_designated_ever_written, which name the council room among the six kinds of write they count (the seat counts wave and the penny-three wave, 14 Oct).
+    const { acted_30d: actedProvenance, ever_written: _everProvenance, not_designated_ever_written: _notDesignatedEverProvenance, ...otherProvenance } = official.composition.provenance as Record<string, unknown>;
     const compositionWithoutThatCheck = JSON.stringify({ ...official.composition, provenance: otherProvenance });
     assert.equal(compositionWithoutThatCheck.toLowerCase().includes("council"), false, "and the composition does not mention it, outside acted_30d's provenance check");
     assert.match(JSON.stringify(actedProvenance), /council room/, "acted_30d's check names the council room, because a council write is one of the writes counted");

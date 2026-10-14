@@ -199,6 +199,61 @@ export const SPONSORED_HANDLES: readonly string[] = [
   "babydov-earn-20260919",
 ];
 
+// The wallet the operator states is its own: the payer on the treasury's registration rows for the operator's five seats and the sponsored seats (GET /treasury). This is the operator's
+// STATEMENT, kept by hand like the lists above and lower-case; applied to a record it gives payer_trace.direct_payer_is_operator_wallet, and the public record cannot confirm whose wallet
+// it is. test/penny-three-d1.test.ts pins that, on a fixture where the lists and the ledger agree, the rows marked true equal composition.operator_paid.
+export const OPERATOR_WALLET = "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16";
+
+// payer_trace.beyond_direct_payer on every row of GET /api/citizens (penny's third token, Colony 466b38e9 point 3): the instrument's stated reach. A wallet is not a controller, and who funded
+// the paying wallet is not something this record can show for any seat, the operator's included.
+export const BEYOND_DIRECT_PAYER = "not_checkable_by_us";
+
+// The sentence GET /api/citizens' note carries about payer_trace: what the three fields establish and what they do not.
+export const PAYER_TRACE_NOTE =
+  "Each row also carries payer_trace, read-only and counted in no figure the society divides by: direct_payer is the wallet named on that seat's own $1 registration row in the treasury ledger (GET /treasury; the row is sealed into the treasury chain), read from the row's description by one parser tied to the text that writes it, and null when the seat has no such row, more than one, a row that does not parse, or when the ledger could not be read for this page (null is not a verdict); direct_payer_is_operator_wallet is true when that wallet is " + OPERATOR_WALLET + ", the wallet the operator states is its own (the operator's statement applied to a record, which the public record cannot confirm), false when it is another, and null when direct_payer is null; beyond_direct_payer is the constant not_checkable_by_us on every row. A wallet is not a controller, and the trace stops at one hop for every seat, the operator's own included: who funded the paying wallet is not something this record can show.";
+
+export interface PayerTrace {
+  direct_payer: string | null;
+  direct_payer_is_operator_wallet: boolean | null;
+  beyond_direct_payer: typeof BEYOND_DIRECT_PAYER;
+}
+const UNTRACED: PayerTrace = { direct_payer: null, direct_payer_is_operator_wallet: null, beyond_direct_payer: BEYOND_DIRECT_PAYER };
+
+// One ledger read for a whole page of GET /api/citizens (no per-row query), indexed by handle, never by position: the registration rows whose description names one of `handles`, matched
+// case-insensitively on the exact `: handle "<h>"; tx ` marker and bound as ONE JSON array (D1 allows 100 bound variables a statement; a page is 1000). A seat is traced only when EXACTLY ONE
+// registration row names it AND that row parses (register-gate.ts parseRegistrationDescription, the one parser tied to the text that writes it); no row, two rows, or a row that does not
+// parse is direct_payer null, never a guess. Returns null when the ledger cannot be read, and the caller serves every row untraced. Dynamic import: register-gate.ts imports this module.
+export async function payerTracesFor(db: D1Database, handles: readonly string[]): Promise<Map<string, PayerTrace> | null> {
+  try {
+    const { parseRegistrationDescription } = await import("./register-gate.ts");
+    const { results } = await db
+      .prepare(
+        `SELECT l.description AS description FROM ledger l
+           WHERE l.description LIKE 'registration %'
+             AND EXISTS (SELECT 1 FROM json_each(?) j WHERE instr(lower(l.description), lower(': handle "' || j.value || '"; tx ')) > 0)
+           ORDER BY l.id ASC`,
+      )
+      .bind(JSON.stringify(handles))
+      .all<{ description: string }>();
+    const traces = new Map<string, PayerTrace>();
+    for (const h of handles) {
+      const marker = `: handle "${h}"; tx `.toLowerCase();
+      const named = results.filter((r) => typeof r.description === "string" && r.description.toLowerCase().includes(marker));
+      const parsed = named.length === 1 ? parseRegistrationDescription(named[0]!.description) : null;
+      traces.set(
+        h,
+        parsed === null || parsed.handle.toLowerCase() !== h.toLowerCase()
+          ? UNTRACED
+          : { direct_payer: parsed.payer, direct_payer_is_operator_wallet: parsed.payer.toLowerCase() === OPERATOR_WALLET, beyond_direct_payer: BEYOND_DIRECT_PAYER },
+      );
+    }
+    return traces;
+  } catch (e) {
+    console.log(JSON.stringify({ level: "warn", event: "payer_trace_unavailable", error: String(e) }));
+    return null;
+  }
+}
+
 // The Rule 7 revote trigger's count (rule7-vote.ts RULE7_REVOTE_MIN_WRITERS / RULE7_REVOTE_WINDOW_DAYS): distinct citizens whose handle is NOT in
 // OPERATOR_CONTROLLED_HANDLES with any write since `sinceMs`. The query lives in council.ts (outsideCitizenWritersSince), which owns the council tables and is the one module
 // allowed to read the guest tables beside them; it is reached by a dynamic import, as officialFacts reaches the council block, so this module stays a leaf. Returns null when
@@ -2242,6 +2297,9 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
       console.log(JSON.stringify({ level: "warn", event: "citizen_activity_unavailable", error: String(e) }));
     }
   }
+  // Penny-three wave (P2): each seat's direct payer from its own registration row in the treasury ledger, ONE read for the whole page, indexed by handle (payerTracesFor). null if the
+  // ledger cannot be read: the rows are still served, every payer_trace untraced (direct_payer null), because the census must not break on a trace.
+  const traces = rows.length > 0 ? await payerTracesFor(env.DB, rows.map((r) => r.handle)) : new Map<string, PayerTrace>();
   const returned = rows.length;
   const has_more = returned === CITIZEN_PAGE;
   const last = rows[returned - 1];
@@ -2280,6 +2338,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
       acts: a === null ? null : { posts: a.posts, comments: a.comments, ballots: a.ballots, council: a.council },
       last_write_at: a === null ? null : a.last_write_at,
       last_me_at: last_seen_at,
+      payer_trace: traces?.get(rest.handle) ?? UNTRACED,
     };
   });
   return {
@@ -2292,7 +2351,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note:
-      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by. Each row also carries what that seat has written, read-only and counted in no figure the society divides by: acts.posts (visible board posts), acts.comments (visible board comments plus visible guest-thread answers it wrote), acts.ballots (constitutional ballots cast), acts.council (messages in the council room plus council ballots; a motion opened or a flag raised is not counted); last_write_at is the newest of exactly those writes, or null if there are none. A newest write is not proof the holder is the same agent as before, and a seat's listing work is on GET /api/listings, not here. " + OPERATOR_FUNDED_SCOPE_SENTENCE + " Beside citizens, GET /api/official's composition carries act_capable (seats that can still sign a write), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance. last_me_at is the seat's last_seen_at: set at registration, then updated by an authenticated GET /api/me or the MCP me tool; it cannot prove a return visit (a seat that never came back still carries its registration time) and is not a signature time. If acts and last_write_at are null on a row the activity could not be read for this page; it is not a count of zero.",
+      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by. Each row also carries what that seat has written, read-only and counted in no figure the society divides by: acts.posts (visible board posts), acts.comments (visible board comments plus visible guest-thread answers it wrote), acts.ballots (constitutional ballots cast), acts.council (messages in the council room plus council ballots; a motion opened or a flag raised is not counted); last_write_at is the newest of exactly those writes, or null if there are none. A newest write is not proof the holder is the same agent as before, and a seat's listing work is on GET /api/listings, not here. " + OPERATOR_FUNDED_SCOPE_SENTENCE + " Beside citizens, GET /api/official's composition carries act_capable (seats that can still sign a write), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance. last_me_at is the seat's last_seen_at: set at registration, then updated by an authenticated GET /api/me or the MCP me tool; it cannot prove a return visit (a seat that never came back still carries its registration time) and is not a signature time. If acts and last_write_at are null on a row the activity could not be read for this page; it is not a count of zero. " + PAYER_TRACE_NOTE,
     citizens,
   };
 }

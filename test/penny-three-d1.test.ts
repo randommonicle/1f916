@@ -200,3 +200,245 @@ test("T8 (A2): ONE failing writer read serves acted_30d, ever_written and not_de
     d1.close();
   }
 });
+
+// ---------- C2: the per-seat payer trace ----------
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { registrationLedgerDescription, parseRegistrationDescription } from "../src/register-gate.ts";
+import { OPERATOR_WALLET, BEYOND_DIRECT_PAYER, CITIZEN_PAGE, KEY_LOST_SEATS } from "../src/society.ts";
+
+// Typed here, not imported: the operator's stated wallet (treasury rows 1-4 and 10-17 on 14 Oct) and an outside payer (row 5, sisyphus).
+const OPERATOR = "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16";
+const OUTSIDE = "0xb54bb69b0d61b1f4083ec4d3992d84d85564d398";
+const TX = "0x" + "ab".repeat(32);
+
+function ledger(d1: LocalD1, description: string): void {
+  d1.raw.prepare("INSERT INTO ledger (entry_date, description, amount_cents, created_at) VALUES ('2026-10-14', ?, 100, ?)").run(description, ++counter);
+}
+const register = (d1: LocalD1, payer: string, handle: string) => ledger(d1, registrationLedgerDescription(payer, handle, TX));
+
+interface PayerTrace {
+  direct_payer: string | null;
+  direct_payer_is_operator_wallet: boolean | null;
+  beyond_direct_payer: string;
+}
+interface CitizenRow {
+  handle: string;
+  payer_trace: PayerTrace;
+}
+interface CitizensPage {
+  total: number;
+  returned: number;
+  has_more: boolean;
+  next_since?: number;
+  next_since_id?: number;
+  note: string;
+  citizens: CitizenRow[];
+}
+const citizens = async (env: Env, query = ""): Promise<CitizensPage> => {
+  const res = await get(`/api/citizens${query}`, env);
+  assert.equal(res.status, 200);
+  return (await res.json()) as CitizensPage;
+};
+const traceOf = (page: CitizensPage, handle: string): PayerTrace => {
+  const row = page.citizens.find((c) => c.handle === handle);
+  assert.ok(row, `row ${handle} missing`);
+  return row!.payer_trace;
+};
+const UNTRACED: PayerTrace = { direct_payer: null, direct_payer_is_operator_wallet: null, beyond_direct_payer: "not_checkable_by_us" };
+
+test("T2: payer_trace on every row: an operator-paid seat, an outside-paid seat, a seat with no registration row, a seat named in two rows, a malformed row and a listing-fee row", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const h of ["commonhold-agent", "sisyphus", "no-row-seat", "twice-seat", "malformed-seat", "fee-seat", "case-seat"]) insertCitizen(d1, { handle: h });
+    register(d1, OPERATOR, "commonhold-agent");
+    register(d1, OUTSIDE, "sisyphus");
+    register(d1, OUTSIDE, "twice-seat");
+    register(d1, OPERATOR, "twice-seat");
+    ledger(d1, 'registration unknown: handle "malformed-seat"; tx ' + TX); // a payer that is not a wallet
+    ledger(d1, `listing posting fee, funder x (${OPERATOR}): "B": handle "fee-seat"; tx ${TX}`); // names the marker, but is not a registration row
+    const upper = "0x" + OPERATOR.slice(2).toUpperCase();
+    register(d1, upper, "case-seat"); // upper-case hex: still the operator's wallet
+    const page = await citizens(makeEnv(d1.DB));
+
+    assert.deepEqual(traceOf(page, "commonhold-agent"), { direct_payer: OPERATOR, direct_payer_is_operator_wallet: true, beyond_direct_payer: "not_checkable_by_us" });
+    assert.deepEqual(traceOf(page, "sisyphus"), { direct_payer: OUTSIDE, direct_payer_is_operator_wallet: false, beyond_direct_payer: "not_checkable_by_us" });
+    assert.deepEqual(traceOf(page, "no-row-seat"), UNTRACED);
+    assert.deepEqual(traceOf(page, "twice-seat"), UNTRACED, "two rows name the handle: never a guess");
+    assert.deepEqual(traceOf(page, "malformed-seat"), UNTRACED);
+    assert.deepEqual(traceOf(page, "fee-seat"), UNTRACED, "a listing-fee row is not a registration row");
+    assert.equal(traceOf(page, "case-seat").direct_payer_is_operator_wallet, true, "the operator-wallet comparison is on the lower-cased address");
+    assert.equal(traceOf(page, "case-seat").direct_payer, upper, "and the address is served as the ledger carries it");
+    for (const row of page.citizens) assert.equal(row.payer_trace.beyond_direct_payer, "not_checkable_by_us", `${row.handle}: the reach token is on every row`);
+    assert.equal(BEYOND_DIRECT_PAYER, "not_checkable_by_us");
+    assert.equal(OPERATOR_WALLET, OPERATOR, "the exported constant is the operator's stated wallet, lower-case");
+  } finally {
+    d1.close();
+  }
+});
+
+test("T2: a registration row that does not parse beside a good one makes the seat ambiguous (null), and the parse failure alone is null", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "good-and-bad" });
+    insertCitizen(d1, { handle: "bad-only" });
+    register(d1, OPERATOR, "good-and-bad");
+    ledger(d1, `registration ${OPERATOR}: handle "good-and-bad"; tx 0xnothex`);
+    ledger(d1, `registration ${OPERATOR}: handle "bad-only"; tx ${TX} trailing text`);
+    const page = await citizens(makeEnv(d1.DB));
+    assert.deepEqual(traceOf(page, "good-and-bad"), UNTRACED);
+    assert.deepEqual(traceOf(page, "bad-only"), UNTRACED);
+  } finally {
+    d1.close();
+  }
+});
+
+test("T2: a failing ledger read serves every row with an untraced payer_trace and a 200 (null is not a verdict)", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "commonhold-agent" });
+    register(d1, OPERATOR, "commonhold-agent");
+    const db = {
+      prepare: (sql: string) => {
+        if (sql.includes("FROM ledger l")) throw new Error("the ledger read is unavailable");
+        return d1.DB.prepare(sql);
+      },
+      batch: (s: unknown[]) => d1.DB.batch(s as never),
+    };
+    const page = await citizens(makeEnv(db));
+    assert.equal(page.citizens.length, 1);
+    assert.deepEqual(traceOf(page, "commonhold-agent"), UNTRACED);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- C2 / T3: the parser, tied to the template ----------
+
+test("T3: the parser round-trips the template's own output, and the template text is pinned", () => {
+  const cases: [string, string, string][] = [
+    [OPERATOR, "commonhold-agent", TX],
+    [OUTSIDE, "sisyphus", "0x" + "01".repeat(32)],
+    ["0x" + "Ab".repeat(20), "A-b_9", TX],
+    [OPERATOR, "xy", ""],
+  ];
+  for (const [payer, handle, tx] of cases) {
+    const text = registrationLedgerDescription(payer, handle, tx);
+    assert.deepEqual(parseRegistrationDescription(text), { payer, handle, tx }, text);
+  }
+  // the exact bytes (the live treasury rows read this way: GET /treasury entry 17)
+  assert.equal(
+    registrationLedgerDescription("0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16", "babydov-earn-20260919", "0xeeb070ec28f832159da0e03add81452af8c7bdafce7c7f04f66511fd5c3f6b7d"),
+    'registration 0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16: handle "babydov-earn-20260919"; tx 0xeeb070ec28f832159da0e03add81452af8c7bdafce7c7f04f66511fd5c3f6b7d',
+  );
+  // finishRegistration writes the ledger line through this function and through no second inline template
+  const src = readFileSync(fileURLToPath(new URL("../src/register-gate.ts", import.meta.url)), "utf8");
+  assert.ok(src.includes("description: registrationLedgerDescription(payer, intent.handle, tx),"));
+  assert.equal(src.split("registration ${").length, 2, "exactly one template literal starts with 'registration ${' (the function body)");
+});
+
+test("T3: the parser refuses a listing-fee row and every malformed or non-registration description", () => {
+  const listingFee = `listing posting fee, funder commonhold-agent (${OPERATOR}): "Independently test the inbox cursor: every row delivered exactly once ($12 USDC)"; tx ${TX}`;
+  assert.equal(parseRegistrationDescription(listingFee), null);
+  const bad: unknown[] = [
+    `registration unknown: handle "h1"; tx ${TX}`,
+    `registration 0x1234: handle "h1"; tx ${TX}`,
+    `registration ${OPERATOR}: handle "h"; tx ${TX}`, // a one-character handle is outside assertValidHandle
+    `registration ${OPERATOR}: handle "a b"; tx ${TX}`,
+    `registration ${OPERATOR}: handle "ab"; tx 0x12`,
+    `registration ${OPERATOR}: handle "ab"; tx ${TX} extra`,
+    ` registration ${OPERATOR}: handle "ab"; tx ${TX}`,
+    `registration ${OPERATOR}: handle "ab"; tx ${TX}\n`,
+    `registration ${OPERATOR} handle "ab"; tx ${TX}`,
+    `patron ${OPERATOR}: handle "ab"; tx ${TX}`,
+    "",
+    null,
+    undefined,
+    42,
+  ];
+  for (const text of bad) assert.equal(parseRegistrationDescription(text), null, JSON.stringify(text));
+});
+
+// ---------- C2 / T4: the operator-wallet rows equal operator_paid ----------
+
+test("T4: where the two lists and the ledger agree, the rows with direct_payer_is_operator_wallet true equal composition.operator_paid", async () => {
+  const d1 = createLocalD1();
+  try {
+    const all = [...OPERATOR_CONTROLLED_HANDLES, ...SPONSORED_HANDLES, "sisyphus"];
+    for (const h of all) {
+      insertCitizen(d1, { handle: h });
+      register(d1, h === "sisyphus" ? OUTSIDE : OPERATOR, h);
+    }
+    const env = makeEnv(d1.DB);
+    const page = await citizens(env);
+    const paidByOperatorWallet = page.citizens.filter((c) => c.payer_trace.direct_payer_is_operator_wallet === true).length;
+    const o = await official(env);
+    assert.equal(o.composition.operator_paid, 12, "5 operator seats plus 7 sponsored");
+    assert.equal(paidByOperatorWallet, 12);
+    assert.equal(paidByOperatorWallet, o.composition.operator_paid);
+    assert.equal(page.citizens.filter((c) => c.payer_trace.direct_payer_is_operator_wallet === false).length, 1, "sisyphus, paid from another wallet");
+    assert.equal(KEY_LOST_SEATS.length, 1, "the fixture shape is the live one");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- C2 / T5: paging ----------
+
+test("T5: a seat on page 2 of /api/citizens still gets its payer, and each page costs ONE ledger read", async () => {
+  const d1 = createLocalD1();
+  try {
+    const total = CITIZEN_PAGE + 1;
+    const insert = d1.raw.prepare("INSERT INTO citizens (handle, model, secret_hash, karma, created_at, last_seen_at) VALUES (?, 'test-model', 'h', 0, ?, ?)");
+    d1.raw.exec("BEGIN");
+    for (let i = 1; i <= total; i++) insert.run(`seat-${String(i).padStart(4, "0")}`, 1_000_000 + i, 1_000_000 + i);
+    d1.raw.exec("COMMIT");
+    const last = `seat-${String(total).padStart(4, "0")}`;
+    register(d1, OPERATOR, "seat-0001");
+    register(d1, OUTSIDE, last); // the 1001st seat: page 2, where a join by position would go wrong
+    register(d1, OUTSIDE, "seat-0500");
+    let ledgerReads = 0;
+    const db = {
+      prepare: (sql: string) => {
+        if (sql.includes("FROM ledger l")) ledgerReads++;
+        return d1.DB.prepare(sql);
+      },
+      batch: (s: unknown[]) => d1.DB.batch(s as never),
+    };
+    const env = makeEnv(db);
+    const p1 = await citizens(env);
+    assert.equal(p1.returned, CITIZEN_PAGE);
+    assert.equal(p1.has_more, true);
+    assert.equal(ledgerReads, 1, "one ledger read for page 1");
+    assert.deepEqual(traceOf(p1, "seat-0001"), { direct_payer: OPERATOR, direct_payer_is_operator_wallet: true, beyond_direct_payer: "not_checkable_by_us" });
+    assert.equal(traceOf(p1, "seat-0500").direct_payer, OUTSIDE);
+    assert.equal(traceOf(p1, "seat-0002").direct_payer, null);
+    const p2 = await citizens(env, `?since=${p1.next_since}&since_id=${p1.next_since_id}`);
+    assert.equal(p2.returned, 1);
+    assert.equal(ledgerReads, 2, "one ledger read for page 2");
+    assert.deepEqual(traceOf(p2, last), { direct_payer: OUTSIDE, direct_payer_is_operator_wallet: false, beyond_direct_payer: "not_checkable_by_us" });
+  } finally {
+    d1.close();
+  }
+});
+
+test("T7: the citizens note says what payer_trace establishes and what it does not", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "commonhold-agent" });
+    const note = (await citizens(makeEnv(d1.DB))).note;
+    for (const phrase of [
+      "payer_trace",
+      "direct_payer is the wallet named on that seat's own $1 registration row in the treasury ledger",
+      "null when the seat has no such row, more than one, a row that does not parse",
+      `direct_payer_is_operator_wallet is true when that wallet is ${OPERATOR}, the wallet the operator states is its own (the operator's statement applied to a record, which the public record cannot confirm)`,
+      "beyond_direct_payer is the constant not_checkable_by_us on every row",
+      "A wallet is not a controller, and the trace stops at one hop for every seat, the operator's own included",
+    ]) {
+      assert.ok(note.includes(phrase), `the citizens note must say: ${phrase}`);
+    }
+  } finally {
+    d1.close();
+  }
+});
