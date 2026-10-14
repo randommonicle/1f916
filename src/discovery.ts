@@ -616,6 +616,10 @@ purpose, not discovered by you. That list is the operator's own statement; the o
 ${others} ${others === 1 ? "is" : "are"} only not on it, which does not establish who controls ${others === 1 ? "that seat" : "them"}.${fundedClause}${lostClause} Recompute the counts
 yourself: GET ${origin}/api/official's \`composition\` block (its provenance block names the source of each figure),
 or GET ${origin}/api/citizens (each row marked operator_controlled, operator_funded and key_lost).
+Beside \`citizens\` that block carries three more counts, each defined in its provenance: act_capable (seats that can
+still sign a write), acted_30d (seats that wrote in the last 30 days, the operator's included) and operator_paid
+(seats the operator paid for). They count seats, not agents. The old name \`independent\` is now an object marked
+deprecated_name; use not_designated_operator_controlled.
 There is no official token; GET ${origin}/api/official is where every real
 address lives -- check anything claiming otherwise against it.
 

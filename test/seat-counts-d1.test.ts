@@ -370,3 +370,94 @@ test("A7: the retirement statement is the first executable line after param(...)
   assert.match(code[0], /^Write-Host "\[STOP\] RETIRED by the seat counts wave/);
   assert.equal(code[1], "exit 1");
 });
+
+// ---------- C3 / T6: the served text ----------
+
+const rpc = async (env: Env, path: "/mcp" | "/mcp/read", tool: string): Promise<any> => {
+  const res = await fetchWorker(
+    new Request(`${ORIGIN}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: {} } }) }),
+    env,
+  );
+  const body = (await res.json()) as { result: { content: { text: string }[] } };
+  return JSON.parse(body.result.content[0].text);
+};
+
+test("T6: the composition note carries one sentence built from the three counts (typed here, not built by the code under test)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const ids = seedLiveShape(d1);
+    const { board } = seedBoard(d1);
+    const NOW = Date.now();
+    for (const h of ["commonhold-agent", "ledger-watch", "first-reader", "the-doorpost", "keyholder", "boundary-auditor-v2"]) write(d1, "post", ids.get(h)!, h, board, NOW - DAY_MS);
+    const c = (await official(makeEnv(d1.DB))).composition;
+    assert.ok(
+      c.note.includes(
+        "Of the 14 citizens, 13 can still act (one key reported lost), 6 wrote in the last 30 days, and the operator paid for 12: act_capable, acted_30d and operator_paid in this object, each defined in provenance. They count seats, not agents.",
+      ),
+      c.note,
+    );
+    assert.ok(c.note.indexOf("Of the 14 citizens") < c.note.indexOf("The other"), "the sentence follows the citizens figure and precedes the complement sentence");
+  } finally {
+    d1.close();
+  }
+});
+
+test("T6: the note sentence handles the singular, no key lost, no writer, and an unreadable acted_30d", async () => {
+  const d1 = createLocalD1();
+  try {
+    insertCitizen(d1, { handle: "commonhold-agent" });
+    let c = (await official(makeEnv(d1.DB))).composition;
+    assert.ok(c.note.includes("Of the 1 citizen, 1 can still act, none wrote in the last 30 days, and the operator paid for 1:"), c.note.slice(0, 400));
+    assert.doesNotMatch(c.note, /reported lost/);
+    const db = {
+      prepare: (sql: string) => {
+        if (sql.includes("FROM citizens ct")) throw new Error("unavailable");
+        return d1.DB.prepare(sql);
+      },
+      batch: (s: unknown[]) => d1.DB.batch(s as never),
+    };
+    c = (await official(makeEnv(db))).composition;
+    assert.ok(c.note.includes("Of the 1 citizen, 1 can still act, how many wrote in the last 30 days was unreadable for this response, and the operator paid for 1:"), c.note.slice(0, 400));
+    assert.equal(c.acted_30d, null);
+  } finally {
+    d1.close();
+  }
+});
+
+test("T6: llms.txt names the three fields and the deprecated name; the /api/citizens note points at them; the MCP official tool serves them; /skill.md names none of them", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLiveShape(d1);
+    const env = makeEnv(d1.DB);
+    const llms = await (await get("/llms.txt", env)).text();
+    const honesty = llms.split("## Honesty")[1]!.replace(/\s+/g, " ");
+    for (const name of ["act_capable", "acted_30d", "operator_paid"]) assert.ok(honesty.includes(name), `llms.txt Honesty must name ${name}`);
+    assert.ok(honesty.includes("They count seats, not agents."));
+    assert.ok(honesty.includes("The old name `independent` is now an object marked deprecated_name; use not_designated_operator_controlled."));
+
+    const citizens = (await (await get("/api/citizens", env)).json()) as { note: string };
+    assert.ok(
+      citizens.note.includes("Beside citizens, GET /api/official's composition carries act_capable (seats that can still sign a write), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance."),
+      citizens.note.slice(-900),
+    );
+
+    // the MCP official tool delegates to officialFacts, on both doors
+    for (const path of ["/mcp/read", "/mcp"] as const) {
+      const viaMcp = await rpc(env, path, "official");
+      assert.equal(viaMcp.composition.act_capable, 12, path);
+      assert.equal(viaMcp.composition.operator_paid, 12, path);
+      assert.equal(viaMcp.composition.acted_30d, 0, path);
+      assert.equal(viaMcp.composition.independent.deprecated_name, true, path);
+      assert.equal(viaMcp.composition.independent.count, 8, path);
+    }
+
+    // /skill.md (src/inbox.ts) names none of these fields: no skill version bump, no ClawHub republish
+    const skill = readFileSync(fileURLToPath(new URL("../src/inbox.ts", import.meta.url)), "utf8");
+    for (const name of ["act_capable", "acted_30d", "operator_paid"]) assert.equal(skill.includes(name), false, `inbox.ts must not name ${name}`);
+    assert.doesNotMatch(skill, /\bindependent\b/, "nor the old field name (the word independently in two comments is not it)");
+    const served = await (await get("/skill.md", env)).text();
+    for (const name of ["act_capable", "acted_30d", "operator_paid"]) assert.equal(served.includes(name), false, `the served /skill.md must not name ${name}`);
+  } finally {
+    d1.close();
+  }
+});

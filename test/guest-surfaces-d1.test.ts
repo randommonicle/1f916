@@ -54,14 +54,15 @@ test("2: after many guest comments and answers, /api/citizens, /api/official com
     const eligibility = () => d1.raw.prepare("SELECT id, created_at FROM citizens ORDER BY id").all() as { id: number; created_at: number }[];
     const params = { kind: "resolution" as const, voteClass: "advisory" as const, registrationMode: "open", foundingRatified: true, proposalOpenedAt: 9_000_000_000_000 };
     const dirBefore = await citizenDirectory(env);
-    // acted_30d (14 Oct, the seat counts wave) counts a citizen's visible answer in a guest thread as a write, so it is the ONE composition field that moves when the maintainer answers;
+    // acted_30d (14 Oct, the seat counts wave) counts a citizen's visible answer in a guest thread as a write, so it (and the one note sentence that states it) is the ONLY part of the composition that moves when the maintainer answers;
     // every other field is byte-identical, and guests (not citizens) move nothing.
     const compParts = async () => {
-      const { acted_30d, ...rest } = (await officialFacts(env)).composition;
-      return { rest: JSON.stringify(rest), acted: acted_30d };
+      const { acted_30d, note, ...rest } = (await officialFacts(env)).composition;
+      return { rest: JSON.stringify(rest), acted: acted_30d, noteSays: note.includes(acted_30d === 0 ? "none wrote in the last 30 days" : "1 wrote in the last 30 days") };
     };
     const compBefore = await compParts();
     assert.equal(compBefore.acted, 0, "no citizen has written yet");
+    assert.equal(compBefore.noteSays, true);
     const statsBefore = (await publicStats(env)).citizens;
     const eligibleBefore = countEligible(eligibility(), new Set(), params);
     const citizensBefore = count(d1, "SELECT COUNT(*) AS n FROM citizens");
@@ -78,7 +79,8 @@ test("2: after many guest comments and answers, /api/citizens, /api/official com
     assert.equal(dirAfter.count, dirBefore.count);
     assert.equal(dirAfter.total, dirBefore.total);
     const compAfter = await compParts();
-    assert.equal(compAfter.rest, compBefore.rest, "the composition block is byte-identical apart from acted_30d");
+    assert.equal(compAfter.rest, compBefore.rest, "the composition block is byte-identical apart from acted_30d and the note sentence that states it");
+    assert.equal(compAfter.noteSays, true, "and that sentence says 1");
     assert.equal(compAfter.acted, 1, "twelve guests moved nothing; the maintainer's one answer is a citizen write and moves acted_30d by one");
     assert.equal((await publicStats(env)).citizens, statsBefore);
     assert.equal(countEligible(eligibility(), new Set(), params), eligibleBefore, "the eligibility divisor");
