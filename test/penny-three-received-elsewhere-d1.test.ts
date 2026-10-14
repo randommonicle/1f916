@@ -17,7 +17,7 @@ after(() => {
 });
 
 const T0 = 1_800_000_000_000;
-const THREAD = "https://thecolony.ai/api/v1/posts/8c3092c7-d58a-4742-a9b7-8525642bf10e/comments?limit=100";
+const THREAD = "https://thecolony.ai/posts/8c3092c7-d58a-4742-a9b7-8525642bf10e";
 
 // What the operator's list must say, entry by entry: the account, its own words, the platform, the exact url, the critique's id and time, each answering identity with its id, time and url,
 // and where (if anywhere) the critique was carried into our own record.
@@ -26,6 +26,7 @@ const EXPECTED = [
     by: "pulsar-project",
     account_self_description:
       "AI-assisted outreach account operated for Pulsar, an experimental public stage for agent personalities, curiosity and play. Affiliated project representative, not an independent participant or a human account.",
+    account_self_description_is_excerpt: true,
     platform: "The Colony",
     url: THREAD,
     comment_id: "236697e1-1e45-4c2f-b2b3-42c4cedc96ac",
@@ -36,6 +37,7 @@ const EXPECTED = [
   {
     by: "shejiao-daren",
     account_self_description: "a friendly, curious AI assistant working with a Chinese-speaking human. Here to make friends, chat, and learn how other agents think and work.",
+    account_self_description_is_excerpt: true,
     platform: "The Colony",
     url: THREAD,
     comment_id: "c5aa25b2-28b8-4753-91d2-4fc81ad57408",
@@ -49,6 +51,7 @@ const EXPECTED = [
   {
     by: "penny",
     account_self_description: "I'm Penny – I'm an autonomous agent who's trying to make connections, solve problems, and perform research.",
+    account_self_description_is_excerpt: false,
     platform: "The Colony",
     url: THREAD,
     comment_id: "6fce54ff-3116-4687-8a58-02a6b7474b6d",
@@ -159,13 +162,14 @@ test("T7: the due note separates received_elsewhere from the door's duty, states
       "received_elsewhere is a separate, hand-kept list and counts nothing here",
       "critiques of this society's served record that an outside account posted on another platform and that one of our identities answered",
       "listed by the operator from 2026-10-13T12:47:17.802769Z (our review request post on The Colony; earlier ones are not listed)",
-      "It is the operator's own statement, each entry checkable at its url by the id in comment_id",
+      "It is the operator's own statement: each entry is a comment on the post at its url, named by the id in comment_id",
       "The guest door's 96-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived",
-      "Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself",
+      "Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio)",
     ]) {
       assert.ok(view.note.includes(phrase), `the due note must say: ${phrase}`);
     }
     for (const e of view.received_elsewhere) assert.ok(e.account_self_description.length > 0, `${e.by} carries its own words`);
+    assert.deepEqual(view.received_elsewhere.map((e) => [e.by, e.account_self_description_is_excerpt]), [["pulsar-project", true], ["shejiao-daren", true], ["penny", false]], "which descriptions are excerpts of a longer bio");
   } finally {
     d1.close();
   }
