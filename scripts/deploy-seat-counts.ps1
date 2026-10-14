@@ -393,9 +393,15 @@ foreach ($p in "/", "/api/official", "/llms.txt", "/openapi.json", "/treasury", 
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after the deploy (version $versionId): " + ($bad -join ", ") + ". If a read that answered before now fails: $ROLLBACK_LINE") }
 Say "[ride] 14 public reads -> 200"
 # the counts: whole numbers, consistent, with provenance; independent the marked object
-$officialNow = Get-Text $OFFICIAL_URL 30
-if ($officialNow.Code -ne "200") { Stop-Here "GET /api/official answered $($officialNow.Code). $ROLLBACK_LINE" }
-$servedWhy = Test-SeatCountsServed $officialNow.Body
+# Up to three reads, 10 s apart: acted_30d is null by design on a response whose writer read failed, so one transient D1 failure must not print the rollback line for a
+# healthy deploy (the poll above already saw the counts served). A null on all three reads is a writer query failing in production, and that stops the script.
+for ($try = 1; $try -le 3; $try++) {
+  $officialNow = Get-Text $OFFICIAL_URL 30
+  if ($officialNow.Code -ne "200") { Stop-Here "GET /api/official answered $($officialNow.Code). $ROLLBACK_LINE" }
+  $servedWhy = Test-SeatCountsServed $officialNow.Body
+  if ($servedWhy -eq "" -or -not $servedWhy.StartsWith("composition.acted_30d is ''")) { break }
+  if ($try -lt 3) { Say "[ride] acted_30d was null on read $try (its writer read failed for that response); reading again in 10 s"; Start-Sleep -Seconds 10 }
+}
 if ($servedWhy -ne "") { Stop-Here "GET /api/official does not serve the seat counts as defined: $servedWhy. $ROLLBACK_LINE" }
 if (-not (Test-OfficialNoteHasCounts $officialNow.Body)) { Stop-Here "the composition note on GET /api/official does not carry the sentence built from the three counts. $ROLLBACK_LINE" }
 $officialObj = ($officialNow.Body | ConvertFrom-Json)

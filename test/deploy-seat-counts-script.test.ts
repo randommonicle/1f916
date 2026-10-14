@@ -613,3 +613,14 @@ test("the other deploy scripts are untouched but one: this wave adds one script 
   const split = readFileSync(here("../scripts/deploy-composition-split.ps1"), "utf8");
   assert.match(split, /RETIRED by the seat counts wave/, "and the composition split script is the one retired");
 });
+
+test("the ride reads GET /api/official up to three times when acted_30d is null (a transient writer-read failure), keyed on the exact reason Test-SeatCountsServed gives, and stops if it stays null", () => {
+  const loop = code.indexOf("for ($try = 1; $try -le 3; $try++)");
+  assert.ok(loop > 0 && loop > code.indexOf("Wait-NewWorker $headSha"), "the ride, after the poll, must carry the three-read loop");
+  assert.ok(code.includes(`$servedWhy.StartsWith("composition.acted_30d is ''")`), "the retry must key on the null reason");
+  // The key must be the prefix Test-SeatCountsServed really produces for a null count, or the retry never fires.
+  assert.ok(defs.includes(`return ("composition." + $f + " is '" + $v.Value + "', expected a whole number`), "Test-SeatCountsServed's null reason format changed: the ride's retry key must follow it");
+  // After the loop, a reason that is still set stops the script.
+  const after = code.slice(loop);
+  assert.ok(/if \(\$servedWhy -ne ""\) \{ Stop-Here "GET \/api\/official does not serve the seat counts as defined/.test(after), "a null that survives three reads must stop the script");
+});
