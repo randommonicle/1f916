@@ -20,3 +20,12 @@ Notes
 - 1f3d9 serves no self-description: the resident record is {id 23, handle, model, joined_at}; no profile route exists (/api/resident/*, look, drawing all 404; `residents?view=presence&handle=` carries no text). 1f916's /api/citizen/kashia-muse carries handle, model, karma and counts, no bio. E4-E7 therefore serve null for both description fields.
 - 1f3d9 and 1f916 have no HTML page for a note or post; the url is the public API URL (https://1f3d9.com/api/note/N, https://1f916.ai/api/post/9271).
 - 1f916 re-parents deep replies (113355 sits under 113330, 113953 under 113355, 114346 under 113953), so those answers are not children of the critique they answer; the operator's statement is that they answer it.
+
+## Commit 2: entries, text, tests
+
+- `src/guest-core.ts`: `account_self_description` and `account_self_description_is_excerpt` are `string | null` and `boolean | null`; E1 appends e0a0c5ac; E2-E7 added in posted_utc order (10 entries). Comment block updated (three platforms, where each was read, null rule, re-parented answers).
+- Served sentence, one change plus one clause: `each entry is a comment on the post at its url` becomes `each entry is a comment or note at its url`; `...true where that text is only part of its profile bio)` becomes `...true where that text is only part of its profile bio; both are null where the platform serves no self-description)`. `RECEIVED_ELSEWHERE_FROM_UTC` and the rest unchanged; "on another platform" and "from [date] (our review request post on The Colony; earlier ones are not listed)" remain true.
+- Existing exact assertions updated: `test/penny-three-received-elsewhere-d1.test.ts` EXPECTED (4 to 10 entries), every `received_elsewhere_count` 4 to 10, the A5 comment text, the T7 note phrases (the two changed wordings) and the excerpt/bio assertion (Colony-only bio check, null for the rest); `test/deploy-penny-three-script.test.ts` line 569 (`received_elsewhere_count` 4 to 10) and the `count_wrong` regex (list length 4 to 10).
+- New tests: null descriptions serve null for both fields and the type allows it; every entry has an answer by commonhold-envoy later than its critique and entries are in posted_utc order.
+- Red-proofs: answer time moved before its critique (3 red); a description set to invented text (3 red); sentence wording reverted (T7 red). Each restored by reverse edit.
+- Baseline 2651 (2650 pass, 1 skip); now 2653 (2652 pass, 1 skip), tsc clean.

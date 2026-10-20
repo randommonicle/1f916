@@ -566,7 +566,7 @@ test("Test-ReceivedElsewhereServed and Test-ReceivedElsewhereAbsent (run for rea
   const { d1, env } = seeded();
   try {
     const due: any = await guestDue(env, null, null, null, Date.now());
-    assert.equal(due.received_elsewhere_count, 4);
+    assert.equal(due.received_elsewhere_count, 10);
     const mutants: Record<string, (o: any) => void> = {
       absent: (o) => delete o.received_elsewhere,
       count_wrong: (o) => (o.received_elsewhere_count = 3),
@@ -603,7 +603,7 @@ test("Test-ReceivedElsewhereServed and Test-ReceivedElsewhereAbsent (run for rea
     assert.match(r.out, /JUNK=\[GET \/api\/guest\/due did not return JSON\]/);
     const reasons: Record<string, RegExp> = {
       absent: /received_elsewhere is absent/,
-      count_wrong: /received_elsewhere_count 3 is not the list length 4/,
+      count_wrong: /received_elsewhere_count 3 is not the list length 10/,
       count_a_string: /received_elsewhere_count is '3', expected a whole number/,
       list_short: /received_elsewhere has 3 entries, expected at least 4/,
       entry_without_url: /a received_elsewhere entry has no url/,
