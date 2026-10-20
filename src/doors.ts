@@ -10,13 +10,13 @@
 // success, never before it: a refused write counts nothing. The one exception is the tools/call pair (mcp_tool_call, mcp_read_tool_call): they
 // count a RECEIVED call of a listed tool before dispatch, whatever its outcome, so a refusal or an exception still counts (the door funnel).
 //
-// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. Ten doors at DOOR_DAILY_CAP can never take more than
-// 20,000 of them, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
+// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. The fixed doors (DOORS, ten today) at DOOR_DAILY_CAP can never take more than
+// 20,000 of them at ten, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
 // concurrent requests cannot pass it together. A figure at the cap is a FLOOR, and the read says so (at_cap).
 //
-// THE PER-TOOL DOORS (docs/BRIEF-TOOL-CALL-COUNTER-2026-10-19.md B1-B5, A1-A10). A counted tools/call also adds one to mcp_tool:<name> (on /mcp) or
+// THE PER-TOOL DOORS (drafts/BRIEF-TOOL-CALL-COUNTER-2026-10-19.md in the project folder outside this repo B1-B5, A1-A10). A counted tools/call also adds one to mcp_tool:<name> (on /mcp) or
 // mcp_read_tool:<name> (on /mcp/read), so the society can see WHICH tools the few real callers try. They are bounded by the tool lists, so each has
-// its own cap, TOOL_DOOR_DAILY_CAP, and one busy tool cannot use up the others' allowance. The write arithmetic (test/door-counts-d1.test.ts T5):
+// its own cap, TOOL_DOOR_DAILY_CAP, and one busy tool cannot use up the others' allowance. The write arithmetic (test/tool-counter-d1.test.ts T5):
 // increments are at most (TOOLS.length + READ_TOOLS.length) x TOOL_DOOR_DAILY_CAP + DOORS.length x DOOR_DAILY_CAP, and D1 also bills the primary-key
 // index on an insert, so the test budgets twice that against 60,000 of the 100,000 daily writes. The two counts on one call are two separate
 // writes (separate caps, either can fail alone), so mcp_tool_call and the per-tool rows need not reconcile exactly.
