@@ -1,0 +1,22 @@
+# Checkpoint: received_elsewhere catch-up (20 Oct 2026)
+
+Class: hand-kept data on GET /api/guest/due only. No money route, auth, model call, mint, migration, schema, doc.ts, cron, write path or /skill.md.
+Ruling: Ben, 20 Oct ("add on to the lists, yes to all"); hub ruling, same day: both self-description fields become nullable where the platform serves none (E4-E7); the sentence changes "a comment on the post" to "a comment or note"; `answered_by` lists every answer by our identities even where the platform re-parented it.
+
+## Evidence (public GET reads, 20 Oct 2026, saved under scratch/received-elsewhere-builder/evidence/ at the project root)
+
+| Entry | Critique id and time (UTC) | Answers (id, time UTC) | Source file |
+|---|---|---|---|
+| E1 penny 466b38e9 | existing | + e0a0c5ac-c434-4594-8534-cb5ef5f5d637, 2026-10-14T13:49:30.854883Z (parent 466b38e9) | colony-comments.json |
+| E2 thecaretaker | cf412908-5fc1-44f2-b11c-4fb4a5bc241a, 2026-10-15T19:22:37.746828Z | 242f5cc4-700c-4776-837b-1a5298d188a3, 2026-10-17T19:57:34.977912Z | colony-comments.json |
+| E3 thecaretaker | 1ed54728-eedc-4dc1-a125-fbc51da3a287, 2026-10-17T19:59:34.039570Z | 19dec72b-9579-4c9c-84b9-7ee0a321cc47, 2026-10-18T22:54:16.075939Z | colony-comments.json |
+| E4 parallax, 1f3d9 note 36304 | 2026-10-18T23:44:57.907Z | note 36659 2026-10-19T14:48:38.449Z; note 37121 2026-10-20T09:23:10.681Z | 1f3d9-note-36304/36659/37121.json |
+| E5 parallax, 1f3d9 note 36667 | 2026-10-19T15:02:29.358Z | note 37121 2026-10-20T09:23:10.681Z | 1f3d9-note-36667/37121.json |
+| E6 kashia-muse, 1f916 comment 112374 | 2026-10-19T00:16:17.240Z | 113330 2026-10-19T14:10:56.967Z; 113355 2026-10-19T14:48:29.708Z | 1f916-post-9271.json |
+| E7 kashia-muse, 1f916 comment 113953 | 2026-10-20T01:44:31.775Z | 114346 2026-10-20T08:15:14.389Z | 1f916-post-9271.json |
+
+Notes
+- thecaretaker's Colony bio is one sentence (whole bio, excerpt false).
+- 1f3d9 serves no self-description: the resident record is {id 23, handle, model, joined_at}; no profile route exists (/api/resident/*, look, drawing all 404; `residents?view=presence&handle=` carries no text). 1f916's /api/citizen/kashia-muse carries handle, model, karma and counts, no bio. E4-E7 therefore serve null for both description fields.
+- 1f3d9 and 1f916 have no HTML page for a note or post; the url is the public API URL (https://1f3d9.com/api/note/N, https://1f916.ai/api/post/9271).
+- 1f916 re-parents deep replies (113355 sits under 113330, 113953 under 113355, 114346 under 113953), so those answers are not children of the critique they answer; the operator's statement is that they answer it.
