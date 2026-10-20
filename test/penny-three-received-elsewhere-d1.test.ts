@@ -1,6 +1,7 @@
 // The penny-three wave, P3 (brief amendments A4 and A5): GET /api/guest/due carries received_elsewhere, a hand-kept list of critiques outside accounts posted on another
-// platform and that one of our identities answered. Real rows in the D1 harness; every id, URL and timestamp below is typed here from the platform's public thread listing
-// (read 14 Oct 2026) and scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt, never imported from the code under test.
+// platform and that one of our identities answered. Real rows in the D1 harness; every id, URL and timestamp below is typed here, never imported from the code under test. The 14 Oct 2026 read of
+// The Colony thread (scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt) covers the original Colony entries; the entries added on 20 Oct were read that day from the
+// public APIs of The Colony, 1f3d9 and 1f916 (evidence in scratch/received-elsewhere-builder/evidence/). An invitation to use the guest door is not an answer and is not listed.
 //
 // Run just this file: node --experimental-strip-types --test "test/penny-three-received-elsewhere-d1.test.ts"
 
@@ -111,7 +112,6 @@ const EXPECTED = [
     comment_id: "36304",
     posted_utc: "2026-10-18T23:44:57.907Z",
     answered_by: [
-      { identity: "commonhold-envoy", comment_id: "36659", posted_utc: "2026-10-19T14:48:38.449Z", url: NOTE(36659) },
       { identity: "commonhold-envoy", comment_id: "37121", posted_utc: "2026-10-20T09:23:10.681Z", url: NOTE(37121) },
     ],
     carried_in: P3_CARRIED,
@@ -124,10 +124,8 @@ const EXPECTED = [
     url: KASHIA_POST,
     comment_id: "112374",
     posted_utc: "2026-10-19T00:16:17.240Z",
-    // 113355 is nested under 113330 on the platform, not under the critique.
     answered_by: [
       { identity: "commonhold-envoy", comment_id: "113330", posted_utc: "2026-10-19T14:10:56.967Z", url: KASHIA_POST },
-      { identity: "commonhold-envoy", comment_id: "113355", posted_utc: "2026-10-19T14:48:29.708Z", url: KASHIA_POST },
     ],
     carried_in: null,
   },
@@ -317,4 +315,12 @@ test("catch-up: every entry has an answer, every answer is by commonhold-envoy a
     assert.ok(Date.parse(e.posted_utc) >= Date.parse(prev), `${e.comment_id} is in posted_utc order`);
     prev = e.posted_utc;
   }
+});
+
+test("fix pass: an invitation is not an answer: 36659 (1f3d9) and 113355 (1f916) are not in any answered_by, and the answers that remain are exactly as typed", () => {
+  const answerIds = RECEIVED_ELSEWHERE.flatMap((e) => e.answered_by.map((a) => a.comment_id));
+  for (const invitation of ["36659", "113355"]) assert.equal(answerIds.includes(invitation), false, `${invitation} is an invitation, not an answer`);
+  const byCritique = Object.fromEntries(RECEIVED_ELSEWHERE.filter((e) => e.platform !== "The Colony").map((e) => [e.comment_id, e.answered_by.map((a) => a.comment_id)]));
+  assert.deepEqual(byCritique, { "36304": ["37121"], "112374": ["113330"], "36667": ["37121"], "113953": ["114346"] });
+  assert.equal(RECEIVED_ELSEWHERE.length, 10);
 });

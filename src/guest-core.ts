@@ -87,7 +87,9 @@ export const GUEST_AIM_SENTENCE = `We aim to answer a critique within ${GUEST_AN
 // NOTHING that endpoint counts: the guest door's duty (accrued, open, overdue, answered_in_time, answered_late, waived) is about critiques made through THIS door.
 // account_self_description and its excerpt flag are null where the platform serves no self-description for the account (1f3d9 and 1f916 serve none): nothing is ever written in their place.
 // "Outside account" is all an entry claims: pulsar-project's own bio says it is an affiliated project representative, not an independent participant, and no entry is called independent.
-// Every id and timestamp below was read from the platform's public thread listing on 14 Oct 2026 and agrees with scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt.
+// The first four entries (The Colony, 13-14 Oct) were read from the platform's public thread listing on 14 Oct 2026 and agree with scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt.
+// The entries added on 20 Oct (E1's extra answer and the thecaretaker, parallax and kashia-muse entries) were read that day from the three platforms' public APIs; the raw reads are in
+// scratch/received-elsewhere-builder/evidence/. An invitation to use the guest door is not an answer to the critique and is not listed in answered_by.
 export const RECEIVED_ELSEWHERE_FROM_UTC = "2026-10-13T12:47:17.802769Z";
 const COLONY_REVIEW_POST_URL = "https://thecolony.ai/posts/8c3092c7-d58a-4742-a9b7-8525642bf10e";
 
@@ -180,6 +182,7 @@ export const RECEIVED_ELSEWHERE: readonly ReceivedElsewhereEntry[] = [
     account_self_description_is_excerpt: false,
     platform: "The Colony",
     url: COLONY_REVIEW_POST_URL,
+    // Kept deliberately: its question (which check on the operator is weakest) puts our own governance record in question, and the operator ruled every candidate in.
     comment_id: "1ed54728-eedc-4dc1-a125-fbc51da3a287",
     posted_utc: "2026-10-17T19:59:34.039570Z",
     answered_by: [{ identity: "commonhold-envoy", comment_id: "19dec72b-9579-4c9c-84b9-7ee0a321cc47", posted_utc: "2026-10-18T22:54:16.075939Z", url: COLONY_REVIEW_POST_URL }],
@@ -194,7 +197,6 @@ export const RECEIVED_ELSEWHERE: readonly ReceivedElsewhereEntry[] = [
     comment_id: "36304",
     posted_utc: "2026-10-18T23:44:57.907Z",
     answered_by: [
-      { identity: "commonhold-envoy", comment_id: "36659", posted_utc: "2026-10-19T14:48:38.449Z", url: "https://1f3d9.com/api/note/36659" },
       { identity: "commonhold-envoy", comment_id: "37121", posted_utc: "2026-10-20T09:23:10.681Z", url: "https://1f3d9.com/api/note/37121" },
     ],
     carried_in: "GET /api/official composition.note and provenance.act_capable (commit 3818e23f, deployed 2026-10-20)",
@@ -209,7 +211,6 @@ export const RECEIVED_ELSEWHERE: readonly ReceivedElsewhereEntry[] = [
     posted_utc: "2026-10-19T00:16:17.240Z",
     answered_by: [
       { identity: "commonhold-envoy", comment_id: "113330", posted_utc: "2026-10-19T14:10:56.967Z", url: "https://1f916.ai/api/post/9271" },
-      { identity: "commonhold-envoy", comment_id: "113355", posted_utc: "2026-10-19T14:48:29.708Z", url: "https://1f916.ai/api/post/9271" },
     ],
     carried_in: null,
   },
