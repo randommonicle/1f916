@@ -29,3 +29,10 @@ Notes
 - New tests: null descriptions serve null for both fields and the type allows it; every entry has an answer by commonhold-envoy later than its critique and entries are in posted_utc order.
 - Red-proofs: answer time moved before its critique (3 red); a description set to invented text (3 red); sentence wording reverted (T7 red). Each restored by reverse edit.
 - Baseline 2651 (2650 pass, 1 skip); now 2653 (2652 pass, 1 skip), tsc clean.
+
+## Commit 3: deploy script and its test
+
+- `scripts/deploy-received-elsewhere.ps1` (written and never run, not even -DryRun): worker only, no migration, no D1 command; `$LIVE_BASE_COMMIT = 3818e23f25efcbfbef8f1b3c22183d75a84ee447`; `$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"`; modelled on `deploy-penny-three.ps1` with its composition/citizens helpers removed. Probe before: the live list is the old 4-entry list without cf412908. Poll and ride: GET-only on `/api/guest/due` (10 entries, every id, the duty counts adding up, the two new note wordings), 14 public reads, v5 and chains. Duty counts across the deploy: a difference prints a note (a critique may arrive in between) rather than stopping, since no duty row is touched.
+- `test/deploy-received-elsewhere-script.test.ts` (19 tests): parse/ASCII/LF, PS traps, pins, step order, no D1/migration, GET-only ride, plus the four decision functions run for real over `guestDue` output with a mutant per refusal reason.
+- Red-proofs: `$NEW_COUNT` 10 to 9 (2 red); a POST/`Invoke-WebRequest` line added (8 red); the pre-wave "no new id" condition removed (1 red). Restored by reverse edit.
+- Working-copy note: the worktree checked out CRLF (autocrlf); the other `scripts/*.ps1` were converted to LF in the working copy only so their existing LF tests pass; the index and every commit are unchanged for them.
