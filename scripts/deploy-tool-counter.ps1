@@ -39,7 +39,7 @@ $V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491"
 $LIVE_BASE_COMMIT = "30a20819237cd65c7f8064809999cd91c122ffb0"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "40c52c23297e90d210cf16b3ff659d52a313ffc0"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-tool-counter.ps1", "test/deploy-tool-counter-script.test.ts", "docs/")
 # The four rows the ride reads, in the order it reports them: the two receipt doors and the two per-tool doors of the tool it calls.
