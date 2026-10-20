@@ -510,7 +510,8 @@ test("the poll target and the ride are real (in-process, no network): the doors 
       assert.equal(c.status, 200);
       assert.equal(JSON.stringify(c.body).includes('"isError"'), false, `${path}: the ride's call is not an error result`);
     }
-    assert.deepEqual(readRows(), { mcp_tools_list: 1, mcp_read_tools_list: 1, mcp_tool_call: 1, mcp_read_tool_call: 1 }, "exactly the four new rows, one each, and nothing else");
+    // the tool counter wave (docs/CHECKPOINT-TOOL-COUNTER.md) adds the two per-tool rows to the same ride; deploy-tool-counter.ps1 reads them
+    assert.deepEqual(readRows(), { mcp_tools_list: 1, mcp_read_tools_list: 1, mcp_tool_call: 1, mcp_read_tool_call: 1, "mcp_tool:front_page": 1, "mcp_read_tool:front_page": 1 }, "the four funnel rows and the two per-tool rows, one each, and nothing else");
   } finally {
     d1.close();
   }

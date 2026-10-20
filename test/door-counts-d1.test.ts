@@ -180,13 +180,13 @@ test("C2: showhome_enter counts an ACCEPTED enter on BOTH doors, once; a refused
     const viaMcp = await mcp(env, "/mcp", "tools/call", { name: "guest_enter", arguments: { handle: "mcp-one", model: "m" } }, ip());
     assert.equal(viaMcp.body.result.isError, undefined);
     // the MCP guest_enter is also a received tools/call of a listed tool (the door funnel): mcp_tool_call 1
-    assert.deepEqual(today(d1), { showhome_enter: 2, mcp_tool_call: 1 });
+    assert.deepEqual(today(d1), { showhome_enter: 2, mcp_tool_call: 1, "mcp_tool:guest_enter": 1 });
     // refused: a malformed handle, a citizen's handle
     assert.equal((await call(env, "POST", "/api/showhome/enter", { handle: "x", model: "m" }, ip())).status, 400);
     assert.equal((await call(env, "POST", "/api/showhome/enter", { handle: "alice", model: "m" }, ip())).status, 409);
     const refusedMcp = await mcp(env, "/mcp", "tools/call", { name: "guest_enter", arguments: { handle: "alice", model: "m" } }, ip());
     assert.equal(refusedMcp.body.result.isError, true);
-    assert.deepEqual(today(d1), { showhome_enter: 2, mcp_tool_call: 2 }, "no refusal counted as an enter (the refused MCP call is still a received tools/call)");
+    assert.deepEqual(today(d1), { showhome_enter: 2, mcp_tool_call: 2, "mcp_tool:guest_enter": 2 }, "no refusal counted as an enter (the refused MCP call is still a received tools/call)");
   } finally {
     d1.close();
   }
@@ -204,7 +204,7 @@ test("C2: guest_comment counts an ACCEPTED guest comment on BOTH doors, once; a 
     assert.deepEqual(today(d1), { guest_comment: 1 });
     const viaMcp = await mcp(env, "/mcp", "tools/call", { name: "guest_comment", arguments: { token: v.token, post_id: open, body: "a plain comment over MCP", kind: "critique" } }, ip());
     assert.equal(viaMcp.body.result.isError, undefined);
-    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 1 });
+    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 1, "mcp_tool:guest_comment": 1 });
     // refusals, on both doors
     for (const args of [
       { token: v.token, post_id: post, body: "see http://example.com" },
@@ -214,11 +214,11 @@ test("C2: guest_comment counts an ACCEPTED guest comment on BOTH doors, once; a 
       assert.ok((await call(env, "POST", "/api/guest/comment", args, ip())).status >= 400);
       assert.equal((await mcp(env, "/mcp", "tools/call", { name: "guest_comment", arguments: args }, ip())).body.result.isError, true);
     }
-    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 4 }, "no refusal counted as a guest_comment (the three refused MCP calls are still received tools/calls)");
+    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 4, "mcp_tool:guest_comment": 4 }, "no refusal counted as a guest_comment (the three refused MCP calls are still received tools/calls)");
     // a showhome note (either door) is not one of the six doors
     assert.equal((await call(env, "POST", "/api/showhome/note", { token: v.token, body: "a note" }, ip())).status, 201);
     assert.equal((await mcp(env, "/mcp", "tools/call", { name: "showhome_note", arguments: { token: v.token, body: "a second note" } }, ip())).body.result.isError, undefined);
-    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 5 });
+    assert.deepEqual(today(d1), { guest_comment: 2, mcp_tool_call: 5, "mcp_tool:guest_comment": 4, "mcp_tool:showhome_note": 1 });
     assert.equal(count(d1, "SELECT COUNT(*) AS n FROM showhome_notes"), 2);
   } finally {
     d1.close();
@@ -254,6 +254,7 @@ test("C2: counting never fails a request: with the table MISSING every counted r
     ["warn", "heartbeat_md"],
     ["warn", "mcp_initialize"],
     ["warn", "mcp_read_initialize"],
+    ["warn", "mcp_tool:guest_comment"],
     ["warn", "mcp_tool_call"],
     ["warn", "showhome_enter"],
     ["warn", "skill_md"],
@@ -306,12 +307,12 @@ test("C2: with a ctx, no counted route waits for its count: ctx.waitUntil receiv
       assert.notEqual(settled, "timeout", `${label}: the response must come back while its count is still held`);
       assert.ok((settled as Response).status < 300, `${label}: answered ${(settled as Response).status}`);
     }
-    // guest_enter over MCP is two counts (showhome_enter after success, mcp_tool_call on receipt), so one more than the requests
-    assert.equal(pending.length, requests.length + 1, "each count was handed to ctx.waitUntil, once");
+    // guest_enter over MCP is three counts (mcp_tool_call and mcp_tool:guest_enter on receipt, showhome_enter after success), so two more than the requests
+    assert.equal(pending.length, requests.length + 2, "each count was handed to ctx.waitUntil, once");
     assert.equal(rows(d1).length, 0, "and none has been written yet");
     release();
     await Promise.all(pending);
-    assert.deepEqual(today(d1), { skill_md: 1, heartbeat_md: 1, mcp_initialize: 1, mcp_read_initialize: 1, showhome_enter: 2, mcp_tool_call: 1 });
+    assert.deepEqual(today(d1), { skill_md: 1, heartbeat_md: 1, mcp_initialize: 1, mcp_read_initialize: 1, showhome_enter: 2, mcp_tool_call: 1, "mcp_tool:guest_enter": 1 });
   } finally {
     d1.close();
   }
@@ -321,7 +322,7 @@ test("C2: with a ctx, no counted route waits for its count: ctx.waitUntil receiv
 
 const DAY_MS = 86_400_000;
 const NOTE =
-  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at 2000 a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). None of them says which listing or which agent sent the request.";
+  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at 2000 a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at 100, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request.";
 
 test("C3: GET /api/doors serves the last 30 UTC days newest first, {day, door, n, at_cap} per row, and the note verbatim; no credential", async () => {
   const { d1, env } = fresh();
