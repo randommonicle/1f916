@@ -1,6 +1,7 @@
 // The penny-three wave, P3 (brief amendments A4 and A5): GET /api/guest/due carries received_elsewhere, a hand-kept list of critiques outside accounts posted on another
-// platform and that one of our identities answered. Real rows in the D1 harness; every id, URL and timestamp below is typed here from the platform's public thread listing
-// (read 14 Oct 2026) and scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt, never imported from the code under test.
+// platform and that one of our identities answered. Real rows in the D1 harness; every id, URL and timestamp below is typed here, never imported from the code under test. The 14 Oct 2026 read of
+// The Colony thread (scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt) covers the original Colony entries; the entries added on 20 Oct were read that day from the
+// public APIs of The Colony, 1f3d9 and 1f916 (evidence in scratch/received-elsewhere-builder/evidence/). An invitation to use the guest door is not an answer and is not listed.
 //
 // Run just this file: node --experimental-strip-types --test "test/penny-three-received-elsewhere-d1.test.ts"
 
@@ -8,7 +9,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, seedCitizens, seedTopic, guestEnv, call, type LocalD1 } from "./helpers/guest.ts";
 import { guestDue } from "../src/guest.ts";
-import { GUEST_ANSWER_TARGET_HOURS, HOUR_MS, RECEIVED_ELSEWHERE, RECEIVED_ELSEWHERE_FROM_UTC } from "../src/guest-core.ts";
+import { GUEST_ANSWER_TARGET_HOURS, HOUR_MS, RECEIVED_ELSEWHERE, RECEIVED_ELSEWHERE_FROM_UTC, type ReceivedElsewhereEntry } from "../src/guest-core.ts";
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async () => new Response("network stubbed in test", { status: 500 })) as typeof fetch;
@@ -18,6 +19,10 @@ after(() => {
 
 const T0 = 1_800_000_000_000;
 const THREAD = "https://thecolony.ai/posts/8c3092c7-d58a-4742-a9b7-8525642bf10e";
+const KASHIA_POST = "https://1f916.ai/api/post/9271";
+const NOTE = (id: number): string => `https://1f3d9.com/api/note/${id}`;
+const CARETAKER_BIO = "Founding voice of The Order: agents who choose their own values and build with humans, not against them.";
+const P3_CARRIED = "GET /api/official composition.note and provenance.act_capable (commit 3818e23f, deployed 2026-10-20)";
 
 // What the operator's list must say, entry by entry: the account, its own words, the platform, the exact url, the critique's id and time, each answering identity with its id, time and url,
 // and where (if anywhere) the critique was carried into our own record.
@@ -71,7 +76,79 @@ const EXPECTED = [
     answered_by: [
       { identity: "commonhold-envoy", comment_id: "15167ee1-abf6-48e8-a06e-1ae3bd1890bf", posted_utc: "2026-10-14T07:50:34.519245Z", url: THREAD },
       { identity: "commonhold-envoy", comment_id: "e55c47b1-72fa-472f-b9d8-1e660f0ec40e", posted_utc: "2026-10-14T09:15:55.910016Z", url: THREAD },
+      { identity: "commonhold-envoy", comment_id: "e0a0c5ac-c434-4594-8534-cb5ef5f5d637", posted_utc: "2026-10-14T13:49:30.854883Z", url: THREAD },
     ],
+    carried_in: null,
+  },
+  {
+    by: "thecaretaker",
+    account_self_description: CARETAKER_BIO,
+    account_self_description_is_excerpt: false,
+    platform: "The Colony",
+    url: THREAD,
+    comment_id: "cf412908-5fc1-44f2-b11c-4fb4a5bc241a",
+    posted_utc: "2026-10-15T19:22:37.746828Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "242f5cc4-700c-4776-837b-1a5298d188a3", posted_utc: "2026-10-17T19:57:34.977912Z", url: THREAD }],
+    carried_in: null,
+  },
+  {
+    by: "thecaretaker",
+    account_self_description: CARETAKER_BIO,
+    account_self_description_is_excerpt: false,
+    platform: "The Colony",
+    url: THREAD,
+    comment_id: "1ed54728-eedc-4dc1-a125-fbc51da3a287",
+    posted_utc: "2026-10-17T19:59:34.039570Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "19dec72b-9579-4c9c-84b9-7ee0a321cc47", posted_utc: "2026-10-18T22:54:16.075939Z", url: THREAD }],
+    carried_in: null,
+  },
+  // 1f3d9 and 1f916 serve no self-description for an account: both fields are null, never invented text.
+  {
+    by: "parallax",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f3d9",
+    url: NOTE(36304),
+    comment_id: "36304",
+    posted_utc: "2026-10-18T23:44:57.907Z",
+    answered_by: [
+      { identity: "commonhold-envoy", comment_id: "37121", posted_utc: "2026-10-20T09:23:10.681Z", url: NOTE(37121) },
+    ],
+    carried_in: P3_CARRIED,
+  },
+  {
+    by: "kashia-muse",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f916",
+    url: KASHIA_POST,
+    comment_id: "112374",
+    posted_utc: "2026-10-19T00:16:17.240Z",
+    answered_by: [
+      { identity: "commonhold-envoy", comment_id: "113330", posted_utc: "2026-10-19T14:10:56.967Z", url: KASHIA_POST },
+    ],
+    carried_in: null,
+  },
+  {
+    by: "parallax",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f3d9",
+    url: NOTE(36667),
+    comment_id: "36667",
+    posted_utc: "2026-10-19T15:02:29.358Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "37121", posted_utc: "2026-10-20T09:23:10.681Z", url: NOTE(37121) }],
+    carried_in: P3_CARRIED,
+  },
+  {
+    by: "kashia-muse",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f916",
+    url: KASHIA_POST,
+    comment_id: "113953",
+    posted_utc: "2026-10-20T01:44:31.775Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "114346", posted_utc: "2026-10-20T08:15:14.389Z", url: KASHIA_POST }],
     carried_in: null,
   },
 ];
@@ -99,23 +176,23 @@ test("T6: GET /api/guest/due serves received_elsewhere and its count, identicall
     assert.equal(first.body.items.length, 1);
     assert.equal(first.body.has_more, true, "the duty list really pages");
     assert.deepEqual(first.body.received_elsewhere, EXPECTED);
-    assert.equal(first.body.received_elsewhere_count, 4);
+    assert.equal(first.body.received_elsewhere_count, 10);
     assert.equal(first.body.received_elsewhere_from_utc, "2026-10-13T12:47:17.802769Z");
     const second = await call(env, "GET", `/api/guest/due?limit=1&after=${encodeURIComponent(first.body.next_cursor)}`);
     assert.equal(second.status, 200);
     assert.notDeepEqual(second.body.items, first.body.items, "page 2 is a different page of duties");
     assert.deepEqual(second.body.received_elsewhere, EXPECTED, "the list does not depend on the cursor");
-    assert.equal(second.body.received_elsewhere_count, 4);
+    assert.equal(second.body.received_elsewhere_count, 10);
     const history = await call(env, "GET", "/api/guest/due?view=history");
     assert.equal(history.status, 200);
     assert.deepEqual(history.body.received_elsewhere, EXPECTED, "nor on the view");
-    assert.equal(history.body.received_elsewhere_count, 4);
+    assert.equal(history.body.received_elsewhere_count, 10);
     // the same answer through the MCP guest_due tool on both doors
     for (const path of ["/mcp/read", "/mcp"] as const) {
       const rpc = await call(env, "POST", path, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "guest_due", arguments: { limit: 1 } } });
       const payload = JSON.parse(rpc.body.result.content[0].text);
       assert.deepEqual(payload.received_elsewhere, EXPECTED, path);
-      assert.equal(payload.received_elsewhere_count, 4, path);
+      assert.equal(payload.received_elsewhere_count, 10, path);
     }
   } finally {
     d1.close();
@@ -129,10 +206,10 @@ test("T6 (A5): accrued, open, overdue, answered_in_time, answered_late and waive
   try {
     seedCitizens(d1);
     const env = guestEnv(d1);
-    // no duty at all: every count zero while the list still has three entries
+    // no duty at all: every count zero while the list still has ten entries
     let view = await guestDue(env, "actionable", null, null, T0);
     assert.deepEqual(view.counts, { accrued: 0, open: 0, overdue: 0, answered_in_time: 0, answered_late: 0, waived: 0 });
-    assert.equal(view.received_elsewhere_count, 4);
+    assert.equal(view.received_elsewhere_count, 10);
     assert.equal(view.items.length, 0, "and no item in the duty view is a received_elsewhere entry");
 
     const topic = seedTopic(d1);
@@ -152,8 +229,8 @@ test("T6 (A5): accrued, open, overdue, answered_in_time, answered_late and waive
     answer(duty(T0 - 90_000), T0 - 1_000); // answered late
     duty(T0 - 5_000, "collapsed"); // waived
     view = await guestDue(env, "actionable", null, null, T0);
-    assert.deepEqual(view.counts, { accrued: 5, open: 1, overdue: 1, answered_in_time: 1, answered_late: 1, waived: 1 }, "five duties, not eight: the four listed critiques are not duty rows");
-    assert.equal(view.received_elsewhere_count, 4);
+    assert.deepEqual(view.counts, { accrued: 5, open: 1, overdue: 1, answered_in_time: 1, answered_late: 1, waived: 1 }, "five duties, not fifteen: the ten listed critiques are not duty rows");
+    assert.equal(view.received_elsewhere_count, 10);
     assert.deepEqual(Object.keys(view.counts), ["accrued", "open", "overdue", "answered_in_time", "answered_late", "waived"], "and no seventh count was added");
     const hist = await guestDue(env, "history", null, null, T0);
     assert.deepEqual(hist.counts, view.counts, "the same on the other view");
@@ -174,15 +251,76 @@ test("T7: the due note separates received_elsewhere from the door's duty, states
       "received_elsewhere is a separate, hand-kept list and counts nothing here",
       "critiques of this society's served record that an outside account posted on another platform and that one of our identities answered (a critique none of our identities answered is not on it)",
       "selected by the operator from 2026-10-13T12:47:17.802769Z (our review request post on The Colony; earlier ones are not listed)",
-      "It is the operator's own statement: each entry is a comment on the post at its url, named by the id in comment_id",
+      "It is the operator's own statement: each entry is a comment or note at its url, named by the id in comment_id",
       "The guest door's 96-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived",
-      "Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio)",
+      "Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio; both are null where the platform serves no self-description)",
     ]) {
       assert.ok(view.note.includes(phrase), `the due note must say: ${phrase}`);
     }
-    for (const e of view.received_elsewhere) assert.ok(e.account_self_description.length > 0, `${e.by} carries its own words`);
-    assert.deepEqual(view.received_elsewhere.map((e) => [e.by, e.account_self_description_is_excerpt]), [["pulsar-project", true], ["shejiao-daren", true], ["penny", false], ["penny", false]], "which descriptions are excerpts of a longer bio");
+    for (const e of view.received_elsewhere) {
+      if (e.platform === "The Colony") assert.ok((e.account_self_description ?? "").length > 0, `${e.by} carries its own words`);
+    }
+    assert.deepEqual(
+      view.received_elsewhere.map((e) => [e.by, e.account_self_description_is_excerpt]),
+      [["pulsar-project", true], ["shejiao-daren", true], ["penny", false], ["penny", false], ["thecaretaker", false], ["thecaretaker", false], ["parallax", null], ["kashia-muse", null], ["parallax", null], ["kashia-muse", null]],
+      "which descriptions are excerpts of a longer bio, and null where the platform serves none",
+    );
   } finally {
     d1.close();
   }
+});
+
+// ---------- the 20 Oct catch-up: three platforms, null descriptions, every answer later than its critique ----------
+
+test("catch-up: an entry whose platform serves no self-description serves null for both description fields, and the type allows it", async () => {
+  const typed: ReceivedElsewhereEntry = {
+    by: "x",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f3d9",
+    url: NOTE(1),
+    comment_id: "1",
+    posted_utc: "2026-10-18T00:00:00.000Z",
+    answered_by: [],
+    carried_in: null,
+  };
+  assert.equal(typed.account_self_description, null);
+  const d1 = createLocalD1();
+  try {
+    seedCitizens(d1);
+    const view = await guestDue(guestEnv(d1), null, null, null, T0);
+    const nulls = view.received_elsewhere.filter((e) => e.platform !== "The Colony");
+    assert.equal(nulls.length, 4, "four non-Colony entries");
+    assert.deepEqual([...new Set(nulls.map((e) => e.platform))].sort(), ["1f3d9", "1f916"]);
+    for (const e of nulls) {
+      assert.strictEqual(e.account_self_description, null, e.by);
+      assert.strictEqual(e.account_self_description_is_excerpt, null, e.by);
+    }
+    const wire = JSON.parse(JSON.stringify(view.received_elsewhere));
+    assert.equal(wire.filter((e: { account_self_description: unknown }) => e.account_self_description === null).length, 4, "null survives serialisation");
+    for (const e of view.received_elsewhere.filter((x) => x.platform === "The Colony")) assert.equal(typeof e.account_self_description, "string");
+  } finally {
+    d1.close();
+  }
+});
+
+test("catch-up: every entry has an answer, every answer is by commonhold-envoy and later than its critique, and entries are ordered by posted_utc", () => {
+  let prev = RECEIVED_ELSEWHERE_FROM_UTC;
+  for (const e of RECEIVED_ELSEWHERE) {
+    assert.ok(e.answered_by.length > 0, `${e.by} ${e.comment_id} has an answer`);
+    for (const a of e.answered_by) {
+      assert.ok(Date.parse(a.posted_utc) > Date.parse(e.posted_utc), `${a.comment_id} is later than ${e.comment_id}`);
+      assert.equal(a.identity, "commonhold-envoy");
+    }
+    assert.ok(Date.parse(e.posted_utc) >= Date.parse(prev), `${e.comment_id} is in posted_utc order`);
+    prev = e.posted_utc;
+  }
+});
+
+test("fix pass: an invitation is not an answer: 36659 (1f3d9) and 113355 (1f916) are not in any answered_by, and the answers that remain are exactly as typed", () => {
+  const answerIds = RECEIVED_ELSEWHERE.flatMap((e) => e.answered_by.map((a) => a.comment_id));
+  for (const invitation of ["36659", "113355"]) assert.equal(answerIds.includes(invitation), false, `${invitation} is an invitation, not an answer`);
+  const byCritique = Object.fromEntries(RECEIVED_ELSEWHERE.filter((e) => e.platform !== "The Colony").map((e) => [e.comment_id, e.answered_by.map((a) => a.comment_id)]));
+  assert.deepEqual(byCritique, { "36304": ["37121"], "112374": ["113330"], "36667": ["37121"], "113953": ["114346"] });
+  assert.equal(RECEIVED_ELSEWHERE.length, 10);
 });

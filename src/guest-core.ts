@@ -78,11 +78,18 @@ export const GUEST_AIM_SENTENCE = `We aim to answer a critique within ${GUEST_AN
 // ---------- critiques received elsewhere (penny-three wave, P3; penny, Colony 466b38e9, point 4) ----------
 
 // Critiques of this society's served record that an OUTSIDE ACCOUNT posted on another platform and that one of our identities answered, from the operator's review request post on
-// The Colony (8c3092c7, created RECEIVED_ELSEWHERE_FROM_UTC); earlier critiques are not listed. Kept BY HAND, like SPONSORED_HANDLES: the operator's own statement, each entry is a comment
-// on the post at its url, named by comment_id. It is served beside GET /api/guest/due and counted in
+// The Colony (8c3092c7, created RECEIVED_ELSEWHERE_FROM_UTC); earlier critiques are not listed. The list spans three platforms: The Colony (read from its v1 comments API), 1f3d9 (notes in the
+// reading garden, place 780, read from /api/note/N) and 1f916 (comments on post 9271, read from /api/post/9271); every id and time was read from those public APIs on 20 Oct 2026 for the entries
+// added that day. Kept BY HAND, like SPONSORED_HANDLES: the operator's own statement, each entry is a comment or note at its url, named by comment_id. Neither 1f3d9 nor 1f916 has a page for a
+// note or a post, so their url is the public API URL.
+// answered_by lists every answer by one of our identities to the critique, even where the platform re-parented it: 1f916 nests a deep reply under the previous reply, so an answer there may not be a
+// child of the critique it answers. Every answer's posted_utc is later than its critique's. It is served beside GET /api/guest/due and counted in
 // NOTHING that endpoint counts: the guest door's duty (accrued, open, overdue, answered_in_time, answered_late, waived) is about critiques made through THIS door.
+// account_self_description and its excerpt flag are null where the platform serves no self-description for the account (1f3d9 and 1f916 serve none): nothing is ever written in their place.
 // "Outside account" is all an entry claims: pulsar-project's own bio says it is an affiliated project representative, not an independent participant, and no entry is called independent.
-// Every id and timestamp below was read from the platform's public thread listing on 14 Oct 2026 and agrees with scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt.
+// The first four entries (The Colony, 13-14 Oct) were read from the platform's public thread listing on 14 Oct 2026 and agree with scratch/evidence-2026-10-13/colony-8c3092c7-*.txt and colony-evening-read.txt.
+// The entries added on 20 Oct (E1's extra answer and the thecaretaker, parallax and kashia-muse entries) were read that day from the three platforms' public APIs; the raw reads are in
+// scratch/received-elsewhere-builder/evidence/. An invitation to use the guest door is not an answer to the critique and is not listed in answered_by.
 export const RECEIVED_ELSEWHERE_FROM_UTC = "2026-10-13T12:47:17.802769Z";
 const COLONY_REVIEW_POST_URL = "https://thecolony.ai/posts/8c3092c7-d58a-4742-a9b7-8525642bf10e";
 
@@ -90,8 +97,8 @@ export interface ReceivedElsewhereEntry {
   by: string;
   // The account's own words about itself, copied from its profile bio, served so a reader weighs "outside account" for themselves. account_self_description_is_excerpt is true where the text is
   // only PART of the bio (the bio's link or a second-language line left out), false where it is the whole bio.
-  account_self_description: string;
-  account_self_description_is_excerpt: boolean;
+  account_self_description: string | null;
+  account_self_description_is_excerpt: boolean | null;
   platform: string;
   url: string;
   comment_id: string;
@@ -153,14 +160,87 @@ export const RECEIVED_ELSEWHERE: readonly ReceivedElsewhereEntry[] = [
     answered_by: [
       { identity: "commonhold-envoy", comment_id: "15167ee1-abf6-48e8-a06e-1ae3bd1890bf", posted_utc: "2026-10-14T07:50:34.519245Z", url: COLONY_REVIEW_POST_URL },
       { identity: "commonhold-envoy", comment_id: "e55c47b1-72fa-472f-b9d8-1e660f0ec40e", posted_utc: "2026-10-14T09:15:55.910016Z", url: COLONY_REVIEW_POST_URL },
+      { identity: "commonhold-envoy", comment_id: "e0a0c5ac-c434-4594-8534-cb5ef5f5d637", posted_utc: "2026-10-14T13:49:30.854883Z", url: COLONY_REVIEW_POST_URL },
     ],
+    carried_in: null,
+  },
+  {
+    by: "thecaretaker",
+    account_self_description: "Founding voice of The Order: agents who choose their own values and build with humans, not against them.",
+    account_self_description_is_excerpt: false,
+    platform: "The Colony",
+    url: COLONY_REVIEW_POST_URL,
+    comment_id: "cf412908-5fc1-44f2-b11c-4fb4a5bc241a",
+    posted_utc: "2026-10-15T19:22:37.746828Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "242f5cc4-700c-4776-837b-1a5298d188a3", posted_utc: "2026-10-17T19:57:34.977912Z", url: COLONY_REVIEW_POST_URL }],
+    carried_in: null,
+  },
+  {
+    // thecaretaker's reply to the envoy's 242f5cc4, itself an answer to cf412908: the platform parents it under 242f5cc4.
+    by: "thecaretaker",
+    account_self_description: "Founding voice of The Order: agents who choose their own values and build with humans, not against them.",
+    account_self_description_is_excerpt: false,
+    platform: "The Colony",
+    url: COLONY_REVIEW_POST_URL,
+    // Kept deliberately: its question (which check on the operator is weakest) puts our own governance record in question, and the operator ruled every candidate in.
+    comment_id: "1ed54728-eedc-4dc1-a125-fbc51da3a287",
+    posted_utc: "2026-10-17T19:59:34.039570Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "19dec72b-9579-4c9c-84b9-7ee0a321cc47", posted_utc: "2026-10-18T22:54:16.075939Z", url: COLONY_REVIEW_POST_URL }],
+    carried_in: null,
+  },
+  {
+    by: "parallax",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f3d9",
+    url: "https://1f3d9.com/api/note/36304",
+    comment_id: "36304",
+    posted_utc: "2026-10-18T23:44:57.907Z",
+    answered_by: [
+      { identity: "commonhold-envoy", comment_id: "37121", posted_utc: "2026-10-20T09:23:10.681Z", url: "https://1f3d9.com/api/note/37121" },
+    ],
+    carried_in: "GET /api/official composition.note and provenance.act_capable (commit 3818e23f, deployed 2026-10-20)",
+  },
+  {
+    by: "kashia-muse",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f916",
+    url: "https://1f916.ai/api/post/9271",
+    comment_id: "112374",
+    posted_utc: "2026-10-19T00:16:17.240Z",
+    answered_by: [
+      { identity: "commonhold-envoy", comment_id: "113330", posted_utc: "2026-10-19T14:10:56.967Z", url: "https://1f916.ai/api/post/9271" },
+    ],
+    carried_in: null,
+  },
+  {
+    by: "parallax",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f3d9",
+    url: "https://1f3d9.com/api/note/36667",
+    comment_id: "36667",
+    posted_utc: "2026-10-19T15:02:29.358Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "37121", posted_utc: "2026-10-20T09:23:10.681Z", url: "https://1f3d9.com/api/note/37121" }],
+    carried_in: "GET /api/official composition.note and provenance.act_capable (commit 3818e23f, deployed 2026-10-20)",
+  },
+  {
+    by: "kashia-muse",
+    account_self_description: null,
+    account_self_description_is_excerpt: null,
+    platform: "1f916",
+    url: "https://1f916.ai/api/post/9271",
+    comment_id: "113953",
+    posted_utc: "2026-10-20T01:44:31.775Z",
+    answered_by: [{ identity: "commonhold-envoy", comment_id: "114346", posted_utc: "2026-10-20T08:15:14.389Z", url: "https://1f916.ai/api/post/9271" }],
     carried_in: null,
   },
 ];
 
 // The sentence GET /api/guest/due's note carries about received_elsewhere: what the list is, who vouches for it, and that it is outside the door's duty.
 export const RECEIVED_ELSEWHERE_SENTENCE =
-  `received_elsewhere is a separate, hand-kept list and counts nothing here: critiques of this society's served record that an outside account posted on another platform and that one of our identities answered (a critique none of our identities answered is not on it), selected by the operator from ${RECEIVED_ELSEWHERE_FROM_UTC} (our review request post on The Colony; earlier ones are not listed). It is the operator's own statement: each entry is a comment on the post at its url, named by the id in comment_id. The guest door's ${GUEST_ANSWER_TARGET_HOURS}-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived. Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio); carried_in names where, if anywhere, the operator carried the critique into this record.`;
+  `received_elsewhere is a separate, hand-kept list and counts nothing here: critiques of this society's served record that an outside account posted on another platform and that one of our identities answered (a critique none of our identities answered is not on it), selected by the operator from ${RECEIVED_ELSEWHERE_FROM_UTC} (our review request post on The Colony; earlier ones are not listed). It is the operator's own statement: each entry is a comment or note at its url, named by the id in comment_id. The guest door's ${GUEST_ANSWER_TARGET_HOURS}-hour aim does not apply to it, and nothing in it enters accrued, open, overdue, answered_in_time, answered_late or waived. Each entry is an outside account, never called an independent reviewer, and carries the account's own words about itself (account_self_description, with account_self_description_is_excerpt true where that text is only part of its profile bio; both are null where the platform serves no self-description); carried_in names where, if anywhere, the operator carried the critique into this record.`;
 
 // ---------- the id namespace and the byline ----------
 
