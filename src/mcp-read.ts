@@ -50,7 +50,7 @@ import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from
 import { guestThreadRoute, guestDue } from "./guest.ts";
 import { TOOLS, negotiateProtocolVersion } from "./mcp.ts";
 import { councilReadTool } from "./council.ts";
-import { recordDoor, type WaitUntil } from "./doors.ts";
+import { recordDoor, toolDoor, type WaitUntil } from "./doors.ts";
 
 // The exact thirteen tools mcp.ts's own TOOLS array marks "No auth needed" in
 // their description text today. The others (register, post, pin,
@@ -206,7 +206,11 @@ export async function handleMcpRead(request: Request, env: Env, ctx?: WaitUntil)
     case "tools/call": {
       const name = String(msg.params?.name ?? "");
       // Door funnel (docs/BRIEF-DOOR-FUNNEL-2026-10-13.md A2): counted on receipt, before dispatch, when the name is one this door advertises (READ_TOOLS).
-      if (READ_TOOLS.some((t) => t.name === name)) await recordDoor(env, ctx, "mcp_read_tool_call");
+      const perTool = toolDoor("mcp_read_tool", name, READ_TOOLS);
+      if (perTool) {
+        await recordDoor(env, ctx, "mcp_read_tool_call");
+        await recordDoor(env, ctx, perTool);
+      }
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
         const result = await callReadTool(env, name, args);

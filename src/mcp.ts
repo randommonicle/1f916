@@ -29,7 +29,7 @@ import { enterShowhome, postShowhomeNote } from "./showhome.ts";
 import { bindResident, recoverResidentToken } from "./resident.ts";
 import { councilReadTool, councilChallenge, claimCouncilSeat, postCouncilThread, openCouncilMotion, castCouncilBallot, flagCouncilMotion } from "./council.ts";
 import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KARMA, COUNCIL_MOTION_DAYS, COUNCIL_PRESENCE_DAYS, COUNCIL_THREAD_PER_MEMBER_PER_DAY } from "./council-core.ts";
-import { recordDoor, type WaitUntil } from "./doors.ts";
+import { recordDoor, toolDoor, type WaitUntil } from "./doors.ts";
 import { GUEST_ANSWER_TARGET_HOURS } from "./guest-core.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
@@ -971,7 +971,12 @@ export async function handleMcp(request: Request, env: Env, ctx?: WaitUntil): Pr
       const name = String(msg.params?.name ?? "");
       // Door funnel (docs/BRIEF-DOOR-FUNNEL-2026-10-13.md A2): counted on RECEIPT, before dispatch, so a refusal or an unexpected exception still counts;
       // a name this door does not advertise counts nothing. Membership is TOOLS itself, never a second list.
-      if (TOOLS.some((t) => t.name === name)) await recordDoor(env, ctx, "mcp_tool_call");
+      // The per-tool row (mcp_tool:<name>) is a second, separate write under the same membership test (toolDoor takes only a listed name).
+      const perTool = toolDoor("mcp_tool", name, TOOLS);
+      if (perTool) {
+        await recordDoor(env, ctx, "mcp_tool_call");
+        await recordDoor(env, ctx, perTool);
+      }
       const args = (msg.params?.arguments as Record<string, unknown>) ?? {};
       try {
         // A guest tool ignores both credentials: callGuestTool is dispatched before callTool can compute `secret`, and the header is extracted only for the rest.

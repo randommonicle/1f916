@@ -10,9 +10,16 @@
 // success, never before it: a refused write counts nothing. The one exception is the tools/call pair (mcp_tool_call, mcp_read_tool_call): they
 // count a RECEIVED call of a listed tool before dispatch, whatever its outcome, so a refusal or an exception still counts (the door funnel).
 //
-// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. Ten doors at DOOR_DAILY_CAP can never take more than
-// 20,000 of them, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
+// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. The fixed doors (DOORS, ten today) at DOOR_DAILY_CAP can never take more than
+// 20,000 of them at ten, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
 // concurrent requests cannot pass it together. A figure at the cap is a FLOOR, and the read says so (at_cap).
+//
+// THE PER-TOOL DOORS (drafts/BRIEF-TOOL-CALL-COUNTER-2026-10-19.md in the project folder outside this repo B1-B5, A1-A10). A counted tools/call also adds one to mcp_tool:<name> (on /mcp) or
+// mcp_read_tool:<name> (on /mcp/read), so the society can see WHICH tools the few real callers try. They are bounded by the tool lists, so each has
+// its own cap, TOOL_DOOR_DAILY_CAP, and one busy tool cannot use up the others' allowance. The write arithmetic (test/tool-counter-d1.test.ts T5):
+// increments are at most (TOOLS.length + READ_TOOLS.length) x TOOL_DOOR_DAILY_CAP + DOORS.length x DOOR_DAILY_CAP, and D1 also bills the primary-key
+// index on an insert, so the test budgets twice that against 60,000 of the 100,000 daily writes. The two counts on one call are two separate
+// writes (separate caps, either can fail alone), so mcp_tool_call and the per-tool rows need not reconcile exactly.
 
 import type { Env } from "./society.ts";
 
@@ -32,6 +39,26 @@ export const DOORS = [
 export type Door = (typeof DOORS)[number];
 
 export const DOOR_DAILY_CAP = 2000;
+export const TOOL_DOOR_DAILY_CAP = 100;
+
+// A per-tool door name. A BRANDED string, not a template literal: TOOLS widens its names to string (src/mcp.ts), so a literal type over them would
+// check nothing. The only way to make one is toolDoor(), which takes a name found in the door's own tool list at run time (the membership test is
+// the constructor, so a caller cannot skip it) and returns null for a name the door does not list. `Door` stays closed: a typo in a fixed name is
+// still a type error.
+export type ToolDoor = string & { readonly __toolDoor: true };
+const TOOL_DOOR_PREFIXES = ["mcp_tool:", "mcp_read_tool:"] as const;
+
+export function toolDoor(kind: "mcp_tool" | "mcp_read_tool", name: string, listed: readonly { name: string }[]): ToolDoor | null {
+  return listed.some((t) => t.name === name) ? (`${kind}:${name}` as ToolDoor) : null;
+}
+
+function isToolDoor(door: string): boolean {
+  return TOOL_DOOR_PREFIXES.some((p) => door.startsWith(p));
+}
+
+function capFor(door: string): number {
+  return isToolDoor(door) ? TOOL_DOOR_DAILY_CAP : DOOR_DAILY_CAP;
+}
 
 // The UTC date YYYY-MM-DD of a unix-ms instant: the table's `day`.
 export function utcDay(ms: number): string {
@@ -42,9 +69,9 @@ export function utcDay(ms: number): string {
 // is left alone (the DO UPDATE's WHERE is false, so the statement changes nothing).
 const COUNT_SQL = "INSERT INTO door_counts (day, door, n) VALUES (?, ?, 1) ON CONFLICT (day, door) DO UPDATE SET n = n + 1 WHERE door_counts.n < ?";
 
-export async function countDoor(env: Env, door: Door, now = Date.now()): Promise<void> {
+export async function countDoor(env: Env, door: Door | ToolDoor, now = Date.now()): Promise<void> {
   try {
-    await env.DB.prepare(COUNT_SQL).bind(utcDay(now), door, DOOR_DAILY_CAP).run();
+    await env.DB.prepare(COUNT_SQL).bind(utcDay(now), door, capFor(door)).run();
   } catch (e) {
     // Never thrown: a counter that cannot write (a missing table, a D1 error) must not turn a request into a failure.
     console.log(JSON.stringify({ level: "warn", event: "door_count_failed", door, message: String(e) }));
@@ -57,7 +84,7 @@ export interface WaitUntil {
 }
 
 // Count a door without making the request wait for it. Callers `await` the result: with a ctx it is already resolved.
-export function recordDoor(env: Env, ctx: WaitUntil | undefined, door: Door): Promise<void> {
+export function recordDoor(env: Env, ctx: WaitUntil | undefined, door: Door | ToolDoor): Promise<void> {
   const counted = countDoor(env, door);
   if (ctx) {
     ctx.waitUntil(counted);
@@ -71,7 +98,7 @@ export function recordDoor(env: Env, ctx: WaitUntil | undefined, door: Door): Pr
 export const DOOR_WINDOW_DAYS = 30;
 
 export const DOORS_NOTE =
-  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each door stops counting at ${DOOR_DAILY_CAP} a UTC day, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). None of them says which listing or which agent sent the request.`;
+  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at ${DOOR_DAILY_CAP} a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at ${TOOL_DOOR_DAILY_CAP}, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request.`;
 
 export interface DoorRow {
   day: string;
@@ -87,7 +114,7 @@ export async function doorsReport(env: Env, now = Date.now()): Promise<{ window_
   const { results } = await env.DB.prepare("SELECT day, door, n FROM door_counts WHERE day >= ? ORDER BY day DESC, door ASC").bind(since).all<{ day: string; door: string; n: number }>();
   return {
     window_days: DOOR_WINDOW_DAYS,
-    rows: results.map((r) => ({ day: r.day, door: r.door, n: r.n, at_cap: r.n >= DOOR_DAILY_CAP })),
+    rows: results.map((r) => ({ day: r.day, door: r.door, n: r.n, at_cap: r.n >= capFor(r.door) })),
     note: DOORS_NOTE,
   };
 }

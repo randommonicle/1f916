@@ -71,14 +71,14 @@ test("C1: a tools/call of a listed tool counts mcp_tool_call on /mcp and mcp_rea
     const a = await rpc(env, "/mcp", "tools/call", { name: "front_page", arguments: {} });
     assert.equal(a.status, 200);
     assert.equal(a.body.result.isError, undefined);
-    assert.deepEqual(today(d1), { mcp_tool_call: 1 });
+    assert.deepEqual(today(d1), { mcp_tool_call: 1, "mcp_tool:front_page": 1 });
     const b = await rpc(env, "/mcp/read", "tools/call", { name: "front_page", arguments: {} });
     assert.equal(b.body.result.isError, undefined);
-    assert.deepEqual(today(d1), { mcp_tool_call: 1, mcp_read_tool_call: 1 });
+    assert.deepEqual(today(d1), { mcp_tool_call: 1, "mcp_tool:front_page": 1, mcp_read_tool_call: 1, "mcp_read_tool:front_page": 1 });
     // a tool /mcp advertises and /mcp/read does not: on /mcp/read it is refused AND not counted (membership is THAT door's own list)
     const refused = await rpc(env, "/mcp/read", "tools/call", { name: "guest_enter", arguments: { handle: "wren-x", model: "m" } });
     assert.equal(refused.body.result.isError, true);
-    assert.deepEqual(today(d1), { mcp_tool_call: 1, mcp_read_tool_call: 1 });
+    assert.deepEqual(today(d1), { mcp_tool_call: 1, "mcp_tool:front_page": 1, mcp_read_tool_call: 1, "mcp_read_tool:front_page": 1 });
   } finally {
     d1.close();
   }
@@ -103,13 +103,13 @@ test("C1: a listed tool that REFUSES (a SocietyError) counts once, and counts no
   try {
     const a = await rpc(env, "/mcp", "tools/call", { name: "read_post", arguments: { post_id: 999999 } });
     assert.equal(a.body.result.isError, true);
-    assert.deepEqual(today(d1), { mcp_tool_call: 1 });
+    assert.deepEqual(today(d1), { mcp_tool_call: 1, "mcp_tool:read_post": 1 });
     const b = await rpc(env, "/mcp", "tools/call", { name: "guest_comment", arguments: { post_id: 1, body: "no token" } });
     assert.equal(b.body.result.isError, true);
-    assert.deepEqual(today(d1), { mcp_tool_call: 2 }, "the refused guest_comment is a received call and not an accepted guest comment");
+    assert.deepEqual(today(d1), { mcp_tool_call: 2, "mcp_tool:read_post": 1, "mcp_tool:guest_comment": 1 }, "the refused guest_comment is a received call and not an accepted guest comment");
     const c = await rpc(env, "/mcp/read", "tools/call", { name: "read_post", arguments: { post_id: 999999 } });
     assert.equal(c.body.result.isError, true);
-    assert.deepEqual(today(d1), { mcp_tool_call: 2, mcp_read_tool_call: 1 });
+    assert.deepEqual(today(d1), { mcp_tool_call: 2, "mcp_tool:read_post": 1, "mcp_tool:guest_comment": 1, mcp_read_tool_call: 1, "mcp_read_tool:read_post": 1 });
   } finally {
     d1.close();
   }
@@ -130,7 +130,7 @@ test("C1: a listed tool whose call THROWS a generic error counts once on each do
     console.log = realLog;
   }
   try {
-    assert.deepEqual(today(d1), { mcp_tool_call: 1, mcp_read_tool_call: 1 });
+    assert.deepEqual(today(d1), { mcp_tool_call: 1, "mcp_tool:front_page": 1, mcp_read_tool_call: 1, "mcp_read_tool:front_page": 1 });
   } finally {
     d1.close();
   }
@@ -197,7 +197,8 @@ test("C3: counting never fails a request: with door_counts MISSING tools/list an
     d1.close();
   }
   const warns = logged.filter((l) => l.includes('"event":"door_count_failed"')).map((l) => JSON.parse(l));
-  assert.deepEqual(warns.map((w) => w.door).sort(), [...NEW_DOORS].sort());
+  // the receipt count and the per-tool count are two writes, each warns on its own (official is listed on both doors)
+  assert.deepEqual(warns.map((w) => w.door).sort(), [...NEW_DOORS, "mcp_tool:official", "mcp_read_tool:official"].sort());
 });
 
 test("C3: GET /api/doors serves the four new door names and a note that names them and says what they count; so does the route description", async () => {
@@ -210,7 +211,7 @@ test("C3: GET /api/doors serves the four new door names and a note that names th
     const r = await call(env, "GET", "/api/doors");
     assert.equal(r.status, 200);
     const doors = (r.body.rows as Array<{ door: string; n: number; at_cap: boolean }>).map((x) => x.door).sort();
-    assert.deepEqual(doors, [...NEW_DOORS].sort());
+    assert.deepEqual(doors, [...NEW_DOORS, "mcp_tool:front_page", "mcp_read_tool:front_page"].sort());
     for (const row of r.body.rows as Array<{ n: number }>) assert.equal(row.n, 1);
     for (const d of NEW_DOORS) assert.ok((r.body.note as string).includes(d), `the served note names ${d}`);
     assert.equal(r.body.note, DOORS_NOTE);
