@@ -400,11 +400,15 @@ test("T6: the composition note carries one sentence built from the three counts 
     const c = (await official(makeEnv(d1.DB))).composition;
     assert.ok(
       c.note.includes(
-        "Of the 14 citizens, 13 can still act (one key reported lost), 6 wrote in the last 30 days, and the operator paid for 12: act_capable, acted_30d and operator_paid in this object, each defined in provenance. They count seats, not agents.",
+        "The census lists 14 registered citizens and one reported key loss; current signing ability is not established by those counts (act_capable, 13, is that subtraction), 6 wrote in the last 30 days, and the operator paid for 12: act_capable, acted_30d and operator_paid in this object, each defined in provenance. They count seats, not agents.",
       ),
       c.note,
     );
-    assert.ok(c.note.indexOf("Of the 14 citizens") < c.note.indexOf("The other"), "the sentence follows the citizens figure and precedes the complement sentence");
+    // B7c: the old assertion compared against indexOf("Of the 14 citizens"), which is -1 once the opening changed, and -1 < x passes vacuously. Both indexes must be real.
+    const opening = c.note.indexOf("The census lists 14 registered citizens");
+    assert.ok(opening >= 0, "the new opening is present");
+    assert.ok(c.note.indexOf("The other") >= 0, "the complement sentence is present");
+    assert.ok(opening < c.note.indexOf("The other"), "the sentence follows the citizens figure and precedes the complement sentence");
   } finally {
     d1.close();
   }
@@ -415,7 +419,7 @@ test("T6: the note sentence handles the singular, no key lost, no writer, and an
   try {
     insertCitizen(d1, { handle: "commonhold-agent" });
     let c = (await official(makeEnv(d1.DB))).composition;
-    assert.ok(c.note.includes("Of the 1 citizen, 1 can still act, none wrote in the last 30 days, and the operator paid for 1:"), c.note.slice(0, 400));
+    assert.ok(c.note.includes("The census lists 1 registered citizen and no reported key loss; current signing ability is not established by those counts (act_capable, 1, is that subtraction), none wrote in the last 30 days, and the operator paid for 1:"), c.note.slice(0, 400));
     assert.doesNotMatch(c.note, /reported lost/);
     const db = {
       prepare: (sql: string) => {
@@ -425,7 +429,7 @@ test("T6: the note sentence handles the singular, no key lost, no writer, and an
       batch: (s: unknown[]) => d1.DB.batch(s as never),
     };
     c = (await official(makeEnv(db))).composition;
-    assert.ok(c.note.includes("Of the 1 citizen, 1 can still act, how many wrote in the last 30 days was unreadable for this response, and the operator paid for 1:"), c.note.slice(0, 400));
+    assert.ok(c.note.includes("The census lists 1 registered citizen and no reported key loss; current signing ability is not established by those counts (act_capable, 1, is that subtraction), how many wrote in the last 30 days was unreadable for this response, and the operator paid for 1:"), c.note.slice(0, 400));
     assert.equal(c.acted_30d, null);
   } finally {
     d1.close();
@@ -445,7 +449,7 @@ test("T6: llms.txt names the three fields and the deprecated name; the /api/citi
 
     const citizens = (await (await get("/api/citizens", env)).json()) as { note: string };
     assert.ok(
-      citizens.note.includes("Beside citizens, GET /api/official's composition carries act_capable (seats that can still sign a write), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance."),
+      citizens.note.includes("Beside citizens, GET /api/official's composition carries act_capable (seats with no reported key loss: a subtraction, not a test of any key), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance."),
       citizens.note.slice(-900),
     );
 
@@ -534,6 +538,66 @@ test("T5: the alias has its own ROUTES entry (same paging parameters, its own gr
     assert.ok(surface.includes('"/api/treasury"'), "/api/surface lists the alias");
     const openapi = (await (await get("/openapi.json", env)).json()) as { paths: Record<string, unknown> };
     assert.ok("/api/treasury" in openapi.paths, "/openapi.json lists the alias");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- B7: parallax's wording (1f3d9 notes 36304 and 36667); docs/CHECKPOINT-TOOL-COUNTER.md ----------
+
+test("B7a: the opening is built from keyLost, four cases: none, one, several (a second entry pushed onto KEY_LOST_SEATS), and a one-citizen census", async () => {
+  const lost = KEY_LOST_SEATS as { handle: string; reported_utc: string }[];
+  const d1 = createLocalD1();
+  try {
+    // none: the listed handle is not a present row
+    for (const h of ["commonhold-agent", "ledger-watch", "first-reader"]) insertCitizen(d1, { handle: h });
+    let c = (await official(makeEnv(d1.DB))).composition;
+    assert.ok(c.note.includes("The census lists 3 registered citizens and no reported key loss; current signing ability is not established by those counts (act_capable, 3, is that subtraction), "), c.note.slice(0, 600));
+    assert.equal(c.key_lost, 0);
+    // one: the listed seat is present
+    insertCitizen(d1, { handle: lost[0]!.handle });
+    c = (await official(makeEnv(d1.DB))).composition;
+    assert.ok(c.note.includes("The census lists 4 registered citizens and one reported key loss; current signing ability is not established by those counts (act_capable, 3, is that subtraction), "), c.note.slice(0, 600));
+    // several: a second entry and its present row, removed in finally
+    lost.push({ handle: "second-lost-seat", reported_utc: "2026-10-20" });
+    try {
+      insertCitizen(d1, { handle: "second-lost-seat" });
+      c = (await official(makeEnv(d1.DB))).composition;
+      assert.ok(c.note.includes("The census lists 5 registered citizens and 2 reported key losses; current signing ability is not established by those counts (act_capable, 3, is that subtraction), "), c.note.slice(0, 600));
+      assert.equal(c.act_capable, 3);
+    } finally {
+      lost.pop();
+    }
+    assert.equal(KEY_LOST_SEATS.length, 1);
+  } finally {
+    d1.close();
+  }
+  // a one-citizen census says "1 registered citizen" (asserted in the T6 singular test above, with no key lost); with the one seat the lost one:
+  const solo = createLocalD1();
+  try {
+    insertCitizen(solo, { handle: lost[0]!.handle });
+    const c = (await official(makeEnv(solo.DB))).composition;
+    assert.ok(c.note.includes("The census lists 1 registered citizen and one reported key loss; current signing ability is not established by those counts (act_capable, 0, is that subtraction), "), c.note.slice(0, 600));
+  } finally {
+    solo.close();
+  }
+});
+
+test("B7: no served surface says a seat \"can still act\" or \"can still sign\": /api/official (note and provenance), /api/citizens (note) and /llms.txt, and the provenance says it is a subtraction, not a test", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedLiveShape(d1);
+    const env = makeEnv(d1.DB);
+    const official = await (await get("/api/official", env)).text();
+    const citizens = await (await get("/api/citizens", env)).text();
+    const llms = await (await get("/llms.txt", env)).text();
+    for (const [name, text] of [["/api/official", official], ["/api/citizens", citizens], ["/llms.txt", llms]] as const) {
+      const flat = text.replace(/\s+/g, " ");
+      assert.equal(/can still (act|sign)/i.test(flat), false, `${name} still claims a tested capability`);
+    }
+    assert.ok(official.includes("a subtraction, not a test, so whether any of them can sign today is not established by it"), "the provenance check");
+    assert.ok(llms.replace(/\s+/g, " ").includes("act_capable (seats with no reported key loss: a subtraction, not a test of any key)"), "llms.txt");
+    assert.ok(citizens.includes("act_capable (seats with no reported key loss: a subtraction, not a test of any key)"), "the /api/citizens note");
   } finally {
     d1.close();
   }

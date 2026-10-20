@@ -22,6 +22,12 @@ Baseline before any edit: 2618 tests, 2617 pass, 1 skipped (`I5`, the deploy-scr
 - `DOORS_NOTE`: the single-cap sentence rewritten to cover both caps in one sentence (A3); one sentence added: what the per-tool rows count, that they are separate writes with their own cap, and that they need not reconcile exactly with `mcp_tool_call` / `mcp_read_tool_call` (A6).
 - `src/discovery.ts` ROUTES description for `/api/doors` (A10): names the per-tool rows and the 100 cap.
 
+### 4. The seat-count wording (C4, C5; B7, B7a-B7d)
+
+- Five served places, all after parallax (1f3d9 notes 36304 and 36667): `src/society.ts` provenance check for `act_capable` ("It counts seats with no reported key loss; it is a subtraction, not a test, so whether any of them can sign today is not established by it."), the code comment above `actCapable`, the `seatCountsSentence` opening (B7b template: "The census lists N registered citizen(s) and <no reported key loss | one reported key loss | k reported key losses>; current signing ability is not established by those counts (act_capable, X, is that subtraction)", then the acted_30d and operator_paid clauses unchanged, no full stop), the `/api/citizens` note parenthesis, and the `src/discovery.ts` llms.txt parenthesis. The field name `act_capable` stays. No `/skill.md` change: `grep act_capable src/inbox.ts` finds nothing, and the only two files that name it are society.ts and discovery.ts.
+- `test/seat-counts-d1.test.ts` lines that changed, and why: the T6 sentence test (the new opening); the order assertion (B7c: the old `indexOf("Of the 14 citizens")` is -1 after the change and `-1 < x` passes vacuously, so it now asserts both indexes are >= 0 first); the singular and unreadable T6 tests (new opening, "no reported key loss"); the `/api/citizens` note assertion (new parenthesis). New: B7a (zero, one, k>1 by pushing a second entry onto `KEY_LOST_SEATS` with a present row in try/finally, and a one-citizen census whose only seat is the lost one) and B7 (no served surface contains "can still act" or "can still sign": /api/official note and provenance, /api/citizens, /llms.txt). The unreadable case stays acted_30d's only (B7d); the existing unreadable test is kept.
+- The deploy-script SNAP lines in `test/deploy-penny-three-script.test.ts` and `test/deploy-seat-counts-script.test.ts` match field values, not the sentence: the full suite is green with them unchanged.
+
 ## Red-proofs
 
 Counter (each mutation applied, tests run, restored by reverse edit, tree equal to the index afterwards):
@@ -35,3 +41,18 @@ Counter (each mutation applied, tests run, restored by reverse edit, tree equal 
 - M7 TOOL_DOOR_DAILY_CAP 1000: T3, T5 red.
 - M8 DOORS_NOTE back to the single-cap sentence: T6 red.
 - M9 ROUTES description without the per-tool rows: T6 red.
+
+Seat wording (same method):
+
+- R1 k>1 phrase says "one reported key loss": B7a red.
+- R2 zero case says "one reported key loss": T6 (singular), B7a red.
+- R3 "citizens" always plural: T6 (singular), B7a red.
+- R4 the old "can still act" sentence restored: both T6 sentence tests, B7a, B7 red.
+- R5 provenance check reverted: B7 red.
+- R6 llms.txt parenthesis reverted: B7 red.
+- R7 /api/citizens parenthesis reverted: T6 llms/citizens test and B7 red.
+- R8 opening reworded to "The census has": the T6 order test and both T6/B7a tests red (so the B7c assertion cannot pass vacuously).
+
+## A3 check (watchman prompt and external scripts)
+
+REPORT (nothing outside society/ changed): see the build report.

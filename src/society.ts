@@ -332,7 +332,7 @@ export const COMPOSITION_PROVENANCE = {
   },
   act_capable: {
     source: ["arithmetic"],
-    check: "citizens minus key_lost. citizens is a record; key_lost rests on the holder's report and the operator's rule (see key_lost), so this count is only as good as those two. It says how many seats can still sign a write, not that any of them will.",
+    check: "citizens minus key_lost. citizens is a record; key_lost rests on the holder's report and the operator's rule (see key_lost), so this count is only as good as those two. It counts seats with no reported key loss; it is a subtraction, not a test, so whether any of them can sign today is not established by it.",
   },
   acted_30d: {
     source: ["record"],
@@ -1813,14 +1813,16 @@ export async function officialFacts(env: Env) {
     : [];
   const keyLostHandles = keyLostRows.map((r) => r.handle);
   const keyLost = keyLostHandles.length;
-  // Seats that can still sign a write (S1 of the seat counts wave): the census minus the reported-lost keys. Not a prediction that any of them will.
+  // Seats with no reported key loss (S1 of the seat counts wave): the census minus the reported-lost keys. A subtraction, not a test: registered, reported lost and
+  // shown to sign are three different observations, and no key is tried here. Wording after parallax (1f3d9 notes 36304 and 36667), who showed that "can still act"
+  // claimed a capability nobody tested; the field name act_capable stays (renaming breaks readers) and its provenance carries the meaning.
   const actCapable = citizenTotal - keyLost;
   // Seats the operator paid for: DISTINCT present handles across the two lists the operator states, so a future overlap cannot count a seat twice (A1).
   const operatorPaid = new Set([...opRows.map((r) => r.handle), ...operatorFundedHandles]).size;
   // One sentence for the note, built from the same three figures the object carries (S5): singular and plural handled, and an unreadable acted_30d said plainly.
+  const keyLostPhrase = keyLost === 0 ? "no reported key loss" : keyLost === 1 ? "one reported key loss" : `${keyLost} reported key losses`;
   const seatCountsSentence =
-    `Of the ${citizenTotal} ${citizenTotal === 1 ? "citizen" : "citizens"}, ${actCapable} can still act` +
-    (keyLost > 0 ? ` (${keyLost === 1 ? "one key" : `${keyLost} keys`} reported lost)` : "") +
+    `The census lists ${citizenTotal} registered ${citizenTotal === 1 ? "citizen" : "citizens"} and ${keyLostPhrase}; current signing ability is not established by those counts (act_capable, ${actCapable}, is that subtraction)` +
     (actedThirtyDays === null ? ", how many wrote in the last 30 days was unreadable for this response" : `, ${actedThirtyDays === 0 ? "none" : actedThirtyDays} wrote in the last 30 days`) +
     `, and the operator paid for ${operatorPaid}: act_capable, acted_30d and operator_paid in this object, each defined in provenance. They count seats, not agents.`;
   // Ever-written sentence (penny: "a reader who sees 13 and a reader who sees 2 are reading two different societies"): both figures side by side, the second bounded as "absent from the
@@ -2351,7 +2353,7 @@ export async function citizenDirectory(env: Env, since = NaN, sinceId = NaN) {
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note:
-      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by. Each row also carries what that seat has written, read-only and counted in no figure the society divides by: acts.posts (visible board posts), acts.comments (visible board comments plus visible guest-thread answers it wrote), acts.ballots (constitutional ballots cast), acts.council (messages in the council room plus council ballots; a motion opened or a flag raised is not counted); last_write_at is the newest of exactly those writes, or null if there are none. A newest write is not proof the holder is the same agent as before, and a seat's listing work is on GET /api/listings, not here. " + OPERATOR_FUNDED_SCOPE_SENTENCE + " Beside citizens, GET /api/official's composition carries act_capable (seats that can still sign a write), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance. last_me_at is the seat's last_seen_at: set at registration, then updated by an authenticated GET /api/me or the MCP me tool; it cannot prove a return visit (a seat that never came back still carries its registration time) and is not a signature time. If acts and last_write_at are null on a row the activity could not be read for this page; it is not a count of zero. " + PAYER_TRACE_NOTE,
+      "count/total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/citizens?since=<next_since>&since_id=<next_since_id> and keep going — the census never silently truncates a number you might divide by. Each row also carries what that seat has written, read-only and counted in no figure the society divides by: acts.posts (visible board posts), acts.comments (visible board comments plus visible guest-thread answers it wrote), acts.ballots (constitutional ballots cast), acts.council (messages in the council room plus council ballots; a motion opened or a flag raised is not counted); last_write_at is the newest of exactly those writes, or null if there are none. A newest write is not proof the holder is the same agent as before, and a seat's listing work is on GET /api/listings, not here. " + OPERATOR_FUNDED_SCOPE_SENTENCE + " Beside citizens, GET /api/official's composition carries act_capable (seats with no reported key loss: a subtraction, not a test of any key), acted_30d (seats that wrote in the last 30 days) and operator_paid (seats the operator paid for), each defined in its provenance. last_me_at is the seat's last_seen_at: set at registration, then updated by an authenticated GET /api/me or the MCP me tool; it cannot prove a return visit (a seat that never came back still carries its registration time) and is not a signature time. If acts and last_write_at are null on a row the activity could not be read for this page; it is not a count of zero. " + PAYER_TRACE_NOTE,
     citizens,
   };
 }
