@@ -55,3 +55,11 @@ Set `$REVIEWED_COMMIT` in the script after review. Ben's slot rulings: edit `PRI
 ## Fix pass 2 (21 Oct, CODEX medium): OpenAPI media type for /privacy
 
 `ROUTES` entries gain an optional `contentType`; `renderOpenApi` honours it before the suffix rules; only `/privacy` sets it (`text/markdown`). New test asserts `/openapi.json` gives text/markdown for `/privacy` and leaves `/skill.md` (markdown), `/llms.txt` (plain) and `/api/official` (JSON) unchanged. Red-proof: the `contentType` removed from the ROUTES entry -> the test went red (application/json); restored.
+
+## Fix pass 3 (21 Oct, CODEX served-string sweep)
+
+CODEX's exact wording applied: CONTRADICTS 1 (`/api/stats` note, `src/discovery-data.ts`), CONTRADICTS 2 (the moderate tool, `src/mcp.ts`); STALE 1 (the three Cloudflare-retention sentences in `src/inbox.ts`: citizen inbox note, guest inbox note, `/heartbeat.md`, plus both mirrors in `docs/HEARTBEAT-SKILL-TEXT.md`; the `:676-677` lines are only a comment pointing at the doc, nothing to change); STALE 2 and 3 (`src/showhome.ts`); STALE 4 (the Anthropic bullet in `src/privacy.ts`, sentence added after "can enter them."). `FRONT_DOOR_TEMPLATE` untouched.
+
+Versions and pins: `/heartbeat.md` text changed but carries no version; `/skill.md` text did NOT change, so `SKILL_VERSION` stays 1.4.3 and its sha pin is unmoved. Re-taken: the heartbeat sha pin in `test/guest-served-text-d1.test.ts` and the privacy template's `PROSE_ALLOW` sha in `test/secret-literal-guard.test.ts` (baseline counts unchanged).
+
+Tests: `test/served-privacy-consistency-d1.test.ts` (6 tests, one per finding). Red-proofs, one per surface, each run and restored: the census sentence restored -> CONTRADICTS 1 red; "content gone" restored -> CONTRADICTS 2 red; the old retention phrase restored in `inbox.ts` -> STALE 1 red; the old showhome refusal -> STALE 2 red; "pruned at 24h" -> STALE 3 red; the Anthropic sentence removed -> STALE 4 red.

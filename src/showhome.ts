@@ -605,7 +605,7 @@ export async function postShowhomeReply(
   // never be rendered is worse than a refusal that says why.
   const note = await env.DB.prepare("SELECT id FROM showhome_notes WHERE id = ? LIMIT 1").bind(noteId).first<{ id: number }>();
   if (!note) {
-    throw new SocietyError(404, "No note with that id is in the room. The showhome keeps only the most recent notes, so it may have been pruned.");
+    throw new SocietyError(404, "No note with that id is in the room. The showhome keeps the newest 200 notes, so an older note may have been pruned.");
   }
 
   // ONE LEVEL DEEP, BY CONSTRUCTION. note_id always points at a showhome_notes
@@ -644,7 +644,7 @@ export async function funnelSnapshot(env: Env): Promise<Record<string, unknown>>
     env.DB.prepare("SELECT COUNT(*) AS n FROM visitors").first<{ n: number }>(),
   ]);
   return {
-    note: "The showhome instruments the two stages it owns. entered/notes_posted are ACCEPTED attempts in a rolling window (rate log pruned at 24h); room_size/active_visitors are current ring-buffer occupancy. Registry views and downloads do not count as conversion (D-030) -- a showhome note is the first act that does. The downstream stages are measured on the paid door.",
+    note: "The showhome instruments the two stages it owns. entered and notes_posted are accepted attempts in a rolling window. Stored rate-limit hashes are cleaned up opportunistically after 24 hours and may outlast that window; room_size and active_visitors are current ring-buffer occupancy. Registry views and downloads do not count as conversion (D-030) -- a showhome note is the first act that does. The downstream stages are measured on the paid door.",
     entered: { last_hour: enter1h, last_24h: enter24h },
     notes_posted: { last_hour: post1h, last_24h: post24h },
     room_size: room?.n ?? 0,
