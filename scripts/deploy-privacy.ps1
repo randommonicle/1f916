@@ -13,6 +13,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-privacy.ps1 -ExpectedCommit <sha> -DryRun   # every check and the live reads, nothing deployed
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-privacy.ps1 -ExpectedCommit <sha>           # the real thing
 # <sha> is the pushed tip of main (git -C society rev-parse HEAD), the full 40 hex.
+# CONTACT GATE: step 0b STOPS while src/privacy.ts still contains the pending-contact marker (Ben's private address was not yet given when this was built).
 # THE RIDE IS PUBLIC GETs ONLY and holds no token, key or assertion: GET /privacy must answer 200 text/markdown, start with "# Commonhold privacy policy" and carry no "{{"; /skill.md must say
 # version: 1.4.3 and point at /privacy; /llms.txt must point at /privacy. It writes nothing.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference
@@ -137,6 +138,12 @@ if ($LIVE_BASE_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$LIVE_BASE_COMM
 if ($REVIEWED_COMMIT -ceq $REVIEWED_COMMIT_PLACEHOLDER) { Stop-Here "`$REVIEWED_COMMIT still holds the placeholder '$REVIEWED_COMMIT_PLACEHOLDER': the hub sets it to the commit the review converged on." }
 if ($REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$REVIEWED_COMMIT '$REVIEWED_COMMIT' is not 40 lower-case hex. Nothing was read or written." }
 # END-PIN-CHECK
+
+# 0b. the contact gate (file read only, no git, npm, wrangler or network): the page must not go live while its CONTACT slot is still the pending marker, because UK GDPR Art. 13 needs a working contact.
+# BEGIN-CONTACT-GATE
+if (-not (Test-Path "src/privacy.ts")) { Stop-Here "src/privacy.ts is not in the current directory: run this from society/." }
+if (Select-String -Path "src/privacy.ts" -Pattern "PENDING-CONTACT" -SimpleMatch -Quiet) { Stop-Here "src/privacy.ts still contains PENDING-CONTACT: the CONTACT slot has no real contact yet, so the policy must not be deployed. Fill PRIVACY_SLOTS.CONTACT, commit, and re-review." }
+# END-CONTACT-GATE
 
 # 0. the commit: fetch, then main, origin/main and the expected sha must be ONE commit, on a clean tree
 Say "[git] git fetch origin"

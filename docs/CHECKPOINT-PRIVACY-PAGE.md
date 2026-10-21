@@ -44,3 +44,10 @@ Red-proofs, each run and restored:
 ## Owed to the hub
 
 Set `$REVIEWED_COMMIT` in the script after review. Ben's slot rulings: edit `PRIVACY_SLOTS` in `src/privacy.ts` (slot 2 needs GitHub Issues turned on first, or the page names a dead contact). Registry and ClawHub skill 1.4.3 publish if wanted.
+
+## Fix pass (21 Oct, coordinator): v4 text, seven slots, CONTACT gate
+
+- `src/privacy.ts` regenerated from the v4 draft verbatim; `PRIVACY_SLOTS` now holds the seven values from `drafts/PRIVACY-POLICY-SLOT-VALUES-2026-10-21.md` (blank lines kept) except `CONTACT`, set to the exact string `PENDING-CONTACT`. The served page still carries no `{{`. The secret-literal guard's `PROSE_ALLOW` sha was re-taken for the new template (baseline unchanged, 80 / 24 / 56).
+- `scripts/deploy-privacy.ps1` step 0b (`BEGIN-CONTACT-GATE`, before any git or network command) STOPS while `src/privacy.ts` contains `PENDING-CONTACT`. Nowhere else in that file spells the marker (a comment that did would have kept the gate shut after the fix).
+- Tests: the slot test lists all seven; a new script test runs the gate block in PowerShell against the real file (fires now) and a copy with the marker replaced (passes). When CONTACT is filled the test asserts the real file passes.
+- Red-proofs: gate pattern misspelled -> the gate test went red; gate line deleted -> the gate test went red; `RETENTION_REVIEW` removed from the slots -> the body test and the `{{` test went red. All restored.

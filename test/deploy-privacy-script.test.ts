@@ -100,7 +100,7 @@ test("step 0a STOPS on the placeholder before ANY git, npm, wrangler or network 
 });
 
 test("the steps are in the load-bearing order, there is no migration or D1 step, wrangler is used once (the stamped deploy), and the ride makes GETs only", () => {
-  const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", "Read-Attest \"before the deploy\"", "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", "Read-Attest \"after the deploy\"", "Test-PrivacyServed $privacyNow"];
+  const order = ["BEGIN-PIN-CHECK", "BEGIN-CONTACT-GATE", "git fetch origin", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", "Read-Attest \"before the deploy\"", "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", "Read-Attest \"after the deploy\"", "Test-PrivacyServed $privacyNow"];
   let last = -1;
   for (const needle of order) {
     const i = script.indexOf(needle.startsWith("BEGIN-") ? "# " + needle : needle);
@@ -142,4 +142,41 @@ test("Test-PrivacyServed, run for real, passes the policy and fails each way it 
 
 test("the ride checks the policy, the skill version and both links", () => {
   for (const needle of ["Test-PrivacyServed $privacyNow", '$SKILL_VERSION_LINE = "version: 1.4.3"', '"$BASE/privacy"', "/skill.md", "/llms.txt"]) at(needle);
+});
+
+test("the CONTACT gate fires on the current src/privacy.ts (while CONTACT is the pending marker) and passes on a copy where it is replaced; it runs before any git or network command", (t) => {
+  const gate = script.slice(script.indexOf("# BEGIN-CONTACT-GATE"), script.indexOf("# END-CONTACT-GATE"));
+  assert.ok(gate.length > 50, "the gate block exists");
+  assert.ok(script.indexOf("# BEGIN-CONTACT-GATE") < script.indexOf("git fetch origin"), "before the first git command");
+  const real = readFileSync(here("../src/privacy.ts"), "utf8");
+  const dir = mkdtempSync(join(tmpdir(), "deploy-privacy-gate-"));
+  try {
+    const harness = (file: string): string[] => [
+      "$ErrorActionPreference = 'Stop'",
+      "function Stop-Here($msg) { Write-Host \"[STOP] $msg\"; exit 1 }",
+      `Set-Location '${dir}'`,
+      "New-Item -ItemType Directory -Force -Path src | Out-Null",
+      `[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'src/privacy.ts'), [System.IO.File]::ReadAllText('${file}'))`,
+      gate,
+      'Write-Host "[GATE-PASSED]"',
+    ];
+    writeFileSync(join(dir, "current.ts"), real);
+    writeFileSync(join(dir, "filled.ts"), real.replaceAll("PENDING-CONTACT", "private@example.invalid"));
+    const fired = runPs(harness(join(dir, "current.ts")));
+    if (!fired) return t.skip("no PowerShell available");
+    const hadMarker = real.includes("PENDING-CONTACT");
+    if (hadMarker) {
+      assert.equal(fired.code, 1);
+      assert.match(fired.out, /\[STOP\].*PENDING-CONTACT/);
+    } else {
+      assert.equal(fired.code, 0, "once CONTACT is filled the gate passes the real file");
+    }
+    const passed = runPs(harness(join(dir, "filled.ts")))!;
+    assert.equal(passed.code, 0, passed.out);
+    assert.match(passed.out, /\[GATE-PASSED\]/);
+    // the page itself never serves a marker brace pair
+    assert.equal(/\{\{/.test(real.slice(real.indexOf("export function renderPrivacy"))), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -41,7 +41,7 @@ test("no {{ survives in the served body, and renderPrivacy leaves a slot visible
     const body = (await call(guestEnv(d1), "GET", "/privacy")).body._text as string;
     assert.equal(body.includes("{{"), false);
     assert.equal(body.includes("}}"), false);
-    for (const k of ["CONTROLLER", "CONTACT", "LAWFUL_BASIS", "TRANSFERS", "ERASURE_COMMITMENT"]) {
+    for (const k of ["CONTROLLER", "CONTACT", "CLOUDFLARE_RETENTION", "LAWFUL_BASIS", "TRANSFERS", "RETENTION_REVIEW", "ERASURE_COMMITMENT"]) {
       assert.ok(typeof (PRIVACY_SLOTS as Record<string, string>)[k] === "string" && (PRIVACY_SLOTS as Record<string, string>)[k]!.length > 0, `slot ${k} is filled`);
       assert.ok(PRIVACY_TEMPLATE.includes(`{{${k}}}`), `the template uses ${k}`);
     }

@@ -287,7 +287,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   // The claim-booked citizen INSERT (register-gate.ts finishRegistration): the same column list as register()'s own SQL above, gated on the claim.
   { file: "src/register-gate.ts", sha: "4ebfc1c9fed7351b062afe0896f603965b5a5453b27a9fd1d80dbcd40f24c8bc", note: "SQL: INSERT INTO citizens (... secret_hash, public_key ...) SELECT ... WHERE EXISTS (claim gate)" },
   { file: "src/register-gate.ts", sha: "574033562ec24e6f01296f06007ce861d242acb83071a3a03048d7098f2c1d0a", note: "B6b (C8 wording): the paid-but-failed message for a secret-mode registration: an identical re-send checks it again without a second charge; if no seat was created it attempts to create it and hands its secret over if that succeeds, and says so (secret unrecoverable) if one already was; no deadline" },
-  { file: "src/privacy.ts", sha: "60e5b635c244ff168df14545065e640cd8e50ddbfd2c5748d76925e22ab6d959", note: "the privacy policy template: says a citizen secret is stored only as a SHA-256 hash and never shown; no auth instruction" },
+  { file: "src/privacy.ts", sha: "2b8b6f0e64f2d87a10ed2a005648f3b40e91168e7918166da5cf571a43f97a3a", note: "the privacy policy template: says a citizen secret is stored only as a SHA-256 hash and never shown; no auth instruction" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);
 const PROSE_KEYS = new Set(PROSE_ALLOW.map((e) => e.file + "\n" + e.sha));
