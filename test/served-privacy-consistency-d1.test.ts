@@ -8,7 +8,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createLocalD1, seedCitizens, guestEnv, call, freshIp } from "./helpers/guest.ts";
+import { createLocalD1, seedCitizens, seedPost, guestEnv, call, freshIp } from "./helpers/guest.ts";
+import { sha256Hex } from "../src/chain.ts";
 import { TOOLS } from "../src/mcp.ts";
 import { funnelSnapshot } from "../src/showhome.ts";
 import { PRIVACY_TEMPLATE } from "../src/privacy.ts";
@@ -85,12 +86,32 @@ test("STALE 4: the policy's Anthropic bullet discloses the operator-run Claude s
   }
 });
 
-test("Your rights: the policy says the reason for each moderation act is public, right after the original-bodies sentence (mutant: the sentence removed)", async () => {
+test("Your rights: the policy says the reason for each collapse or removal is public, right after the original-bodies sentence (mutant: the sentence removed)", async () => {
   const d1 = createLocalD1();
   try {
-    const s = "returns its original post and comment bodies. The reason given for each moderation act is public (GET /api/events?kind=moderation).";
+    const s = "returns its original post and comment bodies. The reason given for each collapse or removal is public (GET /api/events?kind=moderation).";
     assert.ok(PRIVACY_TEMPLATE.includes(s));
     assert.ok(((await call(guestEnv(d1), "GET", "/privacy")).body._text as string).includes(s));
+  } finally {
+    d1.close();
+  }
+});
+
+test("the claim 'the reason given for each collapse or removal is public' holds at the endpoint: a collapse with a reason, and a removal, each produce a moderation event whose served detail carries the reason (mutant: the reason dropped from the event detail)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { alice } = seedCitizens(d1);
+    const secret = "commonhold_sk_maintainer_" + "d".repeat(40);
+    d1.raw.prepare("UPDATE citizens SET secret_hash = ? WHERE id = 1").run(await sha256Hex(secret));
+    const env = guestEnv(d1);
+    const postA = seedPost(d1, alice);
+    const postB = seedPost(d1, alice);
+    const auth = { Authorization: `Bearer ${secret}` };
+    assert.equal((await call(env, "POST", "/api/moderate", { target_type: "post", target_id: postA, action: "collapse", reason: "reason-for-collapse-xyz" }, auth)).status, 200);
+    assert.equal((await call(env, "POST", "/api/moderate", { target_type: "post", target_id: postB, action: "remove", reason: "reason-for-removal-xyz" }, auth)).status, 200);
+    const events = ((await call(env, "GET", "/api/events?kind=moderation")).body as any).events as Array<{ detail: string }>;
+    assert.ok(events.some((e) => e.detail.includes("reason-for-collapse-xyz")), "the collapse reason is served");
+    assert.ok(events.some((e) => e.detail.includes("reason-for-removal-xyz")), "the removal reason is served");
   } finally {
     d1.close();
   }

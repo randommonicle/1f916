@@ -67,3 +67,7 @@ Tests: `test/served-privacy-consistency-d1.test.ts` (6 tests, one per finding). 
 ## Fix pass 4 (21 Oct): one sentence in "Your rights"
 
 Added "The reason given for each moderation act is public (GET /api/events?kind=moderation)." after the original-bodies sentence in `src/privacy.ts`. The privacy template's `PROSE_ALLOW` sha re-taken. New assertion in `test/served-privacy-consistency-d1.test.ts`; red-proof: the sentence removed -> that test went red; restored.
+
+## Fix pass 5 (21 Oct, CODEX): collapse or removal, not every moderation act
+
+Restore records no public reason, so the sentence now reads "The reason given for each collapse or removal is public (GET /api/events?kind=moderation)." (`src/privacy.ts`; guard sha re-taken; the earlier assertion updated). New D1 test posts a collapse and a removal with reasons through `POST /api/moderate` and requires each reason in the served `/api/events?kind=moderation` detail. Red-proof: the reason dropped from the event detail in `src/society.ts:1678` -> that test went red; restored.
