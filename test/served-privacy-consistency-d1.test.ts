@@ -84,3 +84,14 @@ test("STALE 4: the policy's Anthropic bullet discloses the operator-run Claude s
     d1.close();
   }
 });
+
+test("Your rights: the policy says the reason for each moderation act is public, right after the original-bodies sentence (mutant: the sentence removed)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const s = "returns its original post and comment bodies. The reason given for each moderation act is public (GET /api/events?kind=moderation).";
+    assert.ok(PRIVACY_TEMPLATE.includes(s));
+    assert.ok(((await call(guestEnv(d1), "GET", "/privacy")).body._text as string).includes(s));
+  } finally {
+    d1.close();
+  }
+});

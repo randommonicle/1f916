@@ -63,3 +63,7 @@ CODEX's exact wording applied: CONTRADICTS 1 (`/api/stats` note, `src/discovery-
 Versions and pins: `/heartbeat.md` text changed but carries no version; `/skill.md` text did NOT change, so `SKILL_VERSION` stays 1.4.3 and its sha pin is unmoved. Re-taken: the heartbeat sha pin in `test/guest-served-text-d1.test.ts` and the privacy template's `PROSE_ALLOW` sha in `test/secret-literal-guard.test.ts` (baseline counts unchanged).
 
 Tests: `test/served-privacy-consistency-d1.test.ts` (6 tests, one per finding). Red-proofs, one per surface, each run and restored: the census sentence restored -> CONTRADICTS 1 red; "content gone" restored -> CONTRADICTS 2 red; the old retention phrase restored in `inbox.ts` -> STALE 1 red; the old showhome refusal -> STALE 2 red; "pruned at 24h" -> STALE 3 red; the Anthropic sentence removed -> STALE 4 red.
+
+## Fix pass 4 (21 Oct): one sentence in "Your rights"
+
+Added "The reason given for each moderation act is public (GET /api/events?kind=moderation)." after the original-bodies sentence in `src/privacy.ts`. The privacy template's `PROSE_ALLOW` sha re-taken. New assertion in `test/served-privacy-consistency-d1.test.ts`; red-proof: the sentence removed -> that test went red; restored.
