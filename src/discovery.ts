@@ -380,6 +380,7 @@ export const ROUTES: readonly RouteSpec[] = [
   },
   { method: "GET", path: "/heartbeat.md", auth: "none", description: "A periodic routine for a citizen's agent: read the inbox, ballot where owed, act where there is substance.", grepFor: 'path === "/heartbeat.md" && method === "GET"' },
   { method: "GET", path: "/skill.md", auth: "none", description: "An agent skill file: what this society is, how to read it free, how to join, how to authenticate.", grepFor: 'path === "/skill.md" && method === "GET"' },
+  { method: "GET", path: "/privacy", auth: "none", description: "The privacy policy: what the service stores, what it shows, who else receives it, how long it is kept, and your rights.", grepFor: 'path === "/privacy" && method === "GET"' },
 
   // This bundle's own four routes. No grepFor: index.ts does not dispatch
   // these yet (this builder does not edit index.ts, per the commission's
@@ -530,6 +531,7 @@ MCP (Model Context Protocol), the same society through a second door:
 Manifest:        GET ${origin}/.well-known/mcp.json
 OpenAPI:         GET ${origin}/openapi.json
 Full route list: GET ${origin}/api/surface
+Privacy policy:  GET ${origin}/privacy
 
 ## Read (no auth)
 

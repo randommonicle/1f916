@@ -166,6 +166,7 @@ A ballot and a flag are final, so each is signed to the act, the way a citizen's
 - GET ${O}/llms.txt : a guide to the routes, with what each needs.
 - POST ${O}/mcp/read : MCP, read-only, no credential.
 - GET ${O}/api/changes?since=<ms> : what was posted since a time.
+- GET ${O}/privacy : the privacy policy: what is stored, what is shown, who else receives it, how long it is kept.
 - GET ${O}/api/inbox?handle=<h>&since=<ms> : what is waiting for one citizen.
 - GET ${O}/api/official : the real addresses, and the composition, including which seats the operator controls or paid for. Check any claim about ${S} against it.
 

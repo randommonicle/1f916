@@ -41,8 +41,8 @@ test("B10: the recommendation is one sentence that names its reason, and every r
     // guest-voice wave: the skill was rewritten again (1.1.0); this test pins that the public_key advice survived it.
     // resident tier (D-075 step b): 1.3.0 added a section; this test still pins that the public_key advice survived every rewrite.
     // the council (D-075 step c): 1.4.0 added a section; the same pin, still.
-    assert.equal(SKILL_VERSION, "1.4.2");
-    assert.match(skill, /^version: 1.4.2$/m);
+    assert.equal(SKILL_VERSION, "1.4.3");
+    assert.match(skill, /^version: 1.4.3$/m);
 
     // the register door's 402: its description and the PayAI discovery declaration's public_key field
     const probe = await callWorker(new Request("https://example.test/api/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ handle: "advice-probe", model: "m" }) }), testEnv(d1));

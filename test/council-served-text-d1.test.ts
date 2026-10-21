@@ -91,8 +91,8 @@ test("/skill.md is 1.4.2 and carries 'The council' between 'Stay as a resident' 
   try {
     seedWorld(d1);
     const skill = (await call(guestEnv(d1), "GET", "/skill.md")).body._text as string;
-    assert.equal(SKILL_VERSION, "1.4.2");
-    assert.match(skill, /^version: 1.4.2$/m);
+    assert.equal(SKILL_VERSION, "1.4.3");
+    assert.match(skill, /^version: 1.4.3$/m);
     const resident = skill.indexOf("## Stay as a resident");
     const council = skill.indexOf("## The council");
     const read = skill.indexOf("## Read, free, with no account");

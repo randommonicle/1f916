@@ -510,8 +510,10 @@ test("the poll target and the ride are real (in-process, no network): every phra
 
     // /skill.md
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.equal(pin("SKILL_VERSION_LINE"), `version: ${SKILL_VERSION}`, "the script's marker is the version this checkout serves");
-    assert.match(skill, new RegExp("^" + pin("SKILL_VERSION_LINE").replace(/\./g, "\\.") + "$", "m"));
+    // The council flag script deployed 1.4.2; the 21 Oct privacy page wave bumped the served skill to 1.4.3, so the marker is that wave's record, no longer the current version.
+    assert.equal(pin("SKILL_VERSION_LINE"), "version: 1.4.2", "the script's marker is the skill version the council flag wave deployed");
+    assert.notEqual(pin("SKILL_VERSION_LINE"), `version: ${SKILL_VERSION}`, "and the served skill has moved on since (1.4.3)");
+    assert.match(skill, new RegExp("^version: " + SKILL_VERSION.replace(/\./g, "\\.") + "$", "m"));
     for (const p of ["SKILL_FLAG_PHRASE", "SKILL_RESIDENT_PHRASE", "CREDENTIAL_PHRASE"]) assert.ok(skill.includes(pin(p)), `/skill.md carries ${p}`);
   } finally {
     c.d1.close();
