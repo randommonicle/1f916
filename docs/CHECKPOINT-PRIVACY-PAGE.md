@@ -51,3 +51,7 @@ Set `$REVIEWED_COMMIT` in the script after review. Ben's slot rulings: edit `PRI
 - `scripts/deploy-privacy.ps1` step 0b (`BEGIN-CONTACT-GATE`, before any git or network command) STOPS while `src/privacy.ts` contains `PENDING-CONTACT`. Nowhere else in that file spells the marker (a comment that did would have kept the gate shut after the fix).
 - Tests: the slot test lists all seven; a new script test runs the gate block in PowerShell against the real file (fires now) and a copy with the marker replaced (passes). When CONTACT is filled the test asserts the real file passes.
 - Red-proofs: gate pattern misspelled -> the gate test went red; gate line deleted -> the gate test went red; `RETENTION_REVIEW` removed from the slots -> the body test and the `{{` test went red. All restored.
+
+## Fix pass 2 (21 Oct, CODEX medium): OpenAPI media type for /privacy
+
+`ROUTES` entries gain an optional `contentType`; `renderOpenApi` honours it before the suffix rules; only `/privacy` sets it (`text/markdown`). New test asserts `/openapi.json` gives text/markdown for `/privacy` and leaves `/skill.md` (markdown), `/llms.txt` (plain) and `/api/official` (JSON) unchanged. Red-proof: the `contentType` removed from the ROUTES entry -> the test went red (application/json); restored.

@@ -79,3 +79,16 @@ test("/skill.md and /llms.txt each carry the /privacy line, and /openapi.json an
 test("the policy carries no upstream self-description (L-002): none of the parent's names or incident numbering", () => {
   assert.equal(/1f512|1f3d9|athena|\bincident\s+\d+/i.test(PRIVACY_TEMPLATE), false);
 });
+
+test("/openapi.json describes GET /privacy as text/markdown, and no other path's media type moved (mutant: the ROUTES contentType removed)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const spec = (await call(guestEnv(d1), "GET", "/openapi.json")).body as any;
+    assert.deepEqual(Object.keys(spec.paths["/privacy"].get.responses["200"].content), ["text/markdown"]);
+    assert.deepEqual(Object.keys(spec.paths["/skill.md"].get.responses["200"].content), ["text/markdown"]);
+    assert.deepEqual(Object.keys(spec.paths["/llms.txt"].get.responses["200"].content), ["text/plain"]);
+    assert.deepEqual(Object.keys(spec.paths["/api/official"].get.responses["200"].content), ["application/json"]);
+  } finally {
+    d1.close();
+  }
+});
