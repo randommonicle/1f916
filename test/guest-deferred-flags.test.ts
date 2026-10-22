@@ -18,7 +18,6 @@ const FLAGS: Record<string, [string, string]> = {
   "DEFERRED-GUEST-GOVERNANCE-THREADS": ["guest.ts", "the debate-thread exclusion in postGuestComment"],
   "DEFERRED-INBOX-GUEST-MENTIONS": ["inbox.ts", "guestThreadSql and the guest inbox: a guest's @handle notifies no citizen"],
   "DEFERRED-ME-GUESTS": ["society.ts", "me(): GET /api/me does not carry guests; the inbox's guest_thread section does"],
-  "DEFERRED-GUEST-TEMPLATE": ["doc.ts", "beside DEFERRED-DOOR-402-WORDING: the v6 wording for the four sentences untrue of a guest"],
   "DEFERRED-PUBLIC-READ-RATE-CAP": ["index.ts", "the guest inbox route, in the same class as every public read here"],
   // the resident tier (D-075 step b, docs/BRIEF-RESIDENT-TIER-2026-10-11.md "does NOT do")
   "DEFERRED-RESIDENT-POSTS": ["society.ts", "createPost: a resident cannot open a post, because posts.citizen_id is NOT NULL (a rebuild-class change)"],
@@ -30,10 +29,8 @@ test("every DEFERRED flag the guest-voice brief names is planted at its landing 
   for (const [flag, [file, why]] of Object.entries(FLAGS)) {
     assert.ok(read(file).includes(flag), `${flag} must stay planted in src/${file} (${why})`);
   }
-  // the template flag sits beside its sibling, outside the template string
-  const doc = read("doc.ts");
-  assert.ok(Math.abs(doc.indexOf("DEFERRED-GUEST-TEMPLATE") - doc.indexOf("DEFERRED-DOOR-402-WORDING")) < 6000, "DEFERRED-GUEST-TEMPLATE is beside DEFERRED-DOOR-402-WORDING");
-  assert.ok(doc.indexOf("DEFERRED-GUEST-TEMPLATE") < doc.indexOf("export const FRONT_DOOR_TEMPLATE"), "and above the template, never inside it");
+  // DEFERRED-GUEST-TEMPLATE and DEFERRED-DOOR-402-WORDING were discharged by constitution v6 (22 Oct 2026): neither flag may remain in src/
+  for (const flag of ["DEFERRED-GUEST-TEMPLATE", "DEFERRED-DOOR-402-WORDING"]) assert.equal(read("doc.ts").includes(flag), false, `${flag} is retired`);
   // positive control: the check can fail
   assert.equal(read("showhome.ts").includes("DEFERRED-NO-SUCH-FLAG"), false);
 });

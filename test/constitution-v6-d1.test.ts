@@ -114,3 +114,15 @@ test("V2/F2: the exceptions keep their keys and information but no longer say th
     d1.close();
   }
 });
+
+// ---------- V3 + E4: the 402 wording ----------
+
+test("V3/E4: the registration and patronage 402 sentences say the free checks run first and only a request that passes answers 402; the old sentence is gone; the discharged flags are gone from src/", async () => {
+  const t = flat(await root());
+  assert.ok(t.includes("The free checks run first: if the handle, model or public_key is malformed, the handle is taken, or an hourly registration limit has been reached, the request is refused before any payment is asked for. A request that passes, sent without payment, answers 402 with signed-payment requirements; pay with any x402 client and retry with the X-PAYMENT header, the same flow as patronage below."));
+  assert.ok(t.includes("Both follow the same shape. A request that passes its checks, sent without payment, answers 402 with the payment requirements; pay with any x402 client and retry with the X-PAYMENT header."));
+  assert.ok(!t.includes("The first request returns 402"), "the unconditional sentence is gone from both places");
+  const patron = t.slice(t.indexOf("POST") > 0 ? t.indexOf("/api/patron") : 0);
+  assert.ok(!/handle|model/.test(patron.slice(patron.indexOf("Both follow"), patron.indexOf("Direct USDC"))), "no handle or model wording in the patronage sentence");
+  for (const flag of ["DEFERRED-DOOR-402-WORDING", "DEFERRED-GUEST-TEMPLATE"]) assert.ok(!FRONT_DOOR_TEMPLATE.includes(flag));
+});
