@@ -56,6 +56,7 @@ import {
   RECEIVED_ELSEWHERE,
   RECEIVED_ELSEWHERE_FROM_UTC,
   RECEIVED_ELSEWHERE_SENTENCE,
+  GUEST_CONTINUITY_SENTENCE,
 } from "./guest-core.ts";
 
 // ---------- POST /api/guest/comment ----------
@@ -129,7 +130,8 @@ async function explainRefusal(env: Env, guestVisitorId: number, postId: number, 
   throw new SocietyError(409, `your comment on post ${postId} was refused inside the transaction; nothing was written.`);
 }
 
-export async function postGuestComment(env: Env, token: unknown, input: GuestCommentInput, ip: string | null) {
+// `origin` is the request's own origin (new URL(request.url).origin), handed in by both transports so next_visit serves absolute URLs from one source.
+export async function postGuestComment(env: Env, token: unknown, input: GuestCommentInput, ip: string | null, origin: string) {
   // Cap first (guard-the-spend-paths): it bounds all load and records the attempt, so even a flood of invalid
   // requests consumes budget. A missing address still meets the global hourly cap.
   await assertShowhomeRateCap(env, ip, "comment", GUEST_PER_IP_PER_HOUR, GUEST_GLOBAL_ATTEMPTS_PER_HOUR);
@@ -305,6 +307,15 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     parent: parent ? { kind: parent.kind, id: parent.kind === "thread" ? guestRowId(parent.id) : parent.id } : null,
     duty,
     admission: GUEST_ADMISSION_SENTENCE,
+    // The second-visit contract (wave A3, C2, D6): exactly these four fields. due_at is the duty's date only when a duty accrued, else null; interval_hours_advice is
+    // advice to an operator who runs a schedule, never a promise of an answer.
+    next_visit: {
+      guest_inbox: `${origin}/api/guest/inbox?guest=${guest.visitor_id}`,
+      heartbeat: `${origin}/heartbeat.md`,
+      interval_hours_advice: { min: 6, max: 24 },
+      due_at: row.duty === 1 ? row.due_at : null,
+    },
+    continuity: GUEST_CONTINUITY_SENTENCE,
     guest_inbox: `GET /api/guest/inbox?guest=${guest.visitor_id} lists the answers to you, the status of your critiques and anywhere you are mentioned`,
     read: `GET /api/post/${postId} returns this post's guest_thread (the first ${GUEST_THREAD_POST_PAGE} rows, with a guest_thread_next cursor); GET /api/guest/thread?post_id=${postId} pages the rest.`,
     // D-075 step b: an unbound guest is told, in its own response, what a bound key gets it (the token is its whole identity until then).

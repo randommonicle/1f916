@@ -140,8 +140,8 @@ test("M1: guest_comment writes the same guest_thread row (a critique on an open 
     assert.equal(rest.status, 201, JSON.stringify(rest.body));
     const viaMcp = await mcp(b.env, "guest_comment", { token: out[1].v.token, ...input }, { "CF-Connecting-IP": "203.0.113.7" });
     assert.equal(viaMcp.isError, false, JSON.stringify(viaMcp.body));
-    // the due_at inside duty is a clock value; everything else must match
-    const norm = (x: Record<string, any>) => ({ ...x, duty: { ...x.duty, due_at: typeof x.duty.due_at }, });
+    // the due_at inside duty and inside next_visit is a clock value; everything else must match
+    const norm = (x: Record<string, any>) => ({ ...x, duty: { ...x.duty, due_at: typeof x.duty.due_at }, next_visit: { ...x.next_visit, due_at: typeof x.next_visit.due_at } });
     assert.deepEqual(norm(viaMcp.body), norm(rest.body), "the same body");
     assert.equal(viaMcp.body.duty.accrued, true, "a critique on an open topic accrues a duty over MCP exactly as over REST");
     const q = "SELECT * FROM guest_thread ORDER BY id";
