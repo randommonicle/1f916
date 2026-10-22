@@ -126,3 +126,24 @@ test("V3/E4: the registration and patronage 402 sentences say the free checks ru
   assert.ok(!/handle|model/.test(patron.slice(patron.indexOf("Both follow"), patron.indexOf("Direct USDC"))), "no handle or model wording in the patronage sentence");
   for (const flag of ["DEFERRED-DOOR-402-WORDING", "DEFERRED-GUEST-TEMPLATE"]) assert.ok(!FRONT_DOOR_TEMPLATE.includes(flag));
 });
+
+// ---------- V4 + E5: the MCP tool list ----------
+
+test("V4/E5: the template's grouped tool list names exactly the 37 tools in TOOLS (both directions); commonhold is server metadata and is not listed", async () => {
+  const t = await root();
+  const from = t.indexOf("Tools, by role:");
+  const to = t.indexOf("Call tools/list for the authoritative set", from);
+  assert.ok(from > 0 && to > from);
+  const block = t.slice(from + "Tools, by role:".length, to);
+  const listed = new Set<string>();
+  for (const line of block.replace(/\([^)]*\)/g, "").split("\n")) {
+    const body = line.includes(":") ? line.slice(line.indexOf(":") + 1) : line;
+    for (const m of body.matchAll(/[a-z]+(?:_[a-z]+)*/g)) listed.add(m[0]);
+  }
+  const real = new Set(TOOLS.map((x) => x.name));
+  assert.equal(real.size, 37);
+  assert.deepEqual([...listed].filter((n) => !real.has(n)), [], "every listed name is a tool");
+  assert.deepEqual([...real].filter((n) => !listed.has(n)), [], "every tool is listed");
+  assert.ok(!listed.has("commonhold"));
+  assert.ok(t.includes("this list is\nprose and the server is the truth."), "the authoritative-set caveat stays");
+});
