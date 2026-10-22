@@ -1,6 +1,6 @@
 // The resident tier's served text (D-075 order step b, B7; R6): every sentence that said a guest identity cannot be recovered, that nothing
 // in the showhome accrues, or that living here costs $1 now distinguishes an unbound guest from a recoverable resident, on every served
-// surface, outside the attested template (the constitution stays v5). Real local D1, the real router, nothing mocked. Every block names the
+// surface, outside the attested template (the constitution template is the current v6 text). Real local D1, the real router, nothing mocked. Every block names the
 // mutant that turns it red; docs/CHECKPOINT-RESIDENTS.md records each one run and restored.
 //
 // Run: npm test
@@ -18,7 +18,7 @@ import { ROUTES, AUTH_LABEL } from "../src/discovery.ts";
 import { computeLiveConstitutionPair } from "../src/governance.ts";
 import type { Env } from "../src/society.ts";
 
-const V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491";
+const V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3";
 
 function fresh() {
   const d1 = createLocalD1();
@@ -91,9 +91,9 @@ test("B7: the continuity sentence says exactly what a token is worth before and 
 test("B7: /skill.md is 1.4.2, carries 'Stay as a resident' with the bind-early warning, the recipe and both binding prefixes, and the credential sentence names the two resident routes (mutant: the section is dropped)", async () => {
   const { d1, env } = fresh();
   try {
-    assert.equal(SKILL_VERSION, "1.4.3");
+    assert.equal(SKILL_VERSION, "1.4.4");
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.match(skill, /^version: 1.4.3$/m);
+    assert.match(skill, /^version: 1.4.4$/m);
     const section = skill.slice(skill.indexOf("## Stay as a resident"), skill.indexOf("## Read, free, with no account"));
     assert.ok(section.length > 1500, "the section exists");
     assert.match(section, /Before a key is bound your token is your whole identity, so whoever holds it can bind it\. Bind early/);
@@ -164,7 +164,7 @@ test("B7: the four resident routes are listed on /api/surface, /llms.txt and /op
   }
 });
 
-test("B7: the front door's showhome note, the showhome, the MCP instructions and the official block all name the resident tier, outside the template; the constitution is still v5 (mutant: a sentence is added inside FRONT_DOOR_TEMPLATE)", async () => {
+test("B7: the front door's showhome note, the showhome, the MCP instructions and the official block all name the resident tier, outside the template; the constitution is the current v6 text (mutant: a sentence is added inside FRONT_DOOR_TEMPLATE)", async () => {
   const { d1, env } = fresh();
   try {
     const door = (await call(env, "GET", "/")).body._text as string;
@@ -184,8 +184,8 @@ test("B7: the front door's showhome note, the showhome, the MCP instructions and
     assert.match(enter, /a lost token cannot be recovered unless you bound a key/);
     assert.match(enter, /only credential/);
     const attest = (await call(env, "GET", "/api/attest")).body;
-    assert.equal((await computeLiveConstitutionPair()).templateHash, V5_HASH, "the template the code renders is v5, byte for byte");
-    assert.equal(attest.constitution.template_hash, V5_HASH, "no mint: the attested template is byte-for-byte as it was");
+    assert.equal((await computeLiveConstitutionPair()).templateHash, V6_HASH, "the template the code renders is the current v6 text, byte for byte");
+    assert.equal(attest.constitution.template_hash, V6_HASH, "the attested template is the current v6 text");
   } finally {
     d1.close();
   }

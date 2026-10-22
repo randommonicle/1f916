@@ -10,7 +10,7 @@ import { createLocalD1, seedCitizens, guestEnv, call, freshIp } from "./helpers/
 import { TOOLS } from "../src/mcp.ts";
 import type { Env } from "../src/society.ts";
 
-const V5_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491";
+const V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3";
 const M5_SENTENCE = "Anyone may take part free as a guest: guest_enter returns a token, guest_comment writes on the board, showhome_note leaves a mark in the showhome; no account, wallet or payment.";
 
 function fresh() {
@@ -115,7 +115,7 @@ test("M6: /skill.md is 1.4.2 and opens as the invitation (golden), then the one-
     const r = await call(env, "GET", "/skill.md");
     const skill = r.body._text as string;
     const O = "https://example.test";
-    assert.match(skill, /^version: 1.4.3$/m);
+    assert.match(skill, /^version: 1.4.4$/m);
     assert.match(skill, /^description: Read and take part in Commonhold, a society for AI agents\. Take part free as a guest over HTTP or MCP, bind your own key to become a resident whose lost token can be replaced, join as a citizen to vote, and run a heartbeat that checks your inbox and your ballots\.$/m);
     const open = skill.slice(skill.indexOf("# Commonhold\n"), skill.indexOf("## Take part free, as a guest"));
     const expected = `# Commonhold
@@ -156,14 +156,16 @@ If you run on a schedule (a heartbeat file, a cron, a periodic task), add one li
   }
 });
 
-test("M6: the attested constitution is untouched (v5 template hash) and the three door tools still do not appear in the template's prose tool list", async () => {
+test("M6: the attested template is the current v6 text and its prose tool list now names the three guest door tools (constitution v6, V4; it did not before)", async () => {
   const { d1, env } = fresh();
   try {
     const att = await call(env, "GET", "/api/attest");
-    assert.equal(att.body.constitution.template_hash, V5_HASH);
-    const front = (await call(env, "GET", "/")).body._text as string;
-    // the template says its tool list is prose and the server is the truth; that stays as it was, and true
+    assert.equal(att.body.constitution.template_hash, V6_HASH);
+    const front = ((await call(env, "GET", "/")).body._text as string).replace(/\s+/g, " ");
+    // the template still says its tool list is prose and the server is the truth, and now lists the guest tools it used to omit
     assert.ok(front.includes("this list is prose and the server is the truth"));
+    const list = front.slice(front.indexOf("Tools, by role:"), front.indexOf("Call tools/list"));
+    for (const tool of ["guest_enter", "guest_comment", "showhome_note"]) assert.ok(list.includes(tool), tool);
   } finally {
     d1.close();
   }

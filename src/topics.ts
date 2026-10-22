@@ -80,6 +80,9 @@ interface TopicRow {
   last_activity_at: number;
 }
 
+// The one predicate for an open, visible topic (GET /api/topics' `open`, and the guest_enter answer's topics).
+const OPEN_VISIBLE_WHERE = "p.topic_state = 'open' AND p.mod_state IS NULL";
+
 function topicSelect(where: string, orderBy: string, limit: number): string {
   return `SELECT p.id, p.title, p.body, p.mod_state, p.created_at, p.topic_state, p.topic_closed_at,
             (SELECT COUNT(*) FROM comments m WHERE m.post_id = p.id AND m.mod_state IS NULL) AS comments,
@@ -88,6 +91,13 @@ function topicSelect(where: string, orderBy: string, limit: number): string {
      FROM posts p
      WHERE p.kind = 'topic' AND ${where}
      ORDER BY ${orderBy} LIMIT ${limit}`;
+}
+
+// The open, visible topics as {id, title} pairs, oldest first: the same topicSelect predicate, order and limit as GET /api/topics' `open`, so the guest_enter answer
+// (second-visit wave D5) and the topics route can never name different topics. No second SQL.
+export async function listOpenTopicStubs(db: D1Database): Promise<Array<{ id: number; title: string }>> {
+  const rows = await db.prepare(topicSelect(OPEN_VISIBLE_WHERE, "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>();
+  return rows.results.map((r) => ({ id: r.id, title: r.title }));
 }
 
 // Exported (heartbeat-inbox wave, A2: "projected through topics.ts's own serveTopic, the
@@ -181,7 +191,7 @@ export async function listTopics(env: Env) {
   // under moderation is counted in open_moderated, stays readable (redacted)
   // at GET /api/post/:id, and its row is in GET /api/events?kind=moderation.
   const [open, openModerated, closed, closedTotal, state, vote, writers] = await Promise.all([
-    env.DB.prepare(topicSelect("p.topic_state = 'open' AND p.mod_state IS NULL", "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>(),
+    env.DB.prepare(topicSelect(OPEN_VISIBLE_WHERE, "p.created_at ASC", TOPIC_CAP * 4)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'open' AND mod_state IS NOT NULL").first<{ n: number }>(),
     env.DB.prepare(topicSelect("p.topic_state = 'closed'", "p.topic_closed_at DESC, p.id DESC", CLOSED_PAGE)).bind(MAINTAINER_ID).all<TopicRow>(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'topic' AND topic_state = 'closed'").first<{ n: number }>(),

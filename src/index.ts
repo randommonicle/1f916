@@ -358,7 +358,7 @@ export default {
       // Authorization header is not read here at all, so a citizen credential presented in it identifies nothing.
       if (path === "/api/guest/comment" && method === "POST") {
         const b = await body(request);
-        const posted = await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP"));
+        const posted = await postGuestComment(env, b.token, b, request.headers.get("CF-Connecting-IP"), new URL(request.url).origin);
         await recordDoor(env, ctx, "guest_comment"); // an accepted comment only: a refused one threw above
         return json(posted, 201);
       }

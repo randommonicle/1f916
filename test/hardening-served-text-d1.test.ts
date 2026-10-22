@@ -24,8 +24,8 @@ test("H5: the council's second known weakness says what a stranger can and canno
     const council = await call(env, "GET", "/api/council");
     assert.equal(council.status, 200);
     assert.ok(JSON.stringify(council.body).includes(JSON.stringify(weakness).slice(1, -1)), "/api/council serves the same sentence");
-    assert.match(skill, /^version: 1.4.3$/m, "the skill text changed, so the version moved with it");
-    assert.equal(SKILL_VERSION, "1.4.3");
+    assert.match(skill, /^version: 1.4.4$/m, "the skill text changed, so the version moved with it");
+    assert.equal(SKILL_VERSION, "1.4.4");
   } finally {
     d1.close();
   }

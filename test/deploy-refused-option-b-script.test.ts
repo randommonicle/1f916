@@ -465,10 +465,11 @@ test("prod checks: every failure STOPS before the end, for its own reason", (t) 
 
 // ---------- the constants, each pinned to a source of truth ----------
 
-test("$V5_HASH is the live constitution's template hash (a re-mint turns this red, as it should)", async (t) => {
+test("$V5_HASH is the v5 hash this historical script pinned (the live constitution is v6 from the second-visit wave; see test/constitution-v6-d1.test.ts)", async (t) => {
   const d = definitions(t);
   if (!d) return;
-  assert.equal(d.V5, (await computeLiveConstitutionPair()).templateHash);
+  assert.equal(d.V5, "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491", "the historical script keeps its own v5 pin");
+  assert.notEqual(d.V5, (await computeLiveConstitutionPair()).templateHash, "and the current code is no longer v5");
 });
 
 test("$LIVE_BASE_COMMIT is a full sha, names a commit in this history, and is an ancestor of HEAD", (t) => {
