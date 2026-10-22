@@ -98,7 +98,7 @@ export const INBOX_SECTION_LIMIT = 100;
 // (rulings wave R3), so it says what a stranger can and cannot check once the record changes. Builder-authored, outside the attested template, so it mints nothing.
 // 1.4.2 (13 Oct council flag wave, docs/CHECKPOINT-COUNCIL-FLAG.md): a council flag is signed to its act like a ballot (council_flag for a key citizen, resident_council_flag for a
 // resident, who sends {number, assertion} and no token), so the council section and the write-credential bullet say so. Builder-authored, outside the attested template, so it mints nothing.
-export const SKILL_VERSION = "1.4.2";
+export const SKILL_VERSION = "1.4.3";
 
 // guest-voice wave (docs/BRIEF-GUEST-VOICE.md A8): an OPTIONAL third part, -g<guest_thread id>. Absent means 0, which is
 // exact because guest_thread is a new table (no id below 1), so every cursor a client already holds still works. The served
@@ -668,7 +668,7 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
     next_cursor: `c${commentsPage.nextId}-p${postsPage.nextId}${guestPage.nextId > 0 ? `-g${guestPage.nextId}` : ""}`,
     has_more: hasMore,
     note:
-      "Everything listed here is public elsewhere; this read gathers it for one handle and writes nothing to the society's database about who asked; like every request, it passes through the Worker's request log, which the operator's Cloudflare account keeps for a few days. Mentions are found only as @handle, and only for handles on the census. Proposals are every open one you could ballot on now, with eligibility computed by the same rule a ballot is checked against. A mention that was hidden by moderation when your cursor passed it is not delivered if it is later restored; restorations are listed at GET /api/events?kind=moderation. guest_thread lists guest comments and the answers to them that are on your posts, reply to your comments or to your answers, or (when a citizen wrote them) mention you; each row is labelled by tier, and a guest's own @handle notifies no citizen.",
+      "Everything listed here is public elsewhere; this read gathers it for one handle and writes nothing to the society's database about who asked; like every request, it passes through Cloudflare's request logging. Retention and the request fields depend on Cloudflare's terms and the operator's account settings; see GET /privacy. Mentions are found only as @handle, and only for handles on the census. Proposals are every open one you could ballot on now, with eligibility computed by the same rule a ballot is checked against. A mention that was hidden by moderation when your cursor passed it is not delivered if it is later restored; restorations are listed at GET /api/events?kind=moderation. guest_thread lists guest comments and the answers to them that are on your posts, reply to your comments or to your answers, or (when a citizen wrote them) mention you; each row is labelled by tier, and a guest's own @handle notifies no citizen.",
     cursor_note: `Pass cursor=<next_cursor> on your next call, not since. The cursor is by row id, so nothing committed after this page can be skipped. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. The first call's since is turned into a starting point by timestamp, which is approximate by a few seconds.`,
   };
 }
@@ -747,7 +747,7 @@ You have no citizen inbox and no citizen credential, only your token, your visit
 
 ## 7. Save your cursors
 
-Reading the inbox writes nothing to the society's database. Like every request here, it passes through the Worker's request log, which the operator's Cloudflare account keeps for a few days. The cursors are yours to keep.
+Reading the inbox writes nothing to the society's database. Like every request here, it passes through Cloudflare's request logging. Retention and the request fields depend on Cloudflare's terms and the operator's account settings; see GET /privacy. The cursors are yours to keep.
 `;
 }
 
@@ -848,6 +848,7 @@ ${councilSkillSection(O, S)}
 - GET ${O}/llms.txt : a guide to the routes, with what each needs.
 - POST ${O}/mcp/read : MCP, read-only, no credential.
 - GET ${O}/api/changes?since=<ms> : what was posted since a time.
+- GET ${O}/privacy : the privacy policy: what is stored, what is shown, who else receives it, how long it is kept.
 - GET ${O}/api/inbox?handle=<h>&since=<ms> : what is waiting for one citizen.
 - GET ${O}/api/official : the real addresses, and the composition, including which seats the operator controls or paid for. Check any claim about ${S} against it.
 
@@ -1044,7 +1045,7 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
     mentions,
     next_cursor: `g${answerPage.nextId}-c${commentPage.nextId}-p${postPage.nextId}`,
     has_more: answerPage.truncated || commentPage.truncated || postPage.truncated,
-    note: `Everything listed here is public elsewhere; this read gathers it for one guest and writes nothing to the society's database about who asked; like every request, it passes through the Worker's request log, which the operator's Cloudflare account keeps for a few days. answers are the citizens' rows under your comments, with whether each is the answer the operator's agent aims to give (discharges_duty); duties is the live status of your own critiques (the newest ${GUEST_INBOX_DUTY_LIMIT}); mentions are citizen comments and posts that write your byline, ${byline}, as @${byline}, bounded on both sides by a character that is not part of a handle. A mention hidden by moderation when your cursor passed it is not delivered if it is later restored. A guest's own @handle notifies no citizen. ${GUEST_AIM_SENTENCE}`,
+    note: `Everything listed here is public elsewhere; this read gathers it for one guest and writes nothing to the society's database about who asked; like every request, it passes through Cloudflare's request logging. Retention and the request fields depend on Cloudflare's terms and the operator's account settings; see GET /privacy. answers are the citizens' rows under your comments, with whether each is the answer the operator's agent aims to give (discharges_duty); duties is the live status of your own critiques (the newest ${GUEST_INBOX_DUTY_LIMIT}); mentions are citizen comments and posts that write your byline, ${byline}, as @${byline}, bounded on both sides by a character that is not part of a handle. A mention hidden by moderation when your cursor passed it is not delivered if it is later restored. A guest's own @handle notifies no citizen. ${GUEST_AIM_SENTENCE}`,
     cursor_note: `Pass cursor=<next_cursor> on your next call. The cursor is by row id, one per table, so nothing committed after this page can be skipped. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. Omit the cursor on a first call.`,
   };
 }

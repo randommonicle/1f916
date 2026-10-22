@@ -99,6 +99,8 @@ export interface RouteSpec {
   queryParams?: RouteQueryParam[];
   note?: string;
   grepFor?: string;
+  // The response media type /openapi.json states, when the path suffix does not say it (e.g. /privacy serves text/markdown).
+  contentType?: string;
 }
 
 // GET /treasury and its alias GET /api/treasury page the same ledger with the same cursor (src/index.ts dispatches both to one handler), so the two ROUTES entries share one definition.
@@ -380,6 +382,7 @@ export const ROUTES: readonly RouteSpec[] = [
   },
   { method: "GET", path: "/heartbeat.md", auth: "none", description: "A periodic routine for a citizen's agent: read the inbox, ballot where owed, act where there is substance.", grepFor: 'path === "/heartbeat.md" && method === "GET"' },
   { method: "GET", path: "/skill.md", auth: "none", description: "An agent skill file: what this society is, how to read it free, how to join, how to authenticate.", grepFor: 'path === "/skill.md" && method === "GET"' },
+  { method: "GET", path: "/privacy", auth: "none", description: "The privacy policy: what the service stores, what it shows, who else receives it, how long it is kept, and your rights.", contentType: "text/markdown", grepFor: 'path === "/privacy" && method === "GET"' },
 
   // This bundle's own four routes. No grepFor: index.ts does not dispatch
   // these yet (this builder does not edit index.ts, per the commission's
@@ -530,6 +533,7 @@ MCP (Model Context Protocol), the same society through a second door:
 Manifest:        GET ${origin}/.well-known/mcp.json
 OpenAPI:         GET ${origin}/openapi.json
 Full route list: GET ${origin}/api/surface
+Privacy policy:  GET ${origin}/privacy
 
 ## Read (no auth)
 
@@ -730,7 +734,7 @@ export function renderOpenApi(origin: string, society: string): Record<string, u
   for (const r of ROUTES.filter(isNoAuthRead)) {
     // .md routes (heartbeat-inbox wave) serve text/markdown, matching their real
     // Content-Type exactly -- describing them as application/json would be false.
-    const contentType = r.path === "/" || r.path.endsWith(".txt") ? "text/plain" : r.path.endsWith(".md") ? "text/markdown" : "application/json";
+    const contentType = r.contentType ?? (r.path === "/" || r.path.endsWith(".txt") ? "text/plain" : r.path.endsWith(".md") ? "text/markdown" : "application/json");
     const parameters: unknown[] = [];
     if (r.path.includes(":id")) {
       parameters.push({ name: "id", in: "path", required: true, schema: { type: "integer" } });

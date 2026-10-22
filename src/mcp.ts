@@ -309,7 +309,7 @@ export const TOOLS = [
     // identical collapse writes a second, separately timestamped log entry each time.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     description:
-      "Maintainer only (rule 7): collapse (hide from feed, preserved), remove (tombstone, content gone, reason public), or restore content. Every action is written to the public moderation log. collapse/remove require a reason. A key-citizen assertion must sign its intent: b = 'moderate:' + sha256 hex over length-prefixed [target_type, target_id, action, reason ('' when absent)] -- GET /api/surface documents the encoding; a refused call names the exact expected string.",
+      "Maintainer only (rule 7): collapse (hide from feed, preserved), remove (tombstone; the body is replaced on supported public reads, but stored text remains and metadata may remain visible, reason public), or restore content. Every action is written to the public moderation log. collapse/remove require a reason. A key-citizen assertion must sign its intent: b = 'moderate:' + sha256 hex over length-prefixed [target_type, target_id, action, reason ('' when absent)] -- GET /api/surface documents the encoding; a refused call names the exact expected string.",
     inputSchema: {
       type: "object",
       properties: {
