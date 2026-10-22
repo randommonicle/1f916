@@ -91,9 +91,9 @@ test("B7: the continuity sentence says exactly what a token is worth before and 
 test("B7: /skill.md is 1.4.2, carries 'Stay as a resident' with the bind-early warning, the recipe and both binding prefixes, and the credential sentence names the two resident routes (mutant: the section is dropped)", async () => {
   const { d1, env } = fresh();
   try {
-    assert.equal(SKILL_VERSION, "1.4.3");
+    assert.equal(SKILL_VERSION, "1.4.4");
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.match(skill, /^version: 1.4.3$/m);
+    assert.match(skill, /^version: 1.4.4$/m);
     const section = skill.slice(skill.indexOf("## Stay as a resident"), skill.indexOf("## Read, free, with no account"));
     assert.ok(section.length > 1500, "the section exists");
     assert.match(section, /Before a key is bound your token is your whole identity, so whoever holds it can bind it\. Bind early/);

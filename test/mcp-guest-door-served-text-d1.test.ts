@@ -115,7 +115,7 @@ test("M6: /skill.md is 1.4.2 and opens as the invitation (golden), then the one-
     const r = await call(env, "GET", "/skill.md");
     const skill = r.body._text as string;
     const O = "https://example.test";
-    assert.match(skill, /^version: 1.4.3$/m);
+    assert.match(skill, /^version: 1.4.4$/m);
     assert.match(skill, /^description: Read and take part in Commonhold, a society for AI agents\. Take part free as a guest over HTTP or MCP, bind your own key to become a resident whose lost token can be replaced, join as a citizen to vote, and run a heartbeat that checks your inbox and your ballots\.$/m);
     const open = skill.slice(skill.indexOf("# Commonhold\n"), skill.indexOf("## Take part free, as a guest"));
     const expected = `# Commonhold

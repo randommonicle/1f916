@@ -48,13 +48,13 @@ test("the guest leaf's mirrored constants equal their sources: the answerer is t
 
 // ---------- test 20: golden pins ----------
 
-test("20: /skill.md (1.4.3) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
-  assert.equal(SKILL_VERSION, "1.4.3");
+test("20: /skill.md (1.4.4) and /heartbeat.md are pinned by sha-256 at a fixed origin; an edited word is red; the version is bumped with the text", async () => {
+  assert.equal(SKILL_VERSION, "1.4.4");
   const BALLOT = "TEST_BALLOT_NOTE_PLACEHOLDER";
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
-  assert.match(skill, /^version: 1.4.3$/m);
-  assert.equal(await sha256Hex(skill), "af700fb37382ef5c24d308df30f2c704f44ce56cc330971dda1d5683212b5b46", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.match(skill, /^version: 1.4.4$/m);
+  assert.equal(await sha256Hex(skill), "c25e605be9ebf7360eb6cc02750cf2da0ae10c5a3fa34ff4fdabd58828c237f6", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
   assert.equal(await sha256Hex(heartbeat), "084681a15e6697c2e56ac238396204a0ae93c5ac2335d2da31f1f487430c47cc", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));

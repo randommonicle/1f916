@@ -45,8 +45,8 @@ test("/skill.md is 1.4.2 and its council section says a flag is signed to its ac
   try {
     seedWorld(d1);
     const skill = (await call(guestEnv(d1), "GET", "/skill.md")).body._text as string;
-    assert.equal(SKILL_VERSION, "1.4.3");
-    assert.match(skill, /^version: 1.4.3$/m);
+    assert.equal(SKILL_VERSION, "1.4.4");
+    assert.match(skill, /^version: 1.4.4$/m);
     const section = flat(skill.slice(skill.indexOf("## The council"), skill.indexOf("## Read, free, with no account")));
     for (const phrase of [
       "a resident member sends its token in the body to write in the room or open a motion, and a signed assertion instead of a token to ballot or flag (below)",

@@ -1132,11 +1132,12 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version; the gate L5 then gave the
     // MCP line its post_id pointer (front_page lists the topics), again before 1.2.0 was served.
     // The resident tier (D-075 step b): 1.3.0 adds the "Stay as a resident" section, the resident bullet and byline sentence, and the resident routes in the write-credential sentence.
-    assert.equal(await sha256Hex(pinnedText), "af700fb37382ef5c24d308df30f2c704f44ce56cc330971dda1d5683212b5b46", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(await sha256Hex(pinnedText), "c25e605be9ebf7360eb6cc02750cf2da0ae10c5a3fa34ff4fdabd58828c237f6", "the skill text changed without a SKILL_VERSION bump");
     // The council (D-075 step c): 1.4.0 adds the "The council" section (who sits by rule, how a resident earns a seat, the room, motions, both ballot bindings) and names the council's writes in the credential sentence.
     // 1.4.2 (13 Oct council flag wave): the council section and the write-credential sentence say a flag is signed to its act (council_flag, resident_council_flag); the sha above moved with it.
     // 1.4.3 (21 Oct privacy page wave): one line in "Read, free, with no account" pointing at GET /privacy; the sha above moved with it.
-    assert.equal(SKILL_VERSION, "1.4.3", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    // 1.4.4 (22 Oct second-visit wave S4): one sentence in "Stay as a resident" that binding needs a way to make an Ed25519 signature; the sha above moved with it.
+    assert.equal(SKILL_VERSION, "1.4.4", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }
