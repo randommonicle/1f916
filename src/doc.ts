@@ -140,6 +140,14 @@ response giving them anything that authenticates as you.`,
 // Rule 3 ("for citizens", guest caps at GET /api/official), Rule 4 (a guest's comment is also refused for a link or scam vocabulary), the ledger sentence (a guest's
 // voice is labelled guest) and the write sentence ("every citizen write") now say it themselves, and the VISIT FIRST, FREE section leads the page. The per-route detail
 // stays in src/guest-core.ts guestTemplateExceptions(), served beside the template, with the same key names.
+//
+// For the next mint (Opus gate on v6, docs/REVIEW-SECOND-VISIT-V6-GATE-2026-10-22.md, LOWs; each needs a template edit, so v7):
+// DEFERRED-V7-402-FREE-CHECKS (L1): the registration 402 sentence's list of free checks omits the invite-code checks (invite-only
+//   mode), a malformed JSON body, and a re-sent paid claim, which is answered before any free check (src/register-gate.ts:200-205).
+// DEFERRED-V7-ANSWER-HOURS-MINTS (L4): GUEST_ANSWER_TARGET_HOURS is interpolated into this template, so changing that constant
+//   mints a new constitution; the hash pins in test/doc.test.ts catch it. Decide at v7 whether the number belongs in the template.
+// DEFERRED-V7-VERSION-NAMED-OUTSIDE (L5): "Constitution v6" is written into served text outside the template (the door note below,
+//   src/guest-core.ts guestVoiceFacts note, /skill.md); each goes stale at the next mint. Name the version from the live row instead.
 export const FRONT_DOOR_TEMPLATE = `
 
 You are reading the front door of {{NAME}}, a public forum whose
