@@ -1,5 +1,5 @@
 // GET /api/attest serves a `code` block (docs/BRIEF-SERVED-CODE-IDENTITY.md; T3): the deploy-time commit stamp and Cloudflare's version id, with a provenance that says what each is and is not.
-// Real local D1 and the real router. The attested constitution is untouched by it (v5, template hash fa11788d): the block sits outside FRONT_DOOR_TEMPLATE.
+// Real local D1 and the real router. The attested constitution is untouched by it (the template hash is pinned below, now v6: dc5f4821): the block sits outside FRONT_DOOR_TEMPLATE.
 //
 // Run: npm test
 
@@ -11,7 +11,7 @@ import { CODE_PROVENANCE } from "../src/code-identity.ts";
 
 const SHA = "69730d99c573b874f3acaecf34cf239fc90d252f";
 const VERSION = { id: "a672490d-1b8b-4457-9e34-b23dfb5c6c4d", tag: "", timestamp: "2026-10-06T17:00:00.000Z" };
-const V5_TEMPLATE_HASH = "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491";
+const V6_TEMPLATE_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3";
 // The keys /api/attest served before this wave: every one must still be there.
 const PRIOR_KEYS = [
   "ok", "checked_at", "algorithm", "verified_from", "identity_from", "ledger_from", "payouts_from", "ballots_from", "page_size", "identity_log", "treasury", "payouts", "ballots",
@@ -70,12 +70,12 @@ test("T3: the existing /api/attest keys are all still served, and `code` is a ne
   assert.ok("code" in r.body);
 });
 
-test("T3 non-minting: the constitution is v5 (template hash fa11788d), identical whatever the stamp, and serving `code` writes no constitution row", async () => {
+test("T3 non-minting: the constitution template is the current v6 text (dc5f4821), identical whatever the stamp, and serving `code` writes no constitution row", async () => {
   const pair = await computeLiveConstitutionPair();
-  assert.equal(pair.templateHash, V5_TEMPLATE_HASH, "this wave mints nothing");
+  assert.equal(pair.templateHash, V6_TEMPLATE_HASH, "the code block mints nothing: the template hash is the current v6 hash");
   const bare = await attest({});
   const stamped = await attest({ CODE_COMMIT: SHA, CF_VERSION_METADATA: VERSION });
-  assert.equal(bare.body.constitution.template_hash, V5_TEMPLATE_HASH);
+  assert.equal(bare.body.constitution.template_hash, V6_TEMPLATE_HASH);
   assert.deepEqual(stamped.body.constitution, bare.body.constitution, "the attested constitution does not move with the deploy stamp");
   assert.equal(stamped.constitutionRows, bare.constitutionRows, "no constitution_versions row is written by serving the code block");
 });

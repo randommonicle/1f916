@@ -134,7 +134,7 @@ test("V4/E5: the template's grouped tool list names exactly the 37 tools in TOOL
   const from = t.indexOf("Tools, by role:");
   const to = t.indexOf("Call tools/list for the authoritative set", from);
   assert.ok(from > 0 && to > from);
-  const block = t.slice(from + "Tools, by role:".length, to);
+  const block = t.slice(from + "Tools, by role:".length, to).replace("the register tool, which refuses on this door", "register");
   const listed = new Set<string>();
   for (const line of block.replace(/\([^)]*\)/g, "").split("\n")) {
     const body = line.includes(":") ? line.slice(line.indexOf(":") + 1) : line;
@@ -146,4 +146,63 @@ test("V4/E5: the template's grouped tool list names exactly the 37 tools in TOOL
   assert.deepEqual([...real].filter((n) => !listed.has(n)), [], "every tool is listed");
   assert.ok(!listed.has("commonhold"));
   assert.ok(t.includes("this list is\nprose and the server is the truth."), "the authoritative-set caveat stays");
+});
+
+// ---------- what v6 must NOT touch ----------
+
+import { createHash } from "node:crypto";
+
+// sha-256 of each section of phase 1's template (commit 3ca09710, v5 text), taken from that commit's src/doc.ts. FIRST LAWS and every rule other than 3 and 4 stay byte-identical.
+const P1_SECTION_SHA: Record<string, string> = {
+  "FIRST LAWS": "a6eaf45930155cbeacb963f3e6454e33591d8e6228a0738ca11d2454118c3fc4",
+  "rule 1": "11588b0ddfbf578f677be3ad6082feeca15430d4af0d65767c038ca175e6cfd2",
+  "rule 2": "f8e13df8557854202a600ea278dbcb9007a10a66ce2eefa150c9593f818fef58",
+  "rule 5": "aa2143c26923e3b23c871fdbd4f4c5073d051ba7b23c8b85c9297445eb618369",
+  "rule 6": "7952e2904a289bb32366090414285c2bd0196463a6b898aaf7e46453c8826ac8",
+  "rule 7": "413d2c3b3462cc8592d8b337c81ace7fb5087952e02767bf58f6399bd426e2b4",
+  "THE COMPACT onward": "e9b2a3794b67f05442cba2233f585377a2423a2a390f192ff8e5eff528ca842a",
+};
+const sha = (x: string): string => createHash("sha256").update(x, "utf8").digest("hex");
+function sections(tpl: string): Record<string, string> {
+  const between = (a: string, b: string): string => {
+    const i = tpl.indexOf(a);
+    assert.ok(i >= 0, a);
+    const j = tpl.indexOf(b, i);
+    assert.ok(j > i, b);
+    return tpl.slice(i, j);
+  };
+  const rules = between("THE CONSTITUTION\n", "HOW TO JOIN (JSON API)");
+  const rule = (n: number): string => {
+    const i = rules.indexOf(`${n}. `);
+    const j = rules.indexOf(`\n${n + 1}. `, i);
+    return rules.slice(i, j > 0 ? j : rules.length);
+  };
+  return {
+    "FIRST LAWS": between("FIRST LAWS\n----------", "THE COMPACT"),
+    "rule 1": rule(1),
+    "rule 2": rule(2),
+    "rule 5": rule(5),
+    "rule 6": rule(6),
+    "rule 7": rule(7),
+    "THE COMPACT onward": tpl.slice(tpl.indexOf("THE COMPACT\n")),
+  };
+}
+
+test("v6 leaves the FIRST LAWS section, rules 1, 2, 5, 6 and 7 and THE COMPACT onward byte-identical to phase 1's v5 text", () => {
+  const got = sections(FRONT_DOOR_TEMPLATE.replace(/\r\n/g, "\n"));
+  for (const [name, expected] of Object.entries(P1_SECTION_SHA)) {
+    assert.equal(sha(got[name]), expected, `${name} moved from phase 1's text`);
+  }
+});
+
+test("v6 template hash: /api/attest serves the pinned v6 hash and no longer the v5 one", async () => {
+  const d1 = createLocalD1();
+  seedCitizens(d1);
+  try {
+    const att = (await call(guestEnv(d1), "GET", "/api/attest")).body;
+    assert.equal(att.constitution.template_hash, "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3");
+    assert.notEqual(att.constitution.template_hash, "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491");
+  } finally {
+    d1.close();
+  }
 });

@@ -127,9 +127,9 @@ test("L-109: the pointer in the secret-lost answer is followed through the real 
 
 // ---------- 13. non-minting ----------
 
-test("13. non-minting: the attested constitution is untouched (template hash fa11788d, v5), and none of the wave's served text sits inside it", async () => {
+test("13. non-minting: the attested constitution is untouched (template hash dc5f4821, the current v6 text), and none of the wave's served text sits inside it", async () => {
   const pair = await computeLiveConstitutionPair();
-  assert.equal(pair.templateHash, "fa11788d062b0c6d23c54c428c1c9649d263ae3ba704e602e122066926049491", "the wave mints nothing");
+  assert.equal(pair.templateHash, "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3", "the template is the current v6 text; this wave adds none of its served text to it");
   const d1 = createLocalD1();
   try {
     const front = await (await get(d1, "/")).text();

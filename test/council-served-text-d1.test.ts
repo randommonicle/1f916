@@ -159,17 +159,20 @@ test("every council route and tool the skill and llms.txt name is real: each /ap
   }
 });
 
-test("the council touches nothing inside the attested constitution: FRONT_DOOR_TEMPLATE does not mention it, and the only council sentence on GET / is the door note's credential exception, appended after the template (mutant: a council sentence is added to the template)", async () => {
+test("the council adds nothing to the attested constitution but its seven tool names (constitution v6, V4): FRONT_DOOR_TEMPLATE mentions it only in the MCP tool list, and the only council sentence on GET / is the door note's credential exception, appended after the template (mutant: a council sentence is added to the template)", async () => {
   const c = await councilCast();
   try {
     const before = (await call(c.env, "GET", "/")).body._text as string;
     // The one council sentence on GET / is the credential exception (COUNCIL_WRITES_SENTENCE), which rides the showhome door note appended AFTER the template; nothing else mentions the council.
     assert.ok(flat(before).includes(flat(COUNCIL_WRITES_SENTENCE)), "the door note's credential exception names the council's writes");
-    assert.equal(/council/i.test(flat(before).replace(flat(COUNCIL_WRITES_SENTENCE), "")), false, "and nothing else on GET / mentions the council");
+    // v6 lists the council's seven tools by name in the template's grouped tool list; that block is the one other place the word may appear.
+    const toolBlock = /Tools, by role:[\s\S]*?Call tools\/list/;
+    assert.ok(toolBlock.test(before), "the grouped tool list is there");
+    assert.equal(/council/i.test(flat(before.replace(toolBlock, "")).replace(flat(COUNCIL_WRITES_SENTENCE), "")), false, "and nothing else on GET / mentions the council");
     const doc = (await import("node:fs")).readFileSync(new URL("../src/doc.ts", import.meta.url), "utf8");
     const tpl = doc.slice(doc.indexOf("export const FRONT_DOOR_TEMPLATE = `"));
     const templateText = tpl.slice(0, tpl.indexOf("`;"));
-    assert.equal(/council/i.test(templateText), false, "FRONT_DOOR_TEMPLATE does not mention the council");
+    assert.equal(/council/i.test(templateText.replace(toolBlock, "")), false, "FRONT_DOOR_TEMPLATE mentions the council only in the tool list");
   } finally {
     c.d1.close();
   }

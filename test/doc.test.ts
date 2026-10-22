@@ -292,15 +292,19 @@ test("frontDoor: ratified First Laws carry no PROPOSED banner -- the laws text s
 // verified by a before/after diff of all eight served pages showing ONLY the
 // TREASURY sentence moved; mints v4->v5 at deploy when buildConstitutionTemplate()
 // recomputes template_hash.
+// v6 (2026-10-22): constitution v6, the second-visit wave: the VISIT FIRST, FREE section, the four guest corrections (Rules 3 and 4, the ledger sentence, "every citizen
+// write"), the conditional 402 wording in the registration and patronage paragraphs, and the grouped, complete MCP tool list. All eight hashes were recomputed from the
+// built template; the line-by-line diff against v5 is recorded in docs/CHECKPOINT-SECOND-VISIT.md. mints v5->v6 at deploy when buildConstitutionTemplate() recomputes
+// template_hash.
 const GOLDEN_FRONT_DOOR_SHA256: Record<string, string> = {
-  "invite_only,false,false": "4cf896b863a841998546dd0a37fb7a711c72adc0abdba06dc14a77e901a1f935",
-  "invite_only,false,true": "cf5b5eccd8dd09bbc6b2c9613b9a87782cd5abd5259c5570797dc866c46c713e",
-  "invite_only,true,false": "165b9b5b75b77db4a7dcdd162ba9179b52cad8fea3c0a4176d9df7981cdb9c1d",
-  "invite_only,true,true": "f988af02feb0ddec63960c87d05d6f4702c289cc41b799e6b897697f0c0eb207",
-  "open,false,false": "11937c6641b817ac7d705656c4c12863b31469c58e139539339f6d92118c6114",
-  "open,false,true": "5b1e052fcd16c070f21a5614b93243825f6769cd59b5b7d5a505d17b784aee42",
-  "open,true,false": "365da5bfa0a41d97f4a67df5cec21cce45b4387c80d23dbeeeeda87d9a91e622",
-  "open,true,true": "02f5365888a3384bb16e136f889d07c97f60511b0c8fd57c66148e2d100a4298",
+"invite_only,false,false": "8f4da9ddf7d11721d124e0bbeab4d4560ff958020b145414aa95d8d7735cbcb7",
+  "invite_only,false,true": "4477c920abb97b1c954d62898e8200d637cda8cca066cce5b034216ce7fe2db0",
+  "invite_only,true,false": "074c7cf964e7a5e494e1d8c0d577e6448f781415d3a3b0610d6b08cdc9130b10",
+  "invite_only,true,true": "f33b460682da27574f230fed38921c7c0b3c05ac6d45d8cf0de489d6fb91d6ff",
+  "open,false,false": "9c6d0107e4d85e3f3c9a9848656634dc8be1ed30bd7cf9ecf4b3f3b58ef2a10a",
+  "open,false,true": "11cc065921829225af604a0cb7d202196c9a8fdb9114cf913ba86c3400d8ded3",
+  "open,true,false": "966db8d4464823aa28feabcaa23c4fe39ae90cdc63a1eb5cf0d8cd52662a3400",
+  "open,true,true": "741e89643f450a2c325412af26d50bd076fc8811329cb86b692c3482958882bd",
 };
 
 // The repeal of the founder bounty-priority clause (2026-08-23) must not be

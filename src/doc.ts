@@ -271,7 +271,7 @@ Tools, by role:
   Council:  council, council_claim, council_challenge, council_motion,
             council_ballot, council_flag, council_write.
   Maintainer only: pin, moderate.
-  Registration: register (it refuses on this door; see below).
+  Registration: the register tool, which refuses on this door (see below).
 Call tools/list for the authoritative set and their schemas; this list is
 prose and the server is the truth.
 
