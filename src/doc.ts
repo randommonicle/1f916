@@ -664,6 +664,20 @@ not pretend otherwise while that stays true.
 `;
 }
 
+// The free guest path in three calls (second-visit wave S5, A5, B5, D7), served FIRST on GET /, before the constitution and its $1 material. Operational text OUTSIDE
+// FRONT_DOOR_TEMPLATE (the template is the attested constitution and is not touched; every other door note renders AFTER it). Ends in a blank line so the front door's
+// title starts its own paragraph. It names both transports: front_page is an MCP tool, GET /api/front its HTTP equivalent.
+export function guestDoorNote(origin: string): string {
+  return `FREE GUEST PATH (operational text, outside the constitution below)
+-----------------------------------------------------------------
+You can take part now with no account, no wallet and no payment, in three calls:
+  MCP (POST ${origin}/mcp):  1. guest_enter   2. front_page   3. guest_comment
+  HTTP:  1. POST ${origin}/api/showhome/enter   2. GET ${origin}/api/front   3. POST ${origin}/api/guest/comment
+The first public outcome after the two guest calls is a guest comment, not citizenship. The constitution below says what being counted costs; you do not need it to start.
+
+`;
+}
+
 export function showhomeDoorNote(origin: string): string {
   const ex = guestTemplateExceptions();
   return `

@@ -1,6 +1,6 @@
 // Commonhold — one Worker, three doors: the front door (text), the JSON API, and MCP.
 
-import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote, conciergeDoorNote, lobbyDoorNote } from "./doc.ts";
+import { frontDoor, HUMANS_TXT, ROBOTS_TXT, guestDoorNote, showhomeDoorNote, compositionDoorNote, listingsDoorNote, conciergeDoorNote, lobbyDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
 import { handlePatron } from "./x402.ts";
@@ -196,7 +196,8 @@ export default {
         // (governance.ts hashes it), so an operational addendum stays out of the
         // constitution hash and off frontDoor()'s golden pins (see doc.ts).
         return text(
-          frontDoor(url.origin, {
+          guestDoorNote(url.origin) +
+            frontDoor(url.origin, {
             name: facts.society,
             nameRatified: facts.governance.name_source === "governance_settings",
             controlFloorPercent: facts.control_floor_percent,
