@@ -3,8 +3,9 @@
 # section, the four guest corrections, the conditional 402 wording and the grouped MCP tool list. THIS DEPLOY MINTS CONSTITUTION v6 (an operator act, changed_by operator).
 # ONE worker deploy. Ben's hand only (D-017). One fail-fast script (L-046, L-069). NO MIGRATION, NO D1 COMMAND: step 0 STOPS if migrations/ or schema.sql differ between the live base and HEAD.
 # THE MINT: step 0 compares FRONT_DOOR_TEMPLATE in src/doc.ts at $REVIEWED_COMMIT and at HEAD byte for byte (they must be equal: what ships is the template that was reviewed) and also STOPS if the
-# template equals the live base's (then this would not be the v6 mint). The new worker records the version row and the identity-log row when it first serves GET / (detectConstitutionChange runs
-# during GET /; GET /api/attest is read-only), so the ride requests GET / FIRST and only then reads /api/attest for version 6 with changed_by operator and template_hash $V6_HASH.
+# template equals the live base's (then this would not be the v6 mint). The version row and the identity-log row are written by the first of GET /, the public governance sweep or a cron wake
+# to reach the new worker (src/index.ts:168-190, src/governance.ts:1740-1751, src/maintainer/clerk.ts:451-462, src/maintainer/judgment.ts:1615-1628); detectConstitutionChange
+# runs on each of them, and GET /api/attest is read-only. The ride still requests GET / FIRST so the row exists before it reads /api/attest for version 6 with changed_by operator and template_hash $V6_HASH.
 # Wrangler is used for exactly ONE thing: the stamped deploy.
 # WRITTEN BY THE BUILDER AND NEVER RUN: not even -DryRun (which reads the live worker over HTTP). The review, the merge and the push come before it.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs. IT ASSUMES THE PRIVACY WAVE IS DEPLOYED FIRST: 773ce09f is the local main with the privacy wave merged; if the
@@ -12,7 +13,7 @@
 # $REVIEWED_COMMIT is the commit the review converged on and holds the hub's placeholder until the hub sets it. Step 0a STOPS, before any git or network command, while EITHER still holds its
 # placeholder or is not 40 lower-case hex.
 # THE DEPLOY STAMPS THE COMMIT: `npx wrangler deploy --var CODE_COMMIT:<sha>`. The poll waits until GET /api/attest serves code.commit equal to the pinned sha AND code.version_id equal to the
-# Current Version ID wrangler printed AND GET / carries the VISIT FIRST, FREE section (which is also the request that writes the version row). The ROLLBACK TARGET is the version id GET /api/attest
+# Current Version ID wrangler printed AND GET / carries the VISIT FIRST, FREE section (a request that makes the new worker detect the change and write the version row if the sweep or a cron wake has not already). The ROLLBACK TARGET is the version id GET /api/attest
 # served BEFORE the deploy (read live, never typed in). A rollback of the WORKER does not unwrite the constitution row: if the ride fails after GET / minted v6, say so in HANDOVER.
 # REVIEWED SOURCE ONLY: step 0 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/).
 # Run from society/ on main, after the merge and the push:
@@ -136,10 +137,10 @@ function Assert-AttestBefore($att, $when) {
   if ($att.constitution.template_hash -cne $V5_HASH) { Stop-Here "template_hash is $($att.constitution.template_hash) $when, expected v5 ${V5_HASH}: investigate before anything else." }
   Assert-AttestChains $att $when
 }
-# After the deploy and after GET / (which writes the version row): constitution version 6, changed_by operator, the pinned v6 template hash, every chain ok.
+# After the deploy and after GET / (the first of GET /, the sweep or a cron wake writes the version row): constitution version 6, changed_by operator, the pinned v6 template hash, every chain ok.
 function Assert-AttestAfter($att, $when) {
-  if ([string]$att.constitution.version -ne "6") { Stop-Here "constitution is version $($att.constitution.version) $when, expected 6 (GET / writes the row; was it requested first?)." }
-  if ([string]$att.constitution.changed_by -cne "operator") { Stop-Here "constitution changed_by is '$($att.constitution.changed_by)' $when, expected operator." }
+  if ([string]$att.constitution.version -ne "6") { Stop-Here "constitution is version $($att.constitution.version) $when, expected 6 (the version row is written by the first of GET /, the public governance sweep or a cron wake; was GET / requested first?)." }
+  if ([string]$att.constitution.changed_by -cne "operator") { Stop-Here "constitution changed_by is '$($att.constitution.changed_by)' $when, expected operator (mandate_linked would mean a passed first_laws_amendment or text_amendment proposal exists, src/governance.ts:2054-2060, which nothing on the record has)." }
   if ($att.constitution.template_hash -cne $V6_HASH) { Stop-Here "template_hash is $($att.constitution.template_hash) $when, expected v6 ${V6_HASH}." }
   Assert-AttestChains $att $when
 }
@@ -161,7 +162,7 @@ function Test-CodeIdentityServed($code, $commit, $versionId) {
   return ""
 }
 # "" when a GET / answer is the v6 root, otherwise the reason it is not: 200, the VISIT FIRST, FREE section present, guest_enter named inside it and before THE CONSTITUTION, both HOW TO JOIN sections
-# and the first dollar-one sentence. (This request is also the one that makes the new worker write the version row.)
+# and the first dollar-one sentence. (This request makes the new worker detect the change and write the version row, unless the sweep or a cron wake already did.)
 function Test-RootServed($r) {
   if ($r.Code -ne "200") { return ("GET / answered " + $r.Code + ", expected 200") }
   $body = [string]$r.Body
@@ -319,11 +320,11 @@ $ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version be
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 
-# 4. the ride: the root first (it writes the v6 version row), then the attestation, the skill, both initialisers, the operator block, then a sweep of public reads. GETs, plus the two initialize POSTs.
+# 4. the ride: the root first (it makes the new worker write the v6 version row if the sweep or a cron wake has not), then the attestation, the skill, both initialisers, the operator block, then a sweep of public reads. GETs, plus the two initialize POSTs.
 $rootNow = Get-Text "$BASE/" 30
 $why = Test-RootServed $rootNow
 if ($why -ne "") { Stop-Here "$why. $ROLLBACK_LINE" }
-Say "[ride] GET / -> 200, carries '$VISIT_HEADING' and names guest_enter before THE CONSTITUTION and both HOW TO JOIN sections (this request writes the v6 version row)"
+Say "[ride] GET / -> 200, carries '$VISIT_HEADING' and names guest_enter before THE CONSTITUTION and both HOW TO JOIN sections (this request writes the v6 version row unless the sweep or a cron wake already did)"
 $attAfter = Read-Attest "after the deploy"
 Assert-AttestAfter $attAfter "after the deploy"
 Say ("[ride] attest: constitution version 6, changed_by operator, template_hash " + $V6_HASH.Substring(0, 8) + "; every chain ok")

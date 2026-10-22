@@ -129,7 +129,7 @@ test("the steps are in the load-bearing order, there is no migration or D1 step,
   assert.ok(code.includes('"/mcp", "/mcp/read"') && code.includes("Get-Instructions"), "the two initialisers are ridden");
 });
 
-test("the mint: the template must equal the REVIEWED commit's and differ from the live base's; v5 is required before, and after GET / (which writes the row) version 6, changed_by operator and the pinned v6 hash, with every chain ok", () => {
+test("the mint: the template must equal the REVIEWED commit's and differ from the live base's; v5 is required before, and after GET / (the first of GET /, the sweep or a cron wake writes the row) version 6, changed_by operator and the pinned v6 hash, with every chain ok", () => {
   assert.match(code, /if \(\$reviewedTemplate -cne \$headTemplate\) \{ Stop-Here/);
   assert.match(code, /if \(\$liveTemplate -ceq \$headTemplate\) \{ Stop-Here/);
   assert.ok(code.includes("migrations schema.sql"));
@@ -141,7 +141,7 @@ test("the mint: the template must equal the REVIEWED commit's and differ from th
   for (const chain of ["identity_log", "treasury", "payouts", "ballots"]) assert.ok(code.includes(`"${chain}"`), `the ${chain} chain is checked`);
   assert.ok(at("Assert-AttestBefore $attBefore") < at("$deployOut = (npx wrangler deploy"), "v5 checked before");
   assert.ok(at("Assert-AttestAfter $attAfter") > at("$deployOut = (npx wrangler deploy"), "v6 checked after");
-  assert.ok(at("$rootNow = Get-Text") < at("Assert-AttestAfter $attAfter"), "GET / is requested BEFORE the attestation is read, because that request writes the version row (F4)");
+  assert.ok(at("$rootNow = Get-Text") < at("Assert-AttestAfter $attAfter"), "GET / is requested BEFORE the attestation is read, because the first of GET /, the sweep or a cron wake writes the version row (F4)");
 });
 
 test("it proves the live worker IS the pinned base, proves the VISIT FIRST section absent before the deploy, and the poll needs the stamped commit AND the printed version id AND the v6 root", () => {
