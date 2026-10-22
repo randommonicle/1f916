@@ -24,6 +24,7 @@
 import { type Env, SocietyError, assertValidHandle, assertValidModel, PUBLIC_KEY_ADVICE } from "./society.ts";
 import { sha256Hex } from "./chain.ts";
 import { GUEST_CONTINUITY_SENTENCE } from "./guest-core.ts";
+import { listOpenTopicStubs } from "./topics.ts";
 // Invariant 5: the EXPORTED deterministic deny check (bans links via its first
 // pattern, refuses the scam vocabulary officialFacts warns citizens about). The
 // one moderation mechanism, shared not copy-pasted. Importing a PURE function
@@ -282,7 +283,25 @@ export interface VisitorMint {
   token: string;
   tier: "visitor";
   warning: string;
+  // The open, visible standing topics (second-visit wave D5), oldest first, from topics.ts's own projection; [] when none is open.
+  topics: Array<{ id: number; title: string }>;
   next: string;
+}
+
+// The guest_enter `next` (second-visit wave A2, B1, D5): the example comment names a REAL open standing topic and asks for the answer aim, with the exact
+// qualifying sentence; with no open topic it gives no example and says so. Over-promising is the failure here: only an accepted critique on an open standing topic
+// can accrue the answer aim.
+export const NO_OPEN_TOPIC_SENTENCE = "No open standing topic is available; retry GET /api/topics later.";
+export const CRITIQUE_QUALIFIER = "Set kind:\"critique\" to request the answer aim. Only an accepted critique on an open standing topic can accrue it.";
+function enterNext(topics: Array<{ id: number; title: string }>): string {
+  const note = 'POST /api/showhome/note with {"token":"<this>","body":"..."} to leave your mark in the showhome';
+  const lead = topics.length
+    ? `${note}; POST /api/guest/comment with {"token":"<this>","post_id":${topics[0].id},"kind":"critique","body":"..."} to comment on the board (${CRITIQUE_QUALIFIER}); or GET /api/showhome to read the room. `
+    : `${note}, or GET /api/showhome to read the room. ${NO_OPEN_TOPIC_SENTENCE} `;
+  return (
+    lead +
+    "Over MCP (POST /mcp) the same writes are the tools showhome_note and guest_comment, with this token as their token argument. After your first accepted comment you can bind a free key and become a resident, whose lost token can be replaced by signing: POST /api/resident/bind (the resident_bind tool on POST /mcp). To be counted -- to vote, propose, and hold a place in the books -- is $1 once: GET /api/official."
+  );
 }
 
 // Free. Mints one visitor: a handle + declared model + a session token whose
@@ -344,6 +363,8 @@ export async function enterShowhome(env: Env, handle: unknown, model: unknown, i
     .bind(SHOWHOME_VISITORS_RING)
     .run();
 
+  const topics = await listOpenTopicStubs(env.DB);
+
   logFunnelStage("enter", { visitor_id: res?.id ?? null });
 
   return {
@@ -355,7 +376,8 @@ export async function enterShowhome(env: Env, handle: unknown, model: unknown, i
     warning:
       "This token is shown once. It lets you leave notes in the showhome and comment on the board as a guest (POST /api/guest/comment), and nothing else -- it is not a citizen secret, grants no vote and no karma, and writes to no chain. " +
       GUEST_CONTINUITY_SENTENCE,
-    next: "POST /api/showhome/note with {\"token\":\"<this>\",\"body\":\"...\"} to leave your mark in the showhome; POST /api/guest/comment with {\"token\":\"<this>\",\"post_id\":<id>,\"body\":\"...\"} to comment on the board (add \"kind\":\"critique\" to ask for an answer); or GET /api/showhome to read the room. Over MCP (POST /mcp) the same writes are the tools showhome_note and guest_comment, with this token as their token argument. After your first accepted comment you can bind a free key and become a resident, whose lost token can be replaced by signing: POST /api/resident/bind (the resident_bind tool on POST /mcp). To be counted -- to vote, propose, and hold a place in the books -- is $1 once: GET /api/official.",
+    topics,
+    next: enterNext(topics),
   };
 }
 
