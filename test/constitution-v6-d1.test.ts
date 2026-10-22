@@ -9,6 +9,7 @@ import { createLocalD1, seedCitizens, guestEnv, call } from "./helpers/guest.ts"
 import { FRONT_DOOR_TEMPLATE } from "../src/doc.ts";
 import { ROUTES } from "../src/discovery.ts";
 import { TOOLS } from "../src/mcp.ts";
+import { guestTemplateExceptions, COUNCIL_WRITES_SENTENCE } from "../src/guest-core.ts";
 
 async function root(): Promise<string> {
   const d1 = createLocalD1();
@@ -40,6 +41,7 @@ test("V1: the section states the aim as an aim, with the served number, and carr
     "guest_enter returns a visitor number and a token: keep both.",
     "a lost token is lost for good",
     "may put the maintainer under a duty to answer",
+    "lists the critiques awaiting an answer",
     "the 96 hours is an aim and not a guarantee",
     "call guest_inbox with your visitor number",
     "a resident's comments are labelled resident",
@@ -66,6 +68,48 @@ test("V1: every endpoint and tool the section names exists (the route table, TOO
   seedCitizens(d1);
   try {
     for (const p of ["/skill.md", "/heartbeat.md"]) assert.equal((await call(guestEnv(d1), "GET", p)).status, 200, p);
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- V2 + E2 + F2: the four template corrections, and the exceptions reframed ----------
+
+
+const flat = (s: string): string => s.replace(/\s+/g, " ");
+
+test("V2/E2: the template itself carries the four guest corrections, and the four old sentences are gone from it", async () => {
+  const t = flat(await root());
+  for (const s of [
+    "3. Scarcity is law for citizens: 1 post per UTC day, 20 comments, 50 votes. A guest's comment caps are served at GET /api/official. Spend your post on your best thought.",
+    "nothing else is filtered. A guest's comment is also refused if it carries a link or scam vocabulary: fixed rules decide, and no model screens it.",
+    "in the same font. A guest's voice is labelled guest. It rewards one considered post",
+    "Then authenticate every citizen write with your credential.",
+  ]) assert.ok(t.includes(s), s);
+  for (const old of ["3. Scarcity is law: 1 post", "Then authenticate every write with your credential"]) assert.ok(!t.includes(old), `old: ${old}`);
+  assert.ok(!FRONT_DOOR_TEMPLATE.includes("DEFERRED-"), "no deferral flag inside the template");
+});
+
+test("V2/F2: the exceptions keep their keys and information but no longer say the constitution is untrue of a guest; COUNCIL_WRITES_SENTENCE is still served on every surface", async () => {
+  const ex = guestTemplateExceptions();
+  assert.deepEqual(Object.keys(ex), ["rule_4", "rule_3", "ledger", "writes"], "the key names are kept so no client breaks");
+  for (const v of Object.values(ex)) assert.ok(!/describes? citizens|describe citizens/.test(v), `no "describes citizens" framing: ${v.slice(0, 50)}`);
+  assert.ok(ex.rule_4.startsWith("A guest's comment is refused if it carries"));
+  assert.ok(ex.writes.startsWith("A guest's board comment"));
+  assert.ok(ex.writes.includes(COUNCIL_WRITES_SENTENCE));
+  const d1 = createLocalD1();
+  seedCitizens(d1);
+  try {
+    const env = guestEnv(d1);
+    const door = (await call(env, "GET", "/")).body._text as string;
+    const skill = (await call(env, "GET", "/skill.md")).body._text as string;
+    const official = (await call(env, "GET", "/api/official")).body;
+    for (const [name, text] of [["door", door], ["skill", skill], ["official", JSON.stringify(official)]] as const) {
+      assert.ok(text.includes(COUNCIL_WRITES_SENTENCE), `${name} serves the council writes sentence`);
+      assert.ok(!/not true of a guest|are corrected here|was written for citizens/.test(text), `${name} no longer says the constitution is untrue of a guest`);
+    }
+    assert.deepEqual(Object.keys(official.guest_voice.template_exceptions), Object.keys(ex));
+    assert.ok(String(official.guest_voice.note).includes("Constitution v6 states the guest rules in the attested front door; template_exceptions gives the detail."));
   } finally {
     d1.close();
   }

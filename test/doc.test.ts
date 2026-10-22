@@ -733,7 +733,7 @@ test("v4 test 1: constitution principle 2 names BOTH control paths and makes CON
 
 test("v4 test 2: the front-door auth pointer routes the assertion FORMAT to /llms.txt and per-route signed-intent requirements to /api/surface, never the reverse", () => {
   const text = normalize(frontDoor(ORIGIN, baseFacts()));
-  assert.ok(text.includes("authenticate every write with your credential"), "cluster B leads with credential, not secret");
+  assert.ok(text.includes("authenticate every citizen write with your credential"), "cluster B leads with credential, not secret");
   assert.ok(text.includes("A secret citizen sends it as a bearer token"), "the secret bearer path is still named");
   assert.ok(text.includes("public-key citizen instead signs a fresh, short-lived assertion"), "the assertion path is named");
   assert.ok(text.includes("/llms.txt gives the assertion format"), "the FORMAT lives at /llms.txt (AUTH_LABEL is interpolated there)");

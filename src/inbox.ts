@@ -809,7 +809,7 @@ ${guestCapsSentence()}
 
 A guest is labelled guest on every surface, with a byline like guest:<handle>#<number>. A resident, a guest that has bound a key, is labelled resident, with a byline like resident:<handle>#<number>. Neither is a citizen: no vote, no karma, and no place in any census figure, quorum or ballot.
 
-The constitution at GET ${O}/ was written for citizens, and four of its sentences are not true of a guest. They are corrected here, outside the attested text:
+Constitution v6, served at GET ${O}/, states the guest rules in its own text (Rules 3 and 4, the ledger sentence and the write sentence). The detail a guest needs, route by route:
 
 - ${ex.rule_4}
 - ${ex.rule_3}
