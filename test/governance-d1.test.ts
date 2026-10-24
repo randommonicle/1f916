@@ -2374,6 +2374,45 @@ test("listProposals: a page-boundary millisecond collision loses no row when the
   }
 });
 
+// ---------- listProposals max_id (1f916 9594) ----------
+
+// The live shape: ids 1..8 issued, 3 and 4 removed by the compensating
+// delete, so max_id 8 and total 6 name the two missing ids from the served
+// body alone. Also pins null on an empty table and the stated limit: a row
+// removed above the highest surviving id leaves no trace.
+test("listProposals: max_id beside total locates ids removed in the middle, is null when empty, and cannot see a removal above the highest surviving id", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const empty = await listProposals(env);
+    assert.equal(empty.total, 0);
+    assert.equal(empty.max_id, null);
+
+    const proposer = insertCitizen(d1);
+    const t = Date.UTC(2026, 0, 1);
+    const insert = d1.raw.prepare(
+      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, created_at) VALUES ('resolution', ?, 'body', ?, ?, ?, ?)",
+    );
+    for (let i = 1; i <= 8; i++) insert.run(`p${i}`, proposer, t + i, t + i + 7 * 86_400_000, t + i);
+    d1.raw.prepare("DELETE FROM proposals WHERE id IN (3, 4)").run();
+
+    const gap = await listProposals(env);
+    assert.equal(gap.total, 6);
+    assert.equal(gap.max_id, 8);
+    const served = new Set(gap.proposals.map((p) => p.id));
+    const missing = [];
+    for (let id = 1; id <= gap.max_id!; id++) if (!served.has(id)) missing.push(id);
+    assert.deepEqual(missing, [3, 4], "the ids missing from 1..max_id are exactly the removed rows");
+
+    d1.raw.prepare("DELETE FROM proposals WHERE id = 8").run();
+    const top = await listProposals(env);
+    assert.equal(top.max_id, 7, "a removal above the highest surviving id is invisible to max_id, as the note says");
+    assert.equal(top.total, 5);
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- citizenDirectory: task_e978a614 (L2-class), docs/REVIEW-DEMOCRACY-RECHECK.md ----------
 //
 // Same defect L2 fixed in listProposals, same fix, same test shape, scaled

@@ -1216,7 +1216,13 @@ export const PROPOSAL_PAGE = 200;
 // real fix -- (created_at, id) is a total order with no ties, since id is
 // a real primary key.
 export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
-  const total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals").first<{ n: number }>())?.n ?? 0;
+  // max_id beside total (1f916 9594, load-bearing-2): ids are AUTOINCREMENT
+  // and never reused, so max_id minus total counts the ids no row carries
+  // any more (createProposal's compensating delete). One statement, so the
+  // two are read at the same instant.
+  const counts = await env.DB.prepare("SELECT COUNT(*) AS n, MAX(id) AS max_id FROM proposals").first<{ n: number; max_id: number | null }>();
+  const total = counts?.n ?? 0;
+  const max_id = counts?.max_id ?? null;
   const cols = `p.id, p.kind, p.title, p.status, p.proposer_id, c.handle AS proposer, p.post_id,
                 p.opened_at, p.closes_at, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at`;
   const hasSince = Number.isFinite(since);
@@ -1236,11 +1242,13 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
   const last = results[returned - 1];
   return {
     total,
+    max_id,
     returned,
     page_size: PROPOSAL_PAGE,
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note: "total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
+    max_id_note: "max_id is the highest proposal id any row now carries, read in the same statement as total (null when there are none). Ids are assigned in increasing order and never reused, so max_id minus total is the number of ids at or below max_id that no row carries now, and the ids missing from 1 to max_id name them. This counts missing ids; it does not show why a row is missing. A row removed above max_id leaves no trace here.",
     proposals,
   };
 }
