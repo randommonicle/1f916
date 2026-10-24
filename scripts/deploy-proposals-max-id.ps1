@@ -108,7 +108,7 @@ function Test-MaxIdServed($r) {
   $names = @($j.PSObject.Properties | ForEach-Object { $_.Name })
   if (-not ($names -ccontains "max_id")) { return "GET /api/proposals carries no max_id field" }
   if (-not ($names -ccontains "max_id_note") -or -not $j.max_id_note) { return "GET /api/proposals carries no max_id_note" }
-  if ($null -eq $j.max_id -or [string]$j.max_id -cnotmatch '^[0-9]+$') { return ("max_id is '" + $j.max_id + "', expected a whole number (the live table is not empty)") }
+  if ($null -eq $j.max_id -or -not ($j.max_id -is [int] -or $j.max_id -is [long]) -or [long]$j.max_id -lt 1) { return ("max_id is '" + $j.max_id + "', expected a JSON whole number of at least 1 (the live table is not empty)") }
   if ($j.has_more -ne $false) { return "GET /api/proposals has_more is not false: this check reads one page only" }
   $maxN = [int]$j.max_id
   $totalN = [int]$j.total

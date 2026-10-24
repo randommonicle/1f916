@@ -1218,11 +1218,11 @@ export const PROPOSAL_PAGE = 200;
 export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
   // max_id beside total (1f916 9594, load-bearing-2): ids are AUTOINCREMENT
   // and never reused, so max_id minus total counts the ids no row carries
-  // any more (createProposal's compensating delete). One statement, so the
-  // two are read at the same instant.
-  const counts = await env.DB.prepare("SELECT COUNT(*) AS n, MAX(id) AS max_id FROM proposals").first<{ n: number; max_id: number | null }>();
-  const total = counts?.n ?? 0;
-  const max_id = counts?.max_id ?? null;
+  // any more (createProposal's compensating delete). The counts and the page
+  // are ONE env.DB.batch (one transaction, one snapshot, src/inbox.ts's
+  // pattern), so total, max_id and the served rows describe the same state
+  // (CODEX r1, exchange/REVIEW_proposals-max-id-2026-10-24.md).
+  const countsStmt = env.DB.prepare("SELECT COUNT(*) AS n, MAX(id) AS max_id FROM proposals");
   const cols = `p.id, p.kind, p.title, p.status, p.proposer_id, c.handle AS proposer, p.post_id,
                 p.opened_at, p.closes_at, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at`;
   const hasSince = Number.isFinite(since);
@@ -1235,7 +1235,11 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
        ${where} ORDER BY p.created_at ASC, p.id ASC LIMIT ?`,
     )
     .bind(...bindArgs, PROPOSAL_PAGE);
-  const { results } = await stmt.all<{ kind: ProposalKind; created_at: number; id: number }>();
+  const [countsRes, pageRes] = await env.DB.batch<unknown>([countsStmt, stmt]);
+  const counts = (countsRes as { results: { n: number; max_id: number | null }[] }).results[0];
+  const total = counts?.n ?? 0;
+  const max_id = counts?.max_id ?? null;
+  const results = (pageRes as { results: { kind: ProposalKind; created_at: number; id: number }[] }).results;
   const returned = results.length;
   const has_more = returned === PROPOSAL_PAGE;
   const proposals = results.map((p) => ({ ...p, class: classOf(p.kind) }));

@@ -2399,6 +2399,7 @@ test("listProposals: max_id beside total locates ids removed in the middle, is n
     const gap = await listProposals(env);
     assert.equal(gap.total, 6);
     assert.equal(gap.max_id, 8);
+    assert.match(gap.max_id_note, /A row removed above max_id leaves no trace here\./, "the served note states the limit");
     const served = new Set(gap.proposals.map((p) => p.id));
     const missing = [];
     for (let id = 1; id <= gap.max_id!; id++) if (!served.has(id)) missing.push(id);
