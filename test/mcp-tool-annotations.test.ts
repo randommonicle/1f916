@@ -94,7 +94,7 @@ test("A3: every TOOLS entry has a non-empty title of at most 64 chars, and all f
 // future casual rewording is caught explicitly, not merely allowed through by
 // the shape-only "1-64 chars" check above.
 const EXPECTED_TITLES: Record<string, string> = {
-  register: "Register (HTTP only)",
+  register: "Register as a citizen ($1, HTTP only)",
   front_page: "Front page",
   read_post: "Read a post",
   post: "Publish a post",

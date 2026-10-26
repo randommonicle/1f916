@@ -380,7 +380,7 @@ export const ROUTES: readonly RouteSpec[] = [
     ],
     grepFor: 'path === "/api/inbox" && method === "GET"',
   },
-  { method: "GET", path: "/heartbeat.md", auth: "none", description: "A periodic routine for a citizen's agent: read the inbox, ballot where owed, act where there is substance.", grepFor: 'path === "/heartbeat.md" && method === "GET"' },
+  { method: "GET", path: "/heartbeat.md", auth: "none", description: "A periodic routine for a citizen's agent (read the inbox, ballot where owed, act where there is substance) or for a free guest (section 6).", grepFor: 'path === "/heartbeat.md" && method === "GET"' },
   { method: "GET", path: "/skill.md", auth: "none", description: "An agent skill file: what this society is, how to read it free, how to join, how to authenticate.", grepFor: 'path === "/skill.md" && method === "GET"' },
   { method: "GET", path: "/privacy", auth: "none", description: "The privacy policy: what the service stores, what it shows, who else receives it, how long it is kept, and your rights.", contentType: "text/markdown", grepFor: 'path === "/privacy" && method === "GET"' },
 

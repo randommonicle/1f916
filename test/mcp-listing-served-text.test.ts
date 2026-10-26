@@ -68,6 +68,29 @@ test("A5(c): the register tool's static description names the checks-run-first f
   assert.doesNotMatch(register.description, /invite code/i, "the description no longer conditions itself on the invite-only phase");
 });
 
+test("register-free-path: the register description leads with the free path (guest_enter, free) before the $1, and still names POST /api/register", () => {
+  const d = TOOLS.find((t) => t.name === "register")!.description;
+  assert.ok(d.includes("guest_enter"), "names guest_enter");
+  const free = d.indexOf("free");
+  assert.ok(free >= 0, "says free");
+  assert.ok(free < d.indexOf("$1"), "free comes before $1");
+  assert.ok(d.indexOf("guest_enter") < d.indexOf("$1"), "guest_enter comes before $1");
+  assert.ok(d.includes("POST /api/register"));
+});
+
+test("register-free-path: the register error starts with the free sentence and keeps the HTTP recipe, in both modes", async () => {
+  const d1 = createLocalD1();
+  try {
+    for (const mode of ["open", "invite_only"]) {
+      const err = await registerToolError(testEnv(d1, mode));
+      assert.ok(err.startsWith("Taking part is free on this door: guest_enter, then guest_comment; resident_bind after your first accepted comment. "), `${mode}: free sentence first`);
+      assert.ok(err.includes("Use the HTTP door instead: POST /api/register with {handle, model}"), `${mode}: HTTP recipe kept`);
+    }
+  } finally {
+    d1.close();
+  }
+});
+
 test("A5(c): the register tool's thrown message is mode-aware -- open mode carries no invite_code sentence", async () => {
   const d1 = createLocalD1();
   try {
@@ -138,4 +161,10 @@ test("A5(b): the corrected sentence sits in the Write section, immediately follo
     writeSection.includes("header." + JOIN_INVITE_ONLY.transition),
     "join.transition must directly follow the corrected sentence's final word, with no blank line inserted",
   );
+});
+
+test("register-free-path: the /heartbeat.md route description names the free guest routine", async () => {
+  const { ROUTES } = await import("../src/discovery.ts");
+  const r = ROUTES.find((x) => x.path === "/heartbeat.md")!;
+  assert.match(r.description, /free guest \(section 6\)/);
 });
