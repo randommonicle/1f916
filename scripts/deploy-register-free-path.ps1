@@ -5,7 +5,7 @@
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs (the max_id wave, 5528b8d4); step 2 PROVES it against the live GET /api/attest code.commit.
 # $REVIEWED_COMMIT is the commit the review converged on. Step 0a STOPS, before any git or network command, while EITHER still holds its placeholder or is not 40 lower-case hex.
 # THE DEPLOY STAMPS THE COMMIT: `npx wrangler deploy --var CODE_COMMIT:<sha>`. The poll waits until GET /api/attest serves code.commit equal to the pinned sha AND code.version_id equal to the
-# Current Version ID wrangler printed AND POST /mcp tools/list serves the new register title AND GET /heartbeat.md carries the new opening line AND GET /api/proposals still serves max_id.
+# Current Version ID wrangler printed AND GET /heartbeat.md carries the new opening line AND GET /api/proposals still serves max_id. The register tool is read ONCE, after the poll (one tools/list POST in the whole run).
 # The ROLLBACK TARGET is the version id GET /api/attest served BEFORE the deploy (read live, never typed in).
 # REVIEWED SOURCE ONLY: step 0 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/).
 # Run from society/ on main, after the merge and the push:
@@ -166,16 +166,15 @@ function Test-HeartbeatFreeServed($r) {
   if ($iRoutine -ge 0 -and $iLine -gt $iRoutine) { return "the new opening line comes after the citizen routine's opening" }
   return ""
 }
-# Polls until the served block is this deploy's AND the register tool, /heartbeat.md and GET /api/proposals (max_id) serve this wave, or STOPS (with $ROLLBACK_LINE) after $tries reads.
+# Polls (GETs only) until the served block is this deploy's AND /heartbeat.md and GET /api/proposals (max_id) serve this wave, or STOPS (with $ROLLBACK_LINE) after $tries reads.
 function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
   $last = "never read"
   for ($n = 1; $n -le $tries; $n++) {
     $why = Test-CodeIdentityServed (Get-ServedCode) $commit $versionId
-    if ($why -eq "") { $why = Test-RegisterFreeServed (Get-ToolsList) }
     if ($why -eq "") { $why = Test-HeartbeatFreeServed (Get-Text $HEARTBEAT_URL 30) }
     if ($why -eq "") { $why = Test-MaxIdServed (Get-Text $PROPOSALS_URL 30) }
     if ($why -eq "") {
-      Say "[poll] try $n of ${tries}: GET /api/attest serves code.commit $($commit.Substring(0, 8)) and code.version_id $versionId; POST /mcp tools/list serves the new register title; GET /heartbeat.md carries the new opening line; GET /api/proposals serves max_id"
+      Say "[poll] try $n of ${tries}: GET /api/attest serves code.commit $($commit.Substring(0, 8)) and code.version_id $versionId; GET /heartbeat.md carries the new opening line; GET /api/proposals serves max_id"
       return
     }
     $last = $why
@@ -267,19 +266,16 @@ if ([string]$attBefore.code.commit -cne $LIVE_BASE_COMMIT) { Stop-Here ("the liv
 $rollbackTarget = "the version before it (check npx wrangler deployments list)"
 if ([string]$attBefore.code.version_status -ceq "available" -and $attBefore.code.version_id) { $rollbackTarget = [string]$attBefore.code.version_id }
 Say "[live] before: the live worker serves the pinned base $($LIVE_BASE_COMMIT.Substring(0, 8)); rollback target $rollbackTarget"
-$toolsBefore = Get-ToolsList
-if ($toolsBefore.Code -ne "200") { Stop-Here "POST /mcp tools/list answered $($toolsBefore.Code) before the deploy, expected 200." }
-if (([string]$toolsBefore.Body).Contains($NEW_REGISTER_TITLE)) { Stop-Here "POST /mcp tools/list already serves the new register title: this wave looks already deployed. Verify by hand; this script cannot prove a propagation it did not wait for." }
 $heartbeatBefore = Get-Text $HEARTBEAT_URL 30
 if ($heartbeatBefore.Code -ne "200") { Stop-Here "GET /heartbeat.md answered $($heartbeatBefore.Code) before the deploy, expected 200." }
 if (([string]$heartbeatBefore.Body).Contains($NEW_HEARTBEAT_LINE)) { Stop-Here "GET /heartbeat.md already carries the new opening line: this wave looks already deployed. Verify by hand." }
 $proposalsBefore = Get-Text $PROPOSALS_URL 30
 $whyBefore = Test-MaxIdServed $proposalsBefore
 if ($whyBefore -ne "") { Stop-Here "GET /api/proposals does not serve max_id before the deploy ($whyBefore): the live worker is not the max_id wave this one rides on." }
-Say "[live] before: the register title and the heartbeat line are the old ones (the new text is absent); GET /api/proposals serves max_id"
+Say "[live] before: the heartbeat line is the old one (the new text is absent); GET /api/proposals serves max_id"
 
 if ($DryRun) {
-  Say "[dry-run] would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until GET /api/attest serves that commit and version id, POST /mcp tools/list serves the new register title, GET /heartbeat.md carries the new opening line and GET /api/proposals still serves max_id; then ride the reads. Nothing was deployed."
+  Say "[dry-run] would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until GET /api/attest serves that commit and version id, GET /heartbeat.md carries the new opening line and GET /api/proposals still serves max_id; then ride the reads, including ONE tools/list POST to /mcp for the register title. Nothing was deployed."
   exit 0
 }
 

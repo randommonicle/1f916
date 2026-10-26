@@ -108,6 +108,10 @@ test("the steps are in the load-bearing order, there is no migration or D1 step,
   assert.equal(/Invoke-WebRequest|Invoke-RestMethod|-Method\s+Post/i.test(code), false, "no PowerShell web cmdlets");
   assert.equal((code.match(/-X POST/g) ?? []).length, 1, "exactly one POST: the fixed tools/list body");
   assert.equal((code.match(/--data/g) ?? []).length, 1, "exactly one request body");
+  // CODEX r1 M1: the POST is defined once AND called once at runtime, after the poll (never inside Wait-NewWorker or before the deploy).
+  const calls = [...code.matchAll(/\(Get-ToolsList\)|= Get-ToolsList\b/g)].map((m) => m.index ?? -1);
+  assert.equal(calls.length, 1, "Get-ToolsList is called exactly once");
+  assert.ok(calls[0] > code.indexOf('Read-Attest "after the deploy"'), "the one tools/list call is in the ride, after the poll");
   assert.ok(code.includes('--data \'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\''), "the POST body is the fixed tools/list call, nothing else");
   assert.ok(code.includes("src/doc.ts") && code.includes("migrations schema.sql"), "the no-mint and no-migration check names src/doc.ts, migrations and schema.sql");
 });
@@ -196,9 +200,9 @@ test("Test-HeartbeatFreeServed, run for real, passes the new opening and fails w
   }
 });
 
-test("the before-read refuses a live worker already serving the new register title or heartbeat line, and still requires max_id live", () => {
-  assert.ok(code.includes("Contains($NEW_REGISTER_TITLE)"));
+test("the before-read refuses a live worker already serving the new heartbeat line (GETs only: the register title is read once, after the poll), and still requires max_id live", () => {
   assert.ok(code.includes("Contains($NEW_HEARTBEAT_LINE)"));
+  assert.equal(code.includes("Contains($NEW_REGISTER_TITLE)"), false, "no before-deploy tools/list read (CODEX r1 M1)");
   assert.ok(code.includes("Test-MaxIdServed $proposalsBefore"));
   assert.ok(code.includes('"/api/proposal/8"'));
 });
