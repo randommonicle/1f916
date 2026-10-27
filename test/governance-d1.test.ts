@@ -2414,6 +2414,43 @@ test("listProposals: max_id beside total locates ids removed in the middle, is n
   }
 });
 
+// max_assigned_id and as_of (1f916 9594 c122634): the AUTOINCREMENT high-water
+// mark does not fall when the newest row is removed, so that removal shows;
+// max_assigned_id minus total counts the removed rows; as_of orders two reads.
+test("listProposals: max_assigned_id keeps the highest id ever assigned after the newest row is removed, and as_of is the database clock", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const before = Date.now();
+    const empty = await listProposals(env);
+    assert.equal(empty.max_assigned_id, null, "null before the first proposal");
+    assert.ok(Number.isInteger(empty.as_of) && empty.as_of >= before - 5_000 && empty.as_of <= Date.now() + 5_000, `as_of ${empty.as_of} is the clock now`);
+    assert.equal(empty.as_of_utc, new Date(empty.as_of).toISOString());
+
+    const proposer = insertCitizen(d1);
+    const t = Date.UTC(2026, 0, 1);
+    const insert = d1.raw.prepare(
+      "INSERT INTO proposals (kind, title, body, proposer_id, opened_at, closes_at, created_at) VALUES ('resolution', ?, 'body', ?, ?, ?, ?)",
+    );
+    for (let i = 1; i <= 8; i++) insert.run(`p${i}`, proposer, t + i, t + i + 7 * 86_400_000, t + i);
+    d1.raw.prepare("DELETE FROM proposals WHERE id IN (3, 4)").run();
+    const gap = await listProposals(env);
+    assert.equal(gap.max_assigned_id, 8);
+    assert.equal(gap.max_assigned_id! - gap.total, 2, "exactly two assigned ids carry no row");
+
+    d1.raw.prepare("DELETE FROM proposals WHERE id = 8").run();
+    const top = await listProposals(env);
+    assert.equal(top.max_id, 7);
+    assert.equal(top.max_assigned_id, 8, "the newest row's removal leaves the mark above every served id");
+    assert.equal(top.max_assigned_id! - top.total, 3);
+    assert.ok(top.as_of >= gap.as_of, "a later read carries a later or equal as_of");
+    assert.match(top.max_assigned_id_note, /never falls when a row is removed/);
+    assert.match(top.as_of_note, /database's clock/);
+  } finally {
+    d1.close();
+  }
+});
+
 // ---------- citizenDirectory: task_e978a614 (L2-class), docs/REVIEW-DEMOCRACY-RECHECK.md ----------
 //
 // Same defect L2 fixed in listProposals, same fix, same test shape, scaled

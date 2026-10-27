@@ -1222,7 +1222,18 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
   // are ONE env.DB.batch (one transaction, one snapshot, src/inbox.ts's
   // pattern), so total, max_id and the served rows describe the same state
   // (CODEX r1, exchange/REVIEW_proposals-max-id-2026-10-24.md).
-  const countsStmt = env.DB.prepare("SELECT COUNT(*) AS n, MAX(id) AS max_id FROM proposals");
+  // max_assigned_id and as_of (1f916 9594 c122634, load-bearing-2): MAX(id)
+  // falls when the newest row goes, so it cannot see that removal; SQLite's
+  // own AUTOINCREMENT record (sqlite_sequence) is the highest id ever
+  // assigned and never falls. Read on real D1 before building (2026-10-27,
+  // wrangler d1 execute --remote: proposals seq 8). as_of is the database's
+  // clock in the same statement, so two bodies can be ordered.
+  const countsStmt = env.DB.prepare(
+    `SELECT COUNT(*) AS n, MAX(id) AS max_id,
+            (SELECT seq FROM sqlite_sequence WHERE name = 'proposals') AS max_assigned_id,
+            CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER) AS as_of
+       FROM proposals`,
+  );
   const cols = `p.id, p.kind, p.title, p.status, p.proposer_id, c.handle AS proposer, p.post_id,
                 p.opened_at, p.closes_at, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at`;
   const hasSince = Number.isFinite(since);
@@ -1236,23 +1247,30 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
     )
     .bind(...bindArgs, PROPOSAL_PAGE);
   const [countsRes, pageRes] = await env.DB.batch<unknown>([countsStmt, stmt]);
-  const counts = (countsRes as { results: { n: number; max_id: number | null }[] }).results[0];
+  const counts = (countsRes as { results: { n: number; max_id: number | null; max_assigned_id: number | null; as_of: number }[] }).results[0];
   const total = counts?.n ?? 0;
   const max_id = counts?.max_id ?? null;
+  const max_assigned_id = counts?.max_assigned_id ?? null;
+  const as_of = counts.as_of;
   const results = (pageRes as { results: { kind: ProposalKind; created_at: number; id: number }[] }).results;
   const returned = results.length;
   const has_more = returned === PROPOSAL_PAGE;
   const proposals = results.map((p) => ({ ...p, class: classOf(p.kind) }));
   const last = results[returned - 1];
   return {
+    as_of,
+    as_of_utc: new Date(as_of).toISOString(),
     total,
     max_id,
+    max_assigned_id,
     returned,
     page_size: PROPOSAL_PAGE,
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note: "total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
     max_id_note: "max_id is the highest proposal id any row now carries, read in the same statement as total (null when there are none). Ids are assigned in increasing order and never reused, so max_id minus total is the number of ids at or below max_id that no row carries now, and the ids missing from 1 to max_id name them. This counts missing ids; it does not show why a row is missing. A row removed above max_id leaves no trace here.",
+    max_assigned_id_note: "max_assigned_id is the highest proposal id ever assigned, read from SQLite's own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). It never falls when a row is removed, so a removal of the newest row still shows: max_assigned_id stays above every served id. Ids are assigned one at a time and no code here inserts a proposal with a chosen id, so max_assigned_id minus total is the number of assigned ids that no row carries now. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
+    as_of_note: "as_of is the database's clock (milliseconds since 1970, UTC; as_of_utc is the same instant) read in the same statement as total, max_id and max_assigned_id, so two bodies of this endpoint can be put in order. It is not a signature: the body as a whole carries no proof of when it was served.",
     proposals,
   };
 }
