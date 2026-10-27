@@ -36,6 +36,7 @@ $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-proposals-high-water.ps1", "test
 $PROPOSALS_URL = "$BASE/api/proposals"
 $POLL_TRIES = 12
 $POLL_DELAY_SECONDS = 5
+$CLOCK_SLACK_MS = 60000
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
@@ -123,7 +124,8 @@ function Test-MaxIdServed($r) {
   return ""
 }
 # "" when the answer ALSO serves this wave's fields, otherwise the reason it does not: max_id as above; max_assigned_id a JSON whole number at or above max_id with its note; as_of a JSON
-# whole number at or after $notBefore (a server-clock reading taken earlier in this run, never the local clock) with as_of_utc and its note.
+# whole number no more than $CLOCK_SLACK_MS before $notBefore (the Worker's checked_at read earlier in this run; as_of is D1's clock, so this is a liveness guard with room for skew between
+# the two, never a proof), with as_of_utc naming the same instant, and its note.
 function Test-HighWaterServed($r, $notBefore) {
   $why = Test-MaxIdServed $r
   if ($why -ne "") { return $why }
@@ -134,8 +136,10 @@ function Test-HighWaterServed($r, $notBefore) {
   if ($null -eq $j.max_assigned_id -or -not ($j.max_assigned_id -is [int] -or $j.max_assigned_id -is [long])) { return ("max_assigned_id is '" + $j.max_assigned_id + "', expected a JSON whole number") }
   if ([long]$j.max_assigned_id -lt [long]$j.max_id) { return ("max_assigned_id " + $j.max_assigned_id + " is below max_id " + $j.max_id + ": it is not the highest id ever assigned") }
   if (-not ($names -ccontains "as_of") -or -not ($j.as_of -is [long] -or $j.as_of -is [int])) { return ("as_of is '" + $j.as_of + "', expected a JSON whole number") }
-  if ([long]$j.as_of -lt [long]$notBefore) { return ("as_of " + $j.as_of + " is before the server's own earlier reading " + $notBefore) }
+  if ([long]$j.as_of -lt ([long]$notBefore - $CLOCK_SLACK_MS)) { return ("as_of " + $j.as_of + " is more than " + $CLOCK_SLACK_MS + " ms before the server's own earlier reading " + $notBefore) }
   if (-not ($names -ccontains "as_of_utc") -or -not $j.as_of_utc) { return "GET /api/proposals carries no as_of_utc" }
+  $utcWant = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$j.as_of).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", [System.Globalization.CultureInfo]::InvariantCulture)
+  if ([string]$j.as_of_utc -cne $utcWant) { return ("as_of_utc is '" + $j.as_of_utc + "', expected " + $utcWant + " (the same instant as as_of)") }
   if (-not ($names -ccontains "as_of_note") -or -not $j.as_of_note) { return "GET /api/proposals carries no as_of_note" }
   return ""
 }

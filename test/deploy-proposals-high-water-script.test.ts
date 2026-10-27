@@ -122,7 +122,7 @@ const body = (o: object): string => "'" + JSON.stringify(o).replace(/'/g, "''") 
 const rows = (ids: number[]) => ids.map((id) => ({ id }));
 
 function runCases(t: { skip: (m: string) => void }, fnName: string, fn: string, cases: Array<[string, string, string]>, extraArg = "") {
-  const lines = ["$ErrorActionPreference = 'Stop'", fn, ...cases.map(([name, r]) => `Write-Host ("RESULT ${name} [" + (${fnName} ${r}${extraArg}) + "]")`)];
+  const lines = ["$ErrorActionPreference = 'Stop'", "$CLOCK_SLACK_MS = 60000", fn, ...cases.map(([name, r]) => `Write-Host ("RESULT ${name} [" + (${fnName} ${r}${extraArg}) + "]")`)];
   const run = runPs(lines);
   if (!run) return t.skip("no PowerShell available");
   for (const [name, , expect] of cases) {
@@ -163,8 +163,10 @@ test("Test-HighWaterServed, run for real, passes the expected live shape (max_as
     ["null", `@{ Code = "200"; Body = ${body({ ...good, max_assigned_id: null })} }`, "whole number"],
     ["below", `@{ Code = "200"; Body = ${body({ ...good, max_assigned_id: 7 })} }`, "below max_id"],
     ["noasof", `@{ Code = "200"; Body = ${body({ ...good, as_of: undefined })} }`, "as_of is"],
-    ["stale", `@{ Code = "200"; Body = ${body({ ...good, as_of: NOT_BEFORE - 1 })} }`, "before the server's own earlier reading"],
+    ["skew", `@{ Code = "200"; Body = ${body({ ...good, as_of: NOT_BEFORE - 59_000, as_of_utc: new Date(NOT_BEFORE - 59_000).toISOString() })} }`, ""],
+    ["stale", `@{ Code = "200"; Body = ${body({ ...good, as_of: NOT_BEFORE - 60_001, as_of_utc: new Date(NOT_BEFORE - 60_001).toISOString() })} }`, "before the server's own earlier reading"],
     ["noutc", `@{ Code = "200"; Body = ${body({ ...good, as_of_utc: undefined })} }`, "no as_of_utc"],
+    ["utcdiff", `@{ Code = "200"; Body = ${body({ ...good, as_of_utc: new Date(NOT_BEFORE).toISOString() })} }`, "the same instant as as_of"],
     ["noasofnote", `@{ Code = "200"; Body = ${body({ ...good, as_of_note: undefined })} }`, "no as_of_note"],
   ], ` ${NOT_BEFORE}`);
 });
@@ -174,5 +176,6 @@ test("the before-read requires max_id live and refuses a worker already serving 
   assert.ok(code.includes(`Contains('"max_assigned_id"')`));
   assert.ok(code.includes("$serverBefore = [long]$attBefore.checked_at"));
   assert.ok(code.includes("Wait-NewWorker $headSha $versionId $serverBefore"));
+  assert.match(script, /^\$CLOCK_SLACK_MS = 60000$/m, "the cross-clock comparison allows a minute of skew between the Worker and D1 (CODEX r1)");
   assert.ok(code.includes('"/api/proposal/8"'));
 });

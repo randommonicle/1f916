@@ -2444,7 +2444,8 @@ test("listProposals: max_assigned_id keeps the highest id ever assigned after th
     assert.equal(top.max_assigned_id, 8, "the newest row's removal leaves the mark above every served id");
     assert.equal(top.max_assigned_id! - top.total, 3);
     assert.ok(top.as_of >= gap.as_of, "a later read carries a later or equal as_of");
-    assert.match(top.max_assigned_id_note, /never falls when a row is removed/);
+    assert.match(top.max_assigned_id_note, /Removing a row does not lower it/);
+    assert.match(top.max_assigned_id_note, /Migration 0007 rebuilt the table/, "the note states the rebuild limit (CODEX r1)");
     assert.match(top.as_of_note, /database's clock/);
   } finally {
     d1.close();

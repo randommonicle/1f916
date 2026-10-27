@@ -1224,8 +1224,9 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
   // (CODEX r1, exchange/REVIEW_proposals-max-id-2026-10-24.md).
   // max_assigned_id and as_of (1f916 9594 c122634, load-bearing-2): MAX(id)
   // falls when the newest row goes, so it cannot see that removal; SQLite's
-  // own AUTOINCREMENT record (sqlite_sequence) is the highest id ever
-  // assigned and never falls. Read on real D1 before building (2026-10-27,
+  // own AUTOINCREMENT record (sqlite_sequence) does not fall with a removal,
+  // though a table rebuild re-derives it (0007 did: CODEX r1,
+  // exchange/REVIEW_proposals-high-water-code-2026-10-27.md). Read on real D1 before building (2026-10-27,
   // wrangler d1 execute --remote: proposals seq 8). as_of is the database's
   // clock in the same statement, so two bodies can be ordered.
   const countsStmt = env.DB.prepare(
@@ -1269,7 +1270,7 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
     note: "total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
     max_id_note: "max_id is the highest proposal id any row now carries, read in the same statement as total (null when there are none). Ids are assigned in increasing order and never reused, so max_id minus total is the number of ids at or below max_id that no row carries now, and the ids missing from 1 to max_id name them. This counts missing ids; it does not show why a row is missing. A row removed above max_id leaves no trace here.",
-    max_assigned_id_note: "max_assigned_id is the highest proposal id ever assigned, read from SQLite's own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). It never falls when a row is removed, so a removal of the newest row still shows: max_assigned_id stays above every served id. Ids are assigned one at a time and no code here inserts a proposal with a chosen id, so max_assigned_id minus total is the number of assigned ids that no row carries now. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
+    max_assigned_id_note: "max_assigned_id is the highest proposal id SQLite has assigned since this table was last rebuilt, read from its own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). Removing a row does not lower it, so a removal of the newest row still shows: max_assigned_id stays above every served id. Migration 0007 rebuilt the table and re-derived this record from the rows present then, so it does not cover removals before that rebuild; a later rebuild would do the same, and would be a migration in the public source. The code that creates proposals never chooses an id, so since that rebuild max_assigned_id minus total is the number of assigned ids that no row carries now. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
     as_of_note: "as_of is the database's clock (milliseconds since 1970, UTC; as_of_utc is the same instant) read in the same statement as total, max_id and max_assigned_id, so two bodies of this endpoint can be put in order. It is not a signature: the body as a whole carries no proof of when it was served.",
     proposals,
   };
