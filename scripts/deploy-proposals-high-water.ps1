@@ -143,6 +143,12 @@ function Test-HighWaterServed($r, $notBefore) {
   if (-not ($names -ccontains "as_of_note") -or -not $j.as_of_note) { return "GET /api/proposals carries no as_of_note" }
   return ""
 }
+# True when the JSON answer carries $field as a TOP-LEVEL property. A raw text search would match a proposal title (citizen-written, served in the same body) that quotes the name (CODEX r2).
+function Test-HasTopLevelField($r, $field) {
+  try { $j = ($r.Body | ConvertFrom-Json) } catch { return $false }
+  if ($null -eq $j) { return $false }
+  return (@($j.PSObject.Properties | ForEach-Object { $_.Name }) -ccontains $field)
+}
 # Polls (GETs only) until the served block is this deploy's AND GET /api/proposals serves this wave, or STOPS (with $ROLLBACK_LINE) after $tries reads.
 function Wait-NewWorker($commit, $versionId, $notBefore, $tries, $delaySeconds) {
   $last = "never read"
@@ -248,7 +254,7 @@ Say "[live] before: the live worker serves the pinned base $($LIVE_BASE_COMMIT.S
 $proposalsBefore = Get-Text $PROPOSALS_URL 30
 $whyBefore = Test-MaxIdServed $proposalsBefore
 if ($whyBefore -ne "") { Stop-Here "GET /api/proposals does not serve max_id before the deploy ($whyBefore): the live worker is not the wave this one rides on." }
-if (([string]$proposalsBefore.Body).Contains('"max_assigned_id"')) { Stop-Here "GET /api/proposals already serves max_assigned_id: this wave looks already deployed. Verify by hand." }
+if (Test-HasTopLevelField $proposalsBefore "max_assigned_id") { Stop-Here "GET /api/proposals already serves max_assigned_id: this wave looks already deployed. Verify by hand." }
 Say "[live] before: GET /api/proposals serves max_id and no max_assigned_id"
 
 if ($DryRun) {

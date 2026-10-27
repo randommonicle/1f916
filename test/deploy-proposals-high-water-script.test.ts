@@ -171,9 +171,26 @@ test("Test-HighWaterServed, run for real, passes the expected live shape (max_as
   ], ` ${NOT_BEFORE}`);
 });
 
+test("Test-HasTopLevelField, run for real, is false for a live-shape body whose proposal TITLE quotes the field name, true when the field is top-level", (t) => {
+  const fn = defs.slice(defs.indexOf("function Test-HasTopLevelField"), defs.indexOf("# Polls (GETs only)"));
+  const old = { total: 1, max_id: 1, max_id_note: "n", has_more: false, proposals: [{ id: 1, title: 'Serve "max_assigned_id" please' }] };
+  const lines = [
+    "$ErrorActionPreference = 'Stop'", fn,
+    `Write-Host ("RESULT title [" + (Test-HasTopLevelField @{ Code = "200"; Body = ${body(old)} } "max_assigned_id") + "]")`,
+    `Write-Host ("RESULT top [" + (Test-HasTopLevelField @{ Code = "200"; Body = ${body({ ...old, max_assigned_id: 1 })} } "max_assigned_id") + "]")`,
+    `Write-Host ("RESULT bad [" + (Test-HasTopLevelField @{ Code = "200"; Body = 'oops' } "max_assigned_id") + "]")`,
+  ];
+  const run = runPs(lines);
+  if (!run) return t.skip("no PowerShell available");
+  assert.match(run.out, /RESULT title \[False\]/);
+  assert.match(run.out, /RESULT top \[True\]/);
+  assert.match(run.out, /RESULT bad \[False\]/);
+});
+
 test("the before-read requires max_id live and refuses a worker already serving max_assigned_id; the poll and the ride compare as_of against the server's own earlier checked_at", () => {
   assert.ok(code.includes("Test-MaxIdServed $proposalsBefore"));
-  assert.ok(code.includes(`Contains('"max_assigned_id"')`));
+  assert.ok(code.includes('Test-HasTopLevelField $proposalsBefore "max_assigned_id"'));
+  assert.equal(code.includes(`Contains('"max_assigned_id"')`), false, "no raw text search of a body that carries citizen-written titles (CODEX r2)");
   assert.ok(code.includes("$serverBefore = [long]$attBefore.checked_at"));
   assert.ok(code.includes("Wait-NewWorker $headSha $versionId $serverBefore"));
   assert.match(script, /^\$CLOCK_SLACK_MS = 60000$/m, "the cross-clock comparison allows a minute of skew between the Worker and D1 (CODEX r1)");
