@@ -12,7 +12,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PROPOSALS_SEQUENCE_BASELINE } from "../src/governance.ts";
 
-// Removes -- and /* */ comments and the contents of '...' strings, and turns
+// Removes -- and /* */ comments and the contents of '...' strings (except a
+// literal 'proposals', which SQLite accepts as the table's name), and turns
 // each quoted identifier ("x", `x`, [x]) into "proposals" when it names the
 // table and "x" otherwise, so the patterns below read only real tokens.
 export function stripSqlNoise(sql: string): string {
@@ -25,8 +26,12 @@ export function stripSqlNoise(sql: string): string {
     if (c === "/" && n === "*") { const end = sql.indexOf("*/", i + 2); i = end < 0 ? sql.length : end + 2; out += " "; continue; }
     if (c === "'") {
       i++;
+      const start = i;
       while (i < sql.length) { if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; } if (sql[i] === "'") break; i++; }
-      i++; out += "''"; continue;
+      // SQLite also accepts 'proposals' as a table name (legacy quoting), so a
+      // literal whose whole text is the name stays a name token (CODEX r3).
+      const lit = sql.slice(start, i).replace(/''/g, "'");
+      i++; out += lit.toLowerCase() === "proposals" ? '"proposals"' : "''"; continue;
     }
     const close = c === '"' ? '"' : c === "`" ? "`" : c === "[" ? "]" : null;
     if (close) {
@@ -83,6 +88,8 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     "SELECT '--'; CREATE TABLE proposals (id INTEGER)",
     "/* note */ CREATE TABLE proposals (id INTEGER)",
     'CREATE TABLE "PROPOSALS" (id INTEGER)',
+    "CREATE TABLE 'proposals' (id INTEGER)",
+    "ALTER TABLE old RENAME TO 'proposals'",
     'CREATE TABLE "pro""posals" (id INTEGER); CREATE TABLE [proposals] (id INTEGER)',
   ];
   const misses = [
@@ -97,6 +104,8 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     'CREATE TABLE notes ("RENAME TO proposals" TEXT)',
     "CREATE TABLE notes (`CREATE TABLE main.proposals (` TEXT)",
     'CREATE TABLE "proposals_v2" (id INTEGER)',
+    "INSERT INTO t (name) VALUES ('proposals')",
+    "CREATE TABLE t (k TEXT DEFAULT 'CREATE TABLE proposals (')",
   ];
   for (const s of hits) assert.equal(rebuildsProposals(s), true, `sees: ${s}`);
   for (const s of misses) assert.equal(rebuildsProposals(s), false, `ignores: ${s}`);
