@@ -52,7 +52,8 @@ export function stripSqlNoise(sql: string): string {
 const PART = String.raw`(?:"[^"]*"|\x60[^\x60]*\x60|\[[^\]]*\]|''|[A-Za-z_][A-Za-z0-9_]*)`;
 const NAME = String.raw`(?:${PART}\s*\.\s*)?(?:"proposals"|\x60proposals\x60|\[proposals\]|proposals)(?![A-Za-z0-9_$\u0080-\uFFFF])`; // SQLite identifiers also continue with $ and non-ASCII (DEEPSEEK r1)
 const REBUILD = new RegExp(
-  String.raw`\bRENAME\s+TO\s+${NAME}|\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
+  // EXPLAIN runs nothing, so an EXPLAINed statement is not a rebuild (CODEX r6).
+  String.raw`(?<!\bEXPLAIN\s+(?:QUERY\s+PLAN\s+)?ALTER\s+TABLE\s+${PART}(?:\s*\.\s*${PART})?\s+)\bRENAME\s+TO\s+${NAME}|(?<!\bEXPLAIN\s+(?:QUERY\s+PLAN\s+)?)\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
   "i",
 );
 
@@ -110,6 +111,9 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     'CREATE TABLE "proposals_v2" (id INTEGER)',
     "INSERT INTO t (name) VALUES ('proposals')",
     "CREATE TABLE proposals$archive (id INTEGER)",
+    "EXPLAIN CREATE TABLE proposals (id INTEGER)",
+    "explain query plan create table proposals (id INTEGER)",
+    "EXPLAIN ALTER TABLE proposals_new RENAME TO proposals",
     "ALTER TABLE old RENAME TO proposals\u00e9",
     "CREATE TABLE t (k TEXT DEFAULT 'CREATE TABLE proposals (')",
   ];
