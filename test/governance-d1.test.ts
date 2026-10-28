@@ -2445,7 +2445,10 @@ test("listProposals: max_assigned_id keeps the highest id ever assigned after th
     assert.equal(top.max_assigned_id! - top.total, 3);
     assert.ok(top.as_of >= gap.as_of, "a later read carries a later or equal as_of");
     assert.match(top.max_assigned_id_note, /Removing a row does not lower it/);
-    assert.match(top.max_assigned_id_note, /Migration 0007 rebuilt the table/, "the note states the rebuild limit (CODEX r1)");
+    assert.match(top.max_assigned_id_note, /does not cover removals before it/, "the note states the rebuild limit (CODEX r1)");
+    assert.deepEqual(top.max_assigned_id_since, { migration: "0007_first_laws", applied: "2026-08-18" }, "the body carries its own baseline (c123559)");
+    assert.match(top.max_assigned_id_note, /a lower max_assigned_id in the later body means the record was rewritten/);
+    assert.match(top.note, /unfiltered/);
     assert.match(top.as_of_note, /database's clock/);
   } finally {
     d1.close();

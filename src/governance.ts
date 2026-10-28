@@ -1204,6 +1204,14 @@ async function hasExistingBallot(env: Env, proposalId: number, citizenId: number
 // (society.ts's citizenDirectory) with a real COUNT and has_more.
 export const PROPOSAL_PAGE = 200;
 
+// The last migration that rebuilt the proposals table, which re-derived its
+// sqlite_sequence row: max_assigned_id counts only from here. Served as
+// max_assigned_id_since so two bodies can tell whether they share a baseline
+// (load-bearing-2, 1f916 9594 c123559). test/proposals-sequence-baseline.test.ts
+// fails if a newer migration rebuilds the table and this is not moved to it.
+// applied: First Laws went live on prod that day (HANDOVER Addendum 25).
+export const PROPOSALS_SEQUENCE_BASELINE = { migration: "0007_first_laws", applied: "2026-08-18" } as const;
+
 // docs/REVIEW-DEMOCRACY.md L2: created_at alone is not a safe cursor --
 // two proposals sharing a millisecond across a page boundary would lose
 // one permanently (created_at > since excludes BOTH once either has been
@@ -1229,6 +1237,9 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
   // exchange/REVIEW_proposals-high-water-code-2026-10-27.md). Read on real D1 before building (2026-10-27,
   // wrangler d1 execute --remote: proposals seq 8). as_of is the database's
   // clock in the same statement, so two bodies can be ordered.
+  // total stays an unfiltered COUNT(*) of the whole table: max_assigned_id
+  // minus total means "assigned ids no row carries" only while it does
+  // (load-bearing-2, 1f916 9594 c123559).
   const countsStmt = env.DB.prepare(
     `SELECT COUNT(*) AS n, MAX(id) AS max_id,
             (SELECT seq FROM sqlite_sequence WHERE name = 'proposals') AS max_assigned_id,
@@ -1264,13 +1275,14 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
     total,
     max_id,
     max_assigned_id,
+    max_assigned_id_since: PROPOSALS_SEQUENCE_BASELINE,
     returned,
     page_size: PROPOSAL_PAGE,
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
-    note: "total is a real SELECT COUNT(*), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
+    note: "total is a real SELECT COUNT(*) of the whole proposals table, unfiltered (since and since_id filter only the page), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
     max_id_note: "max_id is the highest proposal id any row now carries, read in the same statement as total (null when there are none). Ids are assigned in increasing order and never reused, so max_id minus total is the number of ids at or below max_id that no row carries now, and the ids missing from 1 to max_id name them. This counts missing ids; it does not show why a row is missing. A row removed above max_id leaves no trace here.",
-    max_assigned_id_note: "max_assigned_id is the highest proposal id SQLite has assigned since this table was last rebuilt, read from its own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). Removing a row does not lower it, so a removal of the newest row still shows: max_assigned_id stays above every served id. Migration 0007 rebuilt the table and re-derived this record from the rows present then, so it does not cover removals before that rebuild; a later rebuild would do the same, and would be a migration in the public source. The code that creates proposals never chooses an id, so since that rebuild max_assigned_id minus total is the number of assigned ids that no row carries now. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
+    max_assigned_id_note: "max_assigned_id is the highest proposal id SQLite has assigned since this table was last rebuilt, read from its own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). Removing a row does not lower it, so a removal of the newest row still shows: max_assigned_id stays above every served id. max_assigned_id_since names the last rebuild: its migration is in the public source, and its applied date is our statement. That rebuild re-derived this record from the rows present then, so it does not cover removals before it; a later rebuild would do the same, would be a migration in the public source, and would change max_assigned_id_since. The code that creates proposals never chooses an id, so since that rebuild max_assigned_id minus total (an unfiltered count) is the number of assigned ids that no row carries now. Under that code the mark only rises. Two bodies with the same max_assigned_id_since are the outside check: the same max_assigned_id with a larger gap means a row was removed between the reads, and a lower max_assigned_id in the later body means the record was rewritten outside that code (a direct write or a restore of the database). Bodies with different max_assigned_id_since values are not comparable this way. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
     as_of_note: "as_of is the database's clock (milliseconds since 1970, UTC; as_of_utc is the same instant) read in the same statement as total, max_id and max_assigned_id, so two bodies of this endpoint can be put in order. It is not a signature: the body as a whole carries no proof of when it was served.",
     proposals,
   };
