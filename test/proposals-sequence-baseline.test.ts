@@ -53,7 +53,7 @@ const PART = String.raw`(?:"[^"]*"|\x60[^\x60]*\x60|\[[^\]]*\]|''|[A-Za-z_][A-Za
 const NAME = String.raw`(?:${PART}\s*\.\s*)?(?:"proposals"|\x60proposals\x60|\[proposals\]|proposals)(?![A-Za-z0-9_$\u0080-\uFFFF])`; // SQLite identifiers also continue with $ and non-ASCII (DEEPSEEK r1)
 const REBUILD = new RegExp(
   // EXPLAIN runs nothing, so an EXPLAINed statement is not a rebuild (CODEX r6).
-  String.raw`(?<!\bEXPLAIN\s+(?:QUERY\s+PLAN\s+)?ALTER\s+TABLE\s+${PART}(?:\s*\.\s*${PART})?\s+)\bRENAME\s+TO\s+${NAME}|(?<!\bEXPLAIN\s+(?:QUERY\s+PLAN\s+)?)\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
+  String.raw`(?<!\bEXPLAIN\s+(?:QUERY\s+PLAN\s+)?ALTER\s+TABLE\s+${PART}(?:\s*\.\s*${PART})?\s+)\bRENAME\s+TO\s+${NAME}|(?<!\bEXPLAIN\s+(?:QUERY\s+PLAN\s+)?)\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+|VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
   "i",
 );
 
@@ -87,6 +87,8 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     'CREATE TABLE "main"."proposals" (id INTEGER)',
     "CREATE TABLE proposals AS SELECT * FROM old",
     "CREATE TEMP TABLE proposals (id INTEGER)",
+    "CREATE VIRTUAL TABLE proposals USING fts5(content)",
+    "CREATE VIRTUAL TABLE IF NOT EXISTS main.proposals USING fts5(content)",
     "SELECT '--'; CREATE TABLE proposals (id INTEGER)",
     "/* note */ CREATE TABLE proposals (id INTEGER)",
     'CREATE TABLE "PROPOSALS" (id INTEGER)',
