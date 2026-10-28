@@ -48,7 +48,8 @@ export function stripSqlNoise(sql: string): string {
 }
 
 // [schema.]proposals, each part bare or quoted with "", ``, or [].
-const PART = String.raw`(?:"[^"]*"|\x60[^\x60]*\x60|\[[^\]]*\]|[A-Za-z_][A-Za-z0-9_]*)`;
+// '' is any other single-quoted literal after stripping: SQLite accepts 'main' as a schema name (CODEX r4).
+const PART = String.raw`(?:"[^"]*"|\x60[^\x60]*\x60|\[[^\]]*\]|''|[A-Za-z_][A-Za-z0-9_]*)`;
 const NAME = String.raw`(?:${PART}\s*\.\s*)?(?:"proposals"|\x60proposals\x60|\[proposals\]|proposals)(?![A-Za-z0-9_])`;
 const REBUILD = new RegExp(
   String.raw`\bRENAME\s+TO\s+${NAME}|\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
@@ -90,6 +91,9 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     'CREATE TABLE "PROPOSALS" (id INTEGER)',
     "CREATE TABLE 'proposals' (id INTEGER)",
     "ALTER TABLE old RENAME TO 'proposals'",
+    "CREATE TABLE 'main'.'proposals' (id INTEGER)",
+    "CREATE TABLE 'main'.proposals (id INTEGER)",
+    "ALTER TABLE old RENAME TO main.'proposals'",
     'CREATE TABLE "pro""posals" (id INTEGER); CREATE TABLE [proposals] (id INTEGER)',
   ];
   const misses = [
