@@ -12,8 +12,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PROPOSALS_SEQUENCE_BASELINE } from "../src/governance.ts";
 
-// Removes -- and /* */ comments and the contents of '...' strings, keeping
-// quoted identifiers ("x", `x`, [x]) intact so the patterns below can read them.
+// Removes -- and /* */ comments and the contents of '...' strings, and turns
+// each quoted identifier ("x", `x`, [x]) into "proposals" when it names the
+// table and "x" otherwise, so the patterns below read only real tokens.
 export function stripSqlNoise(sql: string): string {
   let out = "";
   let i = 0;
@@ -26,6 +27,15 @@ export function stripSqlNoise(sql: string): string {
       i++;
       while (i < sql.length) { if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; } if (sql[i] === "'") break; i++; }
       i++; out += "''"; continue;
+    }
+    const close = c === '"' ? '"' : c === "`" ? "`" : c === "[" ? "]" : null;
+    if (close) {
+      // A quoted identifier is one token: its text never reads as SQL (CODEX r2).
+      let j = i + 1;
+      let name = "";
+      while (j < sql.length) { if (sql[j] === close && close !== "]" && sql[j + 1] === close) { name += close; j += 2; continue; } if (sql[j] === close) break; name += sql[j]; j++; }
+      out += name.toLowerCase() === "proposals" ? '"proposals"' : '"x"';
+      i = j + 1; continue;
     }
     out += c; i++;
   }
@@ -72,6 +82,8 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     "CREATE TEMP TABLE proposals (id INTEGER)",
     "SELECT '--'; CREATE TABLE proposals (id INTEGER)",
     "/* note */ CREATE TABLE proposals (id INTEGER)",
+    'CREATE TABLE "PROPOSALS" (id INTEGER)',
+    'CREATE TABLE "pro""posals" (id INTEGER); CREATE TABLE [proposals] (id INTEGER)',
   ];
   const misses = [
     "CREATE TABLE proposals_new (id INTEGER)",
@@ -81,6 +93,10 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     "/* CREATE TABLE proposals (id) */ SELECT 1",
     "CREATE TABLE ballots (proposal_id INTEGER REFERENCES proposals(id))",
     "DROP TABLE proposals",
+    "CREATE TABLE notes ([CREATE TABLE proposals (id INTEGER)] TEXT)",
+    'CREATE TABLE notes ("RENAME TO proposals" TEXT)',
+    "CREATE TABLE notes (`CREATE TABLE main.proposals (` TEXT)",
+    'CREATE TABLE "proposals_v2" (id INTEGER)',
   ];
   for (const s of hits) assert.equal(rebuildsProposals(s), true, `sees: ${s}`);
   for (const s of misses) assert.equal(rebuildsProposals(s), false, `ignores: ${s}`);
