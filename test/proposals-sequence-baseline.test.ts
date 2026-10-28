@@ -2,26 +2,86 @@
 // rebuilt the proposals table (and so re-derived its sqlite_sequence row).
 // That value is hand-kept, so this test holds it to the migrations directory:
 // a newer migration that rebuilds the table without moving the constant fails
-// here (load-bearing-2, 1f916 9594 c123559).
+// here (load-bearing-2, 1f916 9594 c123559). The scanner is a guard on the
+// forms SQLite accepts for creating or renaming to the table, not a parser:
+// the synthetic cases below are the forms it is proved against (CODEX r1,
+// exchange/REVIEW_proposals-note-epoch-2026-10-28.md).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PROPOSALS_SEQUENCE_BASELINE } from "../src/governance.ts";
 
-const REBUILD = /\bRENAME\s+TO\s+"?proposals"?\s*;|\bCREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?"?proposals"?\s*\(/i;
+// Removes -- and /* */ comments and the contents of '...' strings, keeping
+// quoted identifiers ("x", `x`, [x]) intact so the patterns below can read them.
+export function stripSqlNoise(sql: string): string {
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    const n = sql[i + 1];
+    if (c === "-" && n === "-") { while (i < sql.length && sql[i] !== "\n") i++; continue; }
+    if (c === "/" && n === "*") { const end = sql.indexOf("*/", i + 2); i = end < 0 ? sql.length : end + 2; out += " "; continue; }
+    if (c === "'") {
+      i++;
+      while (i < sql.length) { if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; } if (sql[i] === "'") break; i++; }
+      i++; out += "''"; continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
+// [schema.]proposals, each part bare or quoted with "", ``, or [].
+const PART = String.raw`(?:"[^"]*"|\x60[^\x60]*\x60|\[[^\]]*\]|[A-Za-z_][A-Za-z0-9_]*)`;
+const NAME = String.raw`(?:${PART}\s*\.\s*)?(?:"proposals"|\x60proposals\x60|\[proposals\]|proposals)(?![A-Za-z0-9_])`;
+const REBUILD = new RegExp(
+  String.raw`\bRENAME\s+TO\s+${NAME}|\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
+  "i",
+);
+
+export function rebuildsProposals(sql: string): boolean {
+  return REBUILD.test(stripSqlNoise(sql));
+}
 
 export function lastProposalsRebuild(dir: string): string | null {
-  const files = readdirSync(dir).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort();
+  const files = readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".sql")).sort();
   let last: string | null = null;
-  for (const f of files) {
-    const sql = readFileSync(join(dir, f), "utf8").replace(/--[^\n]*/g, "");
-    if (REBUILD.test(sql)) last = f.replace(/\.sql$/, "");
-  }
+  for (const f of files) if (rebuildsProposals(readFileSync(join(dir, f), "utf8"))) last = f.replace(/\.sql$/i, "");
   return last;
 }
 
 test("max_assigned_id_since names the newest migration that rebuilds the proposals table", () => {
   const last = lastProposalsRebuild(join(import.meta.dirname, "..", "migrations"));
   assert.equal(PROPOSALS_SEQUENCE_BASELINE.migration, last);
+});
+
+test("the scanner sees every form of creating or renaming to proposals and none of the near misses", () => {
+  const hits = [
+    "ALTER TABLE proposals_new RENAME TO proposals;",
+    "ALTER TABLE proposals_new RENAME TO proposals",
+    'ALTER TABLE x RENAME TO "proposals"',
+    "ALTER TABLE x RENAME TO `proposals`",
+    "ALTER TABLE x RENAME TO [proposals]",
+    "alter table x rename to main.proposals",
+    "CREATE TABLE proposals (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+    "CREATE TABLE IF NOT EXISTS proposals(id INTEGER)",
+    "CREATE TABLE main.proposals (id INTEGER)",
+    'CREATE TABLE "main"."proposals" (id INTEGER)',
+    "CREATE TABLE proposals AS SELECT * FROM old",
+    "CREATE TEMP TABLE proposals (id INTEGER)",
+    "SELECT '--'; CREATE TABLE proposals (id INTEGER)",
+    "/* note */ CREATE TABLE proposals (id INTEGER)",
+  ];
+  const misses = [
+    "CREATE TABLE proposals_new (id INTEGER)",
+    "ALTER TABLE x RENAME TO proposals_old",
+    "INSERT INTO proposals (title) VALUES ('CREATE TABLE proposals (')",
+    "-- ALTER TABLE x RENAME TO proposals;",
+    "/* CREATE TABLE proposals (id) */ SELECT 1",
+    "CREATE TABLE ballots (proposal_id INTEGER REFERENCES proposals(id))",
+    "DROP TABLE proposals",
+  ];
+  for (const s of hits) assert.equal(rebuildsProposals(s), true, `sees: ${s}`);
+  for (const s of misses) assert.equal(rebuildsProposals(s), false, `ignores: ${s}`);
 });
