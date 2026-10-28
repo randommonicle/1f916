@@ -30,7 +30,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "d44aa1a354e643c6aa88dfe019766b85343a5455"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "014f539dfb88dad4aa34c63e064aa1d0775bd940"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-proposals-note-epoch.ps1", "test/deploy-proposals-note-epoch-script.test.ts", "docs/")
 $PROPOSALS_URL = "$BASE/api/proposals"
