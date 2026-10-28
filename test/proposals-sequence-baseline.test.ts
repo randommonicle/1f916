@@ -50,7 +50,7 @@ export function stripSqlNoise(sql: string): string {
 // [schema.]proposals, each part bare or quoted with "", ``, or [].
 // '' is any other single-quoted literal after stripping: SQLite accepts 'main' as a schema name (CODEX r4).
 const PART = String.raw`(?:"[^"]*"|\x60[^\x60]*\x60|\[[^\]]*\]|''|[A-Za-z_][A-Za-z0-9_]*)`;
-const NAME = String.raw`(?:${PART}\s*\.\s*)?(?:"proposals"|\x60proposals\x60|\[proposals\]|proposals)(?![A-Za-z0-9_])`;
+const NAME = String.raw`(?:${PART}\s*\.\s*)?(?:"proposals"|\x60proposals\x60|\[proposals\]|proposals)(?![A-Za-z0-9_$\u0080-￿])`; // SQLite identifiers also continue with $ and non-ASCII (DEEPSEEK r1)
 const REBUILD = new RegExp(
   String.raw`\bRENAME\s+TO\s+${NAME}|\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`,
   "i",
@@ -109,6 +109,8 @@ test("the scanner sees every form of creating or renaming to proposals and none 
     "CREATE TABLE notes (`CREATE TABLE main.proposals (` TEXT)",
     'CREATE TABLE "proposals_v2" (id INTEGER)',
     "INSERT INTO t (name) VALUES ('proposals')",
+    "CREATE TABLE proposals$archive (id INTEGER)",
+    "ALTER TABLE old RENAME TO proposalsé",
     "CREATE TABLE t (k TEXT DEFAULT 'CREATE TABLE proposals (')",
   ];
   for (const s of hits) assert.equal(rebuildsProposals(s), true, `sees: ${s}`);
