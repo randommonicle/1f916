@@ -66,3 +66,22 @@ instead, so the eligible marker never arrived: the test cannot pass vacuously). 
 
 ### `callAnthropic` call sites, re-grepped at this commit (`grep -rn callAnthropic src`)
 `maintainer/anthropic.ts:160` (definition); callers: `clerk.ts:507`, `concierge.ts:426`, `judgment.ts:1812`. Three, as the brief says; no new call site. `council-verify.ts` makes none.
+
+## Commit 4: W3 judgment, tests 8 and 9 (clerk regression)
+
+What: `judgment.ts` `shapeTargetContent` returns, for any target with a `mod_state`, the fixed line
+`(content already <state>; its text is withheld from this review)` and keeps the `mod_state` (the `<target_content mod_state=...>`
+attribute is unchanged). `JUDGMENT_SYSTEM_PROMPT` (the `target_content` paragraph, `judgment.ts:361`) now says a collapsed or
+removed target's block holds only that line, to decide from note and source, and to treat the note as the clerk's historical
+account, not a fresh observation. The prompt previously promised "ACTUAL CURRENT content" for every target; it still does for visible ones.
+E3 (stated, not served): the clerk's note about a flag, which may quote its target, still goes to the judgment as its evidence; test 8 asserts the note markers are PRESENT.
+Existing raw-content test (`maintainer-judgment.test.ts`, "shapeTargetContent returns a comment's body plus its mod_state", a
+`collapsed` comment expecting "this is spam"): split into a visible-comment version (unchanged expectation) and a new moderated
+test with the new expectation. Red on 50007e0f source (judgment.ts reverse-applied): the new moderated expectation fails
+(`Expected values to be strictly equal`), the prompt-pin test fails (`did not match /already collapsed or removed, ...`), and
+test 8 fails at `no moderated target's stored title or body was sent`.
+Test 8 (D1, fetch seam): moderated post, moderated comment, visible post as flag_review targets, each with a distinct clerk-note marker;
+asserts note markers present, the visible target's content present (positive control), the canary (only in stored fields) absent, and the placeholder block.
+Test 9 PRESERVATION (clerk): green on the unchanged clerk. Mutations (on a copy, restored): (1) drop `AND mod_state IS NULL` from the posts
+input query (`clerk.ts:317`): red at `no moderated row's stored text was sent`; (2) delete the moderated branch of `shapeFlagTargetText`
+(`clerk.ts:302`): red at `the flag on a moderated post is shown as moderated, no content`. Both fail with either removed, as the brief requires.

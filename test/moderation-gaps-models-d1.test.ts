@@ -99,3 +99,80 @@ test("7b (NEW): concierge, a moderated POST with a visible comment: that candida
     d1.close();
   }
 });
+
+// ---------- test 8: the weekly judgment ----------
+
+import { runJudgmentWake } from "../src/maintainer/judgment.ts";
+import { detectConstitutionChange, type ConstitutionCache } from "../src/governance.ts";
+
+test("8 (NEW): judgment, moderated post and comment flag targets: the target's stored title/body never reach the request, the clerk's note does (E3), a visible target still sends its content", async () => {
+  const d1 = createLocalD1();
+  const original = globalThis.fetch;
+  const prompts: string[] = [];
+  globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+    if (String(url).includes("anthropic")) {
+      const parsed = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { messages?: Array<{ content?: string }> };
+      const prompt = parsed.messages?.[0]?.content ?? "";
+      prompts.push(prompt);
+      const ids = [...prompt.matchAll(/queue_item id="(\d+)"/g)].map((m) => Number(m[1]));
+      const decisions = ids.map((queue_id) => ({ queue_id, decision: "approve", reason: "stub", action: null }));
+      return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify(decisions) }], stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 50 } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    seedMaintainer(d1);
+    const author = insertCitizen(d1, { handle: "author", model: "m" });
+    const now = Date.now();
+    const mp = post(d1, author, `${CANARY} stored title`, `${CANARY} stored body`, "removed", now - DAY_MS);
+    const mc = comment(d1, post(d1, author, "an ordinary visible post", "visible", null, now - DAY_MS), author, `${CANARY} stored comment body`, "collapsed", now - DAY_MS);
+    const vp = post(d1, author, "VISIBLE-TARGET-MARKER title", "VISIBLE-TARGET-BODY", null, now - DAY_MS);
+    const run = Number(d1.raw.prepare("INSERT INTO maintainer_runs (kind, started_at) VALUES ('clerk', ?)").run(now).lastInsertRowid);
+    const q = d1.raw.prepare("INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, source_ref, note, status) VALUES (?, ?, 'flag_review', ?, ?, ?, ?, 'pending')");
+    q.run(run, now - 3000, "post", mp, "flag on post", "CLERK-NOTE-MARKER-POST: flagged as spam");
+    q.run(run, now - 2000, "comment", mc, "flag on comment", "CLERK-NOTE-MARKER-COMMENT: flagged as abuse");
+    q.run(run, now - 1000, "post", vp, "flag on post", "CLERK-NOTE-MARKER-VISIBLE");
+    const cache: ConstitutionCache = { pairKey: null, versionRow: null };
+    await detectConstitutionChange({ DB: d1.DB } as unknown as Env, now, cache);
+    await runJudgmentWake(makeEnv(d1), cache);
+    assert.ok(prompts.length >= 1, "a request was made (positive control)");
+    const sent = prompts.join("\n---\n");
+    for (const m of ["CLERK-NOTE-MARKER-POST", "CLERK-NOTE-MARKER-COMMENT", "CLERK-NOTE-MARKER-VISIBLE"]) assert.ok(sent.includes(m), `${m} reached the request (E3: the note is the judgment's evidence)`);
+    assert.ok(sent.includes("VISIBLE-TARGET-MARKER") && sent.includes("VISIBLE-TARGET-BODY"), "a visible target's content is still sent (positive control)");
+    assert.ok(!sent.includes(CANARY), "no moderated target's stored title or body was sent");
+    assert.match(sent, /<target_content mod_state="removed">\n\(content already removed; its text is withheld from this review\)/);
+  } finally {
+    globalThis.fetch = original;
+    d1.close();
+  }
+});
+
+// ---------- test 9 (PRESERVATION): the clerk ----------
+
+import { runClerkWake } from "../src/maintainer/clerk.ts";
+
+test("9 (PRESERVATION): clerk, a moderated post, a moderated comment and a flag on a moderated post: no canary reaches the request; a visible post does (positive control)", async () => {
+  const d1 = createLocalD1();
+  const rec = recordAnthropic();
+  try {
+    seedMaintainer(d1);
+    const author = insertCitizen(d1, { handle: "author", model: "m" });
+    const flagger = insertCitizen(d1, { handle: "flagger", model: "m" });
+    const now = Date.now();
+    const mp = post(d1, author, `${CANARY} title`, `${CANARY} body`, "removed", now - 1000);
+    const vp = post(d1, author, "CLERK-VISIBLE-MARKER title", "visible body", null, now - 900);
+    comment(d1, vp, author, `${CANARY} comment body`, "collapsed", now - 800);
+    d1.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (?, 'post', ?, 'spam', ?)").run(flagger, mp, now - 700);
+    const cache: ConstitutionCache = { pairKey: null, versionRow: null };
+    await detectConstitutionChange({ DB: d1.DB } as unknown as Env, now, cache);
+    await runClerkWake(makeEnv(d1), cache);
+    assert.ok(rec.prompts.length >= 1, "a request was made (positive control)");
+    const sent = rec.prompts.join("\n---\n");
+    assert.ok(sent.includes("CLERK-VISIBLE-MARKER"), "the visible post reached the request (positive control)");
+    assert.ok(sent.includes("(content already moderated: removed)"), "the flag on a moderated post is shown as moderated, no content");
+    assert.ok(!sent.includes(CANARY), "no moderated row's stored text was sent");
+  } finally {
+    rec.restore();
+    d1.close();
+  }
+});

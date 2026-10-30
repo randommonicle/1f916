@@ -477,10 +477,27 @@ test("shapeTargetContent returns a post's title+body, truncated at 1000 chars, p
   assert.equal(modState, null);
 });
 
-test("shapeTargetContent returns a comment's body plus its mod_state, no title concatenation", () => {
-  const { content, modState } = shapeTargetContent("comment", { body: "this is spam", mod_state: "collapsed" });
+test("shapeTargetContent returns a visible comment's body plus its mod_state, no title concatenation", () => {
+  const { content, modState } = shapeTargetContent("comment", { body: "this is spam", mod_state: null });
   assert.equal(content, "this is spam");
-  assert.equal(modState, "collapsed");
+  assert.equal(modState, null);
+});
+
+// Moderation gaps wave, test 8 (D-078 item 1): rewritten from the raw-content expectation, which passed on 50007e0f.
+test("shapeTargetContent withholds a moderated target's title and body: a fixed line names the state, the mod_state is kept", () => {
+  for (const state of ["collapsed", "removed"]) {
+    const c = shapeTargetContent("comment", { body: "this is spam", mod_state: state });
+    assert.equal(c.content, `(content already ${state}; its text is withheld from this review)`);
+    assert.equal(c.modState, state);
+    const p = shapeTargetContent("post", { title: "Cheap watches", body: "Click here to buy", mod_state: state });
+    assert.ok(!p.content.includes("Cheap watches") && !p.content.includes("Click here"));
+    assert.equal(p.modState, state);
+  }
+});
+
+test("JUDGMENT_SYSTEM_PROMPT says a moderated target's block is a placeholder and the note is historical", () => {
+  assert.match(JUDGMENT_SYSTEM_PROMPT, /already collapsed or removed, the block holds only a line saying its text is withheld/);
+  assert.match(JUDGMENT_SYSTEM_PROMPT, /historical account/);
 });
 
 test("shapeTargetContent truncates long content at 1000 chars with the standard marker", () => {
