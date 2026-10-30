@@ -29,7 +29,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "50007e0f7785e6fa55dfd716ec42077a6a011c67"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "814f220a36df98693baf637a4bbadaf7c798ce15"
+$REVIEWED_COMMIT = "c336c117bbbce0d27228a298a20b982c8a0e36e3"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-moderation-gaps.ps1", "test/deploy-moderation-gaps-script.test.ts", "docs/")
 $PRIVACY_URL = "$BASE/privacy"
