@@ -216,17 +216,9 @@ export function effectiveStatus(status: string, expiresAt: number, now: number):
   return status === "open" && expiresAt <= now ? "expired" : status;
 }
 
-// Mirrors society.ts's own applyModState convention for a listing's
-// description field -- NOT reused directly, because applyModState is
-// hardcoded to a column literally named `body` (posts/comments/submissions
-// all use that name; listings uses `description`). The two redaction
-// strings are kept byte-identical to applyModState's own, so a moderated
-// listing and a moderated post read the same way to a citizen.
-function applyListingModState<T extends { mod_state?: string | null; description?: string | null }>(row: T): T {
-  if (row.mod_state === "removed") return { ...row, description: "[removed by the maintainer — reason in GET /api/events?kind=moderation]" };
-  if (row.mod_state === "collapsed") return { ...row, description: "[collapsed — flagged by the community or hidden by the maintainer; not deleted. Reason in GET /api/events?kind=moderation]" };
-  return row;
-}
+// A listing's description plays the body's part; applyModState (modstate.ts) redacts description, title and url
+// from the one shared placeholder pair, so a moderated listing, submission and post read the same way.
+const applyListingModState = applyModState;
 
 // ---------- read-time: funder track record (D-059 / SPEC-FUNDER-MITIGATIONS-2026-09-04) ----------
 //
