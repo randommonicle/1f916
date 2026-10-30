@@ -189,3 +189,33 @@ test("the before-read refuses a worker already refusing and one not answering 20
   assert.ok(code.includes("Wait-NewWorker $headSha $versionId $POLL_TRIES"));
   assert.ok(code.includes('"/privacy"') && code.includes('"/api/proposal/8"'));
 });
+
+test("CODEX r1: the ride re-checks code identity, HEAD and a clean tree are re-read just before wrangler bundles, and the MCP note prints its whole JSON", (t) => {
+  // Order: the re-read sits after step 0's checks and before the one wrangler deploy; the ride's identity check sits after the poll.
+  const reread = code.indexOf("$headNow = (git rev-parse HEAD).Trim()");
+  const dirtyNow = code.indexOf("$dirtyNow = @(git status --porcelain)");
+  const deploy = code.indexOf('npx wrangler deploy --var "CODE_COMMIT:$headSha"');
+  const poll = code.indexOf("Wait-NewWorker $headSha $versionId $POLL_TRIES");
+  const rideId = code.indexOf("Test-CodeIdentityServed $attAfter.code $headSha $versionId");
+  assert.ok(reread > code.indexOf("# END-REVIEWED-SOURCE-CHECK") && reread < deploy, "HEAD re-read between step 0 and the deploy");
+  assert.ok(dirtyNow > reread && dirtyNow < deploy, "clean tree re-read between step 0 and the deploy");
+  assert.ok(code.includes("$headNow -cne $headSha") && code.includes("$dirtyNow.Count -gt 0) { Stop-Here"));
+  assert.ok(rideId > poll && rideId < code.indexOf("[ride] attest:"), "the ride's attest read is identity-checked before it is reported");
+  assert.ok(script.includes(`{"status":"open"} on /mcp/read once by hand; it should return isError.'`), "the note line is single-quoted and whole");
+
+  // Executed: the identity check passes this deploy's commit and version and fails another commit or another version.
+  const fn = defs.slice(defs.indexOf("function Test-CodeIdentityServed"), defs.indexOf("# The JSON body of a captured GET answer"));
+  const A = "a".repeat(40), B = "b".repeat(40), VA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", VB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const c = (commit: string, v: string): string => `([pscustomobject]@{ commit_status = 'stamped'; commit = '${commit}'; version_status = 'available'; version_id = '${v}' })`;
+  const run = runPs([
+    "$ErrorActionPreference = 'Stop'",
+    fn,
+    `Write-Host ("RESULT good [" + (Test-CodeIdentityServed ${c(A, VA)} '${A}' '${VA}') + "]")`,
+    `Write-Host ("RESULT commit [" + (Test-CodeIdentityServed ${c(B, VA)} '${A}' '${VA}') + "]")`,
+    `Write-Host ("RESULT version [" + (Test-CodeIdentityServed ${c(A, VB)} '${A}' '${VA}') + "]")`,
+  ]);
+  if (!run) return t.skip("no PowerShell available");
+  assert.match(run.out, /RESULT good \[\]/, run.out);
+  assert.match(run.out, /RESULT commit \[code\.commit is 'b{40}'/, run.out);
+  assert.match(run.out, /RESULT version \[code\.version_id is 'b{8}-/, run.out);
+});

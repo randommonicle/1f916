@@ -251,6 +251,13 @@ if ($DryRun) {
 
 # 3. deploy the worker with the commit stamp, capturing its version id, then poll until the served identity is this deploy's
 # BEGIN-DEPLOY-AND-POLL
+# CODEX r1 (finding 2): tests, typecheck and the live reads ran since step 0, and wrangler bundles the working tree, so HEAD and a clean
+# tree are re-read here, immediately before the bundle, or the stamp could name a commit the uploaded bytes no longer match.
+$headNow = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $headNow -cne $headSha) { Stop-Here ("HEAD moved since step 0 (" + $headSha.Substring(0, 8) + " -> " + $headNow + "): nothing was deployed.") }
+$dirtyNow = @(git status --porcelain)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE) just before the deploy: nothing was deployed." }
+if ($dirtyNow.Count -gt 0) { Stop-Here ("the working tree changed since step 0 (" + $dirtyNow.Count + " paths: " + ($dirtyNow -join " | ") + "): nothing was deployed.") }
 Say "[deploy] npx wrangler deploy --var CODE_COMMIT:$($headSha.Substring(0, 8))... (commit $($headSha.Substring(0, 8)))"
 $ErrorActionPreference = "Continue"
 $deployOut = (npx wrangler deploy --var "CODE_COMMIT:$headSha" 2>&1 | Out-String)
@@ -268,6 +275,9 @@ Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # 4. the ride: non-minting and the chains, the refusals and the plain list served, then a sweep of public reads.
 $attAfter = Read-Attest "after the deploy"
 Assert-Attest $attAfter "after the deploy"
+# CODEX r1 (finding 1): the ride's own attest read must still be this deploy's, not only the poll's.
+$why = Test-CodeIdentityServed $attAfter.code $headSha $versionId
+if ($why -ne "") { Stop-Here "after the poll, ${why}: another deploy may have taken over. Check npx wrangler deployments list by hand." }
 Say ("[ride] attest: v6 " + $V6_HASH.Substring(0, 8) + " unchanged; every chain ok; code.commit " + ([string]$attAfter.code.commit).Substring(0, 8) + ", code.version_id " + $attAfter.code.version_id)
 $unknownNow = Get-Text $PROPOSALS_STATUS_URL 30
 $why = Test-UnknownParamRefused $unknownNow
@@ -288,5 +298,5 @@ foreach ($p in "/", "/api/official", "/openapi.json", "/treasury", "/api/listing
 }
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after the deploy (version $versionId): " + ($bad -join ", ") + ". If a read that answered before now fails: $ROLLBACK_LINE") }
 Say "[ride] 17 public reads -> 200"
-Say "[note] This ride made GET requests only: it wrote nothing. The proposals MCP tool refusal is not ridden here: call the proposals tool with {"status":"open"} on /mcp/read once by hand; it should return isError."
+Say '[note] This ride made GET requests only: it wrote nothing. The proposals MCP tool refusal is not ridden here: call the proposals tool with {"status":"open"} on /mcp/read once by hand; it should return isError.'
 Say "[done] proposals unknown-params wave deployed and ridden. Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
