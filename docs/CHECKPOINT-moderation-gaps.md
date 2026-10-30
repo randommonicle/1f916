@@ -130,3 +130,10 @@ Covered = redacted or excluded when moderated, with a test above.
 - `council.ts` posts reads are counts only. `maintainer/*` posts reads are model inputs, covered in W3.
 - Served `_title`/`_url` fields: `post_title` (inbox, guest inbox, me, history: covered above), `topic_title` (guest_due: covered). No other served `_url` row field exists (`payment_url`-style fields are config, not row content).
 - Known gap, not a title/url: listings' `acceptance_condition` stays visible (E4), flagged for Ben.
+
+## Commit 6: secret-literal guard allowlist
+
+The full-suite run after commit 5 found `test/secret-literal-guard.test.ts` red: the /privacy template literal is allowlisted by the sha-256 of
+its complete decoded value, and commit 5 changed that value. The old sha (`05493d3e...`) was re-derived from `git show 50007e0f:src/privacy.ts`
+and matched the entry, so the method is right; the entry now carries the new sha (`61cfb846...`). Its note is unchanged (the literal still
+only says a citizen secret is stored as a hash; no auth instruction); the baseline count (80/24/56) does not move. Commit 5 should have run the whole suite before committing; it did not.
