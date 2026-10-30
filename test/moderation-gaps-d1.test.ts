@@ -130,6 +130,7 @@ test("10 (NEW): /privacy states the new moderation rule and its named exceptions
       assert.ok(t.includes("a standing topic's title stays in the attested identity log, which is never rewritten"), "E1");
       assert.ok(t.includes("a proposal's title and body stay as filed"), "E2 (title added at the gate, L1)");
       assert.ok(t.includes("a listing's title stays in the description of its posting-fee line in the treasury ledger (GET /api/treasury)"), "gate C1: the treasury ledger exception");
+      assert.ok(t.includes("and in the answer to a repeated or conflicting request made with the same payment"), "CODEX r2: the retained payment-claim answer (settlement-claims.ts describeClaim)");
       assert.ok(t.includes("a listing's acceptance condition stays visible"), "E4");
       assert.ok(t.includes("That history also returns the original titles and links of the citizen's own posts"));
       assert.equal(/titles, links, bylines and other metadata may remain visible/.test(t), false, "the old, now false, sentence is gone");
