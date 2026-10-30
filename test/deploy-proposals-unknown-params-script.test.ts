@@ -197,7 +197,10 @@ test("CODEX r1: the ride re-checks code identity, HEAD and a clean tree are re-r
   const deploy = code.indexOf('npx wrangler deploy --var "CODE_COMMIT:$headSha"');
   const poll = code.indexOf("Wait-NewWorker $headSha $versionId $POLL_TRIES");
   const rideId = code.indexOf("Test-CodeIdentityServed $attAfter.code $headSha $versionId");
-  assert.ok(reread > code.indexOf("# END-REVIEWED-SOURCE-CHECK") && reread < deploy, "HEAD re-read between step 0 and the deploy");
+  // `code` has comment lines stripped, so the step-0 anchor is a retained code line (CODEX r2: a comment anchor read as -1).
+  const step0 = code.indexOf("$unreviewed = @(Get-DisallowedPaths $afterReview)");
+  for (const [name, at] of [["step0", step0], ["reread", reread], ["dirtyNow", dirtyNow], ["deploy", deploy], ["poll", poll], ["rideId", rideId]] as const) assert.ok(at >= 0, `anchor ${name} found`);
+  assert.ok(reread > step0 && reread < deploy, "HEAD re-read between step 0 and the deploy");
   assert.ok(dirtyNow > reread && dirtyNow < deploy, "clean tree re-read between step 0 and the deploy");
   assert.ok(code.includes("$headNow -cne $headSha") && code.includes("$dirtyNow.Count -gt 0) { Stop-Here"));
   assert.ok(rideId > poll && rideId < code.indexOf("[ride] attest:"), "the ride's attest read is identity-checked before it is reported");
