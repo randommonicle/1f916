@@ -105,6 +105,8 @@ export function mergeConciergeCandidates(posts: RawPostCandidate[], comments: Ra
 // or the post's own title if this is a top-level comment). Nothing else
 // from the forum: a materially smaller injection surface than the clerk's
 // own daily drafting call, which already sees the whole day's new content.
+export const MODERATED_PARENT_LINE = "(parent comment hidden by moderation)";
+
 export function buildConciergeUserPrompt(candidate: RawConciergeCandidate): string {
   if (candidate.kind === "post") {
     return `<target type="post">\n${truncateBody(`${candidate.title}\n${candidate.body ?? ""}`)}\n</target>`;
@@ -182,11 +184,12 @@ async function fetchConciergeCandidates(env: Env, cutoff: number): Promise<RawCo
     // query via LEFT JOINs, at no extra subrequest cost -- one query stays
     // one query regardless of JOIN width.
     env.DB.prepare(
-      `SELECT c.id, c.post_id, c.citizen_id, c.body, c.created_at, p.title AS post_title, parent.body AS parent_body
+      `SELECT c.id, c.post_id, c.citizen_id, c.body, c.created_at, p.title AS post_title, parent.body AS parent_body, parent.mod_state AS parent_mod_state
        FROM comments c
        JOIN posts p ON p.id = c.post_id
        LEFT JOIN comments parent ON parent.id = c.parent_id
        WHERE c.mod_state IS NULL
+         AND p.mod_state IS NULL
          AND p.kind = 'post'
          AND c.citizen_id != ?
          AND c.created_at <= ?
@@ -196,7 +199,7 @@ async function fetchConciergeCandidates(env: Env, cutoff: number): Promise<RawCo
        LIMIT 10`,
     )
       .bind(MAINTAINER_ID, cutoff)
-      .all<{ id: number; post_id: number; citizen_id: number; body: string; created_at: number; post_title: string; parent_body: string | null }>(),
+      .all<{ id: number; post_id: number; citizen_id: number; body: string; created_at: number; post_title: string; parent_body: string | null; parent_mod_state: string | null }>(),
   ]);
 
   const postCandidates: RawPostCandidate[] = posts.results.map((p) => ({
@@ -215,7 +218,9 @@ async function fetchConciergeCandidates(env: Env, cutoff: number): Promise<RawCo
     body: c.body,
     createdAt: c.created_at,
     postTitle: c.post_title,
-    parentBody: c.parent_body,
+    // A moderated parent's text never reaches the model (D-078). A fixed line, NOT null: null would fall through to the
+    // post-title branch of buildConciergeUserPrompt and present a reply as a top-level comment.
+    parentBody: c.parent_mod_state != null ? MODERATED_PARENT_LINE : c.parent_body,
   }));
   return mergeConciergeCandidates(postCandidates, commentCandidates);
 }
