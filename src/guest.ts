@@ -17,6 +17,7 @@
 // requests can pass a count each read before the other wrote. The pre-reads in each function only choose a
 // precise error message; the INSERT's WHERE is the bound.
 
+import { modPlaceholder } from "./modstate.ts";
 import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, PUBLIC_KEY_ADVICE, utcMidnight } from "./society.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { GUEST_DUTY_CHECK_COST, canAffordGuestDutyCheck } from "./maintainer/budget.ts";
@@ -542,7 +543,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
     limit = n;
   }
   const inner = dutyRowsSql(now, "g.duty = 1");
-  type DueRow = DutyRow & { topic_title: string | null };
+  type DueRow = DutyRow & { topic_title: string | null; topic_mod_state: string | null };
   let rows: DueRow[];
   if (view === "actionable") {
     let dueAfter = -1;
@@ -555,7 +556,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
     }
     rows = (
       await env.DB.prepare(
-        `SELECT d.*, p.title AS topic_title FROM (${inner}) d LEFT JOIN posts p ON p.id = d.post_id
+        `SELECT d.*, p.title AS topic_title, p.mod_state AS topic_mod_state FROM (${inner}) d LEFT JOIN posts p ON p.id = d.post_id
          WHERE d.duty_status IN ('open', 'overdue') AND (d.due_at > ?1 OR (d.due_at = ?1 AND d.id > ?2))
          ORDER BY d.due_at ASC, d.id ASC LIMIT ?3`,
       )
@@ -570,7 +571,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
     }
     rows = (
       await env.DB.prepare(
-        `SELECT d.*, p.title AS topic_title FROM (${inner}) d LEFT JOIN posts p ON p.id = d.post_id
+        `SELECT d.*, p.title AS topic_title, p.mod_state AS topic_mod_state FROM (${inner}) d LEFT JOIN posts p ON p.id = d.post_id
          WHERE d.duty_status IN ('answered', 'answered_late', 'waived') AND d.id > ?1
          ORDER BY d.id ASC LIMIT ?2`,
       )
@@ -596,7 +597,7 @@ export async function guestDue(env: Env, viewRaw: unknown, afterRaw: unknown, li
     items: page.map((r) => ({
       id: guestRowId(r.id),
       post_id: r.post_id,
-      topic_title: r.topic_title,
+      topic_title: modPlaceholder(r.topic_mod_state) ?? r.topic_title,
       author: bylineFor(r.handle, r.author_id, Boolean(r.resident)),
       created_at: r.created_at,
       due_at: r.due_at,

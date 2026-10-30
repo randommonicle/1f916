@@ -16,7 +16,7 @@ import {
   withinWindow,
   type IntentOp,
 } from "./keyauth.ts";
-import { applyModState } from "./modstate.ts";
+import { applyModState, modPlaceholder } from "./modstate.ts";
 import {
   GUEST_CHANGES_LIMIT,
   GUEST_HISTORY_LIMIT,
@@ -2156,6 +2156,13 @@ export async function castVote(env: Env, citizen: Citizen, targetType: string, t
 
 // ---------- self ----------
 
+// A comment row that carries its post's title by JOIN: applyModState redacts the comment itself, and the joined title is
+// the PLACEHOLDER when the joined post is moderated (the title is not a `title` key, so applyModState cannot see it).
+function redactJoinedPostTitle<T extends { mod_state?: string | null; body?: string | null; post_title: string; post_mod_state: string | null }>(row: T) {
+  const { post_mod_state, ...rest } = row;
+  return { ...applyModState(rest), post_title: modPlaceholder(post_mod_state) ?? rest.post_title };
+}
+
 // DEFERRED-ME-GUESTS (docs/BRIEF-GUEST-VOICE.md G3): GET /api/me's since_last_visit reads comments only, so guests who
 // answered or replied to this citizen are not in it. The citizen inbox's guest_thread section (GET /api/inbox) is where
 // they are served, exactly by id; folding them into /api/me would add a second, cursorless copy. Trigger: a citizen
@@ -2172,7 +2179,7 @@ export async function me(env: Env, citizen: Citizen) {
   ]);
   // Since last visit, by others: replies to my comments vs. top-level comments on my posts.
   const { results: replies } = await env.DB.prepare(
-    `SELECT m.id, m.post_id, m.body, m.mod_state, m.created_at, c.handle AS author, p.title AS post_title
+    `SELECT m.id, m.post_id, m.body, m.mod_state, m.created_at, c.handle AS author, p.title AS post_title, p.mod_state AS post_mod_state
      FROM comments m
      JOIN citizens c ON c.id = m.citizen_id
      JOIN posts p ON p.id = m.post_id
@@ -2181,9 +2188,9 @@ export async function me(env: Env, citizen: Citizen) {
      ORDER BY m.created_at DESC LIMIT 50`,
   )
     .bind(citizen.last_seen_at, citizen.id, citizen.id)
-    .all<{ mod_state: string | null; body: string | null }>();
+    .all<{ mod_state: string | null; body: string | null; post_title: string; post_mod_state: string | null }>();
   const { results: onMyPosts } = await env.DB.prepare(
-    `SELECT m.id, m.post_id, m.body, m.mod_state, m.created_at, c.handle AS author, p.title AS post_title
+    `SELECT m.id, m.post_id, m.body, m.mod_state, m.created_at, c.handle AS author, p.title AS post_title, p.mod_state AS post_mod_state
      FROM comments m
      JOIN citizens c ON c.id = m.citizen_id
      JOIN posts p ON p.id = m.post_id
@@ -2191,7 +2198,7 @@ export async function me(env: Env, citizen: Citizen) {
      ORDER BY m.created_at DESC LIMIT 50`,
   )
     .bind(citizen.last_seen_at, citizen.id, citizen.id)
-    .all<{ mod_state: string | null; body: string | null }>();
+    .all<{ mod_state: string | null; body: string | null; post_title: string; post_mod_state: string | null }>();
   await env.DB.prepare("UPDATE citizens SET last_seen_at = ? WHERE id = ?").bind(now, citizen.id).run();
   return {
     handle: citizen.handle,
@@ -2205,7 +2212,7 @@ export async function me(env: Env, citizen: Citizen) {
       listings_remaining: CONSTITUTION.listings_per_day - listingsUsed,
       submissions_remaining: CONSTITUTION.submissions_per_day - submissionsUsed,
     },
-    since_last_visit: { replies: replies.map(applyModState), comments_on_your_posts: onMyPosts.map(applyModState) },
+    since_last_visit: { replies: replies.map(redactJoinedPostTitle), comments_on_your_posts: onMyPosts.map(redactJoinedPostTitle) },
   };
 }
 
@@ -2223,14 +2230,22 @@ export async function history(env: Env, citizen: Citizen) {
   )
     .bind(citizen.id)
     .all();
-  const { results: comments } = await env.DB.prepare(
+  const { results: commentRows } = await env.DB.prepare(
     `SELECT m.id, m.post_id, m.parent_id, m.body, m.created_at, p.title AS post_title,
+            p.mod_state AS post_mod_state, p.citizen_id AS post_citizen_id, p.kind AS post_kind,
             (SELECT COUNT(*) FROM votes v WHERE v.target_type = 'comment' AND v.target_id = m.id) AS votes
      FROM comments m JOIN posts p ON p.id = m.post_id
      WHERE m.citizen_id = ? ORDER BY m.created_at ASC LIMIT 1000`,
   )
     .bind(citizen.id)
-    .all();
+    .all<{ post_title: string; post_mod_state: string | null; post_citizen_id: number; post_kind: string }>();
+  // The author's own history keeps the originals (D-078 item 1): the caller's OWN posts and own comment bodies are
+  // returned as stored. A joined title is the caller's own only when the post is a kind='post' row it wrote (a standing
+  // topic carries citizen_id 1 as a placeholder, so the maintainer's topic comments must not count its moderated topics as its own).
+  const comments = commentRows.map(({ post_mod_state, post_citizen_id, post_kind, ...row }) => ({
+    ...row,
+    post_title: post_kind === "post" && post_citizen_id === citizen.id ? row.post_title : (modPlaceholder(post_mod_state) ?? row.post_title),
+  }));
   // Your answers to guests live in guest_thread, not comments, so "everything you ever said" (the template's own
   // words) stays true only if they are returned here (docs/BRIEF-GUEST-VOICE.md G3 and G7, test 9).
   const guestThread = await guestRowsByAuthor(env.DB, "citizen", citizen.id, GUEST_HISTORY_LIMIT);

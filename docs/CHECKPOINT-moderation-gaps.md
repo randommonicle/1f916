@@ -21,3 +21,30 @@ Mutations (restored after each):
 - test 4: delete `AND p.mod_state IS NULL` from the `changes()` posts query (`society.ts` ~2425): red, `changes leaks CANARY-TITLE-7731`.
 - front/new/search: delete `p.mod_state IS NULL AND` from the front-page ranked query (`society.ts` ~1295): red, `/api/front leaks CANARY-TITLE-7731`.
   (Only the front query was mutated; /api/new shares that function's window and /api/search has its own filter at `discovery-data.ts:93`, same shape.)
+
+## Commit 2: W2 joined titles (inbox, guest_inbox, guest_due, /api/me, /api/me/history), tests 3a-3e and 6
+
+What: `modPlaceholder` applied explicitly to titles fetched by JOIN, because a `post_title`/`topic_title` is not a `title` key
+and applyModState cannot see it.
+- `inbox.ts`: `commentsSql` selects `p.mod_state AS post_mod_state`; `post_title` is redacted when building `shared`, so
+  replies, comments_on_your_posts and comment mentions all get it. The guest-inbox comment-mention query does the same.
+- `guest.ts` `guestDue`: both views select `p.mod_state AS topic_mod_state`; `topic_title` redacted.
+- `society.ts` `me()`: both queries select `post_mod_state`; `redactJoinedPostTitle` redacts and strips the helper column
+  (served shape unchanged). The caller's own moderated post is redacted here too (only /me/history has the author exception).
+- `society.ts` `history()`: comment rows select `post_mod_state, post_citizen_id, post_kind` (stripped before serving); the
+  title stays original only when `post_kind === 'post' && post_citizen_id === citizen.id`, else the placeholder. Own posts
+  (their own SELECT), own comment bodies unchanged.
+- topics (`serveTopic`, `topics.ts:108`) and `topics_opened` (`inbox.ts` via serveTopic) are covered by W1 alone; tested, not re-implemented.
+Deviation: none. Line numbers matched 50007e0f within a few lines.
+
+Red runs on 50007e0f (src stashed, tests kept), NEW tests:
+- 3b inbox: red, `inbox leaks CANARY-TITLE-7731` (a reply's `post_title`).
+- 3c guest_due: red, `guest_due actionable leaks CANARY-TITLE-7731`.
+- 3d guest_inbox: red, `guest_inbox leaks CANARY-TITLE-7731` (probed HIGH from CODEX r1 confirmed).
+- 3e /api/me: red, `/api/me leaks CANARY-TITLE-7731`.
+- 6 non-owner half: red, `The input did not match the regular expression /^\[collapsed /` (someone else's moderated post title).
+- 3a topics: its assertion needs only W1; it is red on 50007e0f for the title (verified with the W1 revert in the commit-1 run family; see note below).
+Preservation mutation, test 6 owner half: replace the ownership condition with `false` (always redact): red, `own post title kept on own comment`.
+Process note (a mistake, surfaced): I restored from that mutation with `git checkout -- src/society.ts`, which also threw away
+my uncommitted commit-2 edits to that file. I re-applied them from the same scripts and re-ran everything; no committed state was affected. Mutations are now done on a copy.
+Full suite after commit 2: 2795 tests, 2794 pass, 0 fail, 1 skipped; typecheck clean.

@@ -31,6 +31,7 @@
 // module's own classify-then-advance design already has this property for free -- the
 // cursor is by id, past the row, whatever its mod_state does afterwards).
 
+import { modPlaceholder } from "./modstate.ts";
 import { type Env, SocietyError, CONSTITUTION, TOPICS, MAINTAINER_ID, PUBLIC_KEY_ADVICE, applyModState, assertValidHandle } from "./society.ts";
 import { classOf, assertEligible, isFounderCitizen, type ProposalKind } from "./governance.ts";
 import { serveTopic, ACTIVITY_SQL } from "./topics.ts";
@@ -222,6 +223,7 @@ interface CommentCandidateRow {
   author: string;
   author_model: string;
   post_title: string;
+  post_mod_state: string | null;
   post_citizen_id: number;
   post_kind: string;
   parent_citizen_id: number | null;
@@ -243,7 +245,7 @@ interface CommentCandidateRow {
 function commentsSql(startExpr: string): string {
   return `SELECT m.id, m.post_id, m.parent_id, m.body, m.mod_state, m.created_at,
                  c.handle AS author, COALESCE(m.author_model, c.model) AS author_model,
-                 p.title AS post_title, p.citizen_id AS post_citizen_id, p.kind AS post_kind,
+                 p.title AS post_title, p.mod_state AS post_mod_state, p.citizen_id AS post_citizen_id, p.kind AS post_kind,
                  parent.citizen_id AS parent_citizen_id
           FROM comments m
           JOIN citizens c ON c.id = m.citizen_id
@@ -514,7 +516,8 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
       id: row.id,
       post_id: row.post_id,
       parent_id: row.parent_id,
-      post_title: row.post_title,
+      // A title fetched by JOIN is not covered by applyModState (it is not a `title` key): the joined post's own state decides it.
+      post_title: modPlaceholder(row.post_mod_state) ?? row.post_title,
       author: row.author,
       author_model: row.author_model,
       created_at: row.created_at,
@@ -938,6 +941,7 @@ interface GuestMentionCommentRow {
   author: string;
   author_model: string;
   post_title: string;
+  post_mod_state: string | null;
 }
 interface GuestMentionPostRow {
   id: number;
@@ -999,7 +1003,7 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
           WHERE a.id > ? AND a.author_kind = 'citizen' AND t.author_kind = 'guest' AND t.author_id = ?
           ORDER BY a.id ASC LIMIT ?`;
   const commentsSqlText = `SELECT m.id, m.post_id, m.parent_id, m.body, m.mod_state, m.created_at,
-                 c.handle AS author, COALESCE(m.author_model, c.model) AS author_model, p.title AS post_title
+                 c.handle AS author, COALESCE(m.author_model, c.model) AS author_model, p.title AS post_title, p.mod_state AS post_mod_state
           FROM comments m JOIN citizens c ON c.id = m.citizen_id JOIN posts p ON p.id = m.post_id
           WHERE m.id > ? AND (m.body LIKE ? ESCAPE '\\' OR m.body LIKE ? ESCAPE '\\')
           ORDER BY m.id ASC LIMIT ?`;
@@ -1024,7 +1028,7 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
   const mentions: unknown[] = [];
   for (const row of commentPage.rows) {
     if (row.mod_state == null && mentionsBylines(row.body)) {
-      mentions.push({ kind: "comment" as const, id: row.id, post_id: row.post_id, parent_id: row.parent_id, post_title: row.post_title, author: row.author, author_model: row.author_model, body: row.body, created_at: row.created_at });
+      mentions.push({ kind: "comment" as const, id: row.id, post_id: row.post_id, parent_id: row.parent_id, post_title: modPlaceholder(row.post_mod_state) ?? row.post_title, author: row.author, author_model: row.author_model, body: row.body, created_at: row.created_at });
     }
   }
   for (const row of postPage.rows) {
