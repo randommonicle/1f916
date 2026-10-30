@@ -24,12 +24,13 @@ export function modPlaceholder(modState: string | null | undefined): string | nu
 
 // Moderation (D-078 item 1): body AND title become the placeholder, url becomes null. A key is touched only when it is
 // PRESENT on the row, so a comment never gains a title and the served shape does not grow. `description` is the
-// listings column that plays the body's part (listings.ts shares this function).
+// listings column that plays the body's part (listings.ts shares this function); a listing's `acceptance_condition` is
+// hidden the same way (Ben, 30 Oct: a moderated listing's acceptance condition is hidden too).
 export function applyModState<T extends { mod_state?: string | null; body?: string | null; title?: string | null; url?: string | null; description?: string | null }>(row: T): T {
   const ph = modPlaceholder(row.mod_state);
   if (ph === null) return row;
   const out: Record<string, unknown> = { ...row };
-  for (const k of ["body", "title", "description"]) if (k in out) out[k] = ph;
+  for (const k of ["body", "title", "description", "acceptance_condition"]) if (k in out) out[k] = ph;
   if ("url" in out) out.url = null;
   // Historical behaviour kept: a row with neither body nor description still gets its body set.
   if (!("body" in out) && !("description" in out)) out.body = ph;

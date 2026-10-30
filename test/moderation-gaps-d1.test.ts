@@ -22,10 +22,11 @@ test("1 (NEW): applyModState redacts title with the body's placeholder and nulls
     const comment = applyModState({ id: 2, mod_state: state, body: CANARY_BODY } as { id: number; mod_state: string; body: string });
     assert.match(comment.body, re);
     assert.deepEqual(Object.keys(comment).sort(), ["body", "id", "mod_state"], "no title or url key appears on a comment-shaped row");
-    const listing = applyModState({ mod_state: state, title: "t", description: "d", url: "u" });
+    const listing = applyModState({ mod_state: state, title: "t", description: "d", url: "u", acceptance_condition: "a" } as { mod_state: string; title: string; description: string; url: string | null; acceptance_condition: string });
     assert.match(listing.description as string, re);
     assert.equal(listing.title, listing.description);
     assert.equal(listing.url, null);
+    assert.equal(listing.acceptance_condition, listing.description);
   }
   const visible = { mod_state: null, title: "t", body: "b", url: "u" };
   assert.deepEqual(applyModState(visible), visible);
@@ -106,6 +107,8 @@ test("5 (NEW): a moderated listing and submission serve placeholder title/descri
       assertNoLeak(one, `listing ${state}`);
       assertNoLeak(list, `listings ${state}`);
       assert.match(one.listing.title, state === "removed" ? REMOVED : COLLAPSED);
+      assert.match(one.listing.acceptance_condition, state === "removed" ? REMOVED : COLLAPSED, "acceptance condition hidden (Ben, 30 Oct)");
+      assert.ok(list.listings.every((x: { acceptance_condition: string }) => !x.acceptance_condition.includes("stranger-evaluable condition")), "and on the list read");
       assert.equal(one.listing.url, null);
       assert.equal(one.submissions[0].url, null);
       assert.match(one.submissions[0].body, state === "removed" ? REMOVED : COLLAPSED);
@@ -125,13 +128,15 @@ test("10 (NEW): /privacy states the new moderation rule and its named exceptions
   try {
     const text = (await call(env, "GET", "/privacy")).body._text as string;
     for (const t of [PRIVACY_TEMPLATE, text]) {
-      assert.ok(t.includes("Moderation replaces the body and the title of a collapsed or removed post, comment, listing or submission with a notice, and removes its link"));
+      assert.ok(t.includes("Moderation replaces the body and the title of a collapsed or removed post, comment, listing or submission, and a listing's acceptance condition, with a notice, and removes its link"));
+      assert.ok(t.includes("Three things moderation does not reach"));
       assert.ok(t.includes("bylines, ids, times and the moderation state stay visible"));
       assert.ok(t.includes("a standing topic's title stays in the attested identity log, which is never rewritten"), "E1");
       assert.ok(t.includes("a proposal's title and body stay as filed"), "E2 (title added at the gate, L1)");
       assert.ok(t.includes("a listing's title stays in the description of its posting-fee line in the treasury ledger (GET /api/treasury)"), "gate C1: the treasury ledger exception");
       assert.ok(t.includes("and in the answer to a repeated or conflicting request made with the same payment"), "CODEX r2: the retained payment-claim answer (settlement-claims.ts describeClaim)");
-      assert.ok(t.includes("a listing's acceptance condition stays visible"), "E4");
+      assert.equal(t.includes("acceptance condition stays visible"), false, "E4 withdrawn: Ben, 30 Oct, the acceptance condition is hidden too");
+      assert.equal(t.includes("Four things moderation does not reach"), false);
       assert.ok(t.includes("That history also returns the original titles and links of the citizen's own posts"));
       assert.equal(/titles, links, bylines and other metadata may remain visible/.test(t), false, "the old, now false, sentence is gone");
     }

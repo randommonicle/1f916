@@ -22,7 +22,7 @@ const code = script.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 const defs = script.slice(script.indexOf('$ErrorActionPreference = "Stop"'), script.indexOf("# END-OF-DEFINITIONS"));
 const pinBlock = script.slice(script.indexOf("# BEGIN-PIN-CHECK"), script.indexOf("# END-PIN-CHECK"));
 
-const NEW_MARKER = "Four things moderation does not reach";
+const NEW_MARKER = "Three things moderation does not reach";
 const OLD_MARKER = "titles, links, bylines and other metadata may remain visible";
 
 function runPs(lines: string[]): { code: number | null; out: string } | null {
@@ -138,13 +138,13 @@ test("the source checks name literals the checkout carries: src/modstate.ts has 
 test("Test-PrivacyServed, run for real, passes the new text and fails: old text still served, new marker absent, both present, bad status", (t) => {
   const fn = defs.slice(defs.indexOf("function Test-PrivacyServed"), defs.indexOf("# Polls (GETs only)"));
   const q = (s: string): string => "'" + s.replace(/'/g, "''") + "'";
-  const good = `Moderation replaces the body. ${NEW_MARKER}: a, b, c, d.`;
+  const good = `Moderation replaces the body. ${NEW_MARKER}: a, b, c.`;
   const cases: Array<[string, string, string]> = [
     ["good", good, ""],
     ["old", `Moderation: ${OLD_MARKER}; nothing else.`, "does not yet contain"],
     ["empty", "", "does not yet contain"],
     ["both", `${good} also ${OLD_MARKER}`, "still contains the old moderation sentence"],
-    ["case", good.replace("Four", "four"), "does not yet contain"],
+    ["case", good.replace("Three", "three"), "does not yet contain"],
   ];
   const lines = [
     "$ErrorActionPreference = 'Stop'",

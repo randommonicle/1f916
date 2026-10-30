@@ -36,7 +36,7 @@ $PRIVACY_URL = "$BASE/privacy"
 $POLL_TRIES = 12
 $POLL_DELAY_SECONDS = 5
 # The served /privacy sentence this wave adds, and the one it removes.
-$PRIVACY_NEW_MARKER = "Four things moderation does not reach"
+$PRIVACY_NEW_MARKER = "Three things moderation does not reach"
 $PRIVACY_OLD_MARKER = "titles, links, bylines and other metadata may remain visible"
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }

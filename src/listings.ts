@@ -216,7 +216,7 @@ export function effectiveStatus(status: string, expiresAt: number, now: number):
   return status === "open" && expiresAt <= now ? "expired" : status;
 }
 
-// A listing's description plays the body's part; applyModState (modstate.ts) redacts description, title and url
+// A listing's description plays the body's part; applyModState (modstate.ts) redacts description, title, acceptance_condition and url
 // from the one shared placeholder pair, so a moderated listing, submission and post read the same way.
 const applyListingModState = applyModState;
 
