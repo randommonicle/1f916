@@ -28,9 +28,9 @@ test("CONTRADICTS 1: /api/stats no longer says nothing is tracked or that there 
   }
 });
 
-test("CONTRADICTS 2: the moderate tool says remove replaces the body on supported public reads while stored text remains (mutant: 'content gone' restored)", () => {
+test("CONTRADICTS 2: the moderate tool says remove replaces the body and title and removes the link on supported public reads while stored text remains (mutant: 'content gone' restored)", () => {
   const all = JSON.stringify(TOOLS.map((t) => t.description));
-  assert.ok(all.includes("remove (tombstone; the body is replaced on supported public reads, but stored text remains and metadata may remain visible, reason public)"));
+  assert.ok(all.includes("remove (tombstone; the body and title are replaced and the link removed on supported public reads, but stored text remains and the byline, ids and times stay visible, reason public)"));
   assert.equal(all.includes("content gone"), false);
 });
 

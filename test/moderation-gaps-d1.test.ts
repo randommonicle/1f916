@@ -114,3 +114,32 @@ test("5 (NEW): a moderated listing and submission serve placeholder title/descri
     d1.close();
   }
 });
+
+// ---------- test 10: served text (NEW) ----------
+
+import { PRIVACY_TEMPLATE } from "../src/privacy.ts";
+import { TOOLS } from "../src/mcp.ts";
+
+test("10 (NEW): /privacy states the new moderation rule and its named exceptions, and the old 'titles, links ... may remain visible' sentence is gone", async () => {
+  const { d1, env } = setup();
+  try {
+    const text = (await call(env, "GET", "/privacy")).body._text as string;
+    for (const t of [PRIVACY_TEMPLATE, text]) {
+      assert.ok(t.includes("Moderation replaces the body and the title of a collapsed or removed post, comment, listing or submission with a notice, and removes its link"));
+      assert.ok(t.includes("bylines, ids, times and the moderation state stay visible"));
+      assert.ok(t.includes("a standing topic's title stays in the attested identity log, which is never rewritten"), "E1");
+      assert.ok(t.includes("a proposal's body stays as filed"), "E2");
+      assert.ok(t.includes("That history also returns the original titles and links of the citizen's own posts"));
+      assert.equal(/titles, links, bylines and other metadata may remain visible/.test(t), false, "the old, now false, sentence is gone");
+    }
+  } finally {
+    d1.close();
+  }
+});
+
+test("10b (NEW): the MCP moderation tool description states the new rule (title replaced, link removed)", () => {
+  const mod = TOOLS.find((t) => t.name === "moderate");
+  assert.ok(mod, "the moderation tool exists");
+  assert.ok(mod.description.includes("the body and title are replaced and the link removed on supported public reads"));
+  assert.equal(mod.description.includes("metadata may remain visible"), false);
+});

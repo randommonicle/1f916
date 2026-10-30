@@ -85,3 +85,48 @@ asserts note markers present, the visible target's content present (positive con
 Test 9 PRESERVATION (clerk): green on the unchanged clerk. Mutations (on a copy, restored): (1) drop `AND mod_state IS NULL` from the posts
 input query (`clerk.ts:317`): red at `no moderated row's stored text was sent`; (2) delete the moderated branch of `shapeFlagTargetText`
 (`clerk.ts:302`): red at `the flag on a moderated post is shown as moderated, no content`. Both fail with either removed, as the brief requires.
+
+## Commit 5: W4 served text, test 10
+
+What: `/privacy` (`privacy.ts:83`) now says: moderation replaces the body and the title of a collapsed or removed post, comment,
+listing or submission with a notice and removes its link; bylines, ids, times and the moderation state stay; stored text is not erased;
+the author's authenticated history returns the original bodies (the existing pinned sentence "returns its original post and comment
+bodies. The reason given ... is public (GET /api/events?kind=moderation)." is kept byte-identical, `served-privacy-consistency-d1.test.ts`
+pins it) and also the original titles and links of its own posts; then the exceptions: E1 a standing topic's title stays in the attested
+identity log, E2 a proposal's body stays as filed, and (deviation, below) a listing's acceptance condition stays visible. The MCP `moderate`
+tool description (`mcp.ts:312`) now reads "the body and title are replaced and the link removed on supported public reads, but stored text
+remains and the byline, ids and times stay visible, reason public". `served-privacy-consistency-d1.test.ts` CONTRADICTS 2 re-pinned to the new text.
+DEVIATION (small, for Ben): the brief names E1 and E2 in /privacy; I also named E4 (listings' `acceptance_condition` stays visible) because
+the served sentence would otherwise over-claim ("title and body replaced" for listings), and D-078 left E4 for Ben. Remove that clause if Ben prefers E4 left unsaid.
+Sweep of other served strings (doc.ts, discovery*.ts, mcp*.ts, `/skill.md`, `/heartbeat.md`, llms.txt, inbox notes): the only strings that
+described what moderation hides were `privacy.ts:83` and `mcp.ts:312`. `doc.ts:205-210` (inside the hashed template) says only "collapse or remove
+spam and scams, with a public reason, logged": still true, NOT edited, no mint. `discovery.ts:154`/`discovery-data.ts:107` (search excludes moderated
+posts) true. `inbox.ts:676`/`:1056` (mentions hidden by moderation are not delivered) true. `/skill.md` and `/heartbeat.md` carry no moderation-hiding
+sentence, so SKILL_VERSION is not bumped.
+Test 10 (NEW): pins the new /privacy sentences (E1, E2, own-history) on PRIVACY_TEMPLATE and on the served route, and asserts the old
+"titles, links, bylines and other metadata may remain visible" sentence is absent; 10b pins the MCP tool description. Red with privacy.ts and mcp.ts reverse-applied to the old text.
+
+## W2 completeness list (every SELECT of title/url from posts, listings, submissions, direct or joined, and every served `_title`/`_url` field)
+Covered = redacted or excluded when moderated, with a test above.
+- `society.ts` readPost `p.title, p.url` (`:1364`): COVERED (W1 applyModState), test 2, HTTP + both MCP doors.
+- `society.ts` front ranked posts (`:1287`) and front topics (`:1315`): excluded `mod_state IS NULL`; COVERED by the front regression test.
+- `society.ts` changes posts `p.title, p.url` (`:2421`): excluded `mod_state IS NULL`; COVERED, test 4 (+ mutation).
+- `society.ts` search (`:2440`, route) and `discovery-data.ts:90`: `mod_state IS NULL`; COVERED, regression test.
+- `society.ts` me() `post_title` x2 (`:2175`, `:2186`): COVERED (redactJoinedPostTitle), test 3e.
+- `society.ts` history() own posts `p.title, p.url` (`:2219`): OUT OF SCOPE by rule (the author's own history keeps originals); test 6.
+- `society.ts` history() comments `post_title` (`:2227`): COVERED, someone else's moderated post redacted, own kept, standing topic not "own"; test 6.
+- `topics.ts` topicSelect/serveTopic (`:87`, `:108`): COVERED by W1 (title via applyModState), tests 3a and 3b (topics_opened); `topics.ts:141` quietest: excludes moderated.
+- `inbox.ts` commentsSql `post_title` (`:246`): COVERED, test 3b (replies, comments_on_your_posts, mentions).
+- `inbox.ts` postsSql (`:298`, topics_opened and post mentions): topics via serveTopic COVERED; post mentions require `mod_state == null`; COVERED, test 3b.
+- `inbox.ts` guest-inbox comment mentions `post_title` (`:1002`): COVERED, test 3d. Guest-inbox post mentions (`:1006`): require `mod_state == null`.
+- `inbox.ts:336` guestThreadSql joins posts for `post_citizen_id`/`post_kind` only: no title served.
+- `guest.ts` guest_due `topic_title` (`:559`, `:574`): COVERED, test 3c (both views, HTTP and both MCP doors).
+- `guest.ts:243`, `:103`, `:188`, `:502`: posts read for gating, no title served.
+- `listings.ts` list (`:1222`) and single (`:1296`) `l.title, l.url, l.description`: COVERED (applyListingModState is applyModState), test 5.
+- `listings.ts` submissions (`:1306`) `s.url, s.body`: COVERED (applyModState), test 5.
+- `listings.ts:658` `loadPayableListing` selects `title`: its use at `:818` (the x402 description) is only reached after the 409 refusal of a moderated listing: OUT OF SCOPE, unreachable for a moderated row. `:483`/`:535` are the funder's own creation response.
+- `listings.ts:319-341`, `:1437` (funder record, payments page): no title/url served; funder record counts only `mod_state IS NULL`.
+- `governance.ts:1249`, `:1301` and `inbox.ts:590`, `:654` proposals `title`/`body`: OUT OF SCOPE (E2, a proposal is a governance record and stays as filed; it is the proposals table, not posts).
+- `council.ts` posts reads are counts only. `maintainer/*` posts reads are model inputs, covered in W3.
+- Served `_title`/`_url` fields: `post_title` (inbox, guest inbox, me, history: covered above), `topic_title` (guest_due: covered). No other served `_url` row field exists (`payment_url`-style fields are config, not row content).
+- Known gap, not a title/url: listings' `acceptance_condition` stays visible (E4), flagged for Ben.
