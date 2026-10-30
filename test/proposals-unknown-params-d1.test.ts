@@ -114,8 +114,13 @@ test("5 (NEW): a repeated known key is 400 repeated_query_parameter (identical v
       const r = await call(env, "GET", `/api/proposals${q}`);
       assert.equal(r.status, 400, q);
       assert.equal(r.body.code, "repeated_query_parameter", q);
-      assert.match(r.body.error, new RegExp(q.slice(1).split("=")[0]), q);
+      // The offending-key part only (CODEX r1: the accepted list always names both keys, so a whole-message match proves nothing).
+      assert.equal(r.body.error.split(".")[0], `Repeated query parameter: ${q.slice(1).split("=")[0]}`, q);
     }
+    const twice = await call(env, "GET", "/api/proposals?since=1&since=2&since_id=1&since_id=2");
+    assert.equal(twice.status, 400);
+    assert.equal(twice.body.code, "repeated_query_parameter");
+    assert.equal(twice.body.error.split(".")[0], "Repeated query parameters: since, since_id");
     const both = await call(env, "GET", "/api/proposals?since=1&since=2&status=open");
     assert.equal(both.status, 400);
     assert.equal(both.body.code, "unknown_query_parameter");
@@ -186,9 +191,8 @@ test("7 (NEW): the rendered note, /llms.txt, /openapi.json and /api/surface carr
     assert.equal(sr?.description, ROUTE_DESCRIPTION);
 
     const oa = (await call(env, "GET", "/openapi.json")).body as { paths: Record<string, { get?: { description?: string; summary?: string } }> };
-    const op = JSON.stringify(oa.paths["/api/proposals"]?.get);
-    assert.ok(op.includes("unknown_query_parameter"), op);
-    assert.ok(op.includes("repeated_query_parameter"), op);
+    // The whole rendered summary, which carries the at-most-once rule (CODEX r1: two code tokens anywhere proved nothing).
+    assert.equal(oa.paths["/api/proposals"]?.get?.summary, ROUTE_DESCRIPTION);
   } finally {
     d1.close();
   }

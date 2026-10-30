@@ -27,7 +27,9 @@ See commit 1 above. Final: 11/11 of the new file pass after commit 2. Full suite
 ## Mutation table (PRESERVATION tests)
 | Test | One-line mutation | Result |
 |---|---|---|
-| 9 | `governance.ts` listProposals: `OR (p.created_at = ? AND p.id > ?)` to `AND p.id > ? + 1` (loses the tied row) | red (tests 9 and 10 both) |
+| 9 | `governance.ts` listProposals: the tied-row comparison `p.id > ?` to `p.id > ? + 1` (keeps the placeholder count; loses the tied row: actual `[202]`, expected `[201,202]`, re-run by CODEX r1; the builder's first wording changed the placeholder arity) | red (tests 9 and 10 both) |
+| 5 (hub, after CODEX r1) | `governance.ts` assertProposalsQuery: `${repeated.join(", ")}` to `[omitted]` | red (test 5) |
+| 7 (hub, after CODEX r1) | `discovery.ts` renderOpenApi: the proposals `summary` to the two code tokens only | red (test 7) |
 | 10 | `mcp-read.ts` proposals branch (line 124): `since_id` argument replaced by `NaN` | red (test 10; test 9 stays green, HTTP untouched) |
 | 10 | `mcp.ts` proposals case: `since_id` replaced by `NaN` | red (test 10) |
 All reverse-applied with sed on the exact line; `git status` clean afterwards (only the untracked brief).
