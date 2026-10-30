@@ -34,6 +34,7 @@ import {
   createProposal,
   castBallot,
   listProposals,
+  assertProposalsQuery,
   getProposalDetail,
   runGovernanceSweep,
   SWEEP_COHORT_CAP,
@@ -634,7 +635,10 @@ export default {
         await assertPublicSweepNotThrottled(env, request.headers.get("CF-Connecting-IP"));
         return json(await runGovernanceSweep(env));
       }
-      if (path === "/api/proposals" && method === "GET")
+      // DEFERRED-PROPOSALS-MALFORMED-CURSOR: a malformed value of a known key (?since=abc) still becomes NaN and serves the first page, the
+      // same silent-misread class as the unknown keys refused below; not in D-078 item 2, so behaviour is unchanged here (docs/BRIEF-PROPOSALS-UNKNOWN-PARAMS.md).
+      if (path === "/api/proposals" && method === "GET") {
+        assertProposalsQuery(url.searchParams);
         return json(
           await listProposals(
             env,
@@ -642,6 +646,7 @@ export default {
             parseNumberParam(url.searchParams.get("since_id"), NaN),
           ),
         );
+      }
       const proposalMatch = path.match(/^\/api\/proposal\/(\d+)$/);
       if (proposalMatch && method === "GET") return json(await getProposalDetail(env, Number(proposalMatch[1])));
       if (path === "/api/proposal" && method === "POST") {

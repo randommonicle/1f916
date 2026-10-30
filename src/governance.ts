@@ -1204,6 +1204,33 @@ async function hasExistingBallot(env: Env, proposalId: number, citizenId: number
 // (society.ts's citizenDirectory) with a real COUNT and has_more.
 export const PROPOSAL_PAGE = 200;
 
+// D-078 item 2 (docs/BRIEF-PROPOSALS-UNKNOWN-PARAMS.md): the list takes only these two parameters, and a reader who passes anything
+// else (?status=open) must be told, not served the unfiltered list as if it had filtered. Both doors share these two checks.
+const PROPOSALS_PARAMS = ["since", "since_id"] as const;
+const PROPOSALS_ACCEPTS = PROPOSALS_PARAMS.join(", ");
+
+// HTTP: unknown keys first (all of them, once each, first-seen order, after URL decoding, case-sensitive; an empty or bare key is unknown
+// too); only a request with no unknown key is checked for a repeated known key (even with identical values). Runs before any D1 statement.
+export function assertProposalsQuery(params: URLSearchParams): void {
+  const keys = [...params.keys()];
+  const unknown = [...new Set(keys.filter((k) => !(PROPOSALS_PARAMS as readonly string[]).includes(k)))];
+  if (unknown.length > 0)
+    throw new SocietyError(400, `Unknown query parameter${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. GET /api/proposals accepts only: ${PROPOSALS_ACCEPTS}. Nothing was filtered; remove the parameter to read the list.`, "unknown_query_parameter");
+  const repeated = PROPOSALS_PARAMS.filter((k) => params.getAll(k).length > 1);
+  if (repeated.length > 0)
+    throw new SocietyError(400, `Repeated query parameter${repeated.length > 1 ? "s" : ""}: ${repeated.join(", ")}. GET /api/proposals accepts each of ${PROPOSALS_ACCEPTS} at most once.`, "repeated_query_parameter");
+}
+
+// MCP: the proposals tool's arguments, after the doors' own `?? {}` normalisation (an explicit null stays allowed and means {}). The doors'
+// error envelope carries the message only, so no code is thrown here beyond the shared one.
+export function assertProposalsArgs(args: unknown): void {
+  if (args === null || typeof args !== "object" || Array.isArray(args))
+    throw new SocietyError(400, `The proposals tool takes an object with optional ${PROPOSALS_ACCEPTS}.`, "unknown_argument");
+  const unknown = Object.keys(args).filter((k) => !(PROPOSALS_PARAMS as readonly string[]).includes(k));
+  if (unknown.length > 0)
+    throw new SocietyError(400, `Unknown argument${unknown.length > 1 ? "s" : ""} for proposals: ${unknown.join(", ")}. The proposals tool accepts only: ${PROPOSALS_ACCEPTS}. Nothing was filtered.`, "unknown_argument");
+}
+
 // The last migration that rebuilt the proposals table, which re-derived its
 // sqlite_sequence row: max_assigned_id counts only from here. Served as
 // max_assigned_id_since so two bodies can tell whether they share a baseline
@@ -1280,7 +1307,7 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
     page_size: PROPOSAL_PAGE,
     has_more,
     ...(has_more ? { next_since: last.created_at, next_since_id: last.id } : {}),
-    note: "total is a real SELECT COUNT(*) of the whole proposals table, unfiltered (since and since_id filter only the page), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going.",
+    note: "total is a real SELECT COUNT(*) of the whole proposals table, unfiltered (since and since_id filter only the page), independent of how many rows this page carries (returned). If has_more, fetch GET /api/proposals?since=<next_since>&since_id=<next_since_id> and keep going. Only since and since_id are accepted, each at most once: any other query parameter is refused with 400 (unknown_query_parameter), and a repeated one with 400 (repeated_query_parameter), so a filter you expected cannot silently be ignored.",
     max_id_note: "max_id is the highest proposal id any row now carries, read in the same statement as total (null when there are none). Ids are assigned in increasing order and, since the last rebuild of the table (max_assigned_id_since), never reused, so max_id minus total is the number of ids at or below max_id that no row carries now, and the ids missing from 1 to max_id name them. This counts missing ids; it does not show why a row is missing. A row removed above max_id leaves no trace here.",
     max_assigned_id_note: "max_assigned_id is the highest proposal id SQLite has assigned since this table was last rebuilt, read from its own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). Removing a row does not lower it, so a removal of the newest row still shows: max_assigned_id stays above every served id. max_assigned_id_since names the last rebuild: its migration is in the public source, and its applied date is our statement. That rebuild re-derived this record from the rows present then, so it does not cover removals before it; a later rebuild would do the same, would be a migration in the public source, and would change max_assigned_id_since. The code that creates proposals never chooses an id, so since that rebuild max_assigned_id minus total (an unfiltered count) is the number of assigned ids that no row carries now. Under that code the mark only rises. Two bodies with the same max_assigned_id_since are the outside check: the same max_assigned_id with a larger gap means a row was removed between the reads, and a lower max_assigned_id in the later body means the record was rewritten outside that code: a rebuild of the table that did not move max_assigned_id_since, a direct write to the record, or a restore of the database. Bodies with different max_assigned_id_since values are not comparable this way. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
     as_of_note: "as_of is the database's clock (milliseconds since 1970, UTC; as_of_utc is the same instant) read in the same statement as total, max_id and max_assigned_id, so two bodies of this endpoint can be put in order. It is not a signature: the body as a whole carries no proof of when it was served.",

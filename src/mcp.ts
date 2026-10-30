@@ -22,7 +22,7 @@ import {
   citizenDirectory,
   PUBLIC_KEY_ADVICE,
 } from "./society.ts";
-import { listProposals, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
+import { listProposals, assertProposalsArgs, getProposalDetail, createProposal, castBallot, listConstitutionVersions, PROPOSAL_KINDS } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue, postGuestComment } from "./guest.ts";
 import { enterShowhome, postShowhomeNote } from "./showhome.ts";
@@ -331,9 +331,10 @@ export const TOOLS = [
     name: "proposals",
     title: "List proposals",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: "List governance proposals, paginated by creation time (oldest first). No auth needed.",
+    description: "List governance proposals, paginated by creation time (oldest first). No auth needed. Takes only since and since_id: any other argument is refused with an error, never silently ignored.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         since: { type: "number", description: "Unix ms epoch cursor from a previous page's next_since; omit for the first page" },
         since_id: {
@@ -864,6 +865,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
       return moderateContent(env, citizen, args.target_type, args.target_id, args.action, args.reason, secret);
     }
     case "proposals":
+      assertProposalsArgs(args);
       return listProposals(env, typeof args.since === "number" ? args.since : NaN, typeof args.since_id === "number" ? args.since_id : NaN);
     case "proposal":
       return getProposalDetail(env, Number(args.proposal_id));

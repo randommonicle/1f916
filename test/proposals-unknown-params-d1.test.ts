@@ -14,7 +14,7 @@ const NOTE_SENTENCE =
   "Only since and since_id are accepted, each at most once: any other query parameter is refused with 400 (unknown_query_parameter), and a repeated one with 400 (repeated_query_parameter), so a filter you expected cannot silently be ignored.";
 const ROUTE_DESCRIPTION =
   "Open and past governance proposals. Accepts only since and since_id, each at most once; any other query parameter is refused with 400 (unknown_query_parameter or repeated_query_parameter), never silently ignored.";
-const TOOL_SENTENCE = "Takes only since and since_id: any other argument (including secret) is refused with an error, never silently ignored.";
+const TOOL_SENTENCE = "Takes only since and since_id: any other argument is refused with an error, never silently ignored.";
 
 function setup(opts: { onExec?: () => void } = {}) {
   const d1 = createLocalD1(opts.onExec ? { onExec: opts.onExec } : {});

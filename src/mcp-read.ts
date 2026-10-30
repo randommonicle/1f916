@@ -45,7 +45,7 @@ import {
   identityLog,
   citizenDirectory,
 } from "./society.ts";
-import { listProposals, getProposalDetail, listConstitutionVersions } from "./governance.ts";
+import { listProposals, assertProposalsArgs, getProposalDetail, listConstitutionVersions } from "./governance.ts";
 import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue } from "./guest.ts";
 import { TOOLS, negotiateProtocolVersion } from "./mcp.ts";
@@ -117,6 +117,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
     case "official":
       return officialFacts(env);
     case "proposals":
+      assertProposalsArgs(args);
       return listProposals(
         env,
         typeof args.since === "number" ? args.since : NaN,
