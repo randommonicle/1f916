@@ -43,6 +43,7 @@ import {
   listConstitutionVersions,
 } from "./governance.ts";
 import { classifyCron } from "./maintainer/schedule.ts";
+import { runCatchup } from "./maintainer/catchup.ts";
 import { runLoopWake } from "./maintainer/loop.ts";
 import { runClerkWake } from "./maintainer/clerk.ts";
 import { runJudgmentWake } from "./maintainer/judgment.ts";
@@ -694,6 +695,14 @@ export default {
   // wake could open its own runs row), so scheduled() always returns
   // cleanly either way, per the build brief.
   async scheduled(controller, env): Promise<void> {
+    // D-079: the catch-up crons are recognised BEFORE the unconditional sweep below. A catch-up invocation that has nothing to catch up is one D1 read
+    // and returns; when it does run it runs its own sweep and the plain wake (src/maintainer/catchup.ts). Any other cron string is untouched.
+    const catchupWake = classifyCron(controller.cron);
+    if (catchupWake === "clerk_catchup" || catchupWake === "judgment_catchup") {
+      await runCatchup(env, catchupWake === "clerk_catchup" ? "clerk" : "judgment", controller.cron);
+      return;
+    }
+
     // Governance sweep first, on every wake, before either wake's own
     // model-call gate (docs/DEMOCRACY-DESIGN.md §2 point 7 and §13 item
     // 4): closing and tallying a proposal is deterministic code with no

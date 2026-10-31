@@ -23,7 +23,18 @@ export const JUDGMENT_CRON = "0 7 * * 1";
 // docs/CHECKPOINT-DAILY-LOOP-RULE7-STATUS.md note 2). Tripwire: test/guest-check-d1.test.ts "the cron registration" is red until it is there.
 export const LOOP_CRON = "0 12 * * *";
 
-export type WakeKind = "clerk" | "judgment" | "loop";
+// D-079 (docs/BRIEF-MODEL-CALL-RETRY.md Part B, R6, R14, R19): the CATCH-UP wakes. Half an hour after the clerk and judgment crons, a separate
+// invocation reads ONE row and runs the wake again only when the morning's wake ended on a model-call failure a fresh invocation could cure
+// (maintainer_runs.model_retry begins `rerun:`). Otherwise it does nothing: no row, no model call. A separate invocation is a chance of a different
+// placement, not a certainty (whether a 06:30 invocation leaves from a different data centre than the 06:00 one is belief, not known).
+//
+// DEFERRED-CATCHUP-CRON-REGISTRATION: the worker fires these only if wrangler.jsonc's triggers.crons carries the strings; that file is the operator's,
+// so the line is Ben's to apply before the deploy script's $REVIEWED_COMMIT is set. Until then they are inert code. The numeric day-of-week follows
+// JUDGMENT_CRON (Quartz numbering, 1 = Sunday).
+export const CLERK_CATCHUP_CRON = "30 6 * * *";
+export const JUDGMENT_CATCHUP_CRON = "30 7 * * 1";
+
+export type WakeKind = "clerk" | "judgment" | "loop" | "clerk_catchup" | "judgment_catchup";
 
 // Pure. Unrecognised cron strings return null rather than throwing --
 // wrangler.jsonc's triggers.crons is the only thing that can ever invoke
@@ -34,5 +45,7 @@ export function classifyCron(cron: string): WakeKind | null {
   if (cron === CLERK_CRON) return "clerk";
   if (cron === JUDGMENT_CRON) return "judgment";
   if (cron === LOOP_CRON) return "loop";
+  if (cron === CLERK_CATCHUP_CRON) return "clerk_catchup";
+  if (cron === JUDGMENT_CATCHUP_CRON) return "judgment_catchup";
   return null;
 }
