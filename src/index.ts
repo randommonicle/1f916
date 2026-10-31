@@ -703,12 +703,13 @@ export default {
       return;
     }
 
-    // Governance sweep first, on every wake, before either wake's own
+    // Governance sweep first, on every wake except a catch-up cron that has
+    // nothing to catch up (returned above, after one D1 read), before either wake's own
     // model-call gate (docs/DEMOCRACY-DESIGN.md §2 point 7 and §13 item
     // 4): closing and tallying a proposal is deterministic code with no
     // model call in it, so it must keep running even on a dry
     // ANTHROPIC_API_KEY, and it is not "the clerk's job" or "the
-    // judgment's job" specifically -- it runs regardless of which cron
+    // judgment's job" specifically -- it runs regardless of which other cron
     // fired, including one classifyCron does not recognise, since
     // sweeping costs nothing extra and only helps. Isolated in its own
     // try/catch so a sweep failure can never prevent the wake below from

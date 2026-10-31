@@ -13,6 +13,8 @@ test("GET /api/maintainer-runs serves model_retry on the row and the note names 
   assert.match(page.note, /model_retry is a separate column/);
   assert.match(page.note, /deliberately NOT part of error/);
   assert.match(page.note, /at most once/);
+  assert.match(page.note, /an HTTP 403, 429, 500, 502, 503, 504 or 529, or a network error/);
+  assert.doesNotMatch(page.note, /5xx/, "only 500, 502, 503, 504 and 529 are retried");
   assert.match(page.note, /same Cloudflare data centre/);
   assert.match(page.note, /06:30 UTC daily/);
   assert.match(page.note, /only if the operator has registered those two cron lines/);
@@ -27,6 +29,8 @@ test("GET /api/concierge-runs serves model_retry and the note no longer calls a 
   const page = await conciergeRunsPage({ DB: d1.DB });
   assert.equal((page.runs[0] as unknown as { model_retry: string }).model_retry, "recovered: x");
   assert.match(page.note, /model_retry is null unless a model call failed/);
+  assert.match(page.note, /an HTTP 403, 429, 500, 502, 503, 504 or 529, or a network error/);
+  assert.doesNotMatch(page.note, /5xx/);
   assert.match(page.note, /or ran out the clock, or recovered from such a failure/, "the null-unless clause names the timeout form it lists");
   assert.match(page.note, /'model call failed' means the call returned an error, so no tokens came back/);
   assert.doesNotMatch(page.note, /Those three carry a real, non-zero cost/);
