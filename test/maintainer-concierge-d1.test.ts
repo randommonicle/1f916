@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { runConciergeWake } from "../src/maintainer/concierge.ts";
-import { CONCIERGE_WORST_CASE_COST } from "../src/maintainer/budget.ts";
+import { CONCIERGE_WORST_CASE_COST, CONCIERGE_MAX_ATTEMPTS } from "../src/maintainer/budget.ts";
 import { MAINTAINER_ID, CONCIERGE_DISCLOSURE_PREAMBLE, officialFacts, type Env } from "../src/society.ts";
 import { GENESIS } from "../src/chain.ts";
 
@@ -596,7 +596,8 @@ test("CC2: an unhandled throw AFTER real spend (daily-cap check, detection, an a
       console.log = originalConsoleLog;
     }
 
-    assert.equal(result.actualCost, CONCIERGE_WORST_CASE_COST, "the outer catch must return the CONSERVATIVE worst case (16), not 0 -- this run genuinely spent real subrequests before the finalise write failed");
+    // D-079 R20: the worst case (16) plus the most retries a wake can spend (one per candidate, CONCIERGE_MAX_ATTEMPTS), so a throw after retries is not under-priced.
+    assert.equal(result.actualCost, CONCIERGE_WORST_CASE_COST + CONCIERGE_MAX_ATTEMPTS, "the outer catch must return the CONSERVATIVE worst case (16) plus the maximum retries (3), not 0 -- this run genuinely spent real subrequests before the finalise write failed");
     assert.notEqual(result.actualCost, 0, "the old bug: returning 0 understated real spend to the clerk's own priorCost on every failure path");
 
     // Genuinely never throws, matching runConciergeWake's own header
