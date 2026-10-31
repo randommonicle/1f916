@@ -27,6 +27,7 @@ test("GET /api/concierge-runs serves model_retry and the note no longer calls a 
   const page = await conciergeRunsPage({ DB: d1.DB });
   assert.equal((page.runs[0] as unknown as { model_retry: string }).model_retry, "recovered: x");
   assert.match(page.note, /model_retry is null unless a model call failed/);
+  assert.match(page.note, /or ran out the clock, or recovered from such a failure/, "the null-unless clause names the timeout form it lists");
   assert.match(page.note, /'model call failed' means the call returned an error, so no tokens came back/);
   assert.doesNotMatch(page.note, /Those three carry a real, non-zero cost/);
   assert.doesNotMatch(page.note, /made and billed/, "R16: no claim about what Anthropic billed");
