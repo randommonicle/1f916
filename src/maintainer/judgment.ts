@@ -13,7 +13,7 @@
 import { type Env, MAINTAINER_ID, CONSTITUTION, moderateContent, createPost } from "../society.ts";
 import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, buildRequestBody, stripCodeFence } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
-import { canOpenJudgmentBatch, classifyChunkBudget, classifyChunkCost, D1_MAX_BIND_PARAMS } from "./budget.ts";
+import { canAffordJudgmentRetry, canOpenJudgmentBatch, classifyChunkBudget, classifyChunkCost, D1_MAX_BIND_PARAMS } from "./budget.ts";
 import { truncateBody } from "./clerk.ts";
 // Type ownership split (commission notes flag 3, docs/BRIEF-FIRST-LAWS.md
 // commit 4's "CLERK CAGE UNCHANGED" section): QueueRow.kind reads rows
@@ -1769,6 +1769,11 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   // batch's own gate.
   let classifyExtraSpent = 0;
   let classifyBudgetExhaustedOverall = false;
+  // D-079: model-call retries spent this wake (R13). Carried into every later budget check like classifyExtraSpent, and the per-batch
+  // audit parts that become `model_retry` (R18: `rerun: ` leads the whole string only when the wake ENDED on a rerunnable failure).
+  let retrySpent = 0;
+  const retryParts: string[] = [];
+  let endedRerunnable = false;
 
   while (true) {
     // §9 (D-041): shed BEFORE starting a batch we cannot pay for. Opening a
@@ -1780,7 +1785,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     // (test/maintainer-scheduled-budget.test.ts) goes red at 51 -- that is the
     // enforcement. `effectivePriorCost` folds in classification's own real
     // overspend from earlier batches this wake (HIGH 2, above).
-    const effectivePriorCost = priorCost + classifyExtraSpent;
+    const effectivePriorCost = priorCost + classifyExtraSpent + retrySpent;
     if (!canOpenJudgmentBatch(effectivePriorCost, reconciliation.rowsProcessed, batchesRun)) {
       batchesShed = true;
       break;
@@ -1812,7 +1817,12 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     if (scanOutcome.admissible.length > 0) {
       const batchMap = new Map(scanOutcome.admissible.map((r) => [r.id, r]));
       const prompt = buildJudgmentPrompt(scanOutcome.admissible);
-      const result = await callAnthropic(env, MAINTAINER_MODELS.judgment, JUDGMENT_SYSTEM_PROMPT, prompt);
+      const result = await callAnthropic(env, MAINTAINER_MODELS.judgment, JUDGMENT_SYSTEM_PROMPT, prompt, {
+        mayRetry: canAffordJudgmentRetry(priorCost + classifyExtraSpent + retrySpent, reconciliation.rowsProcessed, batchesRun),
+      });
+      retrySpent += result.attempts - 1;
+      if (result.retryNote) retryParts.push(`batch ${batchesRun}: ${result.retryNote}`);
+      if (!result.ok && result.finalRerunnable) endedRerunnable = true;
       tokensIn += result.usage.input_tokens;
       tokensOut += result.usage.output_tokens;
       costEstimateCents += estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens);
@@ -1885,6 +1895,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       itemsActioned,
       overflowDropped,
       error: runError ?? undefined,
+      modelRetry: retryParts.length > 0 ? `${endedRerunnable ? "rerun: " : ""}${retryParts.join("; ")}` : null,
     });
   } catch (e) {
     // The wake must never throw -- even the runs-row write itself failing

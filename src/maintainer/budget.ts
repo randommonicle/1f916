@@ -133,6 +133,15 @@ export function canOpenJudgmentBatch(priorCost: number, replayRowsProcessed: num
   return spent + JUDGMENT_BATCH_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }
 
+// D-079 (docs/BRIEF-MODEL-CALL-RETRY.md R13, R21): may THIS batch's model call be retried? JUDGMENT_BATCH_COST (8) already reserves the batch's scan page,
+// its one model fetch and its decision writes, so the retry is one fetch ON TOP: the same spent sum classifyChunkBudget uses (with this batch counted in
+// `batchesOpened` and `priorCost` already carrying classification's real extra chunks AND every retry spent earlier this wake), plus the finalise reserve,
+// must leave at least 1. A spent retry is carried into every later canOpenJudgmentBatch / classifyChunkBudget call by the caller.
+export function canAffordJudgmentRetry(priorCost: number, replayRowsProcessed: number, batchesOpened: number): boolean {
+  const spent = priorCost + JUDGMENT_WAKE_FIXED_COST + replayRowsProcessed * REPLAY_PER_ROW_COST + batchesOpened * JUDGMENT_BATCH_COST;
+  return INVOCATION_SUBREQUEST_BUDGET - spent - FINALISE_RESERVE >= 1;
+}
+
 // HIGH 2 companion (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md
 // CODEX round 1): JUDGMENT_BATCH_COST prices a scan page's own read but
 // assumes classifying it costs NOTHING extra (8 = 1 scan page + 1 model
