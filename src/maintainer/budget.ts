@@ -85,6 +85,13 @@ export const CLERK_WAKE_FIXED_COST = 18;
 // of shedding real work on every ordinary, uncontended wake.
 export const FINALISE_RESERVE = 2;
 
+// D-079 (docs/BRIEF-MODEL-CALL-RETRY.md R4): may the clerk's model call be retried? One more fetch, on top of the fixed cost (which already prices one),
+// the finalise reserve and everything spent before the wake (the sweep, the concierge, the guest check, the reconciler), must leave at least 1 over.
+// This is the same slack affordableClerkInserts spends on queue inserts, so a retry costs the wake one insert's worth of room, never the finalise write.
+export function canAffordClerkRetry(priorCost: number): boolean {
+  return INVOCATION_SUBREQUEST_BUDGET - priorCost - CLERK_WAKE_FIXED_COST - FINALISE_RESERVE >= 1;
+}
+
 // Pure. The sweep's estimated cost given how many due proposals it processed
 // this invocation. scheduled() passes this to both wakes as their `priorCost`.
 export function estimateSweepCost(proposalsProcessed: number): number {

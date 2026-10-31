@@ -317,3 +317,10 @@ export async function callAnthropic(
     finalRerunnable: second.stopReason === "timeout" || isRetryableAttempt(second),
   };
 }
+
+// Pure (R18). The `model_retry` column value for one call: the result's audit note, prefixed `rerun: ` when the wake ENDED on a failure a fresh
+// invocation could cure (the catch-up cron reads exactly that prefix). null when the call needed no audit.
+export function retryAudit(result: Pick<AnthropicCallResult, "ok" | "retryNote" | "finalRerunnable">): string | null {
+  if (!result.retryNote) return null;
+  return !result.ok && result.finalRerunnable ? `rerun: ${result.retryNote}` : result.retryNote;
+}

@@ -13,9 +13,9 @@
 // judgment.ts reads with the full context in front of it.
 
 import { type Env, readOnchainUsdcCents } from "../society.ts";
-import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, stripCodeFence } from "./anthropic.ts";
+import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, retryAudit, stripCodeFence } from "./anthropic.ts";
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
-import { affordableClerkInserts } from "./budget.ts";
+import { affordableClerkInserts, canAffordClerkRetry } from "./budget.ts";
 // I-007 (docs/FIRST-LAWS-DESIGN.md §5): the shared constitution-detection
 // machinery, not a moderation-executing or money-moving export -- outside
 // the cage this file's own header describes (it writes only
@@ -504,7 +504,9 @@ export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCac
   }
 
   const prompt = buildClerkPrompt(candidates, drift);
-  const result = await callAnthropic(env, MAINTAINER_MODELS.clerk, CLERK_SYSTEM_PROMPT, prompt);
+  const result = await callAnthropic(env, MAINTAINER_MODELS.clerk, CLERK_SYSTEM_PROMPT, prompt, { mayRetry: canAffordClerkRetry(priorCost) });
+  // D-079: the audit of a retried or retryable-failed call. It is NOT written into `error` (getClerkCursor reads error IS NULL; R3).
+  const modelRetry = retryAudit(result);
 
   if (!result.ok) {
     runError = appendError(runError, `model call failed (stop_reason: ${result.stopReason}): ${result.error}`);
@@ -516,6 +518,7 @@ export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCac
       overflowDropped: 0,
       error: runError,
       driftDeltaCents: drift.deltaCents,
+      modelRetry,
     });
     return;
   }
@@ -527,7 +530,7 @@ export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCac
     // more than CLERK_QUEUE_CAP. parseClerkItems already caps-and-counts the
     // overflow, so a budget-tightened cap surfaces as overflow_dropped with no
     // new code path -- the honest "did not draft, deferred" signal.
-    parsedItems = parseClerkItems(result.text, affordableClerkInserts(priorCost, CLERK_QUEUE_CAP));
+    parsedItems = parseClerkItems(result.text, affordableClerkInserts(priorCost + (result.attempts - 1), CLERK_QUEUE_CAP));
   } catch (e) {
     // stop_reason is named explicitly here so a max_tokens truncation
     // that broke the JSON is diagnosable from this row alone, not just
@@ -542,6 +545,7 @@ export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCac
       overflowDropped: 0,
       error: runError,
       driftDeltaCents: drift.deltaCents,
+      modelRetry,
     });
     return;
   }
@@ -591,6 +595,7 @@ export async function runClerkWake(env: Env, constitutionCache?: ConstitutionCac
       // must be repeated here or the reserve call's value would be wiped
       // back to NULL.
       driftDeltaCents: drift.deltaCents,
+      modelRetry,
     });
   } catch (e) {
     // The wake must never throw -- even the runs-row write itself failing

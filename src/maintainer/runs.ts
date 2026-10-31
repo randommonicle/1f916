@@ -29,6 +29,8 @@ export interface RunFields {
   // "could not read live this run", never a guessed 0; judgment never
   // sets this at all. See shouldSkipIdleClerkWake in clerk.ts.
   driftDeltaCents?: number | null;
+  // D-079 (migrations/0022): the model-call retry audit. null/omitted binds SQL NULL ("no retryable-class failure happened").
+  modelRetry?: string | null;
 }
 
 // L8, review fix (NaN guard): NaN/Infinity/-Infinity have no SQLite
@@ -55,8 +57,8 @@ export function finiteOrNull(n: number | null | undefined): number | null {
 export async function insertMaintainerRun(env: Pick<Env, "DB">, fields: RunFields): Promise<number> {
   const res = await env.DB.prepare(
     `INSERT INTO maintainer_runs
-      (kind, started_at, finished_at, tokens_in, tokens_out, cost_estimate_cents, items_drafted, items_actioned, overflow_dropped, skipped_reason, error, cursor_advanced_to, drift_delta_cents)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (kind, started_at, finished_at, tokens_in, tokens_out, cost_estimate_cents, items_drafted, items_actioned, overflow_dropped, skipped_reason, error, cursor_advanced_to, drift_delta_cents, model_retry)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
   )
     .bind(
@@ -73,6 +75,7 @@ export async function insertMaintainerRun(env: Pick<Env, "DB">, fields: RunField
       fields.error ?? null,
       finiteOrNull(fields.cursorAdvancedTo),
       finiteOrNull(fields.driftDeltaCents),
+      fields.modelRetry ?? null,
     )
     .first<{ id: number }>();
   return res!.id;
@@ -90,7 +93,7 @@ export type RunUpdateFields = Omit<RunFields, "kind" | "startedAt">;
 export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fields: RunUpdateFields): Promise<void> {
   await env.DB.prepare(
     `UPDATE maintainer_runs
-      SET finished_at = ?, tokens_in = ?, tokens_out = ?, cost_estimate_cents = ?, items_drafted = ?, items_actioned = ?, overflow_dropped = ?, skipped_reason = ?, error = ?, cursor_advanced_to = ?, drift_delta_cents = ?
+      SET finished_at = ?, tokens_in = ?, tokens_out = ?, cost_estimate_cents = ?, items_drafted = ?, items_actioned = ?, overflow_dropped = ?, skipped_reason = ?, error = ?, cursor_advanced_to = ?, drift_delta_cents = ?, model_retry = ?
      WHERE id = ?`,
   )
     .bind(
@@ -105,6 +108,7 @@ export async function finalizeMaintainerRun(env: Pick<Env, "DB">, id: number, fi
       fields.error ?? null,
       finiteOrNull(fields.cursorAdvancedTo),
       finiteOrNull(fields.driftDeltaCents),
+      fields.modelRetry ?? null,
       id,
     )
     .run();
