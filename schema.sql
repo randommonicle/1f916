@@ -180,7 +180,8 @@ CREATE TABLE IF NOT EXISTS maintainer_runs (
   skipped_reason       TEXT,
   error                TEXT,
   cursor_advanced_to   INTEGER,
-  drift_delta_cents    INTEGER -- clerk only (M5, review fix): see migrations/0004_maintainer_runtime.sql for the full comment
+  drift_delta_cents    INTEGER, -- clerk only (M5, review fix): see migrations/0004_maintainer_runtime.sql for the full comment
+  model_retry          TEXT -- D-079: the model-call retry audit, see migrations/0022_model_retry.sql
 );
 CREATE INDEX IF NOT EXISTS idx_maintainer_runs_kind ON maintainer_runs(kind, started_at DESC);
 
@@ -422,7 +423,8 @@ CREATE TABLE IF NOT EXISTS concierge_runs (
   cost_estimate_cents REAL,
   deny_reason         TEXT,               -- the matched category string only, NEVER the refused text (ai-surface-discipline: log the class, not the value)
   skipped_reason      TEXT,               -- 'no candidates' | 'budget' | 'no api key' | ...
-  error               TEXT
+  error               TEXT,
+  model_retry         TEXT                -- D-079: the model-call retry audit, see migrations/0022_model_retry.sql
 );
 CREATE INDEX IF NOT EXISTS idx_concierge_runs_started ON concierge_runs(started_at DESC);
 

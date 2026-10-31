@@ -43,6 +43,8 @@ const CONCIERGE_COLUMNS = [
   "tokens_in",
   "tokens_out",
 ].sort();
+// 0022 (D-079) adds one nullable column on top of 0010's; schema.sql carries it.
+const CONCIERGE_COLUMNS_WITH_0022 = [...CONCIERGE_COLUMNS, "model_retry"].sort();
 
 function tableColumns(db: InstanceType<typeof DatabaseSync>, table: string): string[] {
   return (db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as { name: string }[]).map((r) => r.name).sort();
@@ -128,7 +130,7 @@ test("positive control: the catalog mechanism sees citizens in the full schema, 
     assert.ok(tables.has("citizens"), "sanity: the catalog mechanism finds a known non-concierge table");
     assert.ok(tables.has(CONCIERGE_TABLE), "schema.sql must carry concierge_runs identically to the migration (harness loads schema.sql)");
     // Columns in schema.sql must match the migration's, or the harness and prod diverge.
-    assert.deepEqual(tableColumns(db, CONCIERGE_TABLE), CONCIERGE_COLUMNS);
+    assert.deepEqual(tableColumns(db, CONCIERGE_TABLE), CONCIERGE_COLUMNS_WITH_0022);
     // The index too, not just the table/columns: schema.sql must carry it
     // identically to the migration, or the harness (which loads schema.sql)
     // would silently diverge from prod.

@@ -133,6 +133,38 @@ export interface AnthropicCallResult {
   stopReason: string;
   usage: { input_tokens: number; output_tokens: number };
   error?: string;
+  // D-079 (docs/BRIEF-MODEL-CALL-RETRY.md R8, R18): HTTP fetches made, 1 or 2.
+  attempts: 1 | 2;
+  // null unless the call ended in a retryable-class failure or recovered from
+  // one. Exactly these shapes: `recovered: <first error>`, `failed twice:
+  // <first> | <second>`, `failed, retry not afforded: <first>`, `failed,
+  // timeout not retried: <error>`. `error` keeps its old meaning (the final
+  // failure only).
+  retryNote: string | null;
+  // True when the call ENDED failed on a status/outcome a fresh invocation
+  // could plausibly cure (a retryable status, network_error or timeout).
+  finalRerunnable: boolean;
+}
+
+export interface AnthropicCallOptions {
+  // The caller's budget verdict (R4): false means a retry would breach the
+  // invocation's subrequest budget, so the first failure is final.
+  mayRetry?: boolean;
+  // Injectable so tests assert the wait without waiting (R23).
+  sleep?: (ms: number) => Promise<void>;
+}
+
+// Statuses worth exactly one more try (A1). 401/400/404/413 are not: a bad
+// key or a bad request is not cured by repeating it.
+export const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([403, 429, 500, 502, 503, 504, 529]);
+const RETRY_DELAY_MIN_MS = 2000;
+const RETRY_DELAY_MAX_MS = 10_000;
+
+// Pure (R2). 2 s, or `retry-after` seconds clamped to 2..10 s when the header
+// parses as a non-negative number of seconds; anything else waits 2 s.
+export function retryDelayMs(retryAfter: string | null | undefined): number {
+  if (retryAfter == null || !/^\s*\d+(\.\d+)?\s*$/.test(retryAfter)) return RETRY_DELAY_MIN_MS;
+  return Math.min(RETRY_DELAY_MAX_MS, Math.max(RETRY_DELAY_MIN_MS, Math.round(Number(retryAfter) * 1000)));
 }
 
 const EMPTY_USAGE = { input_tokens: 0, output_tokens: 0 };
@@ -157,12 +189,14 @@ export function isAbortError(e: unknown): boolean {
 // see usage/tokens for a refusal (Anthropic bills nothing for a pre-output
 // decline, but the field is threaded through honestly either way rather
 // than assumed zero).
-export async function callAnthropic(
+type AttemptResult = Omit<AnthropicCallResult, "attempts" | "retryNote" | "finalRerunnable"> & { status?: number; retryAfter?: string | null };
+
+async function attemptOnce(
   env: { ANTHROPIC_API_KEY?: string },
   model: string,
   system: string,
   userContent: string,
-): Promise<AnthropicCallResult> {
+): Promise<AttemptResult> {
   if (!env.ANTHROPIC_API_KEY) {
     // Callers are expected to check this before ever reaching here (see
     // clerk.ts/judgment.ts's own no-key skip, which never even builds a
@@ -195,15 +229,24 @@ export async function callAnthropic(
     clearTimeout(timer);
   }
 
-  let body: AnthropicMessageResponse & { error?: { message?: string } };
-  try {
-    body = (await res.json()) as AnthropicMessageResponse & { error?: { message?: string } };
-  } catch {
-    return { ok: false, text: "", stopReason: "unparseable_response", usage: EMPTY_USAGE, error: `Anthropic API returned a non-JSON body (HTTP ${res.status})` };
+  // R1: status before body. A 502/503/504/529 or an edge 403 often carries an
+  // HTML or text body; it is an http_error carrying the status either way.
+  if (!res.ok) {
+    let message = "non-JSON body";
+    try {
+      const errBody = (await res.json()) as { error?: { message?: string } };
+      message = errBody?.error?.message ?? "unknown error";
+    } catch {
+      // keep the "non-JSON body" note
+    }
+    return { ok: false, text: "", stopReason: "http_error", usage: EMPTY_USAGE, error: `Anthropic API HTTP ${res.status}: ${message}`, status: res.status, retryAfter: res.headers.get("retry-after") };
   }
 
-  if (!res.ok) {
-    return { ok: false, text: "", stopReason: "http_error", usage: EMPTY_USAGE, error: `Anthropic API HTTP ${res.status}: ${body.error?.message ?? "unknown error"}` };
+  let body: AnthropicMessageResponse;
+  try {
+    body = (await res.json()) as AnthropicMessageResponse;
+  } catch {
+    return { ok: false, text: "", stopReason: "unparseable_response", usage: EMPTY_USAGE, error: `Anthropic API returned a non-JSON body (HTTP ${res.status})` };
   }
 
   const usage = body.usage ?? EMPTY_USAGE;
@@ -226,4 +269,51 @@ export async function callAnthropic(
   // JSON" (the exact class of silent failure CLAUDE.md's max_tokens
   // lesson, in the ASH sibling app, describes).
   return { ok: true, text, stopReason: body.stop_reason, usage };
+}
+
+function isRetryableAttempt(r: AttemptResult): boolean {
+  return !r.ok && ((r.stopReason === "http_error" && r.status != null && RETRYABLE_STATUSES.has(r.status)) || r.stopReason === "network_error");
+}
+
+function addUsage(a: { input_tokens: number; output_tokens: number }, b: { input_tokens: number; output_tokens: number }) {
+  return { input_tokens: a.input_tokens + b.input_tokens, output_tokens: a.output_tokens + b.output_tokens };
+}
+
+function strip(r: AttemptResult): Omit<AnthropicCallResult, "attempts" | "retryNote" | "finalRerunnable"> {
+  const { status: _s, retryAfter: _r, ...rest } = r;
+  return rest;
+}
+
+// D-079: one model call with at most ONE retry (never a loop), only for a
+// transient-class failure (A1) and only when the caller says the budget
+// affords the extra fetch. See docs/BRIEF-MODEL-CALL-RETRY.md.
+export async function callAnthropic(
+  env: { ANTHROPIC_API_KEY?: string },
+  model: string,
+  system: string,
+  userContent: string,
+  opts: AnthropicCallOptions = {},
+): Promise<AnthropicCallResult> {
+  const first = await attemptOnce(env, model, system, userContent);
+  if (first.ok) return { ...strip(first), attempts: 1, retryNote: null, finalRerunnable: false };
+  if (first.stopReason === "timeout") {
+    return { ...strip(first), attempts: 1, retryNote: `failed, timeout not retried: ${first.error}`, finalRerunnable: true };
+  }
+  if (!isRetryableAttempt(first)) {
+    return { ...strip(first), attempts: 1, retryNote: null, finalRerunnable: false };
+  }
+  if (!opts.mayRetry) {
+    return { ...strip(first), attempts: 1, retryNote: `failed, retry not afforded: ${first.error}`, finalRerunnable: true };
+  }
+  await (opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(retryDelayMs(first.retryAfter));
+  const second = await attemptOnce(env, model, system, userContent);
+  const usage = addUsage(first.usage, second.usage);
+  if (second.ok) return { ...strip(second), usage, attempts: 2, retryNote: `recovered: ${first.error}`, finalRerunnable: false };
+  return {
+    ...strip(second),
+    usage,
+    attempts: 2,
+    retryNote: `failed twice: ${first.error} | ${second.error}`,
+    finalRerunnable: second.stopReason === "timeout" || isRetryableAttempt(second),
+  };
 }
