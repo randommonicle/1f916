@@ -652,6 +652,77 @@ test("PROOF GUEST-CHECK -- sweep (1 due) + concierge (1 real engagement) + the g
   }
 });
 
+// R20 (docs/BRIEF-MODEL-CALL-RETRY.md, D-079): PROOF GUEST-CHECK extended to the worst case WITH model-call retries. Every phase does real work as
+// above, and the FIRST Anthropic answer to the concierge and the FIRST to the clerk are each a 403, so each phase is offered a retry. The concierge
+// is handed priorCost without the clerk's floor, so its retry gate reserves the guest check, the clerk's fixed cost and the finalise reserve: it
+// retries only on a quiet sweep day (cohort 0) and sheds the retry at cohorts 1 and 2. The verdict for all three is `total <= 50 && !breached`.
+for (const dueCount of [0, 1, 2]) {
+  test(`PROOF GUEST-CHECK + RETRIES (R20) -- ${dueCount} due proposal(s), concierge and clerk first answers are 403s, five phases, <= 50, every run row finalised`, async () => {
+    const base = conciergeAwareClerkResponder(40);
+    const seen = { concierge: 0, clerk: 0 };
+    const responder = (url: string, init: { body?: unknown } | undefined) => {
+      if (url.includes("api.anthropic.com")) {
+        let prompt = "";
+        try {
+          prompt = (JSON.parse(typeof init?.body === "string" ? init.body : "") as { messages?: Array<{ content?: string }> }).messages?.[0]?.content ?? "";
+        } catch {
+          /* empty prompt */
+        }
+        const kind = prompt.includes("<target") ? "concierge" : "clerk";
+        if (seen[kind]++ === 0) return new Response(JSON.stringify({ error: { message: "Request not allowed" } }), { status: 403 });
+      }
+      return base(url, init);
+    };
+    const counter = installSubrequestCounter(responder);
+    const d1 = createLocalD1({ onExec: counter.consume });
+    try {
+      seedMaintainer(d1);
+      for (let i = 0; i < 4; i++) insertCitizen(d1, {});
+      const now = Date.now();
+      for (let i = 0; i < dueCount; i++) seedDueProposal(d1, now - (i + 1) * 1_000);
+      const authorId = insertCitizen(d1, { handle: "sisyphus" });
+      d1.raw
+        .prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (?, ?, ?, ?, 0, 'm', ?)")
+        .run(authorId, "a post nobody answered", "body", "dupe-retry-proof-target", now - 25 * 60 * 60 * 1000);
+      for (let i = 0; i < 50; i++) {
+        const postId = Number(d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at) VALUES (1, ?, ?, ?, 0, 'm', ?)").run(`P${i}`, `body ${i}`, `h${i}`, now - 1_000_000).lastInsertRowid);
+        d1.raw.prepare("INSERT INTO flags (citizen_id, target_type, target_id, reason, created_at) VALUES (1, 'post', ?, 'spam', ?)").run(postId, now - (50 - i) * 100);
+      }
+      const topicId = Number(
+        d1.raw.prepare("INSERT INTO posts (citizen_id, title, body, dupe_hash, pinned, author_model, created_at, kind, topic_state) VALUES (1, 't', 'b', 'dupe-topic-retry', 0, NULL, ?, 'topic', 'open')").run(now - 40 * 86_400_000).lastInsertRowid,
+      );
+      for (let i = 0; i < 25; i++) {
+        d1.raw
+          .prepare("INSERT INTO guest_thread (post_id, author_kind, author_id, handle, model, kind, body, duty, due_at, created_at) VALUES (?, 'guest', ?, 'g', 'm', 'critique', 'c', 1, ?, ?)")
+          .run(topicId, 5000 + i, now - 5 * 3_600_000 + i, now - 101 * 3_600_000);
+      }
+
+      await callScheduled(CLERK_CRON, makeEnv(d1));
+
+      assert.equal(counter.breached(), false, `cohort ${dueCount}: never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()})`);
+      assert.ok(counter.total() <= 50, `cohort ${dueCount}: total ${counter.total()} <= 50`);
+      assert.equal(seen.concierge >= 1 && seen.clerk >= 1, true, "both phases made their model call");
+      const concierge = d1.raw.prepare("SELECT engaged, finished_at, model_retry FROM concierge_runs ORDER BY id DESC LIMIT 1").get() as { engaged: number; finished_at: number | null; model_retry: string | null };
+      assert.notEqual(concierge.finished_at, null, "the concierge row landed");
+      if (dueCount === 0) {
+        assert.equal(seen.concierge, 2, "a quiet sweep leaves the concierge room for its retry");
+        assert.match(String(concierge.model_retry), /^recovered:/);
+        assert.equal(concierge.engaged, 1);
+      } else {
+        assert.equal(seen.concierge, 1, "a busier sweep sheds the concierge retry");
+        assert.match(String(concierge.model_retry), /^failed, retry not afforded:/);
+      }
+      const clerk = d1.raw.prepare("SELECT finished_at, model_retry FROM maintainer_runs WHERE kind = 'clerk' ORDER BY id DESC LIMIT 1").get() as { finished_at: number | null; model_retry: string | null };
+      assert.notEqual(clerk.finished_at, null, "the clerk row landed");
+      assert.ok(clerk.model_retry !== null, "the clerk's 403 was audited whether or not its retry was afforded");
+      if (dueCount > 0) assert.notEqual((d1.raw.prepare("SELECT status FROM proposals ORDER BY id DESC LIMIT 1").get() as { status: string }).status, "open");
+    } finally {
+      counter.restore();
+      d1.close();
+    }
+  });
+}
+
 // ---------- shapes 3 & 4: costed, stated (no repair expected on 3; 4's repair IS §8) ----------
 
 test("PROOF shape 4 -- POST /api/governance/sweep at zero/one/cap due each stays a small bounded cost (the permissionless public surface)", async () => {
