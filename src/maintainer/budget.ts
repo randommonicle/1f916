@@ -277,6 +277,17 @@ export function canAffordConcierge(priorCost: number): boolean {
   return priorCost + CONCIERGE_WORST_CASE_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET;
 }
 
+// D-079 (docs/BRIEF-MODEL-CALL-RETRY.md R12, R20): may ONE candidate's model call be retried? A retry is a fetch CONCIERGE_WORST_CASE_COST does not
+// price. The concierge is handed priorCost WITHOUT the clerk's floor (index.ts), and the guest check and the clerk run after it in the same invocation,
+// so the retry must leave room for them: its own fetch (1) plus every retry already spent this wake (retrySpent), the guest check, the clerk's fixed
+// cost and the finalise reserve all fit the shared 50, on top of the concierge's worst case. In practice the concierge retries only on a quiet
+// sweep day (priorCost + retrySpent <= 11).
+export function canAffordConciergeRetry(priorCost: number, retrySpent: number): boolean {
+  return (
+    priorCost + CONCIERGE_WORST_CASE_COST + retrySpent + 1 + GUEST_DUTY_CHECK_COST + CLERK_WAKE_FIXED_COST + FINALISE_RESERVE <= INVOCATION_SUBREQUEST_BUDGET
+  );
+}
+
 // The daily loop (src/maintainer/loop.ts), on its own 12:00 UTC cron: the governance sweep and then this, nothing else, so it shares only the
 // sweep's priorCost. No model call, no run table, no finalise write of its own (the log lines are its record), so "finalise" below is only the
 // reserve every phase leaves. Per run, in statements (each one subrequest on the platform):

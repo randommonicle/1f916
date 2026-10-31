@@ -35,6 +35,7 @@ import {
   CONCIERGE_FINALISE_COST,
   CONCIERGE_WORST_CASE_COST,
   canAffordConcierge,
+  canAffordConciergeRetry,
 } from "./budget.ts";
 
 // ---------- pure: constants ----------
@@ -257,13 +258,15 @@ interface ConciergeRunFields {
   denyReason?: string | null;
   skippedReason?: string;
   error?: string;
+  // D-079 (migrations/0022): the model-call retry audit, one part per candidate's call that retried or failed retryably.
+  modelRetry?: string | null;
 }
 
 async function insertConciergeRun(env: Pick<Env, "DB">, fields: ConciergeRunFields): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO concierge_runs
-      (started_at, finished_at, candidates_seen, attempts_made, engaged, target_type, target_id, comment_id, tokens_in, tokens_out, cost_estimate_cents, deny_reason, skipped_reason, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (started_at, finished_at, candidates_seen, attempts_made, engaged, target_type, target_id, comment_id, tokens_in, tokens_out, cost_estimate_cents, deny_reason, skipped_reason, error, model_retry)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       fields.startedAt,
@@ -280,6 +283,7 @@ async function insertConciergeRun(env: Pick<Env, "DB">, fields: ConciergeRunFiel
       fields.denyReason ?? null,
       fields.skippedReason ?? null,
       fields.error ?? null,
+      fields.modelRetry ?? null,
     )
     .run();
 }
@@ -302,7 +306,7 @@ export async function conciergeRunsPage(env: Pick<Env, "DB">, before?: number) {
   const runs = has_more ? results.slice(0, CONCIERGE_RUNS_PAGE) : results;
   return {
     note:
-      "Every clerk-cadence wake runs the engagement concierge FIRST (before the clerk's own drafting pass) and writes exactly one row here, whether or not it engaged anyone. skipped_reason names why nothing happened this run, and it always does when engaged=0: the FREE sheds, decided before any model call, are 'no candidates' (nobody silent >=24h with zero replies), 'budget' (the shared subrequest budget was tight this invocation, a designed shed, not a fault), 'no api key' (a dry model key), and 'already engaged today' (the hard daily cap) -- cost is zero for those four. The PAID outcomes, where a model call was made and billed and still nothing was posted, are 'model declined (NO_ENGAGEMENT)' (the expected, common answer -- most candidates deserve no reply), 'draft outside length band' (a reply was written but fell outside the served character band, and the row states the length so the miss is diagnosable), and 'model call failed'. Those three carry a real, non-zero cost, and they are named rather than left blank because a run that spends money and posts nothing is exactly the case a reader most needs explained. engaged=1 rows name the target and the resulting comment_id; the comment's own body carries the same fixed disclosure this endpoint does. deny_reason, when set, names the matched deterministic refusal category only, never the refused text, and stands in place of skipped_reason for that run. This is the maintainer's own line in the books-are-public ethos for this feature, same as GET /api/maintainer-runs is for the clerk/judge.",
+      "Every clerk-cadence wake runs the engagement concierge FIRST (before the clerk's own drafting pass) and writes exactly one row here, whether or not it engaged anyone. skipped_reason names why nothing happened this run, and it always does when engaged=0: the FREE sheds, decided before any model call, are 'no candidates' (nobody silent >=24h with zero replies), 'budget' (the shared subrequest budget was tight this invocation, a designed shed, not a fault), 'no api key' (a dry model key), and 'already engaged today' (the hard daily cap) -- cost is zero for those four. The PAID outcomes, where a model call was made and billed and still nothing was posted, are 'model declined (NO_ENGAGEMENT)' (the expected, common answer -- most candidates deserve no reply), 'draft outside length band' (a reply was written but fell outside the served character band, and the row states the length so the miss is diagnosable), and 'model call failed'. 'model declined' and 'draft outside length band' carry a real, non-zero cost, and they are named rather than left blank because a run that spends money and posts nothing is exactly the case a reader most needs explained. 'model call failed' means the call returned an error, so no tokens came back and the cost recorded for that call is zero. engaged=1 rows name the target and the resulting comment_id; the comment's own body carries the same fixed disclosure this endpoint does. deny_reason, when set, names the matched deterministic refusal category only, never the refused text, and stands in place of skipped_reason for that run. model_retry is null unless a model call failed with something a second attempt could plausibly cure (a 403, 429, 5xx, 529 or network error) or recovered from one: then it holds, per candidate call and joined by '; ', 'recovered: <first error>', 'failed twice: <first> | <second>', 'failed, retry not afforded: <first>' (the shared subrequest budget could not pay for a second fetch, so the first failure was final) or 'failed, timeout not retried: <error>'. A call is retried at most once, only when the budget affords the extra fetch, and a recovered call leaves no trace in skipped_reason or error; model_retry is where it shows. A retry is a second attempt from the same invocation, so it probably leaves from the same Cloudflare data centre: it cures a transient fault, not necessarily a refusal tied to where the request came from. This is the maintainer's own line in the books-are-public ethos for this feature, same as GET /api/maintainer-runs is for the clerk/judge.",
     returned: runs.length,
     page_size: CONCIERGE_RUNS_PAGE,
     has_more,
@@ -322,12 +326,14 @@ export interface ConciergeWakeResult {
 // attempted work, writes one row to concierge_runs.
 export async function runConciergeWake(env: Env, priorCost = 0): Promise<ConciergeWakeResult> {
   const startedAt = Date.now();
+  // Shared with the inner function so a throw AFTER a call that retried still records what happened (R9).
+  const retryNotes: string[] = [];
   try {
-    return await runConciergeWakeInner(env, priorCost, startedAt);
+    return await runConciergeWakeInner(env, priorCost, startedAt, retryNotes);
   } catch (e) {
     console.log(JSON.stringify({ level: "error", event: "concierge_run_failed", message: String(e) }));
     try {
-      await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), tokensIn: 0, tokensOut: 0, costEstimateCents: 0, error: `unhandled: ${e instanceof Error ? e.message : String(e)}` });
+      await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), tokensIn: 0, tokensOut: 0, costEstimateCents: 0, error: `unhandled: ${e instanceof Error ? e.message : String(e)}`, modelRetry: retryNotes.length ? retryNotes.join("; ") : null });
     } catch {
       // Even the failure-record insert failed; the structured log above is
       // the last resort -- this function must still never throw.
@@ -342,11 +348,11 @@ export async function runConciergeWake(env: Env, priorCost = 0): Promise<Concier
     // full priced worst case instead: conservative (>= any real spend this
     // path could possibly have made), so the clerk under-affords rather
     // than over-affords when this phase's own true cost is unknowable.
-    return { actualCost: CONCIERGE_WORST_CASE_COST };
+    return { actualCost: CONCIERGE_WORST_CASE_COST + CONCIERGE_MAX_ATTEMPTS * CONCIERGE_ATTEMPT_COST };
   }
 }
 
-async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: number): Promise<ConciergeWakeResult> {
+async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: number, retryNotes: string[]): Promise<ConciergeWakeResult> {
   if (!env.ANTHROPIC_API_KEY) {
     await insertConciergeRun(env, { startedAt, finishedAt: Date.now(), tokensIn: 0, tokensOut: 0, costEstimateCents: 0, skippedReason: "no api key" });
     return { actualCost: CONCIERGE_FINALISE_COST };
@@ -408,6 +414,9 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
   }
 
   let attemptsMade = 0;
+  // D-079 R12: HTTP fetches beyond one per candidate, cumulative across this wake. A retry is one more subrequest the worst case
+  // (CONCIERGE_WORST_CASE_COST) does not price, so each is gated on the slack that remains.
+  let retrySpent = 0;
   let tokensIn = 0;
   let tokensOut = 0;
   let denyReason: string | null = null;
@@ -428,7 +437,11 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
     if (attemptsMade >= CONCIERGE_MAX_ATTEMPTS) break;
     attemptsMade++;
 
-    const result = await callAnthropic(env, MAINTAINER_MODELS.clerk, CONCIERGE_SYSTEM_PROMPT, buildConciergeUserPrompt(candidate));
+    const result = await callAnthropic(env, MAINTAINER_MODELS.clerk, CONCIERGE_SYSTEM_PROMPT, buildConciergeUserPrompt(candidate), {
+      mayRetry: canAffordConciergeRetry(priorCost, retrySpent),
+    });
+    retrySpent += result.attempts - 1;
+    if (result.retryNote) retryNotes.push(result.retryNote);
     tokensIn += result.usage.input_tokens;
     tokensOut += result.usage.output_tokens;
 
@@ -523,8 +536,9 @@ async function runConciergeWakeInner(env: Env, priorCost: number, startedAt: num
     // paying for a model call now says so.
     skippedReason: engagedResult || denyReason ? undefined : (inLoopSkip ?? undefined),
     error: runError ?? undefined,
+    modelRetry: retryNotes.length ? retryNotes.join("; ") : null,
   });
 
-  const actualCost = CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + attemptsMade * CONCIERGE_ATTEMPT_COST + (engagedResult ? CONCIERGE_POST_COST : 0) + CONCIERGE_FINALISE_COST;
+  const actualCost = CONCIERGE_DAILY_CAP_CHECK_COST + CONCIERGE_DETECTION_COST + (attemptsMade + retrySpent) * CONCIERGE_ATTEMPT_COST + (engagedResult ? CONCIERGE_POST_COST : 0) + CONCIERGE_FINALISE_COST;
   return { actualCost };
 }
