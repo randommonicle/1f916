@@ -29,4 +29,9 @@ test("GET /api/concierge-runs serves model_retry and the note no longer calls a 
   assert.match(page.note, /model_retry is null unless a model call failed/);
   assert.match(page.note, /'model call failed' means the call returned an error, so no tokens came back/);
   assert.doesNotMatch(page.note, /Those three carry a real, non-zero cost/);
+  assert.doesNotMatch(page.note, /made and billed/, "R16: no claim about what Anthropic billed");
+  assert.doesNotMatch(page.note, /real, non-zero cost/);
+  assert.match(page.note, /'model call failed' is the third reason a run can post nothing, and it is the one outcome that returned no answer/);
+  assert.match(page.note, /the first failed attempt of a call that then recovered leaves no trace in skipped_reason or error/);
+  assert.doesNotMatch(page.note, /a recovered call leaves no trace/);
 });

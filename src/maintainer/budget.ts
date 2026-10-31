@@ -123,6 +123,10 @@ export function estimateSweepCost(proposalsProcessed: number): number {
 // resolves to an empty bucket, never more.
 export const MANUAL_TRIGGER_PRECHECK_COST = 3;
 
+// D-079 (src/maintainer/catchup.ts): the catch-up wake's own skip-check read (catchupWanted, one D1 statement) runs before the sweep in the same
+// invocation, so a catch-up that proceeds adds it to the priorCost every downstream gate sees, as the manual trigger adds its rate-cap reads.
+export const CATCHUP_PRECHECK_COST = 1;
+
 // Pure. May the judgment wake OPEN another batch? True only if, after the
 // sweep (priorCost), the wake's fixed reads, the replay rows already
 // processed, and the batches already opened, there is room for one MORE batch

@@ -7,6 +7,7 @@ import worker from "../src/index.ts";
 import { createLocalD1, insertCitizen, insertProposal, type LocalD1 } from "./helpers/local-d1.ts";
 import { installSubrequestCounter, clerkDraftText, rpcBalanceResponse, judgmentDecisionText } from "./helpers/subrequest-counter.ts";
 import { CLERK_CATCHUP_CRON, JUDGMENT_CATCHUP_CRON, CLERK_CRON, JUDGMENT_CRON, classifyCron } from "../src/maintainer/schedule.ts";
+import { CATCHUP_PRECHECK_COST } from "../src/maintainer/budget.ts";
 import { catchupWanted } from "../src/maintainer/catchup.ts";
 import { utcMidnight } from "../src/society.ts";
 import type { Env } from "../src/society.ts";
@@ -164,6 +165,25 @@ test("an unrecognised cron still sweeps and runs no wake (unchanged behaviour)",
     const status = (d1.raw.prepare("SELECT status FROM proposals WHERE id = ?").get(due) as { status: string }).status;
     assert.notEqual(status, "open");
     assert.equal(c.fetches(), 0);
+  } finally {
+    c.restore();
+  }
+});
+
+test("F1: a proceeding catch-up adds its own skip-check read to priorCost (clerk insert cap 50 - (3 + 1) - 18 - 2 = 26, not 27)", async () => {
+  const drafts = clerkDraftText(Array.from({ length: 40 }, (_, i) => ({ kind: "bookkeeping_note", note: `n${i}` })));
+  const c = installSubrequestCounter((url) => {
+    if (!url.includes("anthropic")) return rpcBalanceResponse();
+    return new Response(JSON.stringify({ content: [{ type: "text", text: drafts }], stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 40 } }), { status: 200 });
+  });
+  const d1 = createLocalD1({ onExec: c.consume });
+  try {
+    seed(d1);
+    priorRow(d1, "clerk", { modelRetry: RERUN });
+    await callScheduled(CLERK_CATCHUP_CRON, makeEnv(d1));
+    const newest = d1.raw.prepare("SELECT items_drafted FROM maintainer_runs WHERE kind = 'clerk' ORDER BY id DESC LIMIT 1").get() as { items_drafted: number };
+    assert.equal(newest.items_drafted, 50 - (3 + CATCHUP_PRECHECK_COST) - 18 - 2);
+    assert.equal(newest.items_drafted, 26);
   } finally {
     c.restore();
   }

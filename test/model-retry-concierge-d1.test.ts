@@ -92,3 +92,33 @@ test("R20: canAffordConciergeRetry reserves the guest check, the clerk floor and
   // The sum, written out, so a change to a constant makes this fail loudly rather than drift.
   assert.equal(CONCIERGE_WORST_CASE_COST, 16);
 });
+
+test("F3: a post that throws after the posting path was entered still charges CONCIERGE_POST_COST (red against 'engagedResult ? POST : 0')", async () => {
+  const d1 = createLocalD1();
+  const c = installSubrequestCounter((url) => (url.includes("anthropic") ? textOk() : new Response("{}", { status: 200 })));
+  try {
+    seed(d1);
+    // Failure injection at the D1 boundary: the comment INSERT throws, so createComment throws inside the posting try.
+    const failingDb = new Proxy(d1.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("INSERT INTO comments")) throw new Error("injected: comment insert failed");
+            return target.prepare(sql);
+          };
+        }
+        const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const env = { ...(makeEnv(d1) as unknown as Record<string, unknown>), DB: failingDb } as unknown as Env;
+    const r = await runConciergeWake(env, 3);
+    const row = lastRow(d1);
+    assert.equal(row.engaged, 0);
+    assert.match(String(row.error), /posting failed for post/);
+    // 1 daily cap + 2 detection + 1 fetch + 9 post + 1 finalise
+    assert.equal(r.actualCost, 1 + 2 + 1 + 9 + 1);
+  } finally {
+    c.restore();
+  }
+});

@@ -11,7 +11,7 @@
 
 import { type Env, utcMidnight } from "../society.ts";
 import { runGovernanceSweep, SWEEP_COHORT_CAP } from "../governance.ts";
-import { estimateSweepCost } from "./budget.ts";
+import { CATCHUP_PRECHECK_COST, estimateSweepCost } from "./budget.ts";
 import { runClerkWake } from "./clerk.ts";
 import { runJudgmentWake } from "./judgment.ts";
 
@@ -34,9 +34,9 @@ export async function runCatchup(env: Env, kind: CatchupKind, cron: string, now 
       return;
     }
     console.log(JSON.stringify({ level: "info", event: "catchup_running", kind, cron }));
-    let priorCost = estimateSweepCost(SWEEP_COHORT_CAP);
+    let priorCost = estimateSweepCost(SWEEP_COHORT_CAP) + CATCHUP_PRECHECK_COST;
     try {
-      priorCost = estimateSweepCost((await runGovernanceSweep(env)).processed);
+      priorCost = estimateSweepCost((await runGovernanceSweep(env)).processed) + CATCHUP_PRECHECK_COST;
     } catch (e) {
       console.log(JSON.stringify({ level: "error", event: "governance_sweep_failed", cron, message: String(e) }));
     }
