@@ -31,8 +31,8 @@ test("canOpenJudgmentBatch: a quiet invocation (zero-due sweep, no replay) can o
 });
 
 test("canOpenJudgmentBatch: the D-041 COMPOUND worst case (2-due sweep + 3 replay rows) sheds even the FIRST batch", () => {
-  // 21 (sweep) + 6 (wake fixed) + 18 (3 replay x 6) = 45 already spent; a batch
-  // (8) + finalise reserve (2) = 55 > 50. This is the exact case §9 exists for:
+  // 21 (sweep) + 7 (wake fixed) + 18 (3 replay x 6) = 46 already spent; a batch
+  // (8) + finalise reserve (2) = 56 > 50. This is the exact case §9 exists for:
   // the seams coincide and the invocation must shed, loudly, before starting.
   assert.equal(canOpenJudgmentBatch(estimateSweepCost(2), 3, 0), false);
 });
