@@ -137,13 +137,14 @@ test("R13: at the budget floor the retry is shed, the run row finalises and the 
   }
 });
 
-test("R13: a spent retry is carried into the next batch's gate (priorCost 26: without the carry batch 2 would open, with it batch 2 is shed)", async () => {
+test("R13: a spent retry is carried into the next batch's gate (priorCost 25: without the carry batch 2 would open, with it batch 2 is shed)", async () => {
+  // canOpenJudgmentBatch(p, 0, 1): p + 7 + 8 + 8 + 2 <= 50 -> p <= 25 opens batch 2; with the batch-1 retry carried (p + 1) it is 26 and sheds.
   const s = scripted(["403", "ok", "ok"]);
   const d1 = createLocalD1({ onExec: s.c.consume });
   try {
     seed(d1, 2);
-    preConsume(s.c, 26);
-    await runJudgmentWake(makeEnv(d1), cache(), 26);
+    preConsume(s.c, 25);
+    await runJudgmentWake(makeEnv(d1), cache(), 25);
     const r = row(d1);
     assert.equal(s.calls(), 2, "batch 1 retried once; batch 2 never opened");
     assert.equal(s.c.breached(), false);

@@ -1906,8 +1906,8 @@ test("§9 shed: a busy co-resident sweep (priorCost = 2-due sweep) sheds later b
     }
     const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
 
-    // priorCost = estimateSweepCost(2) = 21. canOpenJudgmentBatch: batch 1 (37)
-    // and batch 2 (45) fit; batch 3 (53) does not -> shed after 2 batches.
+    // priorCost = estimateSweepCost(2) = 21. canOpenJudgmentBatch: batch 1 (38)
+    // and batch 2 (46) fit; batch 3 (54) does not -> shed after 2 batches.
     await runJudgmentWake(env, cache, estimateSweepCost(2));
 
     assert.equal(countPosts(d1), 2, "only two bulletins decided before the loop shed the rest for budget");
@@ -2143,6 +2143,34 @@ test("T8 a quiet wake (nothing stale) leaves the run row's error null", async ()
     assert.equal(run.error, null);
     assert.equal(run.items_actioned, 0);
   } finally {
+    d1.close();
+  }
+});
+
+test("F1 (review fix): a FAILED maintainer-citizen load does not skip the stale-bulletin expiry: the draft is rejected and the run row carries the count and the load error", async () => {
+  const d1 = createLocalD1();
+  const PINNED = 1_800_000_000_000;
+  const restoreClock = pinClock(PINNED);
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const staleId = seedPendingBulletin(d1, runId, PINNED - 8 * DAY_MS);
+    const DB = {
+      prepare: (sql: string) => {
+        if (/SELECT handle, model FROM citizens/i.test(sql)) throw new Error("citizens read refused");
+        return d1.DB.prepare(sql);
+      },
+      batch: (stmts: Parameters<LocalD1["DB"]["batch"]>[0]) => d1.DB.batch(stmts),
+    } as unknown as LocalD1["DB"];
+    await runJudgmentWake({ DB } as unknown as Env, freshConstitutionCache());
+    assert.equal(getQueueRow(d1, staleId).status, "rejected");
+    assert.equal(getQueueRow(d1, staleId).decided_reason, STALE_REASON);
+    const run = latestRun(d1);
+    assert.match(run.error ?? "", /failed while loading the maintainer's own citizen record: citizens read refused/);
+    assert.match(run.error ?? "", /expired_stale_bulletins=1/);
+    assert.equal(run.items_actioned, 1);
+  } finally {
+    restoreClock();
     d1.close();
   }
 });

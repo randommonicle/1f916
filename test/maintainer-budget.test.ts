@@ -41,8 +41,8 @@ test("canOpenJudgmentBatch: a one-due sweep with no replay opens 3 batches then 
   const priorCost = estimateSweepCost(1); // 12
   assert.equal(canOpenJudgmentBatch(priorCost, 0, 0), true);
   assert.equal(canOpenJudgmentBatch(priorCost, 0, 1), true);
-  assert.equal(canOpenJudgmentBatch(priorCost, 0, 2), true, "3rd batch: 12+6+16+8+2=44 <= 50");
-  assert.equal(canOpenJudgmentBatch(priorCost, 0, 3), false, "4th batch: 12+6+24+8+2=52 > 50 -- shed");
+  assert.equal(canOpenJudgmentBatch(priorCost, 0, 2), true, "3rd batch: 12+7+16+8+2=45 <= 50");
+  assert.equal(canOpenJudgmentBatch(priorCost, 0, 3), false, "4th batch: 12+7+24+8+2=53 > 50 -- shed");
 });
 
 test("affordableClerkInserts: near the ceiling on a quiet sweep, shrinking as the sweep gets busier, never negative, never above the ceiling", () => {

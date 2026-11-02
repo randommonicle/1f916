@@ -1599,8 +1599,8 @@ export async function reconcileApprovedQueue(
 // ---------- the wake itself ----------
 
 // D1-touching. Wake-start expiry of stale pending bulletin drafts, run BEFORE
-// reconcileApprovedQueue (so it also runs on a no-key wake) and BEFORE the
-// pending count (so pending_at_start already excludes the rows it decides).
+// the maintainer-citizen load and reconcileApprovedQueue (so it also runs on a
+// no-key wake and when the citizen load fails) and BEFORE the pending count (so pending_at_start already excludes the rows it decides).
 // One statement. The count is read defensively: the D1 test harness can strip
 // `meta`.
 async function expireStaleBulletinDrafts(env: Env, now: number): Promise<number> {
@@ -1687,6 +1687,18 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     runError = appendError(runError, `constitution detection/reconciliation threw: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // E2: expire stale pending bulletin drafts. DB-only, so it runs before the
+  // maintainer-citizen load (a failed load must not skip it) and before the
+  // API-key gate. The count joins items_actioned on every finalisation path
+  // below, never batchItemsActioned (so never the overflow computation).
+  let expiredStaleBulletins = 0;
+  try {
+    expiredStaleBulletins = await expireStaleBulletinDrafts(env, startedAt);
+  } catch (e) {
+    runError = appendError(runError, `stale bulletin expiry failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (expiredStaleBulletins > 0) runError = appendError(runError, `expired_stale_bulletins=${expiredStaleBulletins}`);
+
   // L8: read once per wake, DB-only. Runs BEFORE the API-key gate below
   // (fixes pass, exchange/REVIEW_wake-reconciliation_2026-08-11.md CLAUDE
   // round 2, "no-key-bypasses-reconciliation") -- wake-start reconciliation
@@ -1702,6 +1714,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     runError = appendError(runError, `failed while loading the maintainer's own citizen record: ${e instanceof Error ? e.message : String(e)}`);
     await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
+      itemsActioned: expiredStaleBulletins,
       overflowDropped: 0,
       error: runError,
     });
@@ -1715,17 +1728,6 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   // there logs into runError and is left for next time -- it must never
   // stop the pending batch below from running, and (this fix) it must
   // never be silently skipped just because the key is dry.
-  // E2: expire stale pending bulletin drafts first. The count joins
-  // items_actioned on every finalisation path below, never batchItemsActioned
-  // (so never the overflow computation).
-  let expiredStaleBulletins = 0;
-  try {
-    expiredStaleBulletins = await expireStaleBulletinDrafts(env, startedAt);
-  } catch (e) {
-    runError = appendError(runError, `stale bulletin expiry failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  if (expiredStaleBulletins > 0) runError = appendError(runError, `expired_stale_bulletins=${expiredStaleBulletins}`);
-
   const reconciliation = await reconcileApprovedQueue(env, maintainerCitizen, startedAt);
   if (reconciliation.error) runError = appendError(runError, reconciliation.error);
 

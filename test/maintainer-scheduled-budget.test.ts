@@ -241,6 +241,9 @@ test("PROOF J-interior -- a 1-due sweep + 1 replayed row + a full pending fideli
     const posts = (d1.raw.prepare("SELECT COUNT(*) AS n FROM posts").get() as { n: number }).n;
     assert.equal(counter.breached(), false, `interior compound never exceeded budget (total ${counter.total()}, d1 ${counter.d1()}, fetch ${counter.fetches()}, posts ${posts})`);
     assert.ok(counter.total() <= 50, `interior compound total ${counter.total()} <= 50 -- the real peak, not the shed boundary`);
+    // The documented shed point, asserted: canOpenJudgmentBatch(12, 1, b) at fixed cost 7 opens batches 1-2 and sheds before the 3rd.
+    const interiorRun = d1.raw.prepare("SELECT error FROM maintainer_runs WHERE kind = 'judgment' ORDER BY started_at DESC LIMIT 1").get() as { error: string | null };
+    assert.match(interiorRun.error ?? "", /judgment batches shed for subrequest budget after 2 batches/, "the interior case opens exactly two batches, then sheds loudly");
   } finally {
     counter.restore();
     d1.close();
