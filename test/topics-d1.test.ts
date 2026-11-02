@@ -504,7 +504,7 @@ test("7b: the concierge never picks a topic or a comment on one (DEFERRED-CONCIE
     // opened inside the window: that refusal IS the proof the topic was not
     // taken for the artifact, and the dupe rule spanning kinds is intended (a
     // bulletin identical to a standing topic is a duplicate on the board).
-    const rec = await reconcileApprovedQueue(env, maintainer);
+    const rec = await reconcileApprovedQueue(env, maintainer, Date.now());
     assert.ok(rec.error?.includes("A near-identical post exists"), `the reconciliation tried to post the bulletin: ${rec.error}`);
     assert.equal(rec.actioned, 0);
     assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'post'").get() as { n: number }).n, 0, "no bulletin row: refused by the dupe rule, not by mistaking the topic for it");

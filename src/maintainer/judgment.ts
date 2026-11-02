@@ -70,6 +70,19 @@ async function loadMaintainerCitizen(env: Env) {
 // several times over), not a First Laws regression.
 export const JUDGMENT_QUEUE_CAP = 1;
 
+// A bulletin_draft older than this at a judgment wake is rejected unpublished:
+// the clerk's figures are frozen at drafting and the pending queue drains
+// oldest first, so a backlog can otherwise publish a weeks-old bulletin, pinned
+// (post 24, 1 Nov 2026). A maximum age at a wake, not a publication guarantee:
+// a draft skipped by one wake's budget can still expire at the next.
+export const BULLETIN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const STALE_BULLETIN_REASON = "stale: drafted more than 7 days before this wake; not published";
+
+// Strict: a draft exactly BULLETIN_MAX_AGE_MS old survives.
+export function isStaleBulletin(createdAt: number, now: number): boolean {
+  return createdAt < now - BULLETIN_MAX_AGE_MS;
+}
+
 export interface QueueRow {
   id: number;
   kind: DbQueueKind;
@@ -96,6 +109,11 @@ export interface QueueRow {
   // reaches the model at all -- see the withhold contract in the scanner
   // below, not this field).
   fidelity_evidence: string | null;
+  // Epoch ms the clerk drafted the row (never rewritten). REQUIRED, never
+  // optional: a missing timestamp must be a type or fixture error, not read as
+  // fresh, or the stale-bulletin belt in resolveExecution could publish a stale
+  // draft.
+  created_at: number;
 }
 
 // ---------- pure: bulletin splitting ----------
@@ -257,7 +275,7 @@ export type ResolvedExecution =
 // is null, so createPost is never reached. An approved bookkeeping_note or
 // registration_check executes nothing (design doc S10.1/S10.3:
 // observational only) but still reports "approved" for the public record.
-export function resolveExecution(item: QueueRow, decision: JudgmentDecision): ResolvedExecution {
+export function resolveExecution(item: QueueRow, decision: JudgmentDecision, now: number): ResolvedExecution {
   if (decision.decision !== "approve") {
     return { status: "rejected", reason: decision.reason, execute: null };
   }
@@ -269,6 +287,12 @@ export function resolveExecution(item: QueueRow, decision: JudgmentDecision): Re
     };
   }
   if (item.kind === "bulletin_draft") {
+    // A draft older than BULLETIN_MAX_AGE_MS at this wake is never published,
+    // whatever the judge said: its "now shows" figures are the clerk's, frozen
+    // at drafting. Checked before the split so a stale draft costs nothing.
+    if (isStaleBulletin(item.created_at, now)) {
+      return { status: "rejected", reason: STALE_BULLETIN_REASON, execute: null };
+    }
     const { title, body } = splitBulletinDraft(item.note);
     const denyReason = bulletinDenyCheck(title, body);
     if (denyReason) {
@@ -621,6 +645,7 @@ async function classifyAndHydratePage(env: Env, page: RawScanRow[]): Promise<{ c
     target_content: null,
     target_mod_state: null,
     fidelity_evidence: null,
+    created_at: raw.created_at,
     ...over,
   });
 
@@ -1017,6 +1042,7 @@ export async function executeJudgmentDecisions(
   maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
   batchMap: Map<number, QueueRow>,
   decisions: JudgmentDecision[],
+  now: number,
 ): Promise<{ actioned: number; error: string | null }> {
   let actioned = 0;
   const errors: string[] = [];
@@ -1027,7 +1053,7 @@ export async function executeJudgmentDecisions(
     // execute null here, so the claim below stamps "rejected" directly
     // and nothing downstream ever has an "approved but don't post"
     // special case to get wrong.
-    const resolved = resolveExecution(item, d);
+    const resolved = resolveExecution(item, d, now);
 
     // Wake-start reconciliation (reconcileApprovedQueue below) needs to
     // recover WHICH action a claimed-but-never-executed flag_review
@@ -1124,6 +1150,7 @@ interface ReconcileRow {
   note: string;
   decided_at: number | null;
   decided_reason: string | null;
+  created_at: number;
 }
 
 // D1-touching. Only the two kinds whose approval executes anything
@@ -1186,7 +1213,7 @@ export const JUDGMENT_REPLAY_CAP = 3;
 // decisions heal first and older ones wait rather than any row being lost.
 async function fetchReconcilableApprovedRows(env: Env): Promise<ReconcileRow[]> {
   const { results } = await env.DB.prepare(
-    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') AND (kind != 'flag_review' OR (target_type IN ('post', 'comment') AND target_id IS NOT NULL)) ORDER BY decided_at DESC LIMIT ?",
+    "SELECT id, kind, target_type, target_id, note, decided_at, decided_reason, created_at FROM maintainer_queue WHERE status = 'approved' AND kind IN ('flag_review', 'bulletin_draft') AND (kind != 'flag_review' OR (target_type IN ('post', 'comment') AND target_id IS NOT NULL)) ORDER BY decided_at DESC LIMIT ?",
   )
     .bind(JUDGMENT_REPLAY_CAP)
     .all<ReconcileRow>();
@@ -1396,6 +1423,7 @@ async function bulletinArtifactExists(env: Env, title: string, body: string, dec
 export async function reconcileApprovedQueue(
   env: Env,
   maintainerCitizen: Awaited<ReturnType<typeof loadMaintainerCitizen>>,
+  now: number,
 ): Promise<{ actioned: number; error: string | null; rowsProcessed: number }> {
   // rowsProcessed: how many stranded rows this replay actually walked (bounded
   // by JUDGMENT_REPLAY_CAP). The judgment batch loop prices this at
@@ -1534,6 +1562,14 @@ export async function reconcileApprovedQueue(
         }
         const exists = await bulletinArtifactExists(env, title, body, row.decided_at);
         if (exists) continue; // already posted; idempotent skip
+        // AFTER the artifact check, on purpose: a bulletin that WAS posted stays
+        // 'approved' for ever and is re-read every wake (newest 3), so an age
+        // check first would re-stamp a published bulletin "not published".
+        if (isStaleBulletin(row.created_at, now)) {
+          const stamped = await stampQueueRow(env, row.id, "rejected", STALE_BULLETIN_REASON, { requirePending: false });
+          if (stamped) actioned++;
+          continue;
+        }
         await createPost(env, maintainerCitizen, title, body, null, true);
         actioned++;
       }
@@ -1561,6 +1597,20 @@ export async function reconcileApprovedQueue(
 }
 
 // ---------- the wake itself ----------
+
+// D1-touching. Wake-start expiry of stale pending bulletin drafts, run BEFORE
+// reconcileApprovedQueue (so it also runs on a no-key wake) and BEFORE the
+// pending count (so pending_at_start already excludes the rows it decides).
+// One statement. The count is read defensively: the D1 test harness can strip
+// `meta`.
+async function expireStaleBulletinDrafts(env: Env, now: number): Promise<number> {
+  const res = await env.DB.prepare(
+    "UPDATE maintainer_queue SET status = 'rejected', decided_at = ?, decided_reason = ? WHERE status = 'pending' AND kind = 'bulletin_draft' AND created_at < ?",
+  )
+    .bind(now, STALE_BULLETIN_REASON, now - BULLETIN_MAX_AGE_MS)
+    .run();
+  return (res as { meta?: { changes?: number } } | null)?.meta?.changes ?? 0;
+}
 
 // The scheduled() entry point for the weekly cron. Never throws -- every
 // path writes exactly one maintainer_runs row and returns.
@@ -1665,7 +1715,18 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   // there logs into runError and is left for next time -- it must never
   // stop the pending batch below from running, and (this fix) it must
   // never be silently skipped just because the key is dry.
-  const reconciliation = await reconcileApprovedQueue(env, maintainerCitizen);
+  // E2: expire stale pending bulletin drafts first. The count joins
+  // items_actioned on every finalisation path below, never batchItemsActioned
+  // (so never the overflow computation).
+  let expiredStaleBulletins = 0;
+  try {
+    expiredStaleBulletins = await expireStaleBulletinDrafts(env, startedAt);
+  } catch (e) {
+    runError = appendError(runError, `stale bulletin expiry failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (expiredStaleBulletins > 0) runError = appendError(runError, `expired_stale_bulletins=${expiredStaleBulletins}`);
+
+  const reconciliation = await reconcileApprovedQueue(env, maintainerCitizen, startedAt);
   if (reconciliation.error) runError = appendError(runError, reconciliation.error);
 
   if (!env.ANTHROPIC_API_KEY) {
@@ -1676,7 +1737,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
       skippedReason: "no api key",
-      itemsActioned: reconciliation.actioned,
+      itemsActioned: expiredStaleBulletins + reconciliation.actioned,
       overflowDropped: 0,
       error: runError ?? undefined,
     });
@@ -1690,7 +1751,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
     runError = appendError(runError, `failed while counting the pending queue: ${e instanceof Error ? e.message : String(e)}`);
     await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
-      itemsActioned: reconciliation.actioned,
+      itemsActioned: expiredStaleBulletins + reconciliation.actioned,
       overflowDropped: 0,
       error: runError,
     });
@@ -1704,7 +1765,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       tokensIn: 0,
       tokensOut: 0,
       costEstimateCents: 0,
-      itemsActioned: reconciliation.actioned,
+      itemsActioned: expiredStaleBulletins + reconciliation.actioned,
       overflowDropped: 0,
       error: runError ?? undefined,
     });
@@ -1840,7 +1901,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
         break;
       }
 
-      const executed = await executeJudgmentDecisions(env, maintainerCitizen, batchMap, decisions);
+      const executed = await executeJudgmentDecisions(env, maintainerCitizen, batchMap, decisions, startedAt);
       batchItemsActioned += executed.actioned;
       if (executed.error) runError = appendError(runError, executed.error);
     }
@@ -1885,7 +1946,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   // reported above -- they must not also inflate overflow_dropped as if
   // they were silently dropped by the JUDGMENT_MAX_BATCHES ceiling.
   const overflowDropped = computeOverflowDropped(pendingAtStart, batchItemsActioned + allWithheld.length);
-  const itemsActioned = reconciliation.actioned + batchItemsActioned;
+  const itemsActioned = expiredStaleBulletins + reconciliation.actioned + batchItemsActioned;
   try {
     await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),

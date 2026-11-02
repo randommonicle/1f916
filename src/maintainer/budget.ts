@@ -33,9 +33,14 @@ export const SWEEP_PER_PROPOSAL_COST = 9;
 
 // The judgment wake's fixed reads before the batch loop: run-row reserve,
 // detection (conservatively 1, usually 0 cached), set-based reconciliation,
-// maintainer-citizen load, approved-row read, pending count. Finalise is
-// reserved separately (FINALISE_RESERVE).
-export const JUDGMENT_WAKE_FIXED_COST = 6;
+// maintainer-citizen load, the stale-bulletin expiry UPDATE (one statement, every
+// wake), approved-row read, pending count. Finalise is reserved separately
+// (FINALISE_RESERVE).
+// DEFERRED-JUDGMENT-SHED-ROOT-CAUSE: the sweep and replay sharing the Sunday
+// 07:00 wake leave room for about two batches, so the backlog never drains
+// (two decisions a week since run 59). Separate brief; this constant only
+// prices the expiry statement.
+export const JUDGMENT_WAKE_FIXED_COST = 7;
 
 // One stranded approved row replayed through the real executors costs up to 6
 // (the bulletin ceiling: claim + createPost's daily-count + dupe + insert +

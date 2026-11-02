@@ -458,12 +458,14 @@ test("loud catch: a claim UPDATE that commits but reports no meta reaches execut
       note: "flagged as spam",
       target_content: null,
       target_mod_state: null,
+      fidelity_evidence: null,
+      created_at: Date.now(),
     };
     const batchMap = new Map<number, QueueRow>([[queueId, queueRow]]);
     const decisions: JudgmentDecision[] = [{ queue_id: queueId, decision: "approve", reason: "confirmed spam", action: "remove" }];
 
     const env = { DB: withQueueUpdateMetaStripped(d1.DB) } as unknown as Env;
-    const result = await executeJudgmentDecisions(env, maintainer, batchMap, decisions);
+    const result = await executeJudgmentDecisions(env, maintainer, batchMap, decisions, Date.now());
 
     // The claim UPDATE committed for real (verified directly against the
     // unwrapped DB) even though the code could not tell -- the exact
@@ -494,7 +496,7 @@ test("bulletin reconciliation: an approved draft with no post gets one created v
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, 1);
     assert.equal(result.error, null);
@@ -533,7 +535,7 @@ test("§6 replay cap: reconcileApprovedQueue replays at most JUDGMENT_REPLAY_CAP
     }
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, JUDGMENT_REPLAY_CAP, "exactly JUDGMENT_REPLAY_CAP rows replay this wake -- the cohort is bounded so a backlog cannot exhaust the invocation before the pending batch");
     assert.equal(countPosts(d1), JUDGMENT_REPLAY_CAP, "exactly that many bulletins posted, not the whole backlog");
@@ -570,7 +572,7 @@ test("bulletin reconciliation: a deny-tripping draft flips to rejected with the 
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, 1, "the reject-flip itself is the completed job, same counting convention as the primary path");
     assert.equal(result.error, null);
@@ -609,7 +611,7 @@ test("idempotency: running reconciliation twice on the same rows actions nothing
 
     const env = { DB: d1.DB } as unknown as Env;
 
-    const first = await reconcileApprovedQueue(env, maintainer);
+    const first = await reconcileApprovedQueue(env, maintainer, Date.now());
     assert.equal(first.actioned, 2, "both rows execute on the first pass");
     // countPosts is 2: the pre-existing flagged post fixture PLUS the one
     // new bulletin post reconciliation just created -- moderating a post
@@ -623,7 +625,7 @@ test("idempotency: running reconciliation twice on the same rows actions nothing
     assert.equal(countPosts(d1), 2);
     assert.equal(countModerationEvents(d1), 2);
 
-    const second = await reconcileApprovedQueue(env, maintainer);
+    const second = await reconcileApprovedQueue(env, maintainer, Date.now());
     assert.equal(second.actioned, 0, "both artifacts already exist -- nothing double-executes");
     assert.equal(second.error, null);
     assert.equal(countPosts(d1), 2, "still exactly two posts (flagged + bulletin), not three");
@@ -678,7 +680,7 @@ test("out-of-scope kinds: approved bookkeeping_note/registration_check rows are 
     const beforeRegistration = getQueueRow(d1, registrationId);
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, 2, "only the flag_review and bulletin_draft rows are actioned");
     assert.equal(result.error, null);
@@ -715,7 +717,7 @@ test("poisoned row: a flag_review targeting a vanished post errors loudly but do
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, 1, "the sibling bulletin row still executes despite the poisoned flag_review");
     assert.notEqual(result.error, null, "the poisoned row's failure is loud, not silently swallowed");
@@ -788,7 +790,7 @@ test("superseded: a later, different decision on the same target is never silent
     // producing a genuine identity_events artifact after decided_at.
     await moderateContent(env, maintainer, "post", postId, "restore", "restored after appeal, the flag was mistaken");
 
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, postId).mod_state, null, "the stranded remove never executes -- the later restore is not silently overwritten");
     assert.equal(result.actioned, 1, "the supersede re-stamp is itself the completed job, same counting convention as an executed action");
@@ -799,7 +801,7 @@ test("superseded: a later, different decision on the same target is never silent
 
     // "the superseded row must never be re-selected in later wakes" --
     // prove it, not just assert the immediate state.
-    const second = await reconcileApprovedQueue(env, maintainer);
+    const second = await reconcileApprovedQueue(env, maintainer, Date.now());
     assert.equal(second.actioned, 0, "a 'rejected' row is excluded by fetchReconcilableApprovedRows's own status='approved' filter -- never reprocessed");
     assert.equal(countModerationEvents(d1), 1, "still exactly the one restore event -- no duplicate action, no phantom remove");
     assert.equal(getQueueRow(d1, queueId).status, "rejected", "status is stable across a second pass, not reverted or reprocessed");
@@ -831,7 +833,7 @@ test("an exact-action artifact anywhere in the window wins over an earlier diffe
     // through a route this test does not need to name.
     await moderateContent(env, maintainer, "post", postId, "remove", "confirmed after review");
 
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, 0, "the exact artifact already exists -- idempotent skip, not a re-execution and not a supersede");
     assert.equal(getQueueRow(d1, queueId).status, "approved", "an idempotent skip leaves the row exactly as it was, unlike a supersede");
@@ -861,7 +863,7 @@ test("false-decode: a pre-encoding free-text decided_reason that mimics the acti
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, postId).mod_state, null, "no action a judge never machine-recorded via mq1 is ever executed");
     assert.equal(countModerationEvents(d1), 0, "no artifact is fabricated from prose alone");
@@ -881,10 +883,10 @@ test("false-decode: a pre-encoding free-text decided_reason that mimics the acti
 
     // F-1/F-2 door probes named "three passes must yield the error/report
     // at most once, then silence" -- prove it, not just the first pass.
-    const second = await reconcileApprovedQueue(env, maintainer);
+    const second = await reconcileApprovedQueue(env, maintainer, Date.now());
     assert.equal(second.actioned, 0, "already rejected -- excluded from selection now, nothing left to retire");
     assert.equal(second.error, null, "the report does not repeat on the second pass");
-    const third = await reconcileApprovedQueue(env, maintainer);
+    const third = await reconcileApprovedQueue(env, maintainer, Date.now());
     assert.equal(third.actioned, 0);
     assert.equal(third.error, null, "still silent on the third pass");
   } finally {
@@ -909,7 +911,7 @@ test("false-decode: the dead bare '<action>: <reason>' shape (this file's own pr
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, postId).mod_state, null, "the dead bare-prefix shape decodes to null -- nothing executes");
     assert.notEqual(result.error, null, "left loud for manual review, same as any other undecodable row");
@@ -1112,7 +1114,7 @@ test("F-1: a real community-flag auto-collapse never masks a stranded approved r
     }
     assert.equal(getPost(d1, postId).mod_state, "collapsed", "test setup invariant: the real auto-collapse fired");
 
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, postId).mod_state, "removed", "the judge's approved remove executes -- an auto-collapse must never read as a superseding decision");
     assert.equal(result.actioned, 1, "the replay is the completed job");
@@ -1148,7 +1150,7 @@ test("F-5: a moderation reason that quotes another target's id inside its own te
     await moderateContent(env, maintainer, "post", otherPostId, "remove", `duplicate of removed post ${strandedPostId} spam`);
     assert.equal(countModerationEvents(d1), 1, "test setup invariant: exactly the one real moderation exists so far");
 
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, strandedPostId).mod_state, "removed", "the stranded approval must still execute -- a reason-embedded id on a DIFFERENT target is not this target's own artifact");
     assert.equal(countModerationEvents(d1), 2, "a real, new moderation event lands for the stranded post -- the old bug silently skipped this and left the count at 1");
@@ -1185,7 +1187,7 @@ test("boundary control: a target id that is a numeric prefix of another target's
     const env = { DB: d1.DB } as unknown as Env;
     await moderateContent(env, maintainer, "post", otherPostId, "remove", "unrelated spam on a different post");
 
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, strandedPostId).mod_state, "removed", "post 1's own stranded approval executes -- 'removed post 10' must never be read as post 1's artifact");
     assert.equal(result.actioned, 1);
@@ -1227,7 +1229,7 @@ test("F-2: within one pass, the newer decision executes and the older one is cor
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, postId).mod_state, "removed", "the society's most recent judgment (remove) must win, not the week-older collapse");
     assert.equal(result.actioned, 2, "the newer row replays for real, the older row is correctly superseded -- both are completed work");
@@ -1276,7 +1278,7 @@ test("F-2 control: two stranded decisions with the SAME verb on one target behav
     });
 
     const env = { DB: d1.DB } as unknown as Env;
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(getPost(d1, postId).mod_state, "removed", "the target ends up removed either way -- both rows agree on the action");
     assert.equal(countModerationEvents(d1), 1, "only ONE real remove event -- the second row's replay is an idempotent skip against the first's own artifact, not a duplicate action");
@@ -1317,7 +1319,7 @@ test("F-3 ruling (a), artifact PRESENT: a pre-encoding row whose target already 
     // after decided_at, for this exact target.
     await moderateContent(env, maintainer, "post", postId, "remove", "confirmed spam, take it down");
 
-    const result = await reconcileApprovedQueue(env, maintainer);
+    const result = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     assert.equal(result.actioned, 1, "retiring the row is the completed job");
     assert.equal(result.error, null, "PRESENT is silent -- the public record already carries the true outcome, retiring the row is bookkeeping, not news");
@@ -1346,9 +1348,9 @@ test("F-3 ruling (b): an approved flag_review with no post/comment target is nev
     const before = getQueueRow(d1, queueId);
 
     const env = { DB: d1.DB } as unknown as Env;
-    const first = await reconcileApprovedQueue(env, maintainer);
-    const second = await reconcileApprovedQueue(env, maintainer);
-    const third = await reconcileApprovedQueue(env, maintainer);
+    const first = await reconcileApprovedQueue(env, maintainer, Date.now());
+    const second = await reconcileApprovedQueue(env, maintainer, Date.now());
+    const third = await reconcileApprovedQueue(env, maintainer, Date.now());
 
     for (const result of [first, second, third]) {
       assert.equal(result.actioned, 0, "never selected, so never actioned");
@@ -1410,7 +1412,7 @@ test("F-7: the supersede re-stamp counts actioned only if stampQueueRow's UPDATE
     await moderateContent(realEnv, maintainer, "post", postId, "restore", "restored after appeal");
 
     const wrappedEnv = { DB: withQueueUpdateAlwaysReportsZeroChanges(d1.DB) } as unknown as Env;
-    const result = await reconcileApprovedQueue(wrappedEnv, maintainer);
+    const result = await reconcileApprovedQueue(wrappedEnv, maintainer, Date.now());
 
     assert.equal(result.actioned, 0, "the UPDATE reported zero rows changed -- must not be counted, even though this is the supersede branch");
     assert.equal(getQueueRow(d1, queueId).status, "approved", "consistent with the reported zero -- nothing really changed either");
@@ -1432,7 +1434,7 @@ test("F-7: the bulletin deny-check re-stamp counts actioned only if stampQueueRo
     });
 
     const wrappedEnv = { DB: withQueueUpdateAlwaysReportsZeroChanges(d1.DB) } as unknown as Env;
-    const result = await reconcileApprovedQueue(wrappedEnv, maintainer);
+    const result = await reconcileApprovedQueue(wrappedEnv, maintainer, Date.now());
 
     assert.equal(result.actioned, 0, "the UPDATE reported zero rows changed -- must not be counted, even on the deny-check branch");
     assert.equal(getQueueRow(d1, queueId).status, "approved", "consistent with the reported zero -- nothing really changed either");
@@ -1977,6 +1979,170 @@ test("§10 D-038 red-proof: 249 pending rows do NOT arm the trigger -- the bound
     assert.doesNotMatch(judgmentRun!.error ?? "", /cursor trigger reached/, "one row below the threshold must NOT arm the trigger");
   } finally {
     stub.restore();
+    d1.close();
+  }
+});
+
+// ---------- stale bulletin expiry (drafts/BRIEF-STALE-BULLETIN-EXPIRY-2026-11-02.md E2, E4) ----------
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const STALE_REASON = "stale: drafted more than 7 days before this wake; not published";
+
+// Pins Date.now() for the wake so a row meant to be EXACTLY 7 days old cannot
+// turn stale during setup. Restored in the caller's finally.
+function pinClock(at: number): () => void {
+  const real = Date.now;
+  Date.now = () => at;
+  return () => {
+    Date.now = real;
+  };
+}
+
+function seedPendingBulletin(d1: LocalD1, runId: number, createdAt: number, note = "Old digest\nFigures from long ago."): number {
+  return insertQueueRow(d1, runId, { kind: "bulletin_draft", note, status: "pending", decided_at: null, decided_reason: null, created_at: createdAt });
+}
+
+test("T1 a pending bulletin_draft 7 days + 1 ms old is rejected at wake start (stale reason), never posted; run row carries expired_stale_bulletins=1 in items_actioned, overflow unaffected", async () => {
+  const d1 = createLocalD1();
+  const stub = stubAnthropicFetch();
+  const PINNED = 1_800_000_000_000;
+  const restoreClock = pinClock(PINNED);
+  try {
+    seedMaintainer(d1);
+    const cache = await establishRealGenesisCache(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const staleId = seedPendingBulletin(d1, runId, PINNED - 7 * DAY_MS - 1);
+    // A fresh pending row so the batch loop runs: items_actioned = 1 expired + 1 decided.
+    const freshId = insertQueueRow(d1, runId, { kind: "bookkeeping_note", note: "routine", status: "pending", decided_at: null, decided_reason: null, created_at: PINNED - 1_000 });
+    const env = { DB: d1.DB, ANTHROPIC_API_KEY: "test-key" } as unknown as Env;
+    await runJudgmentWake(env, cache);
+
+    const q = getQueueRow(d1, staleId);
+    assert.equal(q.status, "rejected");
+    assert.equal(q.decided_reason, STALE_REASON);
+    assert.equal(countPosts(d1), 0, "the stale draft is never posted");
+    assert.equal(getQueueRow(d1, freshId).status, "approved");
+    const run = latestRun(d1);
+    assert.match(run.error ?? "", /expired_stale_bulletins=1/);
+    assert.equal(run.items_actioned, 2, "1 expired + 1 batch decision");
+    assert.equal(run.overflow_dropped, 0, "the expired row is excluded from pending_at_start, so overflow is untouched");
+  } finally {
+    restoreClock();
+    stub.restore();
+    d1.close();
+  }
+});
+
+test("T2 pending bulletins exactly 7 days old and 6 days old are untouched by the expiry", async () => {
+  const d1 = createLocalD1();
+  const PINNED = 1_800_000_000_000;
+  const restoreClock = pinClock(PINNED);
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const exact = seedPendingBulletin(d1, runId, PINNED - 7 * DAY_MS);
+    const six = seedPendingBulletin(d1, runId, PINNED - 6 * DAY_MS);
+    const env = { DB: d1.DB } as unknown as Env; // no key: only the DB-only half runs
+    await runJudgmentWake(env, freshConstitutionCache());
+    assert.equal(getQueueRow(d1, exact).status, "pending", "exactly 7 days survives (strict comparison)");
+    assert.equal(getQueueRow(d1, six).status, "pending");
+    assert.equal(latestRun(d1).error, null);
+  } finally {
+    restoreClock();
+    d1.close();
+  }
+});
+
+test("T3 pending non-bulletin kinds 30 days old are untouched by the expiry", async () => {
+  const d1 = createLocalD1();
+  const PINNED = 1_800_000_000_000;
+  const restoreClock = pinClock(PINNED);
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const ids = ["bookkeeping_note", "registration_check", "flag_review"].map((kind) =>
+      insertQueueRow(d1, runId, { kind, note: "old", status: "pending", decided_at: null, decided_reason: null, created_at: PINNED - 30 * DAY_MS }),
+    );
+    const env = { DB: d1.DB } as unknown as Env;
+    await runJudgmentWake(env, freshConstitutionCache());
+    for (const id of ids) assert.equal(getQueueRow(d1, id).status, "pending");
+    assert.equal(latestRun(d1).error, null);
+  } finally {
+    restoreClock();
+    d1.close();
+  }
+});
+
+test("T4 the expiry runs on a NO-KEY wake: the stale draft is rejected and the run row carries the count", async () => {
+  const d1 = createLocalD1();
+  const PINNED = 1_800_000_000_000;
+  const restoreClock = pinClock(PINNED);
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const staleId = seedPendingBulletin(d1, runId, PINNED - 8 * DAY_MS);
+    const env = { DB: d1.DB } as unknown as Env;
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    await runJudgmentWake(env, freshConstitutionCache());
+    assert.equal(getQueueRow(d1, staleId).status, "rejected");
+    assert.equal(getQueueRow(d1, staleId).decided_reason, STALE_REASON);
+    const run = latestRun(d1);
+    assert.equal(run.skipped_reason, "no api key");
+    assert.equal(run.items_actioned, 1);
+    assert.match(run.error ?? "", /expired_stale_bulletins=1/);
+  } finally {
+    restoreClock();
+    d1.close();
+  }
+});
+
+test("T6 replay of a stranded APPROVED stale bulletin with NO matching post is re-stamped rejected (stale) and posts nothing", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const id = insertQueueRow(d1, runId, { kind: "bulletin_draft", note: "Old digest\nStale figures.", status: "approved", created_at: now - 30 * DAY_MS, decided_at: now - 1_000, decided_reason: "judge approved" });
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer, now);
+    assert.equal(result.actioned, 1);
+    assert.equal(countPosts(d1), 0);
+    assert.deepEqual({ ...getQueueRow(d1, id) }, { status: "rejected", decided_reason: STALE_REASON });
+  } finally {
+    d1.close();
+  }
+});
+
+test("T7 replay of an approved stale bulletin that WAS posted is left 'approved', untouched (the post 24 case): the artifact check precedes the age check", async () => {
+  const d1 = createLocalD1();
+  try {
+    const maintainer = seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    const now = Date.now();
+    const id = insertQueueRow(d1, runId, { kind: "bulletin_draft", note: "Old digest\nStale figures.", status: "approved", created_at: now - 30 * DAY_MS, decided_at: now - 5_000, decided_reason: "judge approved" });
+    insertPost(d1, maintainer.id, { title: "Old digest", body: "Stale figures.", created_at: now - 4_000 });
+    const env = { DB: d1.DB } as unknown as Env;
+    const result = await reconcileApprovedQueue(env, maintainer, now);
+    assert.equal(result.actioned, 0);
+    assert.deepEqual({ ...getQueueRow(d1, id) }, { status: "approved", decided_reason: "judge approved" });
+    assert.equal(countPosts(d1), 1, "no duplicate post");
+  } finally {
+    d1.close();
+  }
+});
+
+test("T8 a quiet wake (nothing stale) leaves the run row's error null", async () => {
+  const d1 = createLocalD1();
+  try {
+    seedMaintainer(d1);
+    const runId = insertMaintainerRunRow(d1);
+    seedPendingBulletin(d1, runId, Date.now() - 1_000);
+    const env = { DB: d1.DB } as unknown as Env; // no key
+    await runJudgmentWake(env, freshConstitutionCache());
+    const run = latestRun(d1);
+    assert.equal(run.error, null);
+    assert.equal(run.items_actioned, 0);
+  } finally {
     d1.close();
   }
 });

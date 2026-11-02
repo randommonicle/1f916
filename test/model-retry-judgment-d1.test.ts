@@ -122,10 +122,10 @@ test("R13: at the budget floor the retry is shed, the run row finalises and the 
   const d1 = createLocalD1({ onExec: s.c.consume });
   try {
     seed(d1, 1);
-    preConsume(s.c, 34); // priorCost 34: a batch may still open (34+6+8+2 = 50) but a retry on top of it may not
-    assert.equal(canAffordJudgmentRetry(34, 0, 1), false);
-    assert.equal(canAffordJudgmentRetry(33, 0, 1), true);
-    await runJudgmentWake(makeEnv(d1), cache(), 34);
+    preConsume(s.c, 33); // priorCost 33: a batch may still open (33+7+8+2 = 50) but a retry on top of it may not
+    assert.equal(canAffordJudgmentRetry(33, 0, 1), false);
+    assert.equal(canAffordJudgmentRetry(32, 0, 1), true);
+    await runJudgmentWake(makeEnv(d1), cache(), 33);
     const r = row(d1);
     assert.equal(s.calls(), 1);
     assert.equal(s.c.breached(), false);

@@ -209,7 +209,7 @@ test("PROOF J5 -- the D-041 COMPOUND worst case (2-due sweep + 3 stranded replay
 // higher than either extreme: worked from budget.ts's real constants, a
 // 1-due sweep (estimateSweepCost(1) = 3 + 9 = 12) and a 1-row replay
 // (6) leaves canOpenJudgmentBatch(12, 1, batchesOpened) affording
-// batchesOpened <= 2, i.e. batches 1-3 open for real and a 4th sheds.
+// batchesOpened <= 1 (fixed cost 7), i.e. batches 1-2 open for real and a 3rd sheds.
 test("PROOF J-interior -- a 1-due sweep + 1 replayed row + a full pending fidelity set, opening several REAL batches on top of sweep+replay (the interior peak between J5's all-shed boundary and the quiet case)", async () => {
   const counter = installSubrequestCounter(judgmentResponder);
   const d1 = createLocalD1({ onExec: counter.consume });

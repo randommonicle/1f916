@@ -22,6 +22,9 @@ import {
   bulletinDenyCheck,
   parseJudgmentDecisions,
   resolveExecution,
+  BULLETIN_MAX_AGE_MS,
+  STALE_BULLETIN_REASON,
+  isStaleBulletin,
   shouldContinueBatchLoop,
   computeOverflowDropped,
   buildJudgmentPrompt,
@@ -42,6 +45,7 @@ function row(over: Partial<QueueRow> & { id: number }): QueueRow {
     target_content: null,
     target_mod_state: null,
     fidelity_evidence: null,
+    created_at: Date.now(),
     ...over,
   };
 }
@@ -135,37 +139,37 @@ function decision(over: Partial<JudgmentDecision> & { queue_id: number }): Judgm
 }
 
 test("resolveExecution: an approved bulletin_draft that fails the deny-check resolves to rejected with execute null (never posts)", () => {
-  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Claim your reward\nSign here to continue", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
-  const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "seems like a fine bulletin" }));
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Claim your reward\nSign here to continue", target_content: null, target_mod_state: null, fidelity_evidence: null, created_at: Date.now(), id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "seems like a fine bulletin" }), Date.now());
   assert.equal(resolved.status, "rejected");
   assert.equal(resolved.execute, null);
   assert.match(resolved.reason, /^deny-check: /);
 });
 
 test("resolveExecution: an approved bulletin_draft that passes the deny-check resolves to approved with a bulletin to post", () => {
-  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet this week.", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
-  const resolved = resolveExecution(item, decision({ queue_id: 1 }));
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet this week.", target_content: null, target_mod_state: null, fidelity_evidence: null, created_at: Date.now(), id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1 }), Date.now());
   assert.equal(resolved.status, "approved");
   assert.deepEqual(resolved.execute, { kind: "bulletin", title: "Weekly digest", body: "All quiet this week." });
 });
 
 test("resolveExecution: a rejected decision always executes nothing, regardless of kind", () => {
-  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet.", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
-  const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "not newsworthy" }));
+  const item = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet.", target_content: null, target_mod_state: null, fidelity_evidence: null, created_at: Date.now(), id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "not newsworthy" }), Date.now());
   assert.equal(resolved.status, "rejected");
   assert.equal(resolved.execute, null);
 });
 
 test("resolveExecution: an approved flag_review maps to a moderate execution with the decided action", () => {
-  const item = { kind: "flag_review" as const, target_type: "post" as const, target_id: 42, source_ref: "flag on post 42", note: "spam", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
-  const resolved = resolveExecution(item, decision({ queue_id: 1, action: "remove", reason: "confirmed spam" }));
+  const item = { kind: "flag_review" as const, target_type: "post" as const, target_id: 42, source_ref: "flag on post 42", note: "spam", target_content: null, target_mod_state: null, fidelity_evidence: null, created_at: Date.now(), id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1, action: "remove", reason: "confirmed spam" }), Date.now());
   assert.equal(resolved.status, "approved");
   assert.deepEqual(resolved.execute, { kind: "moderate", targetType: "post", targetId: 42, action: "remove" });
 });
 
 test("resolveExecution: an approved bookkeeping_note executes nothing but still reports approved", () => {
-  const item = { kind: "bookkeeping_note" as const, target_type: null, target_id: null, source_ref: null, note: "drift observed", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
-  const resolved = resolveExecution(item, decision({ queue_id: 1 }));
+  const item = { kind: "bookkeeping_note" as const, target_type: null, target_id: null, source_ref: null, note: "drift observed", target_content: null, target_mod_state: null, fidelity_evidence: null, created_at: Date.now(), id: 1 };
+  const resolved = resolveExecution(item, decision({ queue_id: 1 }), Date.now());
   assert.equal(resolved.status, "approved");
   assert.equal(resolved.execute, null);
 });
@@ -187,9 +191,10 @@ test("resolveExecution: an approved constitution_fidelity item executes nothing 
     target_content: null,
     target_mod_state: null,
     fidelity_evidence: null,
+    created_at: Date.now(),
     id: 1,
   };
-  const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "matches its linked mandate exactly" }));
+  const resolved = resolveExecution(item, decision({ queue_id: 1, reason: "matches its linked mandate exactly" }), Date.now());
   assert.equal(resolved.status, "approved");
   assert.equal(resolved.execute, null);
   assert.equal(resolved.reason, "matches its linked mandate exactly");
@@ -205,9 +210,10 @@ test("resolveExecution: a rejected constitution_fidelity item executes nothing, 
     target_content: null,
     target_mod_state: null,
     fidelity_evidence: null,
+    created_at: Date.now(),
     id: 1,
   };
-  const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "exceeds its linked mandate" }));
+  const resolved = resolveExecution(item, decision({ queue_id: 1, decision: "reject", reason: "exceeds its linked mandate" }), Date.now());
   assert.equal(resolved.status, "rejected");
   assert.equal(resolved.execute, null);
 });
@@ -614,4 +620,28 @@ test("parseJudgmentDecisions: genuinely broken text STILL throws the loud error 
   const batch = new Map([[1, row({ id: 1 })]]);
   assert.throws(() => parseJudgmentDecisions(JFENCE + "json\nthis is not json\n" + JFENCE, batch), /judgment response was not valid JSON/, "fenced garbage still fails loudly");
   assert.throws(() => parseJudgmentDecisions("not json at all", batch), /judgment response was not valid JSON/, "bare garbage still fails loudly");
+});
+
+// ---------- stale bulletin expiry (drafts/BRIEF-STALE-BULLETIN-EXPIRY-2026-11-02.md E1, E3) ----------
+
+test("T5 isStaleBulletin: strictly older than 7 days is stale; exactly 7 days survives", () => {
+  const now = 1_800_000_000_000;
+  assert.equal(BULLETIN_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
+  assert.equal(isStaleBulletin(now - BULLETIN_MAX_AGE_MS, now), false, "exactly 7 days old survives");
+  assert.equal(isStaleBulletin(now - BULLETIN_MAX_AGE_MS - 1, now), true);
+});
+
+test("T5 resolveExecution: an APPROVED bulletin_draft older than 7 days resolves to rejected with the stale reason and execute null; a fresh one is unchanged", () => {
+  const now = 1_800_000_000_000;
+  const base = { kind: "bulletin_draft" as const, target_type: null, target_id: null, source_ref: null, note: "Weekly digest\nAll quiet.", target_content: null, target_mod_state: null, fidelity_evidence: null, id: 1 };
+  const stale = resolveExecution({ ...base, created_at: now - BULLETIN_MAX_AGE_MS - 1 }, decision({ queue_id: 1 }), now);
+  assert.equal(stale.status, "rejected");
+  assert.equal(stale.execute, null);
+  assert.equal(stale.reason, STALE_BULLETIN_REASON);
+  const fresh = resolveExecution({ ...base, created_at: now - BULLETIN_MAX_AGE_MS }, decision({ queue_id: 1 }), now);
+  assert.equal(fresh.status, "approved");
+  assert.deepEqual(fresh.execute, { kind: "bulletin", title: "Weekly digest", body: "All quiet." });
+  // a stale NON-bulletin kind is untouched
+  const note = resolveExecution({ ...base, kind: "bookkeeping_note" as const, created_at: now - 30 * 86_400_000 }, decision({ queue_id: 1 }), now);
+  assert.equal(note.status, "approved");
 });
