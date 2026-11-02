@@ -66,10 +66,10 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
   assert.equal(/\$\w+\s*\|\s*Where-Object[^\n]*-notmatch/.test(code), false);
 });
 
-test("the pins: the v6 hash, the live base is the full sha of 07adcc4e, the reviewed commit is still the placeholder, the allowlist is this script, its test and docs/, the parameters are -ExpectedCommit (mandatory) and -DryRun", () => {
+test("the pins: the v6 hash, the live base is the full sha of 07adcc4e, the reviewed commit is bc8e565a (the gated code), the allowlist is this script, its test and docs/, the parameters are -ExpectedCommit (mandatory) and -DryRun", () => {
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, /^\$LIVE_BASE_COMMIT = "07adcc4e55c9c326eebdf92e00cb6574d411fe62"$/m);
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m);
+  assert.match(script, /^\$REVIEWED_COMMIT = "bc8e565acf24884ea562746285b18c6cdfa57e55"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-stale-bulletin-expiry\.ps1", "test\/deploy-stale-bulletin-expiry-script\.test\.ts", "docs\/"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
   assert.match(script, /\[switch\]\$DryRun/);
