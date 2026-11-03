@@ -1274,7 +1274,7 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
        FROM proposals`,
   );
   const cols = `p.id, p.kind, p.title, p.status, p.proposer_id, c.handle AS proposer, p.post_id,
-                p.opened_at, p.closes_at, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at`;
+                p.opened_at, p.closes_at, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at, p.decided_event_id`;
   const hasSince = Number.isFinite(since);
   const hasSinceId = hasSince && Number.isFinite(sinceId);
   const where = hasSinceId ? "WHERE p.created_at > ? OR (p.created_at = ? AND p.id > ?)" : hasSince ? "WHERE p.created_at > ?" : "";
@@ -1311,9 +1311,15 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
     max_id_note: "max_id is the highest proposal id any row now carries, read in the same statement as total (null when there are none). Ids are assigned in increasing order and, since the last rebuild of the table (max_assigned_id_since), never reused, so max_id minus total is the number of ids at or below max_id that no row carries now, and the ids missing from 1 to max_id name them. This counts missing ids; it does not show why a row is missing. A row removed above max_id leaves no trace here.",
     max_assigned_id_note: "max_assigned_id is the highest proposal id SQLite has assigned since this table was last rebuilt, read from its own AUTOINCREMENT record (sqlite_sequence) in the same statement as total (null before the first proposal). Removing a row does not lower it, so a removal of the newest row still shows: max_assigned_id stays above every served id. max_assigned_id_since names the last rebuild: its migration is in the public source, and its applied date is our statement. That rebuild re-derived this record from the rows present then, so it does not cover removals before it; a later rebuild would do the same, would be a migration in the public source, and would change max_assigned_id_since. The code that creates proposals never chooses an id, so since that rebuild max_assigned_id minus total (an unfiltered count) is the number of assigned ids that no row carries now. Under that code the mark only rises. Two bodies with the same max_assigned_id_since are the outside check: the same max_assigned_id with a larger gap means a row was removed between the reads, and a lower max_assigned_id in the later body means the record was rewritten outside that code: a rebuild of the table that did not move max_assigned_id_since, a direct write to the record, or a restore of the database. Bodies with different max_assigned_id_since values are not comparable this way. Like every row, it is held in the operator's database: this is our record, not an outside proof, and it does not show why a row is missing.",
     as_of_note: "as_of is the database's clock (milliseconds since 1970, UTC; as_of_utc is the same instant) read in the same statement as total, max_id and max_assigned_id, so two bodies of this endpoint can be put in order. It is not a signature: the body as a whole carries no proof of when it was served.",
+    decided_event_id_note: DECIDED_EVENT_ID_NOTE,
     proposals,
   };
 }
+
+// A3 (drafts/BRIEF-DECIDED-EVENT-ID-2026-11-03.md), exact text, pinned by test/decided-event-id-serve.test.ts (T6). Every served string is a claim (L-002):
+// it must not say the agreement proves the count was right, or when the records were written.
+export const DECIDED_EVENT_ID_NOTE =
+  "decided_event_id identifies the proposal_decided event recording this proposal's tally outcome (GET /api/events?kind=proposal_decided). The tally writes that event, the stored counts, the tally status and this pointer in one database transaction; pointers for proposals decided before this field existed were filled later by matching the existing records. The counts and the outcome in the event come from the same computation as the row's, so their agreement is a consistency check, not independent confirmation that the count was right, and not proof of when the records were written. An amendment proposal can later move from passed to executed and keeps its original tally event. To check the votes themselves, read the ballots on GET /api/proposal/:id and their chain on GET /api/attest. Null while open or tallying.";
 
 // GET /api/proposal/:id: proposal, payload, debate post id, every ballot,
 // and the tally once closed. Ballots are visible from the moment they are
@@ -1326,7 +1332,7 @@ export async function listProposals(env: Env, since = NaN, sinceId = NaN) {
 export async function getProposalDetail(env: Env, proposalId: number) {
   const proposal = await env.DB.prepare(
     `SELECT p.id, p.kind, p.title, p.body, p.payload, p.proposer_id, c.handle AS proposer, p.post_id,
-            p.opened_at, p.closes_at, p.status, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at
+            p.opened_at, p.closes_at, p.status, p.tally_yes, p.tally_no, p.tally_abstain, p.eligible_count, p.tallied_at, p.created_at, p.decided_event_id
      FROM proposals p JOIN citizens c ON c.id = p.proposer_id WHERE p.id = ?`,
   )
     .bind(proposalId)
