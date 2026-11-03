@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS proposals (
   tally_abstain  INTEGER,
   eligible_count INTEGER,                  -- snapshotted at close so a historical quorum check is always recomputable
   tallied_at     INTEGER,
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  decided_event_id INTEGER                 -- migrations/0023: the proposal_decided identity_events row recording the tally outcome; NULL while open or tallying; no REFERENCES
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status_closes ON proposals(status, closes_at);
 CREATE INDEX IF NOT EXISTS idx_proposals_proposer ON proposals(proposer_id, created_at);
