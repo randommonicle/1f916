@@ -8,7 +8,7 @@
 # afterwards cannot become due inside the window under the seven-day minimum voting window. Step 7 repairs missing pointers on decided rows; it does not detect newly opened proposals. 5 apply 0023 (column plus backfill);
 # 6 verify on prod: pragma_table_info shows the column, scripts/verify-decided-event-id.sql returns ZERO rows (STOP on any mismatch row), and the six historical pairs (1,6) (2,12) (5,16) (6,20) (7,25) (8,37) are present (those six are
 # checked; extra proposals are not rejected); 7 deploy the worker (stamped) and poll; 8 re-run the backfill UPDATE (idempotent: it fills only NULL pointers on decided rows) and the verification AFTER activation; 9 ride HTTP list and
-# detail and the proposals and proposal tools on /mcp and /mcp/read, and /api/attest (chains ok and sealed counts unchanged).
+# detail and the proposals and proposal tools on /mcp and /mcp/read, and /api/attest (all four chains - identity_log, treasury, payouts, ballots - ok, and each chain's sealed_entries and head identical before and after).
 # ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0023 applied: an extra nullable column the old worker never reads.
 # It restores a writer that does not fill the pointer. After ANY tally made under the rolled-back worker the recovery is the same idempotent backfill UPDATE (the block between BEGIN/END BACKFILL in migrations/0023_decided_event_id.sql)
 # followed by scripts/verify-decided-event-id.sql, which must return zero rows. Do not drop the column.
@@ -176,6 +176,18 @@ function Test-WithinWindow($checkedAt, $now) {
   if ($age -gt $WINDOW_SECONDS) { return ("the preflight completed " + [int]$age + " s ago, over the " + $WINDOW_SECONDS + " s window: stop for recovery and run a fresh preflight") }
   return ""
 }
+# "" when all four chains carry the same sealed_entries and the same head in both attest reads, otherwise the first difference. (Integrity is Assert-Attest's job; this is "nothing was written".)
+function Test-ChainsUnchanged($before, $after) {
+  foreach ($chain in "identity_log", "treasury", "payouts", "ballots") {
+    foreach ($field in "sealed_entries", "head") {
+      $b = [string]$before.$chain.$field
+      $a = [string]$after.$chain.$field
+      if ($b -eq "" -and $a -eq "") { return ("chain " + $chain + " carries no " + $field + " in either attest read: it cannot be compared") }
+      if ($a -cne $b) { return ("chain " + $chain + " changed at " + $field + " during the deploy (" + $b + " -> " + $a + ")") }
+    }
+  }
+  return ""
+}
 # "" when a step whose upper bound is $requiredSeconds can START now and still END inside the window (age plus the bound stays within $WINDOW_SECONDS), otherwise the reason it must not start.
 function Test-SufficientWindow($checkedAt, $now, $requiredSeconds) {
   if ($null -eq $checkedAt) { return "the D1 preflight has not completed" }
@@ -279,10 +291,12 @@ function Test-ListServed($body) {
   foreach ($row in $rows) {
     if ($null -eq $row.PSObject.Properties[$POINTER_FIELD]) { return ("proposal " + $row.id + " in the list has no decided_event_id key") }
   }
+  # Each expected historical pair must be present EXACTLY ONCE and carry its pointer; a missing or duplicated row is a failure (later proposals beyond the six are fine).
   foreach ($pair in $EXPECTED_PAIRS) {
-    foreach ($row in $rows) {
-      if ([string]$row.id -ceq [string]$pair[0] -and [string]$row.$POINTER_FIELD -cne [string]$pair[1]) { return ("proposal " + $row.id + " serves decided_event_id '" + $row.$POINTER_FIELD + "', expected " + $pair[1]) }
-    }
+    $found = @($rows | Where-Object { [string]$_.id -ceq [string]$pair[0] })
+    if ($found.Count -eq 0) { return ("proposal " + $pair[0] + " is not served in the list") }
+    if ($found.Count -gt 1) { return ("proposal " + $pair[0] + " is served " + $found.Count + " times in the list, expected once") }
+    if ([string]$found[0].$POINTER_FIELD -cne [string]$pair[1]) { return ("proposal " + $found[0].id + " serves decided_event_id '" + $found[0].$POINTER_FIELD + "', expected " + $pair[1]) }
   }
   return ""
 }
@@ -421,9 +435,6 @@ Say "[live] before: the live worker serves the pinned base $($LIVE_BASE_COMMIT.S
 $listBefore = Read-JsonBody (Get-Text "$BASE/api/proposals" 30 $null)
 if ($null -eq $listBefore) { Stop-Here "GET /api/proposals did not return JSON before the deploy: read it by hand." }
 if ($null -ne $listBefore.PSObject.Properties[$NOTE_FIELD]) { Stop-Here "GET /api/proposals already carries decided_event_id_note: this looks already deployed, verify by hand." }
-$identityBefore = [string]$attBefore.identity_log.sealed_entries
-$treasuryBefore = [string]$attBefore.treasury.sealed_entries
-$ballotsBefore = [string]$attBefore.ballots.sealed_entries
 
 # 4. THE PREFLIGHT (A5 step 2), immediately before the migration: whole-table, production D1, fail closed. A READ, so -DryRun runs it too.
 $pendingRows = Invoke-D1Read $PENDING_SQL "the pending-proposals preflight"
@@ -506,10 +517,9 @@ $attAfter = Read-Attest "after the deploy"
 Assert-Attest $attAfter "after the deploy"
 $why = Test-CodeIdentityServed $attAfter.code $headSha $versionId
 if ($why -ne "") { Stop-Here "after the poll, ${why}: another deploy may have taken over. Check npx wrangler deployments list by hand." }
-if ([string]$attAfter.identity_log.sealed_entries -cne $identityBefore -or [string]$attAfter.treasury.sealed_entries -cne $treasuryBefore -or [string]$attAfter.ballots.sealed_entries -cne $ballotsBefore) {
-  Stop-Here ("a chain length moved during the deploy (identity " + $identityBefore + " -> " + $attAfter.identity_log.sealed_entries + ", treasury " + $treasuryBefore + " -> " + $attAfter.treasury.sealed_entries + ", ballots " + $ballotsBefore + " -> " + $attAfter.ballots.sealed_entries + "): something wrote. Read what, by hand.")
-}
-Say ("[ride] attest: v6 " + $V6_HASH.Substring(0, 8) + " unchanged; every chain ok and unchanged in length; code.commit " + ([string]$attAfter.code.commit).Substring(0, 8) + ", code.version_id " + $attAfter.code.version_id)
+$why = Test-ChainsUnchanged $attBefore $attAfter
+if ($why -ne "") { Stop-Here "$why. Something wrote during the deploy: read what, by hand." }
+Say ("[ride] attest: v6 " + $V6_HASH.Substring(0, 8) + " unchanged; the four chains (identity_log, treasury, payouts, ballots) ok, with sealed_entries and head identical to before; code.commit " + ([string]$attAfter.code.commit).Substring(0, 8) + ", code.version_id " + $attAfter.code.version_id)
 $why = Test-ListServed (Read-JsonBody (Get-Text "$BASE/api/proposals" 30 $null))
 if ($why -ne "") { Stop-Here "GET /api/proposals: $why. $ROLLBACK_LINE" }
 Say "[ride] GET /api/proposals -> the note, a decided_event_id key on every row, the six pairs"

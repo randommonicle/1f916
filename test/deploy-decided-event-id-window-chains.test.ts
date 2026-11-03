@@ -103,4 +103,76 @@ test("F3: every bounded step is preceded by a window check sized to it, and comp
   assert.ok(script.includes("-gt $WINDOW_SECONDS") && script.includes("($age + $requiredSeconds)"), "the comparison adds the step bound");
 });
 
+// ---------- F4: all four chains compared on sealed_entries and head ----------
+
+const chains = (over: Record<string, Record<string, unknown>> = {}): string =>
+  JSON.stringify({
+    identity_log: { ok: true, sealed_entries: 40, head: "aaa", ...over.identity_log },
+    treasury: { ok: true, sealed_entries: 18, head: "bbb", ...over.treasury },
+    payouts: { ok: true, sealed_entries: 0, head: "0000", ...over.payouts },
+    ballots: { ok: true, sealed_entries: 19, head: "ccc", ...over.ballots },
+  });
+
+test("F4: Test-ChainsUnchanged, run for real: identical reads pass; a changed payouts length, a changed head with an unchanged length, and an unreadable chain all stop, each naming the chain and field", (t) => {
+  const cases: Array<[string, string, string]> = [
+    ["same", chains(), ""],
+    ["payouts-length", chains({ payouts: { sealed_entries: 1 } }), "chain payouts changed at sealed_entries during the deploy (0 -> 1)"],
+    ["head-only", chains({ ballots: { head: "ddd" } }), "chain ballots changed at head during the deploy (ccc -> ddd)"],
+    ["identity-length", chains({ identity_log: { sealed_entries: 41 } }), "chain identity_log changed at sealed_entries"],
+    ["no-head", chains({ treasury: { head: null } }), "chain treasury changed at head"],
+  ];
+  const run = runPs(
+    harness([
+      `$before = ${q(chains())} | ConvertFrom-Json`,
+      ...cases.map(([name, after]) => `Write-Host ("RESULT ${name} [" + (Test-ChainsUnchanged $before (${q(after)} | ConvertFrom-Json)) + "]")`),
+      `$bare = ${q(JSON.stringify({ identity_log: { ok: true }, treasury: {}, payouts: {}, ballots: {} }))} | ConvertFrom-Json`,
+      'Write-Host ("RESULT unreadable [" + (Test-ChainsUnchanged $bare $bare) + "]")',
+    ]),
+  );
+  if (!run) return t.skip("no PowerShell available");
+  for (const [name, , expect] of cases) {
+    const got = grab(run.out, name);
+    assert.ok(got !== null, `${name}: ${run.out}`);
+    if (expect === "") assert.equal(got, "", name);
+    else assert.ok(got!.includes(expect), `${name}: '${got}' mentions '${expect}'`);
+  }
+  assert.match(grab(run.out, "unreadable") ?? "", /carries no sealed_entries in either attest read/);
+});
+
+test("F4: the ride compares the two attest reads through Test-ChainsUnchanged and says exactly what is compared", () => {
+  assert.ok(code.includes("Test-ChainsUnchanged $attBefore $attAfter"));
+  assert.equal(/\$(identity|treasury|ballots)Before/.test(code), false, "the three-chain length variables are gone");
+  assert.ok(script.includes("the four chains (identity_log, treasury, payouts, ballots) ok, with sealed_entries and head identical to before"));
+  assert.ok(script.includes("all four chains - identity_log, treasury, payouts, ballots - ok, and each chain's sealed_entries and head identical before and after"));
+  assert.ok(script.indexOf("Test-ChainsUnchanged $attBefore $attAfter") < script.indexOf("[ride] attest:"));
+});
+
+// ---------- F5: the served list must carry each expected historical pair exactly once ----------
+
+const NOTE = "decided_event_id identifies the proposal_decided event recording this proposal's tally outcome.";
+const PAIRS: Array<[number, number]> = [[1, 6], [2, 12], [5, 16], [6, 20], [7, 25], [8, 37]];
+const row = ([id, e]: [number, number]) => ({ id, decided_event_id: e });
+const listBody = (rows: unknown[]): string => JSON.stringify({ decided_event_id_note: NOTE, proposals: rows });
+
+test("F5: Test-ListServed, run for real: a non-empty list missing proposal 1 fails, a duplicate fails, extra later proposals pass, the full six pass", (t) => {
+  const cases: Array<[string, unknown[], string]> = [
+    ["full", PAIRS.map(row), ""],
+    ["extra-later", [...PAIRS.map(row), { id: 9, decided_event_id: null }, { id: 10, decided_event_id: null }], ""],
+    ["only-8", [row([8, 37])], "proposal 1 is not served in the list"],
+    ["missing-1", PAIRS.slice(1).map(row), "proposal 1 is not served in the list"],
+    ["missing-8", PAIRS.slice(0, 5).map(row), "proposal 8 is not served in the list"],
+    ["duplicate-5", [...PAIRS.map(row), row([5, 16])], "proposal 5 is served 2 times in the list, expected once"],
+    ["wrong-pointer", [...PAIRS.slice(0, 5).map(row), row([8, 99])], "proposal 8 serves decided_event_id '99', expected 37"],
+    ["no-key", [...PAIRS.slice(0, 5).map(row), { id: 8 }], "proposal 8 in the list has no decided_event_id key"],
+  ];
+  const run = runPs(harness(cases.map(([name, rows]) => `Write-Host ("RESULT ${name} [" + (Test-ListServed (Read-JsonBody @{ Body = ${q(listBody(rows))} })) + "]")`)));
+  if (!run) return t.skip("no PowerShell available");
+  for (const [name, , expect] of cases) {
+    const got = grab(run.out, name);
+    assert.ok(got !== null, `${name}: ${run.out}`);
+    if (expect === "") assert.equal(got, "", name);
+    else assert.ok(got!.includes(expect), `${name}: '${got}' mentions '${expect}'`);
+  }
+});
+
 // END-OF-TESTS
