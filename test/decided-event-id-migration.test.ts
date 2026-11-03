@@ -44,28 +44,40 @@ const detailOf = (id: number, kind: string, status: string, t: [number, number, 
 const pointer = (d1: LocalD1, id: number) => (d1.raw.prepare("SELECT decided_event_id AS p FROM proposals WHERE id = ?").get(id) as { p: number | null }).p;
 const offenders = (d1: LocalD1) => d1.raw.prepare(VERIFY).all() as { id: number }[];
 
-test("0023 on a prod-shaped fixture links exactly the decided rows, leaves the open one null, and the verification returns zero rows (mutant: the prefix pattern ' (%' widened to '%')", () => {
+test("0023 on the real six (proposals 1, 2, 5, 6, 7, 8 with events 6, 12, 16, 20, 25, 37) links exactly the decided rows, leaves the open one null, and the verification returns zero rows (mutant: the prefix pattern ' (%' widened to '%')", () => {
   const d1 = preMigration();
   try {
     const who = insertCitizen(d1);
-    const spec: [string, string, [number, number, number, number]][] = [
-      ["resolution", "passed", [4, 0, 1, 5]],
-      ["set_name", "failed", [0, 0, 0, 5]],
-      ["set_name", "executed", [4, 0, 0, 5]],
-      ["first_laws_ratify", "executed", [4, 0, 0, 5]],
-      ["resolution", "failed", [0, 0, 5, 13]],
-    ];
+    // The real six: proposals 1, 2, 5, 6, 7, 8 (3 and 4 are gaps) and their events 6, 12, 16, 20, 25, 37, in the real order.
+    const spec: Record<number, [string, string, [number, number, number, number], number]> = {
+      1: ["resolution", "passed", [4, 0, 1, 5], 6],
+      2: ["set_name", "failed", [0, 0, 0, 5], 12],
+      5: ["set_name", "failed", [1, 0, 0, 1], 16],
+      6: ["set_name", "executed", [4, 0, 0, 5], 20],
+      7: ["first_laws_ratify", "executed", [4, 0, 0, 5], 25],
+      8: ["resolution", "failed", [0, 0, 5, 13], 37],
+    };
     const ids: number[] = [];
     const evs: number[] = [];
-    spec.forEach(([kind, status, t], i) => {
-      const at = 1_000_000 + i;
-      const id = decidedProposal(d1, who, kind, status, t, at);
+    for (let want = 1; want <= 8; want++) {
+      const s = spec[want];
+      if (!s) {
+        insertProposal(d1, { kind: "resolution", status: "open", proposer_id: who });
+        continue;
+      }
+      const at = 1_000_000 + want;
+      const id = decidedProposal(d1, who, s[0], s[1], s[2], at);
+      assert.equal(id, want);
+      let lastEvent = (d1.raw.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM identity_events").get() as { m: number }).m;
+      while (lastEvent < s[3] - 1) lastEvent = addEvent(d1, who, 500_000 + lastEvent, "unrelated event", { kind: "key_rotation" });
+      const ev = addEvent(d1, who, at, detailOf(id, s[0], s[1], s[2]));
+      assert.equal(ev, s[3], `proposal ${id}'s event is the real event ${s[3]}`);
       ids.push(id);
-      evs.push(addEvent(d1, who, at, detailOf(id, kind, status, t)));
-    });
-    // A decoy sharing the first proposal's timestamp, whose detail begins `proposal <id>2 (`: with the id 1 prefix 'proposal 1%' it would match too.
-    assert.equal(ids[0], 1);
-    addEvent(d1, who, 1_000_000, "proposal 12 (resolution) passed: yes=9 no=9 abstain=9 eligible=9");
+      evs.push(ev);
+    }
+    d1.raw.exec("DELETE FROM proposals WHERE id IN (3, 4)");
+    // A decoy sharing the first proposal's timestamp, whose detail begins `proposal 12 (`: with the id 1 prefix 'proposal 1%' it would match too.
+    addEvent(d1, who, 1_000_001, "proposal 12 (resolution) passed: yes=9 no=9 abstain=9 eligible=9");
     const open = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: who });
 
     d1.raw.exec(MIGRATION);
