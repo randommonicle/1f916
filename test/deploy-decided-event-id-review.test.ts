@@ -39,7 +39,10 @@ const grab = (out: string, name: string): string | null => {
 
 // ---------- F1: reads go by --command; --file returns statistics only ----------
 
-const FILE_STATS_SHAPE = JSON.stringify([{ "Total queries executed": 1, "Rows read": 12, "Rows written": 0, "Database size (MB)": "0.1" }]);
+// The real --file answer (wrangler-dist/cli.js 301217-301230): the statistics sit INSIDE a results envelope, so the envelope parses and the four decisions must reject the row for their own reason.
+const FILE_STATS_SHAPE = JSON.stringify([{ results: [{ "Total queries executed": 1, "Rows read": 12, "Rows written": 0, "Database size (MB)": "0.1" }], success: true, finalBookmark: "fixture-bookmark", meta: {} }]);
+// A malformed envelope (no results object at all) must still fail closed at the parser.
+const NO_RESULTS_SHAPE = JSON.stringify([{ "Total queries executed": 1, "Rows read": 12, "Rows written": 0 }]);
 
 test("F1: every read goes by --command and --file is used only for the migration and the backfill (a regression to --file for a SELECT goes red)", () => {
   const fileLines = code.split("\n").filter((l) => l.includes("--file"));
@@ -50,18 +53,26 @@ test("F1: every read goes by --command and --file is used only for the migration
   assert.ok(code.includes("Invoke-D1Command (Get-Content $VERIFY_SQL_PATH -Raw)"), "the verification SQL is loaded from the checked-in file at run time");
 });
 
-test("F1: a reader fed the --file statistics shape fails closed on every read decision; the real --command shape (an array with one object carrying results) is accepted", (t) => {
+test("F1: the real --file statistics envelope PARSES and each read decision rejects its statistics row for its own reason; a malformed envelope fails at the parser; the real --command shape is accepted", (t) => {
   const run = runPs(
     harness([
-      `Write-Host ("RESULT stats-pending [" + (Test-PendingPreflight (Read-D1Rows ${q(FILE_STATS_SHAPE)})) + "]")`,
-      `Write-Host ("RESULT stats-verify [" + (Test-VerificationClean (Read-D1Rows ${q(FILE_STATS_SHAPE)})) + "]")`,
-      `Write-Host ("RESULT stats-pairs [" + (Test-HistoricalPairs (Read-D1Rows ${q(FILE_STATS_SHAPE)})) + "]")`,
-      `Write-Host ("RESULT stats-column [" + (Test-ColumnPresent (Read-D1Rows ${q(FILE_STATS_SHAPE)})) + "]")`,
+      `$stats = Read-D1Rows ${q(FILE_STATS_SHAPE)}`,
+      'Write-Host ("RESULT parsed [" + ($null -ne $stats) + "|" + @($stats.Rows).Count + "]")',
+      'Write-Host ("RESULT stats-pending [" + (Test-PendingPreflight $stats) + "]")',
+      'Write-Host ("RESULT stats-verify [" + (Test-VerificationClean $stats) + "]")',
+      'Write-Host ("RESULT stats-pairs [" + (Test-HistoricalPairs $stats) + "]")',
+      'Write-Host ("RESULT stats-column [" + (Test-ColumnPresent $stats) + "]")',
+      `Write-Host ("RESULT malformed [" + ($null -eq (Read-D1Rows ${q(NO_RESULTS_SHAPE)})) + "]")`,
       `Write-Host ("RESULT real [" + (Test-PendingPreflight (Read-D1Rows ${q(d1json([{ pending: 0 }]))})) + "]")`,
     ]),
   );
   if (!run) return t.skip("no PowerShell available");
-  for (const n of ["stats-pending", "stats-verify", "stats-pairs", "stats-column"]) assert.ok((grab(run.out, n) ?? "").endsWith("no parsable result"), `${n}: ${run.out}`);
+  assert.equal(grab(run.out, "parsed"), "True|1", "the envelope parses and carries one statistics row");
+  assert.equal(grab(run.out, "stats-pending"), "the pending-proposals row has no 'pending' value");
+  assert.ok((grab(run.out, "stats-verify") ?? "").startsWith("the verification returned 1 offending row(s)"), "non-empty");
+  assert.equal(grab(run.out, "stats-pairs"), "the historical-pairs read returned 1 rows, expected 6");
+  assert.equal(grab(run.out, "stats-column"), "proposals.decided_event_id has type '', expected INTEGER");
+  assert.equal(grab(run.out, "malformed"), "True");
   assert.equal(grab(run.out, "real"), "");
 });
 

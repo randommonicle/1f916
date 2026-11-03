@@ -53,3 +53,9 @@ Brief: drafts/BRIEF-DECIDED-EVENT-ID-2026-11-03.md (amendments A1-A6 override B1
 - F5: `Test-ListServed` requires each of the six expected pairs present exactly once and carrying its pointer; missing, duplicated or wrong fails; later proposals beyond the six are fine. (The loop variable is `$found`, not `$matches`, which is a PowerShell automatic variable.)
 - Tests in test/deploy-decided-event-id-window-chains.test.ts: changed payouts length; changed head with unchanged length; changed identity length; null head; unreadable chains; the static ride wording. F5: the full six, extra later proposals, only proposal 8, missing 1, missing 8, duplicate 5, wrong pointer, no key.
 - Red-proofs: head dropped from the comparison reds F4; payouts dropped from the comparison reds F4; deleting the missing-row failure reds F5; deleting the duplicate failure reds F5. Restored.
+
+## 9. Fix pass 2 (CODEX round 2): G1, G2
+
+- G2 correction to section 6: pointer equality IS red-provable. Replacing `e.id = p.decided_event_id` with `1=1` in the verification SQL reds the "pointer names no event" case (planted pointer 999999) in test/decided-event-id-verify-predicates.test.ts (run, one failure, restored). Only the inner `e.kind`, `e.created_at` and tally-NULL predicates remain defence in depth (other predicates catch the same corruptions).
+- G1: the `--file` fixture now has the real shape (statistics inside a results envelope, success, finalBookmark, meta; wrangler-dist/cli.js 301217-301230). The envelope PARSES (one row); no decision accepts it, each rejects for its own reason: pending "row has no 'pending' value", verification non-empty (1 offending row), pairs "returned 1 rows, expected 6", column "type '', expected INTEGER". The missing-results envelope stays a separate case that fails at the parser.
+- Red-proofs: a pending decision that treats an absent count as 0 reds the test; a parser that accepts a missing `results` reds it. Restored.
