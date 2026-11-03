@@ -232,6 +232,49 @@ test("detectConstitutionChange: non-genesis, two passed mandates (first_laws_ame
   }
 });
 
+// decided_event_id T8 (migrations/0023, A1): constitution detection moves a passed amendment to executed with its OWN constitution_changed event; the
+// pointer names the TALLY event and is never rewritten, so the pointer, the counts and the event's detail (`passed`) are unchanged while the status
+// becomes executed. Each amendment kind is really tallied by the sweep first.
+for (const kind of ["first_laws_amendment", "text_amendment"] as const) {
+  test(`decided_event_id T8: a tallied ${kind} keeps its pointer, counts and passed event when constitution detection moves it to executed (mutant: rewrite the pointer in the flip UPDATE)`, async () => {
+    const d1 = createLocalD1();
+    try {
+      seedFakePriorVersion(d1);
+      d1.raw.prepare("INSERT INTO governance_settings (key, value, updated_at) VALUES (?, ?, ?)").run("first_laws_ratified", "1", Date.now());
+      const now = Date.now();
+      const old = now - 60 * 86_400_000;
+      const proposer = insertCitizen(d1, { created_at: old });
+      const voters = [proposer, ...[1, 2, 3, 4].map(() => insertCitizen(d1, { created_at: old }))];
+      const id = insertProposal(d1, { kind, status: "open", proposer_id: proposer, opened_at: now - 20 * 86_400_000, closes_at: now - 1000 });
+      for (const v of voters) d1.raw.prepare("INSERT INTO ballots (proposal_id, citizen_id, choice, cast_at) VALUES (?, ?, 'yes', ?)").run(id, v, now - 500);
+
+      const sweep = await runGovernanceSweep(testEnv(d1), now, freshCache());
+      assert.equal(sweep.results[0].outcome, "passed", "an amendment kind tallies passed (it is not machine-executable)");
+      // The sweep runs constitution detection straight after the tally (governance.ts, runGovernanceSweep), so the flip to executed has happened here.
+      const row = d1.raw
+        .prepare("SELECT status, tally_yes, tally_no, tally_abstain, eligible_count, decided_event_id FROM proposals WHERE id = ?")
+        .get(id) as { status: string; tally_yes: number; tally_no: number; tally_abstain: number; eligible_count: number; decided_event_id: number | null };
+      assert.equal(row.status, "executed", "constitution detection moved the passed amendment to executed");
+      assert.ok(row.decided_event_id !== null);
+      const tallyEvent = d1.raw.prepare("SELECT kind, detail FROM identity_events WHERE id = ?").get(row.decided_event_id as number) as { kind: string; detail: string };
+      assert.equal(tallyEvent.kind, "proposal_decided");
+      assert.equal(tallyEvent.detail, `proposal ${id} (${kind}) passed: yes=5 no=0 abstain=0 eligible=5`, "the pointer still names the tally event, which says passed");
+      assert.deepEqual([row.tally_yes, row.tally_no, row.tally_abstain, row.eligible_count], [5, 0, 0, 5]);
+      const changed = d1.raw.prepare("SELECT id, detail FROM identity_events WHERE kind = 'constitution_changed'").all() as { id: number; detail: string }[];
+      assert.equal(changed.length, 1);
+      assert.ok(changed[0].detail.endsWith(`mandates=[${id}]`), "the flip is recorded separately, in its own event");
+      assert.notEqual(changed[0].id, row.decided_event_id, "the pointer is not the constitution_changed event");
+
+      // A later detection finds nothing to do and cannot move the pointer.
+      await detectConstitutionChange(testEnv(d1), Date.now() + 1000, freshCache());
+      const again = d1.raw.prepare("SELECT decided_event_id AS p FROM proposals WHERE id = ?").get(id) as { p: number };
+      assert.equal(again.p, row.decided_event_id);
+    } finally {
+      d1.close();
+    }
+  });
+}
+
 // ---------- concurrency: the CONCURRENT-WINNER CONTRACT ----------
 
 // Reused verbatim from governance-d1.test.ts's own N1/N6 helper (this

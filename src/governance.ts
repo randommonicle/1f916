@@ -1508,10 +1508,19 @@ function settingsStatementForExecution(env: Env, kind: ProposalKind, payload: Re
 // statement in the batch is conditional on the same fact") only holds if
 // every gate asks the same question; stamping two of the three would let
 // a stale settings write land alone.
+//
+// decided_event_id (migrations/0023, D-078 item 3): the final proposal UPDATE
+// is built HERE, per attempt, because the pointer it writes is the sub-select
+// of THIS attempt's `log.hash` (a chain-head collision re-prepares the log
+// statement with a new hash; a statement built once by the caller could not
+// follow it). Batch order stays: log statement, optional settings upsert,
+// final update; logRes stays the first result.
+type OutcomeFinal = { status: "passed" | "failed" | "executed"; yes: number; no: number; abstain: number; eligible: number };
 async function commitOutcome(
   env: Env,
   proposalId: number,
-  stateStmts: D1PreparedStatement[],
+  settingStmts: D1PreparedStatement[],
+  final: OutcomeFinal,
   actorId: number,
   detail: string,
   now: number,
@@ -1546,7 +1555,12 @@ async function commitOutcome(
       // statement sees an earlier one's effects. The settings upsert (when
       // present) is already ordered ahead of the status UPDATE for the
       // identical reason; the log entry now follows the same rule.
-      const [logRes] = await env.DB.batch([log.stmt, ...stateStmts]);
+      const finalStmt = env.DB
+        .prepare(
+          "UPDATE proposals SET status = ?, tally_yes = ?, tally_no = ?, tally_abstain = ?, eligible_count = ?, tallied_at = ?, decided_event_id = (SELECT id FROM identity_events WHERE hash = ? AND kind = 'proposal_decided') WHERE id = ? AND status = 'tallying' AND tallied_at = ?",
+        )
+        .bind(final.status, final.yes, final.no, final.abstain, final.eligible, now, log.hash, proposalId, now);
+      const [logRes] = await env.DB.batch([log.stmt, ...settingStmts, finalStmt]);
       // Optional chaining is load-bearing (gate finding 3,
       // docs/REVIEW-HARDENING2-GATE-2026-08-10.md): a driver returning an
       // EMPTY results array -- the sibling of Finding A's absent-changes
@@ -1700,26 +1714,26 @@ async function claimTallyAndExecuteOne(env: Env, proposalId: number, now: number
   const isExecutable = result.status === "passed" && MACHINE_EXECUTABLE_KINDS.includes(proposal.kind);
   const finalStatus: "passed" | "failed" | "executed" = result.status === "failed" ? "failed" : isExecutable ? "executed" : "passed";
 
-  const stateStmts: D1PreparedStatement[] = [];
+  const settingStmts: D1PreparedStatement[] = [];
   if (isExecutable) {
     const parsedPayload = proposal.payload ? (JSON.parse(proposal.payload) as Record<string, unknown>) : null;
     const settingStmt = settingsStatementForExecution(env, proposal.kind, parsedPayload, proposalId, now);
-    if (settingStmt) stateStmts.push(settingStmt);
+    if (settingStmt) settingStmts.push(settingStmt);
   }
-  // `AND tallied_at = ?` (this claimant's own claim stamp): the third of
-  // the outcome batch's three gated statements, kept in lockstep with
-  // commitOutcome's chain gate and upsertSettingStmt's WHERE EXISTS --
-  // F1's sibling-window fix (gate finding 1), see commitOutcome's comment.
-  stateStmts.push(
-    env.DB
-      .prepare(
-        "UPDATE proposals SET status = ?, tally_yes = ?, tally_no = ?, tally_abstain = ?, eligible_count = ?, tallied_at = ? WHERE id = ? AND status = 'tallying' AND tallied_at = ?",
-      )
-      .bind(finalStatus, yes, no, abstain, eligible, now, proposalId, now),
-  );
-
+  // The final status UPDATE (third of the batch's gated statements, `AND
+  // tallied_at = ?` this claimant's own stamp, F1's sibling-window fix) is
+  // built inside commitOutcome now, per attempt, so it can bind that
+  // attempt's event hash into decided_event_id; see its comment.
   const detail = `proposal ${proposalId} (${proposal.kind}) ${finalStatus}: yes=${yes} no=${no} abstain=${abstain} eligible=${eligible}`;
-  const outcome = await commitOutcome(env, proposalId, stateStmts, proposal.proposer_id, detail, now);
+  const outcome = await commitOutcome(
+    env,
+    proposalId,
+    settingStmts,
+    { status: finalStatus, yes, no, abstain, eligible },
+    proposal.proposer_id,
+    detail,
+    now,
+  );
   // F1: a resumed stale claimant whose batch just no-opped (see
   // commitOutcome above) must report that honestly -- never its own
   // precomputed finalStatus, which was frozen against a citizens/eligible

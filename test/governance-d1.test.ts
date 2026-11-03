@@ -2175,6 +2175,102 @@ test("commitOutcome: F6 -- a retried outcome commit's identity_events.created_at
     assert.ok(event, "the outcome event must exist");
     assert.equal(event!.created_at, now, "created_at must be the sweep's own `now`, not a fresh clock read taken during the retry");
     assert.equal(event!.created_at, row!.tallied_at, "the log entry and the proposal row committed in the same batch must carry the identical timestamp");
+
+    // decided_event_id (migrations/0023, A4/T3): the retry re-prepared the log statement with a NEW hash; the pointer must name the event that
+    // actually committed, not the first attempt's (never-written) hash, which would leave it NULL.
+    const ptr = await d1.DB.prepare("SELECT p.decided_event_id AS ptr, (SELECT id FROM identity_events WHERE kind = 'proposal_decided') AS ev FROM proposals p WHERE p.id = ?")
+      .bind(proposalId)
+      .first<{ ptr: number | null; ev: number }>();
+    assert.ok(ptr!.ptr !== null, "a collision retry still fills the pointer");
+    assert.equal(ptr!.ptr, ptr!.ev, "the pointer names the successful retry's event");
+  } finally {
+    d1.close();
+  }
+});
+
+// ---------- decided_event_id (migrations/0023, D-078 item 3; A4, T1-T3) ----------
+
+async function assertPointerAgrees(d1: LocalD1, proposalId: number, wantStatus: string) {
+  const row = await d1.DB.prepare(
+    "SELECT kind, status, tally_yes, tally_no, tally_abstain, eligible_count, tallied_at, proposer_id, decided_event_id FROM proposals WHERE id = ?",
+  )
+    .bind(proposalId)
+    .first<{ kind: string; status: string; tally_yes: number; tally_no: number; tally_abstain: number; eligible_count: number; tallied_at: number; proposer_id: number; decided_event_id: number | null }>();
+  assert.equal(row!.status, wantStatus);
+  assert.ok(row!.decided_event_id !== null, "the pointer is filled by the tally");
+  const ev = await d1.DB.prepare("SELECT id, kind, detail, citizen_id, created_at, hash FROM identity_events WHERE id = ?")
+    .bind(row!.decided_event_id)
+    .first<{ id: number; kind: string; detail: string; citizen_id: number; created_at: number; hash: string | null }>();
+  assert.ok(ev, "the pointer names a row that exists");
+  assert.equal(ev!.kind, "proposal_decided");
+  assert.equal(
+    ev!.detail,
+    `proposal ${proposalId} (${row!.kind}) ${row!.status}: yes=${row!.tally_yes} no=${row!.tally_no} abstain=${row!.tally_abstain} eligible=${row!.eligible_count}`,
+    "the event's detail agrees with the row's status and tallies",
+  );
+  assert.equal(ev!.citizen_id, row!.proposer_id);
+  assert.equal(ev!.created_at, row!.tallied_at);
+  assert.ok(ev!.hash, "the event is sealed");
+}
+
+test("decided_event_id T1: a tally that passes writes the pointer to the proposal_decided row it wrote (mutant: drop decided_event_id from commitOutcome's final UPDATE)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const id = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    castYes(d1, id, proposer, now - 500);
+    const res = await runGovernanceSweep(testEnv(d1), now);
+    assert.equal(res.results[0].outcome, "passed");
+    await assertPointerAgrees(d1, id, "passed");
+  } finally {
+    d1.close();
+  }
+});
+
+test("decided_event_id T2: failed, and executed (with the settings upsert in the batch), both write the pointer", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const voter2 = insertCitizen(d1);
+    insertCitizen(d1);
+    insertCitizen(d1);
+    const now = Date.now();
+    const failedId = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    const execId = insertProposal(d1, { kind: "set_split", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    d1.raw.prepare("UPDATE proposals SET payload = ? WHERE id = ?").run(JSON.stringify({ prize: 80, bounty: 20 }), execId);
+    castYes(d1, execId, proposer, now - 500);
+    castYes(d1, execId, voter2, now - 500);
+    const res = await runGovernanceSweep(testEnv(d1), now);
+    const outcomes = new Map(res.results.map((r) => [r.proposal_id, r.outcome]));
+    assert.equal(outcomes.get(failedId), "failed");
+    assert.equal(outcomes.get(execId), "executed");
+    await assertPointerAgrees(d1, failedId, "failed");
+    await assertPointerAgrees(d1, execId, "executed");
+    const setting = await d1.DB.prepare("SELECT COUNT(*) AS n FROM governance_settings").first<{ n: number }>();
+    assert.equal(setting!.n, 1, "the settings upsert landed in the same batch");
+  } finally {
+    d1.close();
+  }
+});
+
+test("decided_event_id T3b: a resumed stale claimant leaves the real committer's pointer untouched (mutant: drop the tallied_at / status gate from the final UPDATE)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const proposer = insertCitizen(d1);
+    const now = Date.now();
+    const id = insertProposal(d1, { kind: "resolution", status: "open", proposer_id: proposer, opened_at: now - 8 * 86_400_000, closes_at: now - 1000 });
+    castYes(d1, id, proposer, now - 500);
+    const later = now + 16 * 60 * 1000;
+    const bEnv = testEnv(d1);
+    const aEnv = { ...testEnv(d1), DB: withChainedHeadReadTriggering(d1.DB, "identity_events", () => runGovernanceSweep(bEnv, later)) };
+    const a = await runGovernanceSweep(aEnv, now);
+    assert.equal(a.results[0].outcome, "claimed_elsewhere");
+    await assertPointerAgrees(d1, id, "passed");
+    const row = await d1.DB.prepare("SELECT tallied_at FROM proposals WHERE id = ?").bind(id).first<{ tallied_at: number }>();
+    assert.equal(row!.tallied_at, later, "B's stamp and B's event stand; A wrote neither");
+    const n = await d1.DB.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE kind = 'proposal_decided'").first<{ n: number }>();
+    assert.equal(n!.n, 1);
   } finally {
     d1.close();
   }
