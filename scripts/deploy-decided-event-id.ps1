@@ -4,7 +4,7 @@
 # live base is migrations/0023_decided_event_id.sql (an ADD COLUMN plus an idempotent backfill; no rebuild, no FK detach). The scratch-D1 rehearsal of 0023 against a prod copy is the hub's, with Ben, BEFORE this script runs.
 # STEPS (A5): 1 pins and git; 2 gates (npm test, typecheck); 3 live read of the base and the attested constitution; 4 PREFLIGHT immediately before the migration: SELECT COUNT(*) AS pending FROM proposals WHERE status IN
 # ('open','tallying') against production D1, a successfully parsed result with pending = 0 or STOP (absent or malformed fails closed); the time it completed is recorded and migration, worker activation and reconciliation must all finish
-# within ONE HOUR of it (every step re-checks the window; wrangler commands are bounded by a timeout), else STOP for recovery and a fresh preflight. This whole-table count excludes existing pending tallies; proposals opened
+# within ONE HOUR of it (before every bounded step, the time since the preflight plus that step's upper bound must fit inside the window or the step is not started; a final check follows the post-activation reconciliation; wrangler commands are bounded by a timeout), else STOP for recovery and a fresh preflight. This whole-table count excludes existing pending tallies; proposals opened
 # afterwards cannot become due inside the window under the seven-day minimum voting window. Step 7 repairs missing pointers on decided rows; it does not detect newly opened proposals. 5 apply 0023 (column plus backfill);
 # 6 verify on prod: pragma_table_info shows the column, scripts/verify-decided-event-id.sql returns ZERO rows (STOP on any mismatch row), and the six historical pairs (1,6) (2,12) (5,16) (6,20) (7,25) (8,37) are present (those six are
 # checked; extra proposals are not rejected); 7 deploy the worker (stamped) and poll; 8 re-run the backfill UPDATE (idempotent: it fills only NULL pointers on decided rows) and the verification AFTER activation; 9 ride HTTP list and
@@ -49,6 +49,8 @@ $WRANGLER_D1_SECONDS = 120
 $WRANGLER_DEPLOY_SECONDS = 300
 $POLL_TRIES = 12
 $POLL_DELAY_SECONDS = 5
+# One poll try reads GET /api/attest and GET /api/proposals, each bounded by curl --max-time 30, then sleeps.
+$POLL_READ_SECONDS = 60
 $POINTER_FIELD = "decided_event_id"
 $NOTE_FIELD = "decided_event_id_note"
 $PENDING_SQL = "SELECT COUNT(*) AS pending FROM proposals WHERE status IN ('open','tallying')"
@@ -174,6 +176,13 @@ function Test-WithinWindow($checkedAt, $now) {
   if ($age -gt $WINDOW_SECONDS) { return ("the preflight completed " + [int]$age + " s ago, over the " + $WINDOW_SECONDS + " s window: stop for recovery and run a fresh preflight") }
   return ""
 }
+# "" when a step whose upper bound is $requiredSeconds can START now and still END inside the window (age plus the bound stays within $WINDOW_SECONDS), otherwise the reason it must not start.
+function Test-SufficientWindow($checkedAt, $now, $requiredSeconds) {
+  if ($null -eq $checkedAt) { return "the D1 preflight has not completed" }
+  $age = ($now - $checkedAt).TotalSeconds
+  if (($age + $requiredSeconds) -gt $WINDOW_SECONDS) { return ("the preflight completed " + [int]$age + " s ago and the next bounded step may need up to " + $requiredSeconds + " s, over the " + $WINDOW_SECONDS + " s window: stop for recovery and run a fresh preflight") }
+  return ""
+}
 # "" when $rows are the six historical pairs (extra proposals are ignored by the SQL itself), otherwise the reason not.
 function Test-HistoricalPairs($res) {
   if ($null -eq $res) { return "the historical-pairs read returned no parsable result" }
@@ -234,6 +243,8 @@ function Invoke-D1Command($sql, $label) {
   $one = ConvertTo-SingleLineSql $sql
   $why = Test-SingleLineSql $one
   if ($why -ne "") { Stop-Here ("cannot send the SQL for " + $label + ": " + $why + ".") }
+  # Every read after the preflight is itself a bounded step inside the window (the preflight read is the one that starts the clock).
+  if ($null -ne $script:PreflightAt) { Assert-Window $label $WRANGLER_D1_SECONDS }
   $r = Invoke-BoundedSql ("npx wrangler d1 execute " + $PROD_DB + " --remote --json --command") $one $WRANGLER_D1_SECONDS
   if ($r.TimedOut) { Stop-Here ("wrangler d1 execute timed out after " + $WRANGLER_D1_SECONDS + " s on " + $label + ". The state is unknown: read the catalogue by hand before any retry.") }
   if ($r.Code -ne 0) { Stop-Here ("wrangler d1 execute failed (exit " + $r.Code + ") on " + $label + ".") }
@@ -246,8 +257,9 @@ function Get-BackfillSql($migrationText) {
   if (-not $m.Success) { return "" }
   return $m.Groups[1].Value
 }
-function Assert-Window($label) {
-  $why = Test-WithinWindow $script:PreflightAt (Get-Date)
+# STOPS, without starting the step, unless a step bounded by $requiredSeconds fits inside the window; with 0 it is the completion check.
+function Assert-Window($label, $requiredSeconds) {
+  $why = Test-SufficientWindow $script:PreflightAt (Get-Date) $requiredSeconds
   if ($why -ne "") { Stop-Here ("before " + $label + ": " + $why + ".") }
 }
 # Reads the catalogue and verification on prod and STOPS on any mismatch row (A5 step 6 and 8).
@@ -433,7 +445,7 @@ if ($DryRun) {
 
 # 5. migration 0023 to the REMOTE D1 FIRST (column plus idempotent backfill; applied only when the catalogue read above found the column absent)
 # BEGIN-MIGRATION
-Assert-Window "applying the migration"
+Assert-Window "applying the migration" $WRANGLER_D1_SECONDS
 if (-not $MigrationAlreadyApplied) {
   Say "[d1] applying $MIGRATION_PATH_EXPECTED to the remote database"
   $mig = Invoke-Bounded ("npx wrangler d1 execute " + $PROD_DB + " --remote --file " + $MIGRATION_PATH_EXPECTED) $WRANGLER_D1_SECONDS
@@ -442,7 +454,7 @@ if (-not $MigrationAlreadyApplied) {
 }
 
 # 6. catalogue and verification on prod (db-migration-verification): the worker deploys only if the column is there, the A2 query returns zero rows, and the six historical pairs hold
-Assert-Window "the catalogue verification"
+Assert-Window "the catalogue verification (two reads, then the pairs read)" (3 * $WRANGLER_D1_SECONDS)
 Assert-Prod-Verified "after the migration"
 $why = Test-HistoricalPairs (Invoke-D1Read $PAIRS_SQL "the historical pairs read")
 if ($why -ne "") { Stop-Here ("historical pairs after the migration: " + $why + ". Do not deploy.") }
@@ -451,7 +463,7 @@ Say "[d1] verified on prod: column present (INTEGER), A2 verification returns ze
 
 # 7. deploy the worker with the commit stamp, capturing its version id, then poll until the served identity is this deploy's
 # BEGIN-DEPLOY-AND-POLL
-Assert-Window "the worker deploy"
+Assert-Window "the worker deploy and its poll" ($WRANGLER_DEPLOY_SECONDS + ($POLL_TRIES * ($POLL_DELAY_SECONDS + $POLL_READ_SECONDS)))
 $headNow = (git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $headNow -cne $headSha) { Stop-Here ("HEAD moved since step 1 (" + $headSha.Substring(0, 8) + " -> " + $headNow + "): the migration is applied, the worker was not deployed. Re-run with -MigrationAlreadyApplied once HEAD is right.") }
 $dirtyNow = @(git status --porcelain)
@@ -472,7 +484,7 @@ Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 
 # 8. reconciliation AFTER activation (A5 step 6): the idempotent backfill again, then the verification again
 # BEGIN-RECONCILE
-Assert-Window "the post-activation reconciliation"
+Assert-Window "the post-activation reconciliation (backfill, then two reads)" (3 * $WRANGLER_D1_SECONDS)
 $bfStem = [System.IO.Path]::GetTempFileName()
 $bf = $bfStem + ".sql"
 try {
@@ -485,6 +497,7 @@ try {
 if ($rec.TimedOut) { Stop-Here "the post-activation backfill timed out after $WRANGLER_D1_SECONDS s; read the verification by hand. $ROLLBACK_LINE" }
 if ($rec.Code -ne 0) { Stop-Here "the post-activation backfill failed (exit $($rec.Code)). $ROLLBACK_LINE" }
 Assert-Prod-Verified "after worker activation"
+Assert-Window "completion of post-activation reconciliation" 0
 Say "[d1] post-activation: backfill re-run, A2 verification returns zero rows"
 # END-RECONCILE
 
