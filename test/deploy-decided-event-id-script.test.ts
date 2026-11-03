@@ -63,7 +63,7 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
     names.set(m[1].toLowerCase(), set);
   }
   assert.deepEqual([...names.values()].filter((s) => s.size > 1).map((s) => [...s].join(" / ")), []);
-  assert.equal(/\$[A-Za-z_][A-Za-z0-9_]*:/.test(code.replace(/\$\(/g, "").replace(/\$script:/g, "")), false);
+  assert.equal(/\$[A-Za-z_][A-Za-z0-9_]*:/.test(code.replace(/\$\(/g, "").replace(/\$script:/g, "").replace(/\$env:/g, "")), false);
   for (const m of code.matchAll(/2>&1/g)) {
     const before = code.slice(0, m.index);
     assert.ok(before.lastIndexOf('$ErrorActionPreference = "Continue"') > before.lastIndexOf('$ErrorActionPreference = "Stop"'));
@@ -138,7 +138,7 @@ test("the steps are in the load-bearing order: pins, git, gates, live read, D1 p
   // The migration is applied only after the preflight read passed; the deploy only after the verification.
   assert.ok(script.indexOf("if ($why -ne \"\") { Stop-Here \"preflight: $why\" }") < script.indexOf("# BEGIN-MIGRATION"));
   const wranglerLines = code.split("\n").filter((l) => l.includes("npx wrangler"));
-  const executed = wranglerLines.filter((l) => /Invoke-Bounded \("npx wrangler /.test(l));
+  const executed = wranglerLines.filter((l) => /Invoke-Bounded(Sql)? \("npx wrangler /.test(l));
   assert.deepEqual(
     executed.map((l) => /npx wrangler (\S+)/.exec(l)![1]).sort(),
     ["d1", "d1", "d1", "deploy"],

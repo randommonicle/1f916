@@ -23,7 +23,8 @@
 # THE RIDE writes nothing: public GETs, and two POSTs of a read-only tools/call whose body is sent from a temp file.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference (write "${var}:");
 # never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips inner double quotes from a native command's
-# argument, so SQL goes to wrangler by --file and request bodies by --data-binary @file. ASCII only.
+# argument, so every READ goes to wrangler by --command as one single-quote-only line (a statement with a double quote is refused), --file is used only for the migration and the backfill, and request bodies go by
+# --data-binary @file. ASCII only.
 param(
   [Parameter(Mandatory = $true)][string]$ExpectedCommit,
   [switch]$DryRun,
@@ -200,25 +201,45 @@ function Test-ColumnPresent($res) {
   if ([string]$list[0].type -cne "INTEGER") { return ("proposals.decided_event_id has type '" + $list[0].type + "', expected INTEGER") }
   return ""
 }
-# Runs one SQL file against the remote D1 (bounded) and returns the parsed rows, or STOPS. $json: read the rows back.
-function Invoke-D1File($sqlPath, $label) {
-  $r = Invoke-Bounded ("npx wrangler d1 execute " + $PROD_DB + " --remote --json --file " + $sqlPath) $WRANGLER_D1_SECONDS
+# SQL for wrangler goes by --command, never --file: with --file, `d1 execute` goes through D1's import API and returns statistics only, never rows (wrangler-dist/cli.js, the input.file branch), so a SELECT read that
+# way can only fail closed. --file stays for the migration apply and the backfill re-run, whose result is the exit code alone.
+# One line, single quotes only: PowerShell 5.1 mangles embedded double quotes when it calls a native exe, so a statement containing one is refused. Full-line -- comments are stripped and whitespace collapsed.
+function ConvertTo-SingleLineSql($text) {
+  $kept = @()
+  foreach ($line in (([string]$text).Replace("`r`n", "`n").Split("`n"))) {
+    $t = $line.Trim()
+    if ($t -eq "" -or $t.StartsWith("--")) { continue }
+    $kept += $t
+  }
+  return ((($kept -join " ") -replace '\s+', " ").Trim())
+}
+# "" when $sql is safe to hand to a native exe as one --command argument, otherwise the reason it is refused.
+function Test-SingleLineSql($sql) {
+  if ([string]$sql -eq "") { return "the SQL is empty" }
+  if (([string]$sql).Contains('"')) { return "the SQL contains a double quote, which PowerShell 5.1 mangles in a native argument" }
+  if (([string]$sql).Contains("--")) { return "the SQL still contains '--' after stripping full-line comments" }
+  return ""
+}
+# Runs `$prefix "<sql>"` bounded. The statement travels in an environment variable that cmd.exe expands inside the quotes, so a percent sign or an angle bracket in it is never parsed as cmd syntax.
+function Invoke-BoundedSql($prefix, $sql, $seconds) {
+  $env:D1_SQL_ARG = $sql
+  try {
+    return (Invoke-Bounded ($prefix + ' "%D1_SQL_ARG%"') $seconds)
+  } finally {
+    Remove-Item Env:D1_SQL_ARG -ErrorAction SilentlyContinue
+  }
+}
+# Runs one READ against the remote D1 by --command (bounded) and returns the parsed result, or STOPS.
+function Invoke-D1Command($sql, $label) {
+  $one = ConvertTo-SingleLineSql $sql
+  $why = Test-SingleLineSql $one
+  if ($why -ne "") { Stop-Here ("cannot send the SQL for " + $label + ": " + $why + ".") }
+  $r = Invoke-BoundedSql ("npx wrangler d1 execute " + $PROD_DB + " --remote --json --command") $one $WRANGLER_D1_SECONDS
   if ($r.TimedOut) { Stop-Here ("wrangler d1 execute timed out after " + $WRANGLER_D1_SECONDS + " s on " + $label + ". The state is unknown: read the catalogue by hand before any retry.") }
   if ($r.Code -ne 0) { Stop-Here ("wrangler d1 execute failed (exit " + $r.Code + ") on " + $label + ".") }
   return (Read-D1Rows $r.Out)
 }
-# Writes $sql to a temp .sql file and runs it as a read.
-function Invoke-D1Read($sql, $label) {
-  $stem = [System.IO.Path]::GetTempFileName()
-  $f = $stem + ".sql"
-  try {
-    [System.IO.File]::WriteAllText($f, $sql + "`n")
-    return (Invoke-D1File $f $label)
-  } finally {
-    Remove-Item $f -ErrorAction SilentlyContinue
-    Remove-Item $stem -ErrorAction SilentlyContinue
-  }
-}
+function Invoke-D1Read($sql, $label) { return (Invoke-D1Command $sql $label) }
 # The text between the BEGIN BACKFILL and END BACKFILL marker lines of the migration (the one idempotent UPDATE), or "" when the markers are absent.
 function Get-BackfillSql($migrationText) {
   $m = [regex]::Match(([string]$migrationText).Replace("`r`n", "`n"), '(?s)-- BACKFILL BEGIN\n(.*?)-- BACKFILL END')
@@ -233,7 +254,7 @@ function Assert-Window($label) {
 function Assert-Prod-Verified($when) {
   $why = Test-ColumnPresent (Invoke-D1Read $COLUMN_SQL "the column read")
   if ($why -ne "") { Stop-Here ("catalogue check " + $when + " failed: " + $why + ".") }
-  $why = Test-VerificationClean (Invoke-D1File $VERIFY_SQL_PATH "the A2 verification")
+  $why = Test-VerificationClean (Invoke-D1Command (Get-Content $VERIFY_SQL_PATH -Raw) "the A2 verification")
   if ($why -ne "") { Stop-Here ("A2 verification " + $when + " failed: " + $why + ". Do not deploy or continue; read the rows by hand.") }
 }
 # ---- the served-answer checks (A5 step 9) ----
@@ -349,6 +370,8 @@ if (-not (Select-String -Path "src/governance.ts" -Pattern "export function asse
 if (-not (Select-String -Path "src/code-identity.ts" -Pattern "export function codeBlock" -Quiet)) { Stop-Here "src/code-identity.ts has no codeBlock: this checkout would drop served code identity." }
 if (-not (Select-String -Path "migrations/0023_decided_event_id.sql" -Pattern "-- BACKFILL BEGIN" -SimpleMatch -Quiet)) { Stop-Here "the migration carries no BACKFILL BEGIN marker: step 8 could not re-run the backfill." }
 if (-not (Test-Path $VERIFY_SQL_PATH)) { Stop-Here "$VERIFY_SQL_PATH is missing: the A2 verification cannot run." }
+$verifyWhy = Test-SingleLineSql (ConvertTo-SingleLineSql (Get-Content $VERIFY_SQL_PATH -Raw))
+if ($verifyWhy -ne "") { Stop-Here "$VERIFY_SQL_PATH cannot be sent as one --command argument: $verifyWhy." }
 if (-not (Select-String -Path "wrangler.jsonc" -Pattern '"version_metadata"' -Quiet)) { Stop-Here "wrangler.jsonc has no version_metadata binding: the Worker could not serve Cloudflare's version id." }
 if (Select-String -Path "wrangler.jsonc" -Pattern '"CODE_COMMIT"' -Quiet) { Stop-Here "wrangler.jsonc configures a CODE_COMMIT var: a deploy that forgot the flag would serve a stale stamp. The stamp comes from this script's --var flag only." }
 $backfillSql = Get-BackfillSql (Get-Content $MIGRATION_PATH_EXPECTED -Raw)
