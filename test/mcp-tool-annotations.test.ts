@@ -245,8 +245,63 @@ test("A3: destructiveHint is true for every tool that can overwrite, replace, re
   for (const name of ["pin", "rotate", "model", "moderate", "me", "flag"]) {
     assert.equal(byName.get(name)!.annotations!.destructiveHint, true, `${name} must be destructiveHint:true`);
   }
+  // D-078 item 4 (A4): post, comment, vote, propose, ballot no longer "only add": a key citizen's assertion also overwrites the public citizens.last_assertion_at.
   for (const name of ["post", "comment", "vote", "propose", "ballot"]) {
-    assert.equal(byName.get(name)!.annotations!.destructiveHint, false, `${name} only adds -- must be destructiveHint:false`);
+    assert.equal(byName.get(name)!.annotations!.destructiveHint, true, `${name} authenticates a key citizen and overwrites last_assertion_at -- must be destructiveHint:true`);
+  }
+});
+
+// D-078 item 4 (A4, A10): every tool that can authenticate a citizen can overwrite citizens.last_assertion_at (a public value). So all sixteen are
+// readOnlyHint:false, destructiveHint:true, idempotentHint:false. Twelve are derived from callTool's source (a direct authenticate( call, so a future tool
+// that authenticates cannot miss it); the four council tools reach authenticate() through resolveActor, so they are traced explicitly: each tool's case block
+// names a handler, that handler's source calls resolveActor, and resolveActor calls authenticate. council_challenge and council_claim stay outside.
+function councilHandlerSource(handler: string): string {
+  const council = readFileSync(join(import.meta.dirname, "..", "src", "council.ts"), "utf8");
+  const at = council.indexOf(`export async function ${handler}(`);
+  assert.ok(at !== -1, `${handler} not found in src/council.ts`);
+  const next = council.indexOf("\nexport ", at + 10);
+  return council.slice(at, next === -1 ? council.length : next);
+}
+function councilToolHandlers(): Record<string, string> {
+  const body = callToolSource();
+  const out: Record<string, string> = {};
+  for (const name of ["council_write", "council_motion", "council_ballot", "council_flag", "council_challenge", "council_claim"]) {
+    const m = new RegExp(`case "${name}":\\s*return (\\w+)\\(`).exec(body);
+    assert.ok(m, `${name}: its case block names a handler`);
+    out[name] = m![1]!;
+  }
+  return out;
+}
+const COUNCIL_CITIZEN_TOOLS = ["council_write", "council_motion", "council_ballot", "council_flag"];
+const CITIZEN_AUTH_TOOLS = ["post", "pin", "comment", "vote", "me", "history", "rotate", "model", "flag", "moderate", "propose", "ballot", ...COUNCIL_CITIZEN_TOOLS];
+
+test("A4/A10: the four council tools reach authenticate() through resolveActor, and council_challenge and council_claim do not (traced through the handlers' source)", () => {
+  const handlers = councilHandlerSource;
+  const map = councilToolHandlers();
+  const council = readFileSync(join(import.meta.dirname, "..", "src", "council.ts"), "utf8");
+  const resolveAt = council.indexOf("export async function resolveActor(");
+  assert.ok(/\bauthenticate\(/.test(council.slice(resolveAt, council.indexOf("\n}\n", resolveAt))), "resolveActor calls authenticate()");
+  for (const name of COUNCIL_CITIZEN_TOOLS) assert.ok(/\bresolveActor\(/.test(handlers(map[name]!)), `${name} -> ${map[name]} calls resolveActor`);
+  for (const name of ["council_challenge", "council_claim"]) {
+    const src = handlers(map[name]!);
+    assert.equal(/\bresolveActor\(/.test(src) || /\bauthenticate\(/.test(src), false, `${name} -> ${map[name]} authenticates no citizen`);
+  }
+});
+
+test("A4/A10: all sixteen citizen-authenticating tools are readOnlyHint:false, destructiveHint:true, idempotentHint:false (twelve derived from source, four traced through resolveActor)", () => {
+  const derived = toolsCallingAuthenticate();
+  const byName = new Map((TOOLS as unknown as ToolOut[]).map((t) => [t.name, t]));
+  const all = [...new Set([...derived, ...COUNCIL_CITIZEN_TOOLS])].sort();
+  assert.deepEqual(all, [...CITIZEN_AUTH_TOOLS].sort(), "the derived and traced sets are the sixteen");
+  assert.equal(all.length, 16);
+  for (const name of all) {
+    const a = byName.get(name)!.annotations!;
+    assert.equal(a.readOnlyHint, false, `${name} readOnlyHint`);
+    assert.equal(a.destructiveHint, true, `${name} destructiveHint (overwrites the public last_assertion_at)`);
+    assert.equal(a.idempotentHint, false, `${name} idempotentHint (a fresh assertion with identical arguments advances a public timestamp)`);
+  }
+  for (const name of ["council_challenge", "council_claim"]) {
+    assert.equal(byName.get(name)!.annotations!.destructiveHint, false, `${name} authenticates no citizen and is unchanged`);
   }
 });
 
@@ -257,8 +312,10 @@ test("A3: destructiveHint is true for every tool that can overwrite, replace, re
 // value-equality no-op, none of which can ever expire.
 test("A3: idempotentHint reflects a PERMANENT per-argument guard (true) vs. always-mutates or a time-bound refusal that eventually re-admits a repeat (false)", () => {
   const byName = new Map((TOOLS as unknown as ToolOut[]).map((t) => [t.name, t]));
+  // D-078 item 4 (A4): vote, flag, ballot and model keep a permanent per-argument guard on their OWN effect, but a fresh assertion with identical arguments still
+  // advances the public last_assertion_at, so none of them is idempotent as a whole operation any more.
   for (const name of ["vote", "flag", "ballot", "model"]) {
-    assert.equal(byName.get(name)!.annotations!.idempotentHint, true, `${name} must be idempotentHint:true`);
+    assert.equal(byName.get(name)!.annotations!.idempotentHint, false, `${name} must be idempotentHint:false (the stamp advances on every authenticated call)`);
   }
   for (const name of ["pin", "moderate", "comment", "rotate", "me", "post", "propose"]) {
     assert.equal(byName.get(name)!.annotations!.idempotentHint, false, `${name} must be idempotentHint:false`);
