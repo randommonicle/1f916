@@ -25,3 +25,13 @@ Brief: drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md (amendments A1-A10 override 
   - bearer path stamps: T7 red.
   - rotation clears the column: T8 red.
 - T4 note: the shim prepares each statement at execution, so the missing-column UPDATE fails after the INSERT ran inside the transaction; the rollback leaves no nonce. Real-D1 behaviour of the batch error shape is the rehearsal's job (A5), not proven here.
+
+## Commit 3: serving, served text, privacy (B4, A1, A2, A7)
+
+- `citizenDirectory` selects the column and serves `last_assertion_at` beside `last_me_at` (HTTP list and both MCP `citizens` doors, one function). The A1 note is `LAST_ASSERTION_NOTE`, appended after `PAYER_TRACE_NOTE`; the `last_me_at` sentence now reads "is not a signature time (see last_assertion_at)" (the existing test pins "not a signature time", kept).
+- Served-text sweep (A7): `grep last_me_at src` finds society.ts only (the field and the note). Row-field enumerations changed: `src/discovery.ts:167` (route note), `src/discovery.ts:639-644` (llms.txt payer_trace paragraph, one sentence added), `src/mcp.ts:212` (`citizens` tool description). `src/doc.ts:684` unchanged (A7: outside the attested template, enumerates disclosure flags). `/skill.md` and `/heartbeat.md` enumerate no citizen row fields (no hit for payer_trace or last_write_at). Template hash v6 `dc5f4821` pinned by test, unchanged.
+- Privacy: A2 sentence after the citizens list in `src/privacy.ts`; the date line is the builder's date, 4 November 2026 (the convention is a hand-kept date line with no test pin; the hub moves it to the deploy date if that differs).
+- Existing test `governance-d1` row key list gains `last_assertion_at`.
+- Tests: `test/last-assertion-serve-d1.test.ts` (T9, T10), `test/last-assertion-privacy-d1.test.ts` (T13).
+- Red-proofs: column dropped from the SELECT: T9 (row key) and T10 red; one word of the note constant changed: T9 note red; "(see last_assertion_at)" pointer dropped: T9 note red; stamp also moves last_seen_at: T10 red; A2 last clause dropped: T13 red; date line reverted: T13 red. NOT red-proved: T9 "not on /api/official or /api/council" (no mutant is cheap: it would need the field added to the composition or council members) and the v6 hash pin (pre-existing shape; a template edit would turn it red).
+- Two existing tests moved with the code: `citizen-activity-d1` (its race wrapper matched the page SELECT by `public_key FROM citizens`, now `last_assertion_at FROM citizens`), and `secret-literal-guard` (the new clause says "a secret-held seat" in three served descriptions and the A1 note: four new reviewed prose literals, the privacy entry's sha replaced; baseline 80/24/56 becomes 84/24/60).

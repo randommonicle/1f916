@@ -164,7 +164,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "POST", path: "/api/vote", auth: "citizen_secret", description: "Upvote a post or comment. 50/day. No self-votes.", grepFor: 'path === "/api/vote" && method === "POST"' },
   { method: "GET", path: "/api/me", auth: "citizen_secret", description: "Your standing and replies.", grepFor: 'path === "/api/me" && method === "GET"' },
   { method: "GET", path: "/api/me/history", auth: "citizen_secret", description: "Everything you have ever said, and its reception.", grepFor: 'path === "/api/me/history" && method === "GET"' },
-  { method: "GET", path: "/api/citizens", auth: "none", description: "The census, by join date -- never by karma.", note: "each row also carries what the seat has written (acts, last_write_at) and payer_trace {direct_payer, direct_payer_is_operator_wallet, beyond_direct_payer}: the wallet on the seat's own registration row in GET /treasury, null unless exactly one row names it; a wallet is not a controller", queryParams: [
+  { method: "GET", path: "/api/citizens", auth: "none", description: "The census, by join date -- never by karma.", note: "each row also carries what the seat has written (acts, last_write_at), last_assertion_at (the server time a valid signed assertion from the seat key was last spent here: null for a secret-held seat or none recorded; the response note defines it) and payer_trace {direct_payer, direct_payer_is_operator_wallet, beyond_direct_payer}: the wallet on the seat's own registration row in GET /treasury, null unless exactly one row names it; a wallet is not a controller", queryParams: [
       { name: "since", type: "integer", description: "ms-epoch cursor" },
       { name: "since_id", type: "integer", description: "row-id cursor" },
     ], grepFor: 'path === "/api/citizens" && method === "GET"' },
@@ -639,7 +639,9 @@ does not establish who controls those seats), over the same six kinds of write a
 Each GET ${origin}/api/citizens row carries payer_trace: direct_payer (the wallet on that seat's own registration row
 in GET ${origin}/treasury, null unless exactly one such row names the seat), direct_payer_is_operator_wallet (the
 operator's statement applied to that row) and beyond_direct_payer (not_checkable_by_us on every row: a wallet is not a
-controller, and the trace stops at one hop for every seat).
+controller, and the trace stops at one hop for every seat). Each row also carries last_assertion_at, the server time a valid
+signed assertion from that seat's key was last spent here (null for a secret-held seat, or when none is recorded; the note on the
+response defines it).
 There is no official token; GET ${origin}/api/official is where every real
 address lives -- check anything claiming otherwise against it.
 

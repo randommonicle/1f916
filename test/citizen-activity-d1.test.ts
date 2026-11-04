@@ -201,7 +201,7 @@ test("CODEX r1 M1: a registration committed between the directory's page SELECT 
       ...db,
       prepare(sql: string) {
         const st = db.prepare(sql);
-        if (!/FROM citizens/.test(sql) || !/public_key FROM citizens/.test(sql)) return st;
+        if (!/FROM citizens/.test(sql) || !/last_assertion_at FROM citizens/.test(sql)) return st;
         return {
           ...st,
           bind: (...a: unknown[]) => {

@@ -287,7 +287,12 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   // The claim-booked citizen INSERT (register-gate.ts finishRegistration): the same column list as register()'s own SQL above, gated on the claim.
   { file: "src/register-gate.ts", sha: "4ebfc1c9fed7351b062afe0896f603965b5a5453b27a9fd1d80dbcd40f24c8bc", note: "SQL: INSERT INTO citizens (... secret_hash, public_key ...) SELECT ... WHERE EXISTS (claim gate)" },
   { file: "src/register-gate.ts", sha: "574033562ec24e6f01296f06007ce861d242acb83071a3a03048d7098f2c1d0a", note: "B6b (C8 wording): the paid-but-failed message for a secret-mode registration: an identical re-send checks it again without a second charge; if no seat was created it attempts to create it and hands its secret over if that succeeds, and says so (secret unrecoverable) if one already was; no deadline" },
-  { file: "src/privacy.ts", sha: "bfc40b13f6ac0eddf536a0ec04d4f1a8cdede7cb2445b91153394d8f89a69903", note: "the privacy policy template: says a citizen secret is stored only as a SHA-256 hash and never shown; no auth instruction" },
+  { file: "src/privacy.ts", sha: "3ce8a30bd3628d30a7a43f5c265124f574a1b9135190ab096b9f9841ff1ae7c3", note: "the privacy policy template: says a citizen secret is stored only as a SHA-256 hash and never shown; no auth instruction (last_assertion_at paragraph and date added 4 Nov 2026, D-078 item 4)" },
+  // last_assertion_at (D-078 item 4, 4 Nov 2026): the three served row-field descriptions gained a clause saying null means "a secret-held seat" (no signature to record), so their shas were replaced; the A1 note is one new prose literal. None carries an auth instruction.
+  { file: "src/discovery.ts", sha: "c28ad187104616807308a4436065adac89ae7f688933e5e03ccd5b12c85392ea", note: "GET /api/citizens route note: last_assertion_at, null for a secret-held seat or none recorded; no auth instruction" },
+  { file: "src/discovery.ts", sha: "23e4a874a5ea12fc0690fa10609e4341afe9965967a6ad829b286572c8a4c4c7", note: "llms.txt chunk with the payer_trace paragraph: last_assertion_at, null for a secret-held seat; no auth instruction" },
+  { file: "src/mcp.ts", sha: "58a5d891faf7b597d210c3375720f5fd8bc9ef63eb8a0348b78fe34ffdfbb106", note: "citizens tool description: last_assertion_at, null for a secret-held seat or none recorded; no auth instruction" },
+  { file: "src/society.ts", sha: "36e65e42739a2285fe9cf47ad1b177010c22d4c5db2cae9804d8a2c4ae2e1220", note: "LAST_ASSERTION_NOTE (brief A1): null on a row with no public_key means a secret-held seat; no auth instruction" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);
 const PROSE_KEYS = new Set(PROSE_ALLOW.map((e) => e.file + "\n" + e.sha));
@@ -341,9 +346,10 @@ test("secret-literal guard: every 'secret' literal in src/ is a reviewed wire to
   // free guest tools. Each entry's sha was replaced, so the baseline did not move: 79 / 24 / 55. The new tool descriptions avoid the word.
   // Privacy page (21 Oct 2026): src/privacy.ts adds one reviewed prose literal (the policy template, which says a citizen secret is stored only as a hash): 80 / 24 / 56.
   // Resident tier (D-075 step b): the guest-core "writes" exception gained the two resident routes, so its entry's sha was replaced; every other new literal (src/resident.ts, the two tool descriptions, the route rows, the skill text) avoids the word. The baseline did not move: 79 / 24 / 55.
-  assert.equal(total, 80, "secret-literal total drifted from the committed baseline (80)");
+  // last_assertion_at (D-078 item 4, 4 Nov 2026): four new prose literals say a null stamp means "a secret-held seat" (discovery.ts x2, mcp.ts, the A1 note in society.ts); the privacy entry only changed sha: 84 / 24 / 60.
+  assert.equal(total, 84, "secret-literal total drifted from the committed baseline (84)");
   assert.equal(wire, 24, "exact wire-token count drifted from the committed baseline (24)");
-  assert.equal(prose, 56, "prose-literal count drifted from the committed baseline (56)");
+  assert.equal(prose, 60, "prose-literal count drifted from the committed baseline (60)");
 });
 
 test("secret-literal guard red-proof: catches a novel secret-only instruction, decodes escapes, exempts only exact wire tokens, and forces review on a changed literal", () => {

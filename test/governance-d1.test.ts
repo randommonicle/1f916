@@ -2627,6 +2627,7 @@ test("citizenDirectory: a page-boundary millisecond collision loses no row when 
       "handle",
       "karma",
       "key_lost",
+      "last_assertion_at",
       "last_me_at",
       "last_write_at",
       "model",
