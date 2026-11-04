@@ -23,7 +23,9 @@
 #   cd "C:\Users\bengr\Projects\AI domain and social network\society"
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-last-assertion-at.ps1 -ExpectedCommit <sha> -DryRun                  # every check and the live reads (including the D1 catalogue read, a READ), nothing written, nothing deployed
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-last-assertion-at.ps1 -ExpectedCommit <sha> -RehearsalPassed        # the real thing
-#   If the migration was applied and a later step stopped: re-run with -MigrationAlreadyApplied (the catalogue and the verification still run).
+#   If the migration was applied and a step BEFORE the worker deploy stopped: re-run with -MigrationAlreadyApplied (the catalogue and the verification still run).
+#   Once the worker has been deployed there is no resume mode: a re-run refuses because the live commit or note already matches. If a stop comes after the deploy, the worker is live: finish the remaining verification
+#   by hand with the GETs this script lists (/api/attest, /api/citizens, the citizens tool on /mcp and /mcp/read, /privacy), or roll back to the version id printed before the stop.
 # THE RIDE writes nothing: public GETs, and two POSTs of a read-only tools/call whose body is sent from a temp file.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference (write "${var}:");
 # never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips inner double quotes from a native command's
@@ -407,10 +409,10 @@ $listBefore = Read-JsonBody (Get-Text "$BASE/api/citizens" 30 $null)
 if ($null -eq $listBefore) { Stop-Here "GET /api/citizens did not return JSON before the deploy: read it by hand." }
 if (([string]$listBefore.note).Contains($NOTE_MARKER)) { Stop-Here "GET /api/citizens already carries the last_assertion_at note: this looks already deployed, verify by hand." }
 
-# 4. THE FIRST PRODUCTION READ, which starts the clock. A READ, so -DryRun runs it too.
+# 4. THE FIRST PRODUCTION READ. The clock starts BEFORE it is invoked, so the read's own run time (up to $WRANGLER_D1_SECONDS) is inside the window. A READ, so -DryRun runs it too.
+$script:PreflightAt = Get-Date
 $columnRes = Invoke-D1Read $COLUMN_SQL "the column state read"
 if ($null -eq $columnRes) { Stop-Here "the column state read returned no parsable result." }
-$script:PreflightAt = Get-Date
 Say ("[window] production D1 first read at " + $script:PreflightAt.ToString("o") + "; migration, worker activation and the post-activation verification must finish within " + $WINDOW_SECONDS + " s of this")
 $columnPresent = (@($columnRes.Rows).Count -gt 0)
 if ($columnPresent -and -not $MigrationAlreadyApplied) { Stop-Here "citizens.last_assertion_at is already on prod. If an earlier run applied it, re-run with -MigrationAlreadyApplied (the catalogue and verification still run)." }

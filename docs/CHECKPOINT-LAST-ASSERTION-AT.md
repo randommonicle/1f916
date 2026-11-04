@@ -49,3 +49,10 @@ Brief: drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md (amendments A1-A10 override 
 - `scripts/verify-last-assertion-at.sql`: offenders are a stamp that is not an integer, is zero or below, or sits on a secret-held seat. Zero rows right after the migration and after the worker serves.
 - Test `test/deploy-last-assertion-at-script.test.ts` (13): parse and ASCII, traps, placeholder pins (pin block run for real), the `-RehearsalPassed` block run for real, step order, wrangler only through the bounded helper, header duties, window, verification and column decision functions, the verification SQL over a real SQLite table, bounded runner, served-answer checks, source literals. Nothing runs wrangler.
 - Red-proofs (mutate the script or the SQL, run the file, restore): reviewed pin set to a sha; rehearsal guard disabled; column type check dropped; verification forced clean; the SQL's secret-held clause dropped; served check without the key test; window threshold widened; migration block marker moved (order); post-activation verification removed; an Authorization header added; privacy marker check dropped. All red.
+
+## Fix pass 1 (CODEX round 1)
+
+- F1: `$script:PreflightAt` is assigned immediately BEFORE the first production read (its own run time, up to 120 s, is now inside the window); the order test pins it. Red-proof: clock moved back after the read: order test red.
+- F2: header narrowed: `-MigrationAlreadyApplied` is for stops before the worker deploy; after it there is no resume mode (a re-run refuses because the live commit or note matches), so finish by hand with the listed GETs or roll back to the printed version id. Header test pins both phrases. No resume mode built.
+- F3: `citizen-activity-d1` race wrapper now requires `public_key` and `last_assertion_at` in the SELECT. Red-proof: `public_key` removed from the directory SELECT: race test red.
+- F4: T9 "not on /api/official or /api/council": field added to each route's answer: red (each). v6 hash pin: one character added to `FRONT_DOOR_TEMPLATE`: red. All restored.

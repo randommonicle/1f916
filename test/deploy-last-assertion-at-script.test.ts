@@ -139,8 +139,8 @@ test("the steps are in the load-bearing order: pins, rehearsal, git, gates, live
     "# BEGIN-REVIEWED-SOURCE-CHECK",
     "# BEGIN-GATES",
     'Read-Attest "before the deploy"',
-    '$columnRes = Invoke-D1Read $COLUMN_SQL "the column state read"',
     "$script:PreflightAt = Get-Date",
+    '$columnRes = Invoke-D1Read $COLUMN_SQL "the column state read"',
     "if ($DryRun)",
     "# BEGIN-MIGRATION",
     'Assert-Prod-Verified "after the migration"',
@@ -190,6 +190,8 @@ test("the header carries the rollback text and every duty (rehearsal first, the 
     "THIS SCRIPT DOES NOT SIGN ANYTHING",
     "public serving verified; production authentication write path not exercised",
     "worker deployed BEFORE the migration",
+    "there is no resume mode",
+    "a step BEFORE the worker deploy stopped",
   ]) assert.ok(header.includes(needle), `header names: ${needle}`);
 });
 
