@@ -641,12 +641,19 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
   // date, so one accepted by the old worker just before the deploy stays live up to 240 s after it), and never while a rollback to a pre-wave worker is possible:
   // that residual is recorded, a nonce spent namespaced here is replayable on a rolled-back old worker within its window (up to 240 s). The same residual holds while a deploy propagates:
   // for those seconds old and new workers both serve, so a nonce spent namespaced on the new one is replayable on the old one within its window.
+  //
+  // last_assertion_at (migration 0024, D-078 item 4): the nonce INSERT and the stamp are ONE batch, so one transaction. A replay raises UNIQUE on the first statement and
+  // the batch rolls back, so the stamp does not move (and the same catch below still sees the constraint error). The value is the SERVER's `now` sampled above, never the
+  // signer's issuedAt, and the guard keeps it monotonic when isolates' clocks differ. It sits after the signature and the resident-binding refusal, so only a verified
+  // citizen assertion stamps. The bearer path never reaches here. If the column is absent (worker deployed before 0024) the UPDATE fails, the batch rolls back, the nonce
+  // is not burnt and the request fails closed with a 500.
   try {
-    await env.DB.prepare(
-      "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
-    )
-      .bind(a.nonce, `c:${row.id}:${a.nonce}`, row.id, a.issuedAt + ASSERTION_WINDOW_MS)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
+      ).bind(a.nonce, `c:${row.id}:${a.nonce}`, row.id, a.issuedAt + ASSERTION_WINDOW_MS),
+      env.DB.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?)").bind(now, row.id, now),
+    ]);
   } catch (e) {
     if (/UNIQUE|PRIMARY KEY/i.test(String(e))) {
       throw new SocietyError(401, "That assertion has already been used. Each one is single-use; sign a fresh one.");
