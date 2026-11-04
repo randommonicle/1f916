@@ -20,14 +20,19 @@ $MIGRATION_PATH = "migrations/0024_last_assertion_at.sql"
 $WRANGLER_D1_SECONDS = 120
 $START_WAIT_SECONDS = 120
 $RUN_SECONDS = 120
+$EXPECTED_DATABASE = "commonhold-migtest (scratch)"
 $EXPECTED_CHECKS = @(
   "c1 first spend returns the citizen", "c1 stamp is a server time inside the call", "c1 one namespaced nonce row",
   "c2 replay is the existing 401", "c2 stamp unchanged by the replay", "c2 nonce rows unchanged",
   "c3a raw-nonce collision is the existing 401", "c3a stamp unchanged", "c3a no namespaced row", "c3a nonce rows unchanged",
   "c3b raw-nonce collision is the existing 401", "c3b stamp unchanged", "c3b no namespaced row", "c3b nonce rows unchanged",
   "c4 bad signature is a 401", "c4 no stamp", "c4 no nonce row",
-  "c5 the failing batch threw", "c5 no nonce row survived the failing batch",
-  "c6 rows_written reported for both statements", "c6 the stamp landed"
+  "c0 the scratch citizen was created with a row id",
+  "c5 the duplicate-insert batch threw", "c5 no nonce row survived the duplicate-insert batch",
+  "c5b the missing-column batch threw", "c5b no nonce row survived the missing-column batch",
+  "c7 concurrent spends: exactly one citizen", "c7 concurrent spends: exactly one replay 401", "c7 concurrent spends: exactly one nonce row",
+  "c6 rows_written reported for both statements", "c6 the stamp landed",
+  "cleanup removed the scratch citizen and its nonce rows"
 )
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
@@ -94,9 +99,21 @@ function Invoke-ScratchRead($sql, $label) {
   if ($null -eq $res) { Stop-Here ("the read for " + $label + " returned no parsable result") }
   return $res
 }
+# "" when the column read shows exactly one citizens.last_assertion_at, type INTEGER, nullable (notnull 0) and with no default (dflt_value null), otherwise the reason.
+function Test-ColumnShape($res) {
+  if ($null -eq $res) { return "the column read returned no parsable result" }
+  $list = @($res.Rows)
+  if ($list.Count -ne 1) { return ("citizens has " + $list.Count + " last_assertion_at column rows, expected exactly 1") }
+  if ([string]$list[0].type -cne "INTEGER") { return ("citizens.last_assertion_at has type '" + $list[0].type + "', expected INTEGER") }
+  if ([string]$list[0].notnull_flag -cne "0") { return ("citizens.last_assertion_at has notnull '" + $list[0].notnull_flag + "', expected 0 (nullable)") }
+  if ($null -ne $list[0].dflt_value) { return ("citizens.last_assertion_at has a default '" + $list[0].dflt_value + "', expected none") }
+  return ""
+}
 # "" when the report is a complete pass: it parsed, carries every expected check exactly once, every check passed, and report.pass is true. Otherwise the first reason.
 function Test-RehearsalReport($report) {
   if ($null -eq $report) { return "the rehearsal route did not return JSON" }
+  if ($null -eq $report.database) { return "the route's answer lacks the database field: it may not be the rehearsal worker" }
+  if ([string]$report.database -cne $EXPECTED_DATABASE) { return ("the route reports database '" + $report.database + "', expected '" + $EXPECTED_DATABASE + "'") }
   if ($null -ne $report.error -and [string]$report.error -ne "") { return ("the rehearsal route reported an error: " + $report.error) }
   $checks = @($report.checks)
   foreach ($name in $EXPECTED_CHECKS) {
@@ -108,8 +125,42 @@ function Test-RehearsalReport($report) {
     if ($c.pass -ne $true) { return ("check '" + $c.name + "' failed: expected " + ($c.expected | ConvertTo-Json -Compress) + ", got " + ($c.actual | ConvertTo-Json -Compress)) }
   }
   if ($report.pass -ne $true) { return "the route's own pass flag is not true" }
-  if ($null -eq $report.rows_written_per_statement) { return "rows_written was not recorded" }
+  $written = @($report.rows_written_per_statement)
+  if ($written.Count -ne 2) { return "rows_written was not recorded for both statements" }
+  foreach ($w in $written) {
+    $n = 0
+    if (-not [int]::TryParse([string]$w, [ref]$n) -or $n -le 0) { return ("rows_written is '" + $w + "', expected a number greater than 0 for each statement") }
+  }
   return ""
+}
+# The process id that owns the LISTENING socket on $listenPort, or $null when nothing listens there.
+function Get-ListenerPid($listenPort) {
+  $conns = @(Get-NetTCPConnection -LocalPort $listenPort -State Listen -ErrorAction SilentlyContinue)
+  if ($conns.Count -lt 1) { return $null }
+  return [int]$conns[0].OwningProcess
+}
+# Every descendant process id of $rootPid (children, their children, and so on), read from the process table now.
+function Get-DescendantPids($rootPid) {
+  $table = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+  $found = @()
+  $queue = @([int]$rootPid)
+  while ($queue.Count -gt 0) {
+    $head = $queue[0]
+    $queue = @($queue | Select-Object -Skip 1)
+    foreach ($proc in $table) {
+      if ([int]$proc.ParentProcessId -eq $head -and ($found -notcontains [int]$proc.ProcessId)) {
+        $found += [int]$proc.ProcessId
+        $queue += [int]$proc.ProcessId
+      }
+    }
+  }
+  return @($found)
+}
+# Kills each listed process id with its tree. An id that is already gone is not an error. Never this shell.
+function Stop-ProcessIds($ids) {
+  foreach ($id in @($ids)) {
+    if ($null -ne $id -and [int]$id -gt 0 -and [int]$id -ne $PID) { taskkill.exe /PID $id /T /F | Out-Null }
+  }
 }
 function Get-Text($url, $maxTime) {
   $tmp = [System.IO.Path]::GetTempFileName()
@@ -137,7 +188,7 @@ Say ("[target] " + $SCRATCH_DB + " (" + $SCRATCH_ID + "), config " + $CONFIG_PAT
 # 1. the scratch database: the tables the real authenticate() touches, then migration 0024 only if the column is absent
 $tables = Invoke-ScratchRead "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('citizens','auth_nonces')" "the tables read"
 if (@($tables.Rows).Count -ne 2) { Stop-Here ("the scratch database has " + @($tables.Rows).Count + " of citizens and auth_nonces: load it with the production schema first.") }
-$colSql = "SELECT name, type FROM pragma_table_info('citizens') WHERE name = 'last_assertion_at'"
+$colSql = "SELECT name, type, [notnull] AS notnull_flag, dflt_value FROM pragma_table_info('citizens') WHERE name = 'last_assertion_at'"
 $col = Invoke-ScratchRead $colSql "the column read"
 if (@($col.Rows).Count -eq 0) {
   Say "[d1] applying $MIGRATION_PATH to the scratch database"
@@ -148,37 +199,57 @@ if (@($col.Rows).Count -eq 0) {
 } else {
   Say "[d1] citizens.last_assertion_at is already on the scratch database; the migration is not re-applied"
 }
-if (@($col.Rows).Count -ne 1 -or [string]@($col.Rows)[0].type -cne "INTEGER") { Stop-Here "citizens.last_assertion_at is not present as INTEGER on the scratch database." }
-Say "[d1] citizens.last_assertion_at present (INTEGER)"
+$why = Test-ColumnShape $col
+if ($why -ne "") { Stop-Here ("the column on the scratch database is not the migration's: " + $why) }
+Say "[d1] citizens.last_assertion_at present (INTEGER, nullable, no default)"
 
 # 2. the worker: wrangler dev --remote on a local port, the route called, wrangler stopped in finally
 $logOut = [System.IO.Path]::GetTempFileName()
 $logErr = [System.IO.Path]::GetTempFileName()
 $dev = $null
+$snapshot = @()
 $report = $null
 $routeNote = ""
 try {
   $devArgs = "/c npx wrangler dev --remote --config " + $CONFIG_PATH + " --port " + $Port
   Say ("[dev] starting: npx wrangler dev --remote --config " + $CONFIG_PATH + " --port " + $Port)
   $dev = Start-Process -FilePath "cmd.exe" -ArgumentList $devArgs -NoNewWindow -PassThru -RedirectStandardOutput $logOut -RedirectStandardError $logErr
+  $snapshot += @($dev.Id)
   $url = "http://127.0.0.1:" + $Port + "/run"
   $deadline = (Get-Date).AddSeconds($START_WAIT_SECONDS)
   $up = $false
   while ((Get-Date) -lt $deadline) {
     if ($dev.HasExited) { $routeNote = "wrangler dev exited early (code " + $dev.ExitCode + ")"; break }
     $probe = Get-Text ("http://127.0.0.1:" + $Port + "/") 5
-    if ($probe.Code -cne "000") { $up = $true; break }
+    if ($probe.Code -cne "000") {
+      $up = $true
+      # The process tree as it stands now: the wrapper, the port's owner and everything under both, so a dead wrapper cannot strand the Worker runtime.
+      $owner = Get-ListenerPid $Port
+      $snapshot += @(Get-DescendantPids $dev.Id)
+      if ($null -ne $owner) { $snapshot += @($owner); $snapshot += @(Get-DescendantPids $owner) }
+      break
+    }
     Start-Sleep -Seconds 3
   }
   if ($up) {
     $r = Get-Text $url $RUN_SECONDS
     Say ("[run] GET " + $url + " -> " + $r.Code)
-    try { $report = ($r.Body | ConvertFrom-Json) } catch { $routeNote = "the route's answer was not JSON (HTTP " + $r.Code + ")" }
+    if ($r.Code -cne "200") { $routeNote = "the rehearsal route answered HTTP " + $r.Code + ", expected 200" }
+    else {
+      try { $report = ($r.Body | ConvertFrom-Json) } catch { $routeNote = "the route's answer was not JSON" }
+    }
   } elseif ($routeNote -eq "") {
     $routeNote = "wrangler dev did not answer within " + $START_WAIT_SECONDS + " s"
   }
 } finally {
-  if ($null -ne $dev -and -not $dev.HasExited) { taskkill.exe /PID $dev.Id /T /F | Out-Null }
+  # Stop by process tree whether or not the cmd.exe wrapper is still alive: the snapshot, whatever is still under the wrapper, and whatever still owns the port.
+  if ($null -ne $dev) { $snapshot += @(Get-DescendantPids $dev.Id) }
+  $ownerNow = Get-ListenerPid $Port
+  if ($null -ne $ownerNow) { $snapshot += @($ownerNow) }
+  Stop-ProcessIds $snapshot
+  Start-Sleep -Seconds 2
+  $stillOwner = Get-ListenerPid $Port
+  if ($null -ne $stillOwner) { Stop-ProcessIds @($stillOwner) }
   if ($routeNote -ne "") {
     $tail = (Get-Content $logOut -Tail 15 -ErrorAction SilentlyContinue) -join " | "
     Say ("[dev] log tail: " + $tail)
@@ -186,7 +257,10 @@ try {
   Remove-Item $logOut -ErrorAction SilentlyContinue
   Remove-Item $logErr -ErrorAction SilentlyContinue
 }
-Say "[dev] wrangler stopped"
+Start-Sleep -Seconds 1
+$leftOver = Get-ListenerPid $Port
+if ($null -ne $leftOver) { Stop-Here ("something (process " + $leftOver + ") still listens on port " + $Port + " after the stop: stop it by hand before any re-run.") }
+Say ("[dev] wrangler stopped, port " + $Port + " released")
 if ($routeNote -ne "") { Stop-Here $routeNote }
 
 # 3. the checks, one line each, then the verdict
@@ -196,7 +270,8 @@ foreach ($c in @($report.checks)) {
   Say ("[" + $mark + "] " + $c.name + " | expected " + ($c.expected | ConvertTo-Json -Compress) + " | actual " + ($c.actual | ConvertTo-Json -Compress))
 }
 if ($null -ne $report.c5_note) { Say ("[note] " + $report.c5_note) }
-Say ("[rows_written] per statement of one spend (nonce INSERT, stamp UPDATE): " + ($report.rows_written_per_statement | ConvertTo-Json -Compress))
+if ($null -ne $report.c5b_note) { Say ("[note] " + $report.c5b_note) }
+Say ("[checkpoint] rows_written per statement of one spend (nonce INSERT, stamp UPDATE): " + ($report.rows_written_per_statement | ConvertTo-Json -Compress))
 if ($null -ne $report.cleanup_rows_deleted) { Say ("[cleanup] rows deleted: " + ($report.cleanup_rows_deleted | ConvertTo-Json -Compress)) }
 $why = Test-RehearsalReport $report
 if ($why -ne "") { Stop-Here ("FAIL: " + $why) }

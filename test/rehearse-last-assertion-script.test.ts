@@ -42,6 +42,7 @@ function runPs(lines: string[]): { code: number | null; out: string } | null {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+const d1json = (rows: unknown[]): string => `[{"results":${JSON.stringify(rows)},"success":true,"meta":{}}]`;
 const q = (s: string): string => "'" + s.replace(/'/g, "''") + "'";
 function harness(statements: string[]): string[] {
   return ["$ErrorActionPreference = 'Stop'", "$Database = 'commonhold-migtest'", defs, ...statements];
@@ -105,7 +106,7 @@ test("PASS is printed once, only after the report check, and the step order is t
     "# 1. the scratch database",
     "--remote --file",
     "# 2. the worker",
-    "taskkill.exe /PID $dev.Id",
+    "Stop-ProcessIds $snapshot",
     "# 3. the checks",
     "$why = Test-RehearsalReport $report",
     'Say "PASS',
@@ -136,8 +137,8 @@ test("the worker config binds ONLY the scratch database (name, id, preview id), 
 
 test("the decision functions, run for real: the scratch target is exact; the config check refuses a wrong name, a wrong id, two databases and bad JSON; the report check refuses a missing check, a failed one, an error and a false pass flag", (t) => {
   const names = workerCheckNames();
-  assert.equal(names.length, 21, `the worker adds 21 named checks: ${names.length}`);
-  const good = { pass: true, rows_written_per_statement: [2, 1], checks: names.map((n) => ({ name: n, expected: 1, actual: 1, pass: true })) };
+  assert.equal(names.length, 28, `the worker adds 28 named checks: ${names.length}`);
+  const good = { pass: true, database: "commonhold-migtest (scratch)", rows_written_per_statement: [2, 1], checks: names.map((n) => ({ name: n, expected: 1, actual: 1, pass: true })) };
   const withCheck = (idx: number, over: Record<string, unknown>) => ({ ...good, checks: good.checks.map((c, i) => (i === idx ? { ...c, ...over } : c)) });
   const jsonc = (db: Record<string, unknown>[]) => JSON.stringify({ name: "x", d1_databases: db });
   const dbOk = { binding: "DB", database_name: "commonhold-migtest", database_id: SCRATCH_ID, preview_database_id: SCRATCH_ID };
@@ -157,6 +158,16 @@ test("the decision functions, run for real: the scratch target is exact; the con
     ["report-failed", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify(withCheck(3, { pass: false, actual: "boom" })))})`, "failed: expected 1, got \"boom\""],
     ["report-error", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, error: "x broke" }))})`, "reported an error: x broke"],
     ["report-flag", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, pass: false }))})`, "pass flag is not true"],
+    ["report-nodatabase", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, database: undefined }))})`, "lacks the database field"],
+    ["report-wrongdatabase", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, database: "something else" }))})`, "expected 'commonhold-migtest (scratch)'"],
+    ["report-zerorows", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: [0, 1] }))})`, "greater than 0"],
+    ["report-textrows", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: ["x", 1] }))})`, "greater than 0"],
+    ["report-onerow", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: [2] }))})`, "not recorded for both"],
+    ["shape-ok", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: null }]))})`, ""],
+    ["shape-notnull", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 1, dflt_value: null }]))})`, "expected 0 (nullable)"],
+    ["shape-default", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: "0" }]))})`, "has a default"],
+    ["shape-type", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT", notnull_flag: 0, dflt_value: null }]))})`, "expected INTEGER"],
+    ["shape-absent", `Test-ColumnShape (Read-D1Rows ${q(d1json([]))})`, "0 last_assertion_at column rows"],
     ["report-norows", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: undefined }))})`, "rows_written was not recorded"],
   ];
   const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
@@ -179,6 +190,51 @@ test("the worker's two batched statements are the ones src/society.ts runs, verb
   for (const s of [lit("NONCE_INSERT"), lit("STAMP_UPDATE")]) assert.ok(society.includes(s), `src/society.ts carries: ${s.slice(0, 60)}`);
 });
 
+test("R7: the process helpers, run for real: descendants are found, and killing the wrapper alone leaves the orphan which the snapshot then stops; a socket's owner is found and released; the helper never kills its own shell", (t) => {
+  const run = runPs(
+    harness([
+      "$w = Start-Process -FilePath cmd.exe -ArgumentList '/c ping -n 60 127.0.0.1 > nul' -PassThru -WindowStyle Hidden",
+      "Start-Sleep -Seconds 2",
+      "$desc = @(Get-DescendantPids $w.Id)",
+      'Write-Host ("RESULT desc [" + ($desc.Count -ge 1) + "]")',
+      "taskkill.exe /PID $w.Id /F | Out-Null",
+      "Start-Sleep -Seconds 1",
+      "$alive1 = @($desc | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count",
+      'Write-Host ("RESULT orphan [" + ($alive1 -ge 1) + "]")',
+      "Stop-ProcessIds $desc",
+      "Start-Sleep -Seconds 1",
+      "$alive2 = @($desc | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count",
+      'Write-Host ("RESULT stopped [" + $alive2 + "]")',
+      "Stop-ProcessIds @($PID)",
+      'Write-Host "RESULT self [still here]"',
+      "$l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)",
+      "$l.Start()",
+      "$sockPort = $l.LocalEndpoint.Port",
+      'Write-Host ("RESULT owner [" + ((Get-ListenerPid $sockPort) -eq $PID) + "]")',
+      "$l.Stop()",
+      "Start-Sleep -Seconds 1",
+      'Write-Host ("RESULT released [" + ($null -eq (Get-ListenerPid $sockPort)) + "]")',
+    ]),
+  );
+  if (!run) return t.skip("no PowerShell available");
+  assert.match(run.out, /RESULT desc \[True\]/, run.out);
+  assert.match(run.out, /RESULT orphan \[True\]/, run.out);
+  assert.match(run.out, /RESULT stopped \[0\]/, run.out);
+  assert.match(run.out, /RESULT self \[still here\]/, run.out);
+  assert.match(run.out, /RESULT owner \[True\]/, run.out);
+  assert.match(run.out, /RESULT released \[True\]/, run.out);
+});
+
+test("R4/R7 flow pins: the route's HTTP status must be exactly 200; wrangler is stopped by snapshot, wrapper tree and port owner in finally; a port still listening afterwards stops the run before the verdict", () => {
+  assert.ok(script.includes('if ($r.Code -cne "200") { $routeNote = "the rehearsal route answered HTTP " + $r.Code + ", expected 200" }'));
+  const fin = script.slice(script.indexOf("} finally {\n  # Stop by process tree"), script.indexOf('Say "[dev] wrangler stopped') > 0 ? script.indexOf("Start-Sleep -Seconds 1\n$leftOver") : script.length);
+  for (const needle of ["Get-DescendantPids $dev.Id", "Get-ListenerPid $Port", "Stop-ProcessIds $snapshot", "Stop-ProcessIds @($stillOwner)"]) assert.ok(fin.includes(needle), `finally has ${needle}`);
+  assert.ok(script.indexOf("$leftOver = Get-ListenerPid $Port") < script.indexOf("# 3. the checks"), "the port check precedes the verdict");
+  assert.ok(script.includes('Stop-Here ("something (process " + $leftOver'), "a left-over listener stops the run");
+  assert.ok(script.includes("[notnull] AS notnull_flag"), "the column read asks for notnull and the default");
+  assert.ok(script.indexOf("Test-ColumnShape $col") > script.indexOf("--remote --file"), "the shape check runs on both paths, after the optional migration");
+});
+
 async function ride() {
   const d1 = createLocalD1();
   try {
@@ -197,7 +253,7 @@ test("the worker, ridden on the local D1 shim: every check passes except rows_wr
   const { report, citizensDelta, nonces } = await ride();
   const failed = report.checks.filter((c) => !c.pass).map((c) => c.name);
   assert.deepEqual(failed, ["c6 rows_written reported for both statements"], JSON.stringify(report.checks.filter((c) => !c.pass)));
-  assert.equal(report.checks.length, 21);
+  assert.equal(report.checks.length, 28);
   assert.equal(report.pass, false, "on the shim the overall verdict is not pass, because rows_written cannot be real here");
   assert.equal(citizensDelta, 0, "the scratch citizen was deleted");
   assert.equal(nonces, 0, "every nonce row was deleted");

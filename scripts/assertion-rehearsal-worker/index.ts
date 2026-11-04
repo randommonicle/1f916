@@ -7,8 +7,11 @@
 //   c3a  raw-nonce collision, stamp null: the same 401; stamp still null; no namespaced row
 //   c3b  raw-nonce collision, stamp already set: the same 401; stamp unchanged; no namespaced row
 //   c4   bad signature: 401, no stamp, no nonce row
-//   c5   a batch of a nonce INSERT plus an UPDATE that must fail leaves no nonce row (proves D1's batch rollback; the real column exists here, so the failure is a nonexistent column)
-//   c6   meta.rows_written of the raw batch for one spend, printed (brief A3)
+//   c5   a batch of the nonce INSERT twice with the same bindings: the second raises UNIQUE at run time, the batch throws and no nonce row survives (a runtime failure that compiles cleanly)
+//   c5b  a batch of a nonce INSERT plus an UPDATE naming a nonexistent column: the worker-before-migration shape; the batch throws and no nonce row survives
+//   c7   two concurrent authenticate() calls on ONE token: exactly one citizen, one replay 401, one nonce row
+//   c6   meta.rows_written of the raw batch for one spend: a number greater than 0 for each statement, printed (brief A3)
+//   c0 / cleanup   the scratch citizen got a usable row id; cleanup (by the unique handle) removed every scratch row, and a cleanup failure is a failing check, never a throw past the report
 // Every row it writes is deleted in finally. The report names each check with expected and actual and carries no key material and no token.
 import { authenticate, SocietyError, type Env } from "../../src/society.ts";
 import { ASSERTION_WINDOW_MS, DEFAULT_AUDIENCE, buildPayloadSegment, encodeBase64Url, newNonce } from "../../src/keyauth.ts";
@@ -72,6 +75,8 @@ export default {
         .run();
       citizenId = Number(ins.meta.last_row_id);
       report.scratch_citizen = handle;
+      add("c0 the scratch citizen was created with a row id", "a positive integer", ins.meta.last_row_id, Number.isSafeInteger(citizenId) && citizenId > 0);
+      if (!(Number.isSafeInteger(citizenId) && citizenId > 0)) throw new Error("the scratch citizen has no usable row id; stopping before any check that needs one");
 
       // c1: first spend
       const nonce1 = newNonce();
@@ -117,21 +122,45 @@ export default {
       add("c4 no stamp", null, await stampOf(citizenId), (await stampOf(citizenId)) === null);
       add("c4 no nonce row", rows4, await nonceRows(citizenId), (await nonceRows(citizenId)) === rows4);
 
-      // c5: batch rollback. The real column exists on this database, so the failing statement names a column that does not.
+      // c5: batch rollback at RUN time. The second statement is the same nonce INSERT with the same bindings: it compiles cleanly and raises UNIQUE when it runs, after the first has succeeded.
       const nonce5 = newNonce();
+      const dupBind = [nonce5, `c:${citizenId}:${nonce5}`, citizenId, Date.now() + ASSERTION_WINDOW_MS] as const;
       let threw5 = false;
       try {
-        await env.DB.batch([
-          env.DB.prepare(NONCE_INSERT).bind(nonce5, `c:${citizenId}:${nonce5}`, citizenId, Date.now() + ASSERTION_WINDOW_MS),
-          env.DB.prepare("UPDATE citizens SET a5_no_such_column = ? WHERE id = ?").bind(1, citizenId),
-        ]);
+        await env.DB.batch([env.DB.prepare(NONCE_INSERT).bind(...dupBind), env.DB.prepare(NONCE_INSERT).bind(...dupBind)]);
       } catch {
         threw5 = true;
       }
-      add("c5 the failing batch threw", true, threw5, threw5);
-      add("c5 no nonce row survived the failing batch", 0, await namespacedRows(citizenId, nonce5), (await namespacedRows(citizenId, nonce5)) === 0);
+      add("c5 the duplicate-insert batch threw", true, threw5, threw5);
+      add("c5 no nonce row survived the duplicate-insert batch", 0, await namespacedRows(citizenId, nonce5), (await namespacedRows(citizenId, nonce5)) === 0);
       report.c5_note =
-        "c5 proves D1's whole-batch rollback (a first-statement success is undone when a later statement fails). It does NOT prove the missing-column deploy case, because last_assertion_at exists on this database: the failing statement names a column that does not.";
+        "c5 proves D1's whole-batch rollback for a RUNTIME failure: the first INSERT succeeds, the identical second INSERT raises UNIQUE, and the first is undone. It is the shape of a replay inside the real batch.";
+
+      // c5b: the worker-before-migration shape. The real column exists on this database, so the failing statement names a column that does not; this is a statement that fails when D1 prepares it.
+      const nonce5b = newNonce();
+      let threw5b = false;
+      try {
+        await env.DB.batch([
+          env.DB.prepare(NONCE_INSERT).bind(nonce5b, `c:${citizenId}:${nonce5b}`, citizenId, Date.now() + ASSERTION_WINDOW_MS),
+          env.DB.prepare("UPDATE citizens SET a5_no_such_column = ? WHERE id = ?").bind(1, citizenId),
+        ]);
+      } catch {
+        threw5b = true;
+      }
+      add("c5b the missing-column batch threw", true, threw5b, threw5b);
+      add("c5b no nonce row survived the missing-column batch", 0, await namespacedRows(citizenId, nonce5b), (await namespacedRows(citizenId, nonce5b)) === 0);
+      report.c5b_note =
+        "c5b stands in for a worker deployed before migration 0024 (the stamp UPDATE names a column that is absent). last_assertion_at exists on this database, so a nonexistent column is used; whether D1 rejects such a batch at prepare or at run, no nonce row may survive.";
+
+      // c7: two concurrent spends of ONE token
+      const nonce7 = newNonce();
+      const token7 = await sign(kp, handle, nonce7);
+      const settled = await Promise.all([refusal(async () => (await authenticate(env, token7)).handle), refusal(async () => (await authenticate(env, token7)).handle)]);
+      const wins = settled.filter((s) => s.status === null && s.message === "NO ERROR").length;
+      const replays = settled.filter((s) => s.status === 401 && s.message === REPLAY_TEXT).length;
+      add("c7 concurrent spends: exactly one citizen", 1, wins, wins === 1);
+      add("c7 concurrent spends: exactly one replay 401", 1, replays, replays === 1);
+      add("c7 concurrent spends: exactly one nonce row", 1, await namespacedRows(citizenId, nonce7), (await namespacedRows(citizenId, nonce7)) === 1);
 
       // c6: rows_written of the raw batch for one spend (stamp null so the UPDATE writes)
       await setStamp(citizenId, null);
@@ -142,19 +171,26 @@ export default {
       ]);
       const written = out.map((r) => (r.meta as { rows_written?: number }).rows_written);
       report.rows_written_per_statement = written;
-      add("c6 rows_written reported for both statements", "two numbers", written, written.length === 2 && written.every((n) => typeof n === "number"));
+      add("c6 rows_written reported for both statements", "two numbers, each greater than 0", written, written.length === 2 && written.every((n) => typeof n === "number" && n > 0));
       add("c6 the stamp landed", "a number", await stampOf(citizenId), typeof (await stampOf(citizenId)) === "number");
     } catch (e) {
       report.error = e instanceof Error ? e.message : String(e);
       add("the run completed without an unexpected error", "no error", report.error, false);
     } finally {
-      if (citizenId > 0) {
+      // Cleanup never throws past the report and never depends on last_row_id: it deletes by the unique handle. A failure is a named failing check.
+      let cleanup: { expected: unknown; actual: unknown; pass: boolean };
+      try {
         const del = await env.DB.batch([
-          env.DB.prepare("DELETE FROM auth_nonces WHERE citizen_id = ?").bind(citizenId),
-          env.DB.prepare("DELETE FROM citizens WHERE id = ? AND handle = ?").bind(citizenId, handle),
+          env.DB.prepare("DELETE FROM auth_nonces WHERE citizen_id IN (SELECT id FROM citizens WHERE handle = ?)").bind(handle),
+          env.DB.prepare("DELETE FROM citizens WHERE handle = ?").bind(handle),
         ]);
         report.cleanup_rows_deleted = del.map((r) => r.meta.changes);
+        const left = await env.DB.prepare("SELECT (SELECT COUNT(*) FROM citizens WHERE handle = ?) AS c, (SELECT COUNT(*) FROM auth_nonces WHERE citizen_id = ?) AS n").bind(handle, citizenId).first<{ c: number; n: number }>();
+        cleanup = { expected: { citizens_left: 0, nonces_left: 0 }, actual: { citizens_left: left?.c ?? "unknown", nonces_left: left?.n ?? "unknown" }, pass: left?.c === 0 && left?.n === 0 };
+      } catch (e) {
+        cleanup = { expected: { citizens_left: 0, nonces_left: 0 }, actual: `cleanup threw: ${e instanceof Error ? e.message : String(e)}`, pass: false };
       }
+      add("cleanup removed the scratch citizen and its nonce rows", cleanup.expected, cleanup.actual, cleanup.pass);
     }
     return Response.json({ ...report, checks, pass: checks.length > 0 && checks.every((c) => c.pass) });
   },

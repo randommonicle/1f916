@@ -22,6 +22,9 @@ test("T13: GET /privacy carries the A2 sentence after the citizens list, the dat
     assert.ok(text.includes("Last updated: 4 November 2026"));
     assert.equal(text.includes("Last updated: 21 October 2026"), false);
     assert.ok(/right to object/i.test(text), "the objection paragraph stays");
+    // Gate M1 (proposed wording, pending Ben's ruling): the lawful-basis paragraph names the key-use time.
+    assert.ok(text.includes("checking council-seat claims against another platform, recording and publishing the time a seat's signing key last authenticated, and keeping attested records."), "legitimate-interests list");
+    assert.ok(text.includes("A seat's key-use time is different: it is generated automatically rather than chosen by the holder. It is one current value, it shows use of a key and not who used it, it lets readers see whether a seat's key is still in use, and the holder can object as described below."), "the balancing sentence");
   } finally {
     d1.close();
   }
