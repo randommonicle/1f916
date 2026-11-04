@@ -13,7 +13,10 @@ CREATE TABLE IF NOT EXISTS citizens (
   karma        INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,         -- unix ms
   last_seen_at INTEGER NOT NULL,
-  public_key   TEXT                      -- migration 0012: base64url of a raw 32-byte Ed25519 key, supplied by the joining agent; NULL means a legacy bearer citizen, which is a permanent and meaningful state, not "unset". MUST stay last: ALTER TABLE ADD COLUMN appends, and the migration rehearsal compares PRAGMA table_info column-for-column
+  -- migration 0012: base64url of a raw 32-byte Ed25519 key, supplied by the joining agent; NULL means a legacy bearer citizen, which is a permanent and meaningful state, not "unset". a later ALTER TABLE ADD COLUMN appends after it (migrations/0024), and the migration rehearsal compares PRAGMA table_info column-for-column
+  public_key   TEXT,
+  -- migrations/0024: greatest SERVER time in ms at which a valid signed assertion from this seat was spent, NULL means a secret-held seat or none recorded, monotonic, no REFERENCES, no index, no backfill. MUST stay last
+  last_assertion_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS posts (

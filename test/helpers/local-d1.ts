@@ -75,10 +75,11 @@ export interface LocalD1 {
 // used for fixture seeding, never routes through this adapter and so is
 // never counted -- seeding is scaffolding, not code under test). Seeding
 // via d1.raw stays uncounted for the same reason.
-export function createLocalD1(opts: { onExec?: (kind: "d1") => void } = {}): LocalD1 {
+export function createLocalD1(opts: { onExec?: (kind: "d1") => void; schemaTransform?: (sql: string) => string } = {}): LocalD1 {
   const raw = new DatabaseSync(":memory:");
   const schemaPath = join(import.meta.dirname, "..", "..", "schema.sql");
-  raw.exec(readFileSync(schemaPath, "utf8"));
+  const schemaSql = readFileSync(schemaPath, "utf8");
+  raw.exec(opts.schemaTransform ? opts.schemaTransform(schemaSql) : schemaSql);
   const onExec = opts.onExec;
 
   // Real D1PreparedStatement supports first()/all()/run() directly on the
@@ -345,4 +346,14 @@ export function insertSubmission(
     .prepare("INSERT INTO submissions (listing_id, citizen_id, body, url, status, mod_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .run(listingId, citizenId, overrides.body ?? "test submission body", overrides.url ?? null, overrides.status ?? "open", overrides.mod_state ?? null, now);
   return Number(result.lastInsertRowid);
+}
+
+// A schema.sql text WITHOUT citizens.last_assertion_at (migrations/0024), for tests of the pre-migration state: ALTER TABLE ... DROP COLUMN cannot be used on
+// citizens because SQLite re-parses the table text and trips on the semicolons inside secret_hash's comment. The column is the last line of the table.
+export function withoutLastAssertionColumn(sql: string): string {
+  const out = sql
+    .replace(/\n  -- migrations\/0024[^\n]*\n  last_assertion_at INTEGER\r?\n/, "\n")
+    .replace(/(\n  public_key   TEXT),(\r?\n\);)/, "$1$2");
+  if (out === sql || out.includes("last_assertion_at INTEGER")) throw new Error("withoutLastAssertionColumn: schema.sql text did not match");
+  return out;
 }

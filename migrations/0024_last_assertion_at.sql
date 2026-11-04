@@ -1,0 +1,14 @@
+-- 0024: last_assertion_at on each citizen row (D-078 item 4, drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md B1, A1).
+--
+-- WHY: the first per-seat observation of a key in use. authenticateByAssertion stamps the greatest SERVER timestamp (Date.now() sampled during
+-- authentication, never the signer's issuedAt) at which a valid assertion from this seat was spent, in the same D1 batch as the nonce insert. A replay
+-- raises UNIQUE on the first statement and rolls the batch back, so the value does not move. The stamp is monotonic (UPDATE ... WHERE NULL OR older).
+-- NULL on a bearer seat (no signature to record) and on a key seat with no recorded assertion.
+--
+-- NO BACKFILL IS POSSIBLE: auth_nonces keeps a row for seconds, so earlier assertions are unknowable. Every row starts NULL.
+-- No REFERENCES, no index (nothing queries by it), no default.
+--
+-- ADD COLUMN only, nullable, no table rebuild, no FK detach (L-016 does not bite). Apply to prod BEFORE the worker that writes it (L-046): the worker's
+-- SELECT and UPDATE name the column, so worker-first would 500 the census and every assertion.
+-- schema.sql carries the same column, last in the table (the test harness loads schema.sql).
+ALTER TABLE citizens ADD COLUMN last_assertion_at INTEGER;
