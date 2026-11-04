@@ -1,0 +1,16 @@
+// Throwaway rehearsal worker for last_assertion_at (brief A5, A8): runs the REAL authenticate() from src/society.ts against real D1.
+// Bound to the SCRATCH D1 only (commonhold-migtest). Never deploy this. Run by scripts/rehearse-last-assertion.ps1, which refuses any other binding.
+{
+  "name": "commonhold-assertion-rehearsal",
+  "main": "index.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "commonhold-migtest",
+      "database_id": "465f489c-f1ca-446e-8f5f-d35ea53fd720",
+      "preview_database_id": "465f489c-f1ca-446e-8f5f-d35ea53fd720"
+    }
+  ]
+}
