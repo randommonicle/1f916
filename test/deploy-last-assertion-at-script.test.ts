@@ -414,3 +414,9 @@ test("L1 (re-gate): the rollback text no longer says the old worker stamps an up
   const line = script.split("\n").find((l) => l.startsWith("$ROLLBACK_LINE = "))!;
   assert.ok(line.includes("the old worker records no stamps") && !/stamps a seat/.test(line));
 });
+
+test("L7 (re-gate): the -RehearsalPassed stop message lists the objection's rehearsal checks, not only the old ones", () => {
+  const line = script.split("
+").find((l) => l.includes("a real run needs -RehearsalPassed:"))!;
+  for (const needle of ["a flagged seat that authenticates and spends its nonce without a stamp", "a stamp cleared by an uphold", "a withdraw", "transport"]) assert.ok(line.includes(needle), needle);
+});

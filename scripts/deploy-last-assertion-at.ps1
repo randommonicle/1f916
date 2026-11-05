@@ -347,7 +347,7 @@ if ($REVIEWED_COMMIT -ceq $REVIEWED_COMMIT_PLACEHOLDER) { Stop-Here "`$REVIEWED_
 if ($REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$REVIEWED_COMMIT '$REVIEWED_COMMIT' is not 40 lower-case hex. Nothing was read or written." }
 # END-PIN-CHECK
 # BEGIN-REHEARSAL-CHECK
-if (-not $DryRun -and -not $RehearsalPassed) { Stop-Here "a real run needs -RehearsalPassed: the Worker-binding authentication rehearsal against a scratch D1 (namespaced replay and raw-nonce collision, the existing 401 text, unchanged stamp and nonces) must have passed first, and this script cannot check that. Nothing was read or written." }
+if (-not $DryRun -and -not $RehearsalPassed) { Stop-Here "a real run needs -RehearsalPassed: the Worker-binding authentication rehearsal against a scratch D1 (namespaced replay and raw-nonce collision, the existing 401 text, unchanged stamp and nonces, a flagged seat that authenticates and spends its nonce without a stamp, a stamp cleared by an uphold, a withdraw, and the operator statement's transport) must have passed first, and this script cannot check that. Nothing was read or written." }
 # END-REHEARSAL-CHECK
 
 # 1. the commit: fetch, then main, origin/main and the expected sha must be ONE commit, on a clean tree
