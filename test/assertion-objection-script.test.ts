@@ -322,3 +322,21 @@ test("AO1: an assertion between a withdrawal and the public read passes the with
     d1.close();
   }
 });
+
+test("F1 and F2: a valid handle with consecutive hyphens reaches the database, and a real withdraw needs the objection time recorded first (mutants: the -- refusal back; the gate removed)", () => {
+  assert.equal(rawScript.includes('Contains("--")'), false, "Invoke-D1 must not refuse -- inside a validated, quoted handle");
+  const r = results([
+    say("shape", "Test-HandleShape 'ab--cd'"),
+    say("sql", "Get-UpholdSql 'ab--cd'"),
+    say("no", "Test-WithdrawRecorded 'withdraw' $false"),
+    say("yes", "Test-WithdrawRecorded 'withdraw' $true"),
+    say("up", "Test-WithdrawRecorded 'uphold' $false"),
+  ]);
+  assert.ok(r, "PowerShell ran");
+  assert.equal(r.shape, "");
+  assert.ok(r.sql.includes("handle = 'ab--cd'"));
+  assert.ok(r.no.includes("-ObjectionTimeRecorded"));
+  assert.equal(r.yes, "");
+  assert.equal(r.up, "");
+  assert.ok(rawScript.includes("$why = Test-WithdrawRecorded $mode $ObjectionTimeRecorded"), "the gate is called on a real run");
+});

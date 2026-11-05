@@ -10,6 +10,7 @@
 # O10 / AO5, the procedure BEFORE a real run, done offline and by the operator: the holder signs a text that names the service, the seat, the field (last_assertion_at), the requested action
 # (uphold or withdraw) and a date; the operator checks the signature against the seat's public key on GET /api/citizens and checks the date is fresh. A withdrawal needs the same. Losing the key
 # does not by itself defeat a person's objection: that case is assessed individually and this script is not the route. The operator keeps a PRIVATE record of the request and its outcome.
+# A withdrawal clears the only database copy of the objection time, so a real -Withdraw also needs -ObjectionTimeRecorded: the operator has copied the stored time (printed by -DryRun) into that record.
 # A real run therefore needs -SignedRequestVerified (the operator's own assertion that this was done) and -ConfirmHandle equal to -Handle, byte for byte.
 #
 # POSTCONDITIONS (AO1), each checked after the write, each its own failure message:
@@ -31,6 +32,7 @@ param(
   [switch]$Withdraw,
   [switch]$DryRun,
   [switch]$SignedRequestVerified,
+  [switch]$ObjectionTimeRecorded,
   [string]$ConfirmHandle = ""
 )
 $ErrorActionPreference = "Stop"
@@ -69,6 +71,11 @@ function Test-Mode($wantUphold, $wantWithdraw) {
 function Test-RealRunAllowed($h, $confirmValue, $signedFlag) {
   if (-not $signedFlag) { return "a real run needs -SignedRequestVerified: the holder's signed text (service, seat, field, action, date) was verified offline against the public key on /api/citizens and is fresh" }
   if ($confirmValue -cne $h) { return "a real run needs -ConfirmHandle equal to -Handle exactly (case-sensitive)" }
+  return ""
+}
+# "" unless a real withdraw would clear the objection time before the operator has recorded it privately.
+function Test-WithdrawRecorded($mode, $recordedFlag) {
+  if ($mode -ceq "withdraw" -and -not $recordedFlag) { return "a real -Withdraw needs -ObjectionTimeRecorded: copy the stored assertion_objected_at (shown by -DryRun) into the private record first, because this clears the only database copy" }
   return ""
 }
 # Runs a command line through cmd.exe with stdout captured to a file, killing the process tree if it outlives $seconds. Returns @{ Code; Out; TimedOut }.
@@ -111,7 +118,6 @@ function Read-D1Result($text) {
 function Invoke-D1($sql, $label) {
   $why = ""
   if (([string]$sql).Contains('"')) { $why = "the SQL contains a double quote" }
-  if (([string]$sql).Contains("--")) { $why = "the SQL contains --" }
   if ($why -ne "") { Stop-Here ("cannot send the SQL for " + $label + ": " + $why + ".") }
   $r = Invoke-BoundedSql ("npx wrangler d1 execute " + $PROD_DB + " --remote --json --command") $sql $WRANGLER_D1_SECONDS
   if ($r.TimedOut) { Stop-Here ("wrangler d1 execute timed out after " + $WRANGLER_D1_SECONDS + " s on " + $label + ". The state is unknown: read the row by hand before any retry.") }
@@ -196,6 +202,8 @@ $mode = "uphold"
 if ($Withdraw) { $mode = "withdraw" }
 if (-not $DryRun) {
   $why = Test-RealRunAllowed $Handle $ConfirmHandle $SignedRequestVerified
+  if ($why -ne "") { Stop-Here $why }
+  $why = Test-WithdrawRecorded $mode $ObjectionTimeRecorded
   if ($why -ne "") { Stop-Here $why }
 }
 

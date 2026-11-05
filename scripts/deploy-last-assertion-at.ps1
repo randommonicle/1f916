@@ -29,7 +29,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-last-assertion-at.ps1 -ExpectedCommit <sha> -RehearsalPassed        # the real thing
 #   If a step BEFORE the worker deploy stopped: just re-run. Each migration applies only if its own column is absent, so a state of '0024 present, 0025 absent' resumes at 0025 (the catalogue and the verification still run).
 #   Once the worker has been deployed there is no resume mode: a re-run refuses because the live commit or note already matches. If a stop comes after the deploy, the worker is live: finish the remaining verification
-#   by hand with the GETs this script lists (/api/attest, /api/citizens, the citizens tool on /mcp and /mcp/read, /privacy), or roll back to the version id printed before the stop.
+#   by hand with the GETs this script lists (/api/attest, /api/citizens, the citizens tool on /mcp and /mcp/read, /privacy), repeat both column catalogue reads and scripts/verify-last-assertion-at.sql (zero rows), or roll back to the version id printed before the stop.
 # THE RIDE writes nothing: public GETs, and two POSTs of a read-only tools/call whose body is sent from a temp file.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference (write "${var}:");
 # never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips inner double quotes from a native command's
