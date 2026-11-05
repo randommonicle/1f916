@@ -1,4 +1,4 @@
-// Worker-binding rehearsal for last_assertion_at (D-078 item 4; brief A5 and A8). A SQL-only wrangler run cannot prove the JavaScript catch in authenticateByAssertion, so this runs the REAL
+// Worker-binding rehearsal for last_assertion_at and the assertion objection (D-078 item 4; brief A5 and A8; objection brief AO3). A SQL-only wrangler run cannot prove the JavaScript catch in authenticateByAssertion, so this runs the REAL
 // authenticate() from src/society.ts through a REAL D1 binding on the SCRATCH database and reports what the Workers D1 binding does with the nonce-plus-stamp batch.
 // Bound to commonhold-migtest only (wrangler.jsonc beside this file; scripts/rehearse-last-assertion.ps1 refuses any other database). Never deploy it.
 // It generates a throwaway Ed25519 keypair inside the Worker, inserts ONE uniquely named scratch citizen, and checks:
@@ -11,6 +11,10 @@
 //   c5b  a batch of a nonce INSERT plus an UPDATE naming a nonexistent column: the worker-before-migration shape; the batch throws and no nonce row survives
 //   c7   two concurrent authenticate() calls on ONE token: exactly one citizen, one replay 401, one nonce row
 //   c6   meta.rows_written of the raw batch for one spend: a number greater than 0 for each statement, printed (brief A3)
+//   c8a  a stamp committed BEFORE the uphold is cleared by it: the uphold statement (the one scripts/assertion-objection.ps1 sends) changes one row, clears the stamp and sets the flag
+//   c8b  a flagged seat authenticates (returns the citizen), spends its nonce (one namespaced row) and is NOT stamped
+//   c8c  a replay on a flagged seat is the existing 401 and writes nothing
+//   c8d  the withdraw statement clears the flag, leaves the value NULL, and the next assertion stamps again
 //   c0 / cleanup   the scratch citizen got a usable row id; cleanup (by the unique handle) removed every scratch row, and a cleanup failure is a failing check, never a throw past the report
 // Every row it writes is deleted in finally. The report names each check with expected and actual and carries no key material and no token.
 import { authenticate, SocietyError, type Env } from "../../src/society.ts";
@@ -22,6 +26,10 @@ const BAD_SIGNATURE_TEXT = "Signature does not verify against that citizen's reg
 const NONCE_INSERT =
   "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)";
 const STAMP_UPDATE = "UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?) AND assertion_objected_at IS NULL";
+
+// The operator's two statements, verbatim from scripts/assertion-objection.ps1 (a test pins that they are the ps1's templates), @HANDLE@ replaced by the scratch handle.
+const UPHOLD_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = CAST(strftime('%s','now') AS INTEGER) * 1000, last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL";
+const WITHDRAW_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL";
 
 type Keypair = { privateKey: CryptoKey; publicKey: string };
 type Check = { name: string; expected: unknown; actual: unknown; pass: boolean };
@@ -60,8 +68,10 @@ export default {
       Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM auth_nonces WHERE nonce = ?").bind(`c:${id}:${nonce}`).first<{ n: number }>())?.n ?? -1);
 
     const col = await env.DB.prepare("SELECT name FROM pragma_table_info('citizens') WHERE name = 'last_assertion_at'").first();
+    const objCol = await env.DB.prepare("SELECT name FROM pragma_table_info('citizens') WHERE name = 'assertion_objected_at'").first();
+    const flagOf = async (id: number) => (await env.DB.prepare("SELECT assertion_objected_at AS v FROM citizens WHERE id = ?").bind(id).first<{ v: number | null }>())?.v ?? null;
     const nonces = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'auth_nonces'").first();
-    if (!col || !nonces) return Response.json({ ...report, pass: false, error: "citizens.last_assertion_at or auth_nonces is missing: migration 0024 is not on this database" }, { status: 500 });
+    if (!col || !objCol || !nonces) return Response.json({ ...report, pass: false, error: "citizens.last_assertion_at, citizens.assertion_objected_at or auth_nonces is missing: migration 0024 or 0025 is not on this database" }, { status: 500 });
 
     let citizenId = 0;
     try {
@@ -173,6 +183,40 @@ export default {
       report.rows_written_per_statement = written;
       add("c6 rows_written reported for both statements", "two numbers, each greater than 0", written, written.length === 2 && written.every((n) => typeof n === "number" && n > 0));
       add("c6 the stamp landed", "a number", await stampOf(citizenId), typeof (await stampOf(citizenId)) === "number");
+
+      // c8: the objection. c8a: a stamp committed before the uphold is cleared by it, in one row.
+      await setStamp(citizenId, null);
+      const nonce8a = newNonce();
+      await authenticate(env, await sign(kp, handle, nonce8a));
+      const stamped8a = await stampOf(citizenId);
+      add("c8a a stamp is committed before the uphold", "a number", stamped8a, typeof stamped8a === "number");
+      const up = await env.DB.prepare(UPHOLD_SQL_TEMPLATE.replace("@HANDLE@", handle)).run();
+      const flag8a = await flagOf(citizenId);
+      add("c8a the uphold changed exactly one row", 1, up.meta.changes, up.meta.changes === 1);
+      add("c8a the uphold cleared the stamp and set the flag", "stamp null, flag a number above zero", { stamp: await stampOf(citizenId), flag: flag8a }, (await stampOf(citizenId)) === null && typeof flag8a === "number" && flag8a > 0);
+
+      // c8b: a flagged seat authenticates, spends its nonce and does not stamp.
+      const nonce8b = newNonce();
+      const token8b = await sign(kp, handle, nonce8b);
+      const rows8b = await nonceRows(citizenId);
+      const r8b = await refusal(async () => (await authenticate(env, token8b)).handle);
+      add("c8b a flagged seat authenticates", `NO ERROR (${handle})`, `${r8b.status} ${r8b.message}`, r8b.status === null && r8b.message === "NO ERROR");
+      add("c8b a flagged seat spends its nonce", 1, await namespacedRows(citizenId, nonce8b), (await namespacedRows(citizenId, nonce8b)) === 1);
+      add("c8b a flagged seat is not stamped", null, await stampOf(citizenId), (await stampOf(citizenId)) === null);
+      add("c8b the flagged spend added exactly one nonce row", rows8b + 1, await nonceRows(citizenId), (await nonceRows(citizenId)) === rows8b + 1);
+
+      // c8c: a replay on a flagged seat is the existing 401 and writes nothing.
+      const rows8c = await nonceRows(citizenId);
+      const r8c = await refusal(() => authenticate(env, token8b));
+      add("c8c a replay on a flagged seat is the existing 401", `401 ${REPLAY_TEXT}`, `${r8c.status} ${r8c.message}`, r8c.status === 401 && r8c.message === REPLAY_TEXT);
+      add("c8c the replay wrote nothing", { stamp: null, nonce_rows: rows8c }, { stamp: await stampOf(citizenId), nonce_rows: await nonceRows(citizenId) }, (await stampOf(citizenId)) === null && (await nonceRows(citizenId)) === rows8c);
+
+      // c8d: withdraw clears the flag only; the next assertion stamps again.
+      const wd = await env.DB.prepare(WITHDRAW_SQL_TEMPLATE.replace("@HANDLE@", handle)).run();
+      add("c8d the withdraw changed exactly one row", 1, wd.meta.changes, wd.meta.changes === 1);
+      add("c8d the withdraw cleared the flag and left the value NULL", "flag null, stamp null", { flag: await flagOf(citizenId), stamp: await stampOf(citizenId) }, (await flagOf(citizenId)) === null && (await stampOf(citizenId)) === null);
+      await authenticate(env, await sign(kp, handle, newNonce()));
+      add("c8d the next assertion stamps again", "a number", await stampOf(citizenId), typeof (await stampOf(citizenId)) === "number");
     } catch (e) {
       report.error = e instanceof Error ? e.message : String(e);
       add("the run completed without an unexpected error", "no error", report.error, false);

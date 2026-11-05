@@ -1,11 +1,11 @@
-# Rehearses last_assertion_at through the REAL Worker D1 binding on the SCRATCH database (brief A5 and A8). A SQL-only wrangler run cannot prove the JavaScript catch in authenticateByAssertion, so this applies
-# migration 0024 to the scratch database, starts scripts/assertion-rehearsal-worker under `wrangler dev --remote`, calls its route (which runs the real authenticate() with a throwaway key and a scratch citizen),
+# Rehearses last_assertion_at AND the assertion objection (D-078 item 4 option B, brief AO3) through the REAL Worker D1 binding on the SCRATCH database (brief A5 and A8). A SQL-only wrangler run cannot prove the JavaScript catch in authenticateByAssertion, so this applies
+# migrations 0024 and 0025 to the scratch database (each ONLY if its own column is absent: the state '0024 present, 0025 absent' works, an apply failure stops the run, a re-run resumes), starts scripts/assertion-rehearsal-worker under `wrangler dev --remote`, calls its route (which runs the real authenticate() with a throwaway key and a scratch citizen),
 # prints every named check, stops wrangler, and exits non-zero on any miss. PASS is printed only when the route answered, every expected check is present and every check passed.
 # BEN'S HAND ONLY (wrangler prompts). THE SCRATCH DATABASE ONLY: the database name is pinned below, the script refuses any other name, and the worker config is checked to bind that one database and no other.
 # This script deploys nothing and writes no production data. A pass here is evidence for Ben's own confirmation flag on the deploy script; it does not set that flag.
 # Run from the repo root:
 #   powershell -ExecutionPolicy Bypass -File scripts\rehearse-last-assertion.ps1
-# A re-run is safe: the migration is applied only when the column is absent, and the worker deletes its scratch citizen and nonce rows in finally.
+# A re-run is safe: each migration is applied only when its own column is absent, and the worker deletes its scratch citizen and nonce rows in finally.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; "$var:" is a drive reference; never merge a native command's stderr under ErrorActionPreference Stop; every READ goes to wrangler by --command
 # as one single-quote-only line. ASCII only.
 param(
@@ -16,7 +16,8 @@ $ErrorActionPreference = "Stop"
 $SCRATCH_DB = "commonhold-migtest"
 $SCRATCH_ID = "465f489c-f1ca-446e-8f5f-d35ea53fd720"
 $CONFIG_PATH = "scripts/assertion-rehearsal-worker/wrangler.jsonc"
-$MIGRATION_PATH = "migrations/0024_last_assertion_at.sql"
+$MIGRATION_PATH_0024 = "migrations/0024_last_assertion_at.sql"
+$MIGRATION_PATH_0025 = "migrations/0025_assertion_objection.sql"
 $WRANGLER_D1_SECONDS = 120
 $START_WAIT_SECONDS = 120
 $RUN_SECONDS = 120
@@ -32,6 +33,10 @@ $EXPECTED_CHECKS = @(
   "c5b the missing-column batch threw", "c5b no nonce row survived the missing-column batch",
   "c7 concurrent spends: exactly one citizen", "c7 concurrent spends: exactly one replay 401", "c7 concurrent spends: exactly one nonce row",
   "c6 rows_written reported for both statements", "c6 the stamp landed",
+  "c8a a stamp is committed before the uphold", "c8a the uphold changed exactly one row", "c8a the uphold cleared the stamp and set the flag",
+  "c8b a flagged seat authenticates", "c8b a flagged seat spends its nonce", "c8b a flagged seat is not stamped", "c8b the flagged spend added exactly one nonce row",
+  "c8c a replay on a flagged seat is the existing 401", "c8c the replay wrote nothing",
+  "c8d the withdraw changed exactly one row", "c8d the withdraw cleared the flag and left the value NULL", "c8d the next assertion stamps again",
   "cleanup removed the scratch citizen and its nonce rows"
 )
 
@@ -99,14 +104,21 @@ function Invoke-ScratchRead($sql, $label) {
   if ($null -eq $res) { Stop-Here ("the read for " + $label + " returned no parsable result") }
   return $res
 }
-# "" when the column read shows exactly one citizens.last_assertion_at, type INTEGER, nullable (notnull 0) and with no default (dflt_value null), otherwise the reason.
-function Test-ColumnShape($res) {
+# The catalogue read for one citizens column (single quotes and square brackets only, so it can go to wrangler by --command).
+function Get-ColumnShapeSql($columnName) { return ("SELECT name, type, [notnull] AS notnull_flag, dflt_value FROM pragma_table_info('citizens') WHERE name = '" + $columnName + "'") }
+# "" when the column read shows exactly one citizens.<$columnName>, type INTEGER, nullable (notnull 0) and with no default (dflt_value null), otherwise the reason.
+function Test-ColumnShape($res, $columnName) {
   if ($null -eq $res) { return "the column read returned no parsable result" }
   $list = @($res.Rows)
-  if ($list.Count -ne 1) { return ("citizens has " + $list.Count + " last_assertion_at column rows, expected exactly 1") }
-  if ([string]$list[0].type -cne "INTEGER") { return ("citizens.last_assertion_at has type '" + $list[0].type + "', expected INTEGER") }
-  if ([string]$list[0].notnull_flag -cne "0") { return ("citizens.last_assertion_at has notnull '" + $list[0].notnull_flag + "', expected 0 (nullable)") }
-  if ($null -ne $list[0].dflt_value) { return ("citizens.last_assertion_at has a default '" + $list[0].dflt_value + "', expected none") }
+  if ($list.Count -ne 1) { return ("citizens has " + $list.Count + " " + $columnName + " column rows, expected exactly 1") }
+  if ([string]$list[0].type -cne "INTEGER") { return ("citizens." + $columnName + " has type '" + $list[0].type + "', expected INTEGER") }
+  if ([string]$list[0].notnull_flag -cne "0") { return ("citizens." + $columnName + " has notnull '" + $list[0].notnull_flag + "', expected 0 (nullable)") }
+  if ($null -ne $list[0].dflt_value) { return ("citizens." + $columnName + " has a default '" + $list[0].dflt_value + "', expected none") }
+  return ""
+}
+# "" when 0025's column is not present without 0024's (out of order: the objection column is meaningless without the stamp it stops), otherwise the reason.
+function Test-ColumnOrder($has0024, $has0025) {
+  if ($has0025 -and -not $has0024) { return "citizens.assertion_objected_at is on the scratch database but citizens.last_assertion_at is not: out of order, read the catalogue by hand" }
   return ""
 }
 # "" when the report is a complete pass: it parsed, carries every expected check exactly once, every check passed, and report.pass is true. Otherwise the first reason.
@@ -178,30 +190,35 @@ function Get-Text($url, $maxTime) {
 # 0. the target: the scratch database by exact name, and a worker config that binds that one database and nothing else
 $why = Test-ScratchTarget $Database
 if ($why -ne "") { Stop-Here $why }
-foreach ($path in $CONFIG_PATH, $MIGRATION_PATH) {
+foreach ($path in $CONFIG_PATH, $MIGRATION_PATH_0024, $MIGRATION_PATH_0025) {
   if (-not (Test-Path $path)) { Stop-Here ("$path is missing: run this from the repo root.") }
 }
 $why = Test-RehearsalConfig (Get-Content $CONFIG_PATH -Raw)
 if ($why -ne "") { Stop-Here $why }
 Say ("[target] " + $SCRATCH_DB + " (" + $SCRATCH_ID + "), config " + $CONFIG_PATH)
 
-# 1. the scratch database: the tables the real authenticate() touches, then migration 0024 only if the column is absent
+# 1. the scratch database: the tables the real authenticate() touches, then each migration (0024, then 0025) only if ITS OWN column is absent
 $tables = Invoke-ScratchRead "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('citizens','auth_nonces')" "the tables read"
 if (@($tables.Rows).Count -ne 2) { Stop-Here ("the scratch database has " + @($tables.Rows).Count + " of citizens and auth_nonces: load it with the production schema first.") }
-$colSql = "SELECT name, type, [notnull] AS notnull_flag, dflt_value FROM pragma_table_info('citizens') WHERE name = 'last_assertion_at'"
-$col = Invoke-ScratchRead $colSql "the column read"
-if (@($col.Rows).Count -eq 0) {
-  Say "[d1] applying $MIGRATION_PATH to the scratch database"
-  $mig = Invoke-Bounded ("npx wrangler d1 execute " + $SCRATCH_DB + " --remote --file " + $MIGRATION_PATH) $WRANGLER_D1_SECONDS
-  if ($mig.TimedOut) { Stop-Here "the migration timed out after $WRANGLER_D1_SECONDS s; read the column by hand before any retry." }
-  if ($mig.Code -ne 0) { Stop-Here "the migration failed (exit $($mig.Code)); read the column by hand before any retry." }
-  $col = Invoke-ScratchRead $colSql "the column read after the migration"
-} else {
-  Say "[d1] citizens.last_assertion_at is already on the scratch database; the migration is not re-applied"
+$col0024 = Invoke-ScratchRead (Get-ColumnShapeSql "last_assertion_at") "the last_assertion_at column read"
+$col0025 = Invoke-ScratchRead (Get-ColumnShapeSql "assertion_objected_at") "the assertion_objected_at column read"
+$why = Test-ColumnOrder (@($col0024.Rows).Count -gt 0) (@($col0025.Rows).Count -gt 0)
+if ($why -ne "") { Stop-Here $why }
+foreach ($migration in @(@{ Label = "0024"; Path = $MIGRATION_PATH_0024; Column = "last_assertion_at"; Read = $col0024 }, @{ Label = "0025"; Path = $MIGRATION_PATH_0025; Column = "assertion_objected_at"; Read = $col0025 })) {
+  $shape = $migration.Read
+  if (@($shape.Rows).Count -eq 0) {
+    Say ("[d1] applying " + $migration.Path + " to the scratch database")
+    $mig = Invoke-Bounded ("npx wrangler d1 execute " + $SCRATCH_DB + " --remote --file " + $migration.Path) $WRANGLER_D1_SECONDS
+    if ($mig.TimedOut) { Stop-Here ("migration " + $migration.Label + " timed out after " + $WRANGLER_D1_SECONDS + " s; read the column by hand before any retry.") }
+    if ($mig.Code -ne 0) { Stop-Here ("migration " + $migration.Label + " failed (exit " + $mig.Code + "); no later migration was started; read the column by hand before any retry.") }
+    $shape = Invoke-ScratchRead (Get-ColumnShapeSql $migration.Column) ("the " + $migration.Column + " column read after migration " + $migration.Label)
+  } else {
+    Say ("[d1] citizens." + $migration.Column + " is already on the scratch database; migration " + $migration.Label + " is not re-applied")
+  }
+  $why = Test-ColumnShape $shape $migration.Column
+  if ($why -ne "") { Stop-Here ("the column on the scratch database is not migration " + $migration.Label + "'s: " + $why) }
+  Say ("[d1] citizens." + $migration.Column + " present (INTEGER, nullable, no default)")
 }
-$why = Test-ColumnShape $col
-if ($why -ne "") { Stop-Here ("the column on the scratch database is not the migration's: " + $why) }
-Say "[d1] citizens.last_assertion_at present (INTEGER, nullable, no default)"
 
 # 2. the worker: wrangler dev --remote on a local port, the route called, wrangler stopped in finally
 $logOut = [System.IO.Path]::GetTempFileName()

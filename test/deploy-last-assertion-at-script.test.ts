@@ -74,16 +74,19 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
   assert.equal(/\$\w+\s*\|\s*Where-Object[^\n]*-notmatch/.test(code), false);
 });
 
-test("the pins: v6 hash, BOTH pins ship as placeholders for the hub, the allowlist is this script, its test and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, the migration is 0024", () => {
+test("the pins: v6 hash, BOTH pins ship as placeholders for the hub, the allowlist is this script, its test and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, the migrations are 0024 and 0025 (AO3: no -MigrationAlreadyApplied switch)", () => {
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, /^\$LIVE_BASE_COMMIT = "TO-BE-SET-BY-HUB-LIVE-BASE"$/m);
   assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-last-assertion-at\.ps1", "test\/deploy-last-assertion-at-script\.test\.ts", "docs\/"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
   assert.match(script, /\[switch\]\$DryRun/);
-  assert.match(script, /\[switch\]\$MigrationAlreadyApplied/);
+  assert.equal(/\[switch\]\$MigrationAlreadyApplied/.test(script), false, "AO3: the single presence switch is gone, the catalogue is the state");
   assert.match(script, /\[switch\]\$RehearsalPassed/);
-  assert.match(script, /^\$MIGRATION_PATH_EXPECTED = "migrations\/0024_last_assertion_at\.sql"$/m);
+  assert.match(script, /^\$MIGRATION_PATH_0024 = "migrations\/0024_last_assertion_at\.sql"$/m);
+  assert.match(script, /^\$MIGRATION_PATH_0025 = "migrations\/0025_assertion_objection\.sql"$/m);
+  assert.match(script, /^\$COLUMN_0024 = "last_assertion_at"$/m);
+  assert.match(script, /^\$COLUMN_0025 = "assertion_objected_at"$/m);
   assert.match(script, /^\$VERIFY_SQL_PATH = "scripts\/verify-last-assertion-at\.sql"$/m);
   assert.match(script, /^\$WINDOW_SECONDS = 3600$/m);
 });
@@ -140,10 +143,13 @@ test("the steps are in the load-bearing order: pins, rehearsal, git, gates, live
     "# BEGIN-GATES",
     'Read-Attest "before the deploy"',
     "$script:PreflightAt = Get-Date",
-    '$columnRes = Invoke-D1Read $COLUMN_SQL "the column state read"',
+    '$columnRes0024 = Invoke-D1Read (Get-ColumnSql $COLUMN_0024)',
+    '$columnRes0025 = Invoke-D1Read (Get-ColumnSql $COLUMN_0025)',
+    '$colState = Get-ColumnState $columnRes0024 $columnRes0025',
     "if ($DryRun)",
     "# BEGIN-MIGRATION",
-    'Assert-Prod-Verified "after the migration"',
+    '# END-MIGRATION-APPLY',
+    'Assert-Prod-Verified "after the migrations"',
     "# BEGIN-DEPLOY-AND-POLL",
     "Wait-NewWorker $headSha $versionId",
     "# BEGIN-RECONCILE",
@@ -182,7 +188,12 @@ test("the header carries the rollback text and every duty (rehearsal first, the 
   for (const needle of [
     "ONE HOUR",
     "worker rollback",
-    "leaves migration 0024 applied",
+    "leaves migrations 0024 and 0025 applied",
+    "0024 present, 0025 absent",
+    "migration applies only if its own column is absent",
+    "AO3",
+    "AO7",
+    "nothing here upholds an objection",
     "stamps go stale",
     "NO BACKFILL",
     "-RehearsalPassed",
@@ -222,10 +233,13 @@ test("the D1 decision functions, run for real: a zero-row verification passes (a
     ["verify-row", `Test-VerificationClean (Read-D1Rows ${q(d1json([{ id: 5, handle: "bearer-a", last_assertion_at: 7, stamp_type: "integer", secret_held: 1 }]))})`, "1 offending row(s), first: citizen 5 bearer-a stamp '7'"],
     ["verify-unparsable", `Test-VerificationClean (Read-D1Rows ${q("boom")})`, "no parsable result"],
     ["verify-norows-object", `Test-VerificationClean (Read-D1Rows ${q(`[{"success":true}]`)})`, "no parsable result"],
-    ["column-good", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER" }]))})`, ""],
-    ["column-absent", `Test-ColumnPresent (Read-D1Rows ${q(d1json([]))})`, "0 last_assertion_at column rows"],
-    ["column-text", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT" }]))})`, "expected INTEGER"],
-    ["column-unparsable", `Test-ColumnPresent (Read-D1Rows ${q("Error: no such table")})`, "no parsable result"],
+    ["column-good", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER" }]))}) 'last_assertion_at'`, ""],
+    ["column-good-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "INTEGER" }]))}) 'assertion_objected_at'`, ""],
+    ["column-absent", `Test-ColumnPresent (Read-D1Rows ${q(d1json([]))}) 'last_assertion_at'`, "0 last_assertion_at column rows"],
+    ["column-absent-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([]))}) 'assertion_objected_at'`, "0 assertion_objected_at column rows"],
+    ["column-text", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT" }]))}) 'last_assertion_at'`, "expected INTEGER"],
+    ["column-text-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "TEXT" }]))}) 'assertion_objected_at'`, "citizens.assertion_objected_at has type 'TEXT'"],
+    ["column-unparsable", `Test-ColumnPresent (Read-D1Rows ${q("Error: no such table")}) 'last_assertion_at'`, "no parsable result"],
   ];
   const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
   if (!run) return t.skip("no PowerShell available");
@@ -279,7 +293,7 @@ test("the bounded runner, run for real: a quick command returns its stdout and c
 });
 
 test("the served-answer checks, run for real: the list needs the note and a stamp key on EVERY row, a non-null stamp must be a whole number on a row with a public key; the privacy page needs the paragraph; a tool answer that is an error or not JSON is null", (t) => {
-  const NOTE = "Each row also carries ... last_assertion_at is the greatest server timestamp, in milliseconds, recorded for a citizen assertion";
+  const NOTE = "Each row also carries ... last_assertion_at is the greatest server timestamp, in milliseconds, recorded for a citizen assertion. Null means a secret-held seat, no recorded assertion, or an objection the operator has upheld;";
   const rows = [
     { handle: "bearer", public_key: null, last_assertion_at: null },
     { handle: "keyed", public_key: "pk", last_assertion_at: 1800000000000 },
@@ -288,12 +302,14 @@ test("the served-answer checks, run for real: the list needs the note and a stam
   const cases: Array<[string, string, string]> = [
     ["list-good", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({}))} })`, ""],
     ["list-nonote", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ note: "no wording" }))} })`, "does not carry the last_assertion_at wording"],
+    ["list-old-note", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ note: "last_assertion_at is the greatest server timestamp, null on a row with a public_key means none recorded" }))} })`, "does not carry the objection meaning of null"],
     ["list-nokey", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [rows[0], { handle: "x", public_key: "pk" }] }))} })`, "citizen x has no last_assertion_at key"],
     ["list-secret-stamped", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [{ handle: "b", public_key: null, last_assertion_at: 5 }] }))} })`, "has no public_key but serves last_assertion_at 5"],
     ["list-text", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [{ handle: "k", public_key: "pk", last_assertion_at: "soon" }] }))} })`, "not a whole number"],
     ["list-empty", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [] }))} })`, "no rows"],
     ["list-html", `Test-CitizensServed (Read-JsonBody @{ Body = '<html>' })`, "did not return JSON"],
-    ["privacy-good", `Test-PrivacyServed ${q("x This lets readers observe recorded use of a seat's signing key, y")}`, ""],
+    ["privacy-good", `Test-PrivacyServed ${q("x This lets readers observe recorded use of a seat's signing key, y. If the holder of a seat's key objects and shows it holds that key, z")}`, ""],
+    ["privacy-no-objection", `Test-PrivacyServed ${q("x This lets readers observe recorded use of a seat's signing key, y")}`, "does not carry the objection sentence"],
     ["privacy-missing", `Test-PrivacyServed ${q("an older privacy page")}`, "does not carry the last_assertion_at paragraph"],
     ["tool-good", `[string]((Read-ToolResult @{ Code = '200'; Body = ${q(JSON.stringify({ result: { content: [{ text: JSON.stringify({ ok: 1 }) }] } }))} }).ok)`, "1"],
     ["tool-iserror", `[string]($null -eq (Read-ToolResult @{ Code = '200'; Body = ${q(JSON.stringify({ result: { isError: true, content: [{ text: "{}" }] } }))} }))`, "True"],
@@ -316,6 +332,11 @@ test("the source checks name literals the checkout carries: every Select-String 
   assert.ok(script.includes('"last_assertion_at is the greatest server timestamp"'));
   assert.ok(privacy.includes("This lets readers observe recorded use of a seat's signing key"));
   assert.ok(script.includes(`"This lets readers observe recorded use of a seat's signing key"`));
+  assert.ok(privacy.includes("If the holder of a seat's key objects and shows it holds that key"));
+  assert.ok(script.includes(`"If the holder of a seat's key objects and shows it holds that key"`));
+  assert.ok(society.includes("or an objection the operator has upheld"));
+  assert.ok(script.includes('"or an objection the operator has upheld"'));
+  assert.ok(society.includes("AND assertion_objected_at IS NULL"));
   let n = 0;
   for (const m of code.matchAll(/Select-String -Path "([^"]+)" -Pattern ('[^']+'|"[^"]+")/g)) {
     const file = m[1];
@@ -325,4 +346,58 @@ test("the source checks name literals the checkout carries: every Select-String 
     n++;
   }
   assert.ok(n >= 5, `checked ${n} literals`);
+});
+
+test("AO3: the catalogue state of the two columns, run for real: each combination, a failed read is an error and never 'absent', and 0025 without 0024 is out of order", (t) => {
+  const row = (name: string) => d1json([{ name, type: "INTEGER" }]);
+  const cases: Array<[string, string, string]> = [
+    ["neither", `& { $s = Get-ColumnState (Read-D1Rows ${q(d1json([]))}) (Read-D1Rows ${q(d1json([]))}); [string]$s.Has0024 + '|' + [string]$s.Has0025 + '|' + $s.Error }`, "False|False|"],
+    ["only-0024", `& { $s = Get-ColumnState (Read-D1Rows ${q(row("last_assertion_at"))}) (Read-D1Rows ${q(d1json([]))}); [string]$s.Has0024 + '|' + [string]$s.Has0025 + '|' + $s.Error }`, "True|False|"],
+    ["both", `& { $s = Get-ColumnState (Read-D1Rows ${q(row("last_assertion_at"))}) (Read-D1Rows ${q(row("assertion_objected_at"))}); [string]$s.Has0024 + '|' + [string]$s.Has0025 + '|' + $s.Error }`, "True|True|"],
+    ["only-0025", `& { $s = Get-ColumnState (Read-D1Rows ${q(d1json([]))}) (Read-D1Rows ${q(row("assertion_objected_at"))}); $s.Error }`, "out of order"],
+    ["failed-0024", `& { $s = Get-ColumnState $null (Read-D1Rows ${q(d1json([]))}); $s.Error }`, "last_assertion_at catalogue read returned no parsable result"],
+    ["failed-0025", `& { $s = Get-ColumnState (Read-D1Rows ${q(row("last_assertion_at"))}) $null; $s.Error }`, "assertion_objected_at catalogue read returned no parsable result"],
+  ];
+  const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
+  if (!run) return t.skip("no PowerShell available");
+  for (const [name, , expect] of cases) {
+    const m = new RegExp(`RESULT ${name} \\[(.*)\\]`).exec(run.out);
+    assert.ok(m, `${name} produced a result: ${run.out}`);
+    assert.ok(m![1].includes(expect), `${name}: '${m![1]}' mentions '${expect}'`);
+  }
+});
+
+test("AO3: the migration block, run for real with a recording stub for wrangler: neither column applies 0024 then 0025; 0024 present applies only 0025; both present applies nothing; a failed or timed-out 0024 stops before 0025 is started", (t) => {
+  const block = script.slice(script.indexOf("# BEGIN-MIGRATION"), script.indexOf("# END-MIGRATION-APPLY"));
+  assert.ok(block.length > 200 && block.includes("MIGRATION_PATH_0025"), "the block was found");
+  const h = (has0024: boolean, has0025: boolean, mig0024: string): string[] => [
+    "$ErrorActionPreference = 'Stop'",
+    "function Stop-Here($msg) { Write-Host \"[STOP] $msg\"; exit 1 }",
+    "function Say($msg) { }",
+    "function Assert-Window($label, $seconds) { }",
+    "$PROD_DB = 'commonhold'; $WRANGLER_D1_SECONDS = 120",
+    `$MIGRATION_PATH_0024 = 'migrations/0024_last_assertion_at.sql'; $MIGRATION_PATH_0025 = 'migrations/0025_assertion_objection.sql'`,
+    `$colState = @{ Has0024 = $${has0024 ? "true" : "false"}; Has0025 = $${has0025 ? "true" : "false"} }`,
+    `function Invoke-Bounded($commandLine, $seconds) { Write-Host ('APPLY ' + $commandLine); if ($commandLine -like '*0024*') { ${mig0024} } else { return @{ Code = 0; Out = ''; TimedOut = $false } } }`,
+    block,
+    "Write-Host '[BLOCK-DONE]'",
+  ];
+  const ok = "return @{ Code = 0; Out = ''; TimedOut = $false }";
+  const applied = (out: string): string[] => [...out.matchAll(/APPLY .*--file (\S+)/g)].map((m) => m[1]!);
+  const none = runPs(h(false, false, ok));
+  if (!none) return t.skip("no PowerShell available");
+  assert.deepEqual(applied(none.out), ["migrations/0024_last_assertion_at.sql", "migrations/0025_assertion_objection.sql"], none.out);
+  assert.match(none.out, /\[BLOCK-DONE\]/);
+  assert.deepEqual(applied(runPs(h(true, false, ok))!.out), ["migrations/0025_assertion_objection.sql"], "the state 0024 present, 0025 absent resumes at 0025");
+  const both = runPs(h(true, true, ok))!;
+  assert.deepEqual(applied(both.out), []);
+  assert.match(both.out, /\[BLOCK-DONE\]/);
+  const failed = runPs(h(false, false, "return @{ Code = 1; Out = ''; TimedOut = $false }"))!;
+  assert.equal(failed.code, 1);
+  assert.match(failed.out, /\[STOP\] migration 0024 failed/);
+  assert.deepEqual(applied(failed.out), ["migrations/0024_last_assertion_at.sql"], "0025 was never started after a failed 0024");
+  const timed = runPs(h(false, false, "return @{ Code = -1; Out = ''; TimedOut = $true }"))!;
+  assert.equal(timed.code, 1);
+  assert.match(timed.out, /\[STOP\] migration 0024 timed out/);
+  assert.deepEqual(applied(timed.out), ["migrations/0024_last_assertion_at.sql"]);
 });

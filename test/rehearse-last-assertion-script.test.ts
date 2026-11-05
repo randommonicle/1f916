@@ -93,9 +93,11 @@ test("the target is the scratch database by name and id; production is named now
   assert.equal(/wrangler\s+deploy/i.test(script), false, "no wrangler deploy anywhere in the file");
   assert.equal(/RehearsalPassed/i.test(script), false, "no shortcut flag");
   assert.equal(/Authorization|Bearer|\.local\./i.test(code), false, "no credential or custody file");
-  // The migration is applied only on an absent column, by the scratch database name.
-  assert.ok(code.includes('npx wrangler d1 execute " + $SCRATCH_DB + " --remote --file " + $MIGRATION_PATH'));
-  assert.ok(script.indexOf("if (@($col.Rows).Count -eq 0)") < script.indexOf("--remote --file"));
+  // Each migration is applied only on its own absent column, by the scratch database name.
+  assert.ok(code.includes('npx wrangler d1 execute " + $SCRATCH_DB + " --remote --file " + $migration.Path'));
+  assert.ok(script.indexOf("if (@($shape.Rows).Count -eq 0)") < script.indexOf("--remote --file"));
+  assert.match(script, /^\$MIGRATION_PATH_0024 = "migrations\/0024_last_assertion_at\.sql"$/m);
+  assert.match(script, /^\$MIGRATION_PATH_0025 = "migrations\/0025_assertion_objection\.sql"$/m);
 });
 
 test("PASS is printed once, only after the report check, and the step order is target, tables, column, migration, worker, checks, verdict", () => {
@@ -137,7 +139,7 @@ test("the worker config binds ONLY the scratch database (name, id, preview id), 
 
 test("the decision functions, run for real: the scratch target is exact; the config check refuses a wrong name, a wrong id, two databases and bad JSON; the report check refuses a missing check, a failed one, an error and a false pass flag", (t) => {
   const names = workerCheckNames();
-  assert.equal(names.length, 28, `the worker adds 28 named checks: ${names.length}`);
+  assert.equal(names.length, 40, `the worker adds 40 named checks: ${names.length}`);
   const good = { pass: true, database: "commonhold-migtest (scratch)", rows_written_per_statement: [2, 1], checks: names.map((n) => ({ name: n, expected: 1, actual: 1, pass: true })) };
   const withCheck = (idx: number, over: Record<string, unknown>) => ({ ...good, checks: good.checks.map((c, i) => (i === idx ? { ...c, ...over } : c)) });
   const jsonc = (db: Record<string, unknown>[]) => JSON.stringify({ name: "x", d1_databases: db });
@@ -163,11 +165,18 @@ test("the decision functions, run for real: the scratch target is exact; the con
     ["report-zerorows", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: [0, 1] }))})`, "greater than 0"],
     ["report-textrows", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: ["x", 1] }))})`, "greater than 0"],
     ["report-onerow", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: [2] }))})`, "not recorded for both"],
-    ["shape-ok", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: null }]))})`, ""],
-    ["shape-notnull", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 1, dflt_value: null }]))})`, "expected 0 (nullable)"],
-    ["shape-default", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: "0" }]))})`, "has a default"],
-    ["shape-type", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT", notnull_flag: 0, dflt_value: null }]))})`, "expected INTEGER"],
-    ["shape-absent", `Test-ColumnShape (Read-D1Rows ${q(d1json([]))})`, "0 last_assertion_at column rows"],
+    ["shape-ok", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: null }]))}) 'last_assertion_at'`, ""],
+    ["shape-notnull", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 1, dflt_value: null }]))}) 'last_assertion_at'`, "expected 0 (nullable)"],
+    ["shape-default", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: "0" }]))}) 'last_assertion_at'`, "has a default"],
+    ["shape-type", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT", notnull_flag: 0, dflt_value: null }]))}) 'last_assertion_at'`, "expected INTEGER"],
+    ["shape-absent", `Test-ColumnShape (Read-D1Rows ${q(d1json([]))}) 'last_assertion_at'`, "0 last_assertion_at column rows"],
+    ["shape-ok-0025", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "INTEGER", notnull_flag: 0, dflt_value: null }]))}) 'assertion_objected_at'`, ""],
+    ["shape-default-0025", `Test-ColumnShape (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "INTEGER", notnull_flag: 0, dflt_value: "0" }]))}) 'assertion_objected_at'`, "citizens.assertion_objected_at has a default"],
+    ["shape-absent-0025", `Test-ColumnShape (Read-D1Rows ${q(d1json([]))}) 'assertion_objected_at'`, "0 assertion_objected_at column rows"],
+    ["order-ok", `Test-ColumnOrder $true $false`, ""],
+    ["order-both", `Test-ColumnOrder $true $true`, ""],
+    ["order-neither", `Test-ColumnOrder $false $false`, ""],
+    ["order-wrong", `Test-ColumnOrder $false $true`, "out of order"],
     ["report-norows", `Test-RehearsalReport (ConvertFrom-Json ${q(JSON.stringify({ ...good, rows_written_per_statement: undefined }))})`, "rows_written was not recorded"],
   ];
   const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
@@ -188,6 +197,52 @@ test("the ps1's expected check names are exactly the worker's (a check added to 
 test("the worker's two batched statements are the ones src/society.ts runs, verbatim", () => {
   const lit = (name: string) => new RegExp(`const ${name} =\\s*\\n?\\s*"([^"]+)"`).exec(workerSource)![1];
   for (const s of [lit("NONCE_INSERT"), lit("STAMP_UPDATE")]) assert.ok(society.includes(s), `src/society.ts carries: ${s.slice(0, 60)}`);
+});
+
+test("AO3: the worker's objection statements are the operator script's two SQL templates, verbatim, and the worker checks both columns", () => {
+  const ao = readFileSync(here("../scripts/assertion-objection.ps1"), "utf8").replace(/\r\n/g, "\n");
+  for (const name of ["UPHOLD_SQL_TEMPLATE", "WITHDRAW_SQL_TEMPLATE"]) {
+    const fromPs = new RegExp("^[$]" + name + ' = "(.*)"$', "m").exec(ao)![1];
+    const fromWorker = new RegExp("const " + name + ' = "(.*)";$', "m").exec(workerSource)![1].replace(/\\"/g, '"');
+    assert.equal(fromWorker, fromPs, name);
+  }
+  assert.ok(workerSource.includes("assertion_objected_at") && workerSource.includes("migration 0024 or 0025"));
+});
+
+test("AO3: the column order check and the migration block, run for real with stubs: neither column applies 0024 then 0025; '0024 present, 0025 absent' resumes at 0025; both present applies nothing; 0025 without 0024 stops; a failed 0024 stops before 0025 is started", (t) => {
+  const from = script.indexOf("$col0024 = Invoke-ScratchRead");
+  const block = script.slice(from, script.indexOf("# 2. the worker:"));
+  assert.ok(block.includes("$MIGRATION_PATH_0025") && block.includes("Test-ColumnOrder"), "the block was found");
+  const h = (has0024: boolean, has0025: boolean, mig0024Code: number): string[] => [
+    "$ErrorActionPreference = 'Stop'",
+    "$Database = 'commonhold-migtest'",
+    defs,
+    "function Say($msg) { }",
+    "$script:applied = @()",
+    `$has = @{ 'last_assertion_at' = $${has0024 ? "true" : "false"}; 'assertion_objected_at' = $${has0025 ? "true" : "false"} }`,
+    "function Invoke-ScratchRead($sql, $label) { foreach ($c in 'last_assertion_at', 'assertion_objected_at') { if ($sql.Contains(\"'\" + $c + \"'\")) { $present = $has[$c]; foreach ($a in $script:applied) { if ($a -like ('*' + $c + '*') -or ($c -eq 'last_assertion_at' -and $a -like '*0024*') -or ($c -eq 'assertion_objected_at' -and $a -like '*0025*')) { $present = $true } }; if ($present) { return @{ Rows = @([pscustomobject]@{ name = $c; type = 'INTEGER'; notnull_flag = 0; dflt_value = $null }) } } else { return @{ Rows = @() } } } }; throw 'unexpected read' }",
+    `function Invoke-Bounded($commandLine, $seconds) { Write-Host ('APPLY ' + $commandLine); $script:applied += $commandLine; if ($commandLine -like '*0024*') { return @{ Code = ${mig0024Code}; Out = ''; TimedOut = $false } }; return @{ Code = 0; Out = ''; TimedOut = $false } }`,
+    block,
+    "Write-Host '[BLOCK-DONE]'",
+  ];
+  const applied = (out: string): string[] => [...out.matchAll(/APPLY .*--file (\S+)/g)].map((m) => m[1]!);
+  const none = runPs(h(false, false, 0));
+  if (!none) return t.skip("no PowerShell available");
+  assert.deepEqual(applied(none.out), ["migrations/0024_last_assertion_at.sql", "migrations/0025_assertion_objection.sql"], none.out);
+  assert.match(none.out, /\[BLOCK-DONE\]/);
+  const resume = runPs(h(true, false, 0))!;
+  assert.deepEqual(applied(resume.out), ["migrations/0025_assertion_objection.sql"], "0024 present, 0025 absent resumes at 0025: " + resume.out);
+  const both = runPs(h(true, true, 0))!;
+  assert.deepEqual(applied(both.out), []);
+  assert.match(both.out, /\[BLOCK-DONE\]/);
+  const wrong = runPs(h(false, true, 0))!;
+  assert.equal(wrong.code, 1);
+  assert.match(wrong.out, /\[STOP\].*out of order/);
+  assert.deepEqual(applied(wrong.out), []);
+  const failed = runPs(h(false, false, 1))!;
+  assert.equal(failed.code, 1);
+  assert.match(failed.out, /\[STOP\] migration 0024 failed/);
+  assert.deepEqual(applied(failed.out), ["migrations/0024_last_assertion_at.sql"], "0025 was never started after a failed 0024");
 });
 
 test("R7: the process helpers, run for real: descendants are found, and killing the wrapper alone leaves the orphan which the snapshot then stops; a socket's owner is found and released; the helper never kills its own shell", (t) => {
@@ -232,7 +287,7 @@ test("R4/R7 flow pins: the route's HTTP status must be exactly 200; wrangler is 
   assert.ok(script.indexOf("$leftOver = Get-ListenerPid $Port") < script.indexOf("# 3. the checks"), "the port check precedes the verdict");
   assert.ok(script.includes('Stop-Here ("something (process " + $leftOver'), "a left-over listener stops the run");
   assert.ok(script.includes("[notnull] AS notnull_flag"), "the column read asks for notnull and the default");
-  assert.ok(script.indexOf("Test-ColumnShape $col") > script.indexOf("--remote --file"), "the shape check runs on both paths, after the optional migration");
+  assert.ok(script.indexOf("Test-ColumnShape $shape $migration.Column") > script.indexOf("--remote --file"), "the shape check runs on both paths, after the optional migration");
 });
 
 async function ride() {
@@ -253,7 +308,7 @@ test("the worker, ridden on the local D1 shim: every check passes except rows_wr
   const { report, citizensDelta, nonces } = await ride();
   const failed = report.checks.filter((c) => !c.pass).map((c) => c.name);
   assert.deepEqual(failed, ["c6 rows_written reported for both statements"], JSON.stringify(report.checks.filter((c) => !c.pass)));
-  assert.equal(report.checks.length, 28);
+  assert.equal(report.checks.length, 40);
   assert.equal(report.pass, false, "on the shim the overall verdict is not pass, because rows_written cannot be real here");
   assert.equal(citizensDelta, 0, "the scratch citizen was deleted");
   assert.equal(nonces, 0, "every nonce row was deleted");

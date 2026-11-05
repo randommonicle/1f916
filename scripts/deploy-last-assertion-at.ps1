@@ -1,21 +1,25 @@
 # Deploys the LAST-ASSERTION-AT WAVE (D-078 item 4): each citizen row carries last_assertion_at, the greatest SERVER time at which a valid signed assertion from that seat's key was spent here, stamped in the same D1 batch as
 # the replay nonce and served on GET /api/citizens and the citizens tool of /mcp and /mcp/read. Spec: drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md with amendments A1-A10 (A8 is this script's order); checkpoint
 # docs/CHECKPOINT-LAST-ASSERTION-AT.md. Adapted from scripts/deploy-decided-event-id.ps1, keeping its fixes: reads by --command, one wrangler subcommand per bounded call, the one-hour window, the four chains compared on length and head.
-# A MIGRATION WAVE, MIGRATION FIRST (L-046, L-016). Ben's hand only (D-017). One fail-fast script. NO MINT: step 1 STOPS if src/doc.ts differs between the live base and HEAD, and unless the ONLY migration added since the
-# live base is migrations/0024_last_assertion_at.sql (a nullable ADD COLUMN: no default, no index, no rebuild, no FK detach, NO BACKFILL because auth_nonces keeps a row for seconds and earlier assertions are unknowable).
+# THE ASSERTION OBJECTION (D-078 item 4, option B, drafts/BRIEF-ASSERTION-OBJECTION-2026-11-05.md, amendments AO1-AO7) RIDES THE SAME DEPLOY: migration 0025 adds citizens.assertion_objected_at, the stamp stops for a seat whose objection the operator
+# upheld (scripts/assertion-objection.ps1, Ben's hand), and the served text says so. The two migrations are INDEPENDENT (AO3): each applies only if ITS OWN column is absent, an apply failure stops the run, a re-run resumes safely from
+# the state '0024 present, 0025 absent', and both columns are verified before the worker deploys. There is no -MigrationAlreadyApplied switch any more: the catalogue is the state.
+# A MIGRATION WAVE, MIGRATION FIRST (L-046, L-016). Ben's hand only (D-017). One fail-fast script. NO MINT: step 1 STOPS if src/doc.ts differs between the live base and HEAD, and unless the ONLY migrations added since the
+# live base are migrations/0024_last_assertion_at.sql and migrations/0025_assertion_objection.sql (each a nullable ADD COLUMN: no default, no index, no rebuild, no FK detach, NO BACKFILL because auth_nonces keeps a row for seconds and earlier assertions are unknowable).
 # THIS SCRIPT DOES NOT SIGN ANYTHING and holds no key. The worker's SELECT and UPDATE name the column, so a worker deployed BEFORE the migration would 500 the census and fail every assertion closed: the migration goes first.
-# ORDER (A8): the rehearsal of the actual Worker binding authentication path against a scratch D1 (namespaced replay and raw-nonce collision, the existing 401 text, an unchanged stamp and nonces) has PASSED, which a real run
+# ORDER (A8): the rehearsal of the actual Worker binding authentication path against a scratch D1 (namespaced replay and raw-nonce collision, the existing 401 text, an unchanged stamp and nonces, AND a flagged seat that authenticates, spends its nonce and does not stamp, and a stamp committed before an uphold that the uphold clears) has PASSED, which a real run
 # confirms by -RehearsalPassed (a SQL-only wrangler run cannot prove the JavaScript catch; it needs Ben, since wrangler prompts); then 1 pins and git; 2 gates (npm test, typecheck); 3 live read of the base and the attested
-# constitution; 4 the first production read, the catalogue state of citizens.last_assertion_at, which STARTS the clock: migration, worker activation and the post-activation verification must all finish within ONE HOUR of it
+# constitution; 4 the first production read, the catalogue state of citizens.last_assertion_at and citizens.assertion_objected_at, which STARTS the clock: migration, worker activation and the post-activation verification must all finish within ONE HOUR of it
 # (before every bounded step, the time since that read plus the step's upper bound must fit inside the window or the step is not started; wrangler commands are bounded by a timeout), else STOP for recovery and a fresh run;
-# 5 apply 0024; 6 verify on prod: pragma_table_info shows the column as INTEGER and scripts/verify-last-assertion-at.sql returns ZERO rows (STOP on any offending row); 7 deploy the worker (stamped) and poll;
+# 5 apply 0024, then 0025, each ONLY if its own column is absent (the apply of 0025 never starts after a failed 0024); 6 verify on prod: pragma_table_info shows BOTH columns as INTEGER and scripts/verify-last-assertion-at.sql returns ZERO rows (STOP on any offending row); 7 deploy the worker (stamped) and poll;
 # 8 re-run the verification AFTER activation; 9 ride GET /api/attest (v6 unchanged, all four chains - identity_log, treasury, payouts, ballots - ok, and each chain's sealed_entries and head identical before and after),
-# GET /api/citizens (the note and a last_assertion_at key on every row), the citizens tool on /mcp and /mcp/read, GET /privacy (the paragraph), and sixteen public reads.
-# WHAT THE RIDE CANNOT DO: public reads cannot execute authenticateByAssertion. If the optional step below is declined, the honest report is "public serving verified; production authentication write path not exercised", and the
+# GET /api/citizens (the note, its null-meaning sentence and a last_assertion_at key on every row), the citizens tool on /mcp and /mcp/read, GET /privacy (the paragraph and the objection sentence), and sixteen public reads.
+# WHAT THE RIDE CANNOT DO: public reads cannot execute authenticateByAssertion, and nothing here upholds an objection. The objection is proven by the rehearsal (AO3) and by Ben's first real use of scripts/assertion-objection.ps1, not by this ride
+# (AO7: gate condition C4, a stamp moving after deploy, does not prove it). If the optional step below is declined, the honest report is "public serving verified; production authentication write path not exercised", and the
 # field is not called ridden. OPTIONAL STEP FOR BEN, after the deploy (the hub writes it, with the existing custody handling, not this script): one signed assertion from keyholder on GET /api/me, then GET /api/citizens must show
 # keyholder's last_assertion_at move from null to a server time inside that minute.
-# ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0024 applied: an extra nullable column the old worker never reads.
-# The old worker records nothing, so stamps go stale from that moment; nothing needs repairing. Do not drop the column. A rollback after 0024 is safe.
+# ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migrations 0024 and 0025 applied: two extra nullable columns the old worker never reads.
+# The old worker records nothing, so stamps go stale from that moment; nothing needs repairing. Do not drop either column. A rollback after 0024 and 0025 is safe. An objection upheld before a rollback stays recorded; the old worker would stamp the seat again, so do not roll back without re-checking each upheld seat.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs; step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on. Both ship as
 # placeholders: the hub sets them. Step 0a STOPS, before any git or network command, while EITHER holds its placeholder or is not 40 lower-case hex. -ExpectedCommit is required.
 # REVIEWED SOURCE ONLY: step 1 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/).
@@ -23,7 +27,7 @@
 #   cd "C:\Users\bengr\Projects\AI domain and social network\society"
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-last-assertion-at.ps1 -ExpectedCommit <sha> -DryRun                  # every check and the live reads (including the D1 catalogue read, a READ), nothing written, nothing deployed
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-last-assertion-at.ps1 -ExpectedCommit <sha> -RehearsalPassed        # the real thing
-#   If the migration was applied and a step BEFORE the worker deploy stopped: re-run with -MigrationAlreadyApplied (the catalogue and the verification still run).
+#   If a step BEFORE the worker deploy stopped: just re-run. Each migration applies only if its own column is absent, so a state of '0024 present, 0025 absent' resumes at 0025 (the catalogue and the verification still run).
 #   Once the worker has been deployed there is no resume mode: a re-run refuses because the live commit or note already matches. If a stop comes after the deploy, the worker is live: finish the remaining verification
 #   by hand with the GETs this script lists (/api/attest, /api/citizens, the citizens tool on /mcp and /mcp/read, /privacy), or roll back to the version id printed before the stop.
 # THE RIDE writes nothing: public GETs, and two POSTs of a read-only tools/call whose body is sent from a temp file.
@@ -34,7 +38,6 @@
 param(
   [Parameter(Mandatory = $true)][string]$ExpectedCommit,
   [switch]$DryRun,
-  [switch]$MigrationAlreadyApplied,
   [switch]$RehearsalPassed
 )
 $ErrorActionPreference = "Stop"
@@ -49,7 +52,10 @@ $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 $REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-last-assertion-at.ps1", "test/deploy-last-assertion-at-script.test.ts", "docs/")
-$MIGRATION_PATH_EXPECTED = "migrations/0024_last_assertion_at.sql"
+$MIGRATION_PATH_0024 = "migrations/0024_last_assertion_at.sql"
+$MIGRATION_PATH_0025 = "migrations/0025_assertion_objection.sql"
+$COLUMN_0024 = "last_assertion_at"
+$COLUMN_0025 = "assertion_objected_at"
 $VERIFY_SQL_PATH = "scripts/verify-last-assertion-at.sql"
 $WINDOW_SECONDS = 3600
 $WRANGLER_D1_SECONDS = 120
@@ -62,10 +68,14 @@ $STAMP_FIELD = "last_assertion_at"
 # The first words of the served note and of the privacy paragraph: the ride's markers that the new worker is the one serving.
 $NOTE_MARKER = "last_assertion_at is the greatest server timestamp"
 $PRIVACY_MARKER = "This lets readers observe recorded use of a seat's signing key"
-$COLUMN_SQL = "SELECT name, type FROM pragma_table_info('citizens') WHERE name = 'last_assertion_at'"
+# The objection's own markers (AO3): the served note's third null meaning, and the privacy page's objection sentence. Only the worker of THIS wave serves them.
+$NULL_MEANING_MARKER = "or an objection the operator has upheld"
+$OBJECTION_PRIVACY_MARKER = "If the holder of a seat's key objects and shows it holds that key"
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
+# The catalogue read for one citizens column (single quotes only, so it can go to wrangler by --command).
+function Get-ColumnSql($columnName) { return ("SELECT name, type FROM pragma_table_info('citizens') WHERE name = '" + $columnName + "'") }
 # The paths in $paths that are NOT on $ALLOWED_PATHS_AFTER_REVIEW (ordinal, case-sensitive; an empty list in is an empty list out).
 function Get-DisallowedPaths($paths) {
   $bad = @()
@@ -196,12 +206,22 @@ function Test-VerificationClean($res) {
   return ""
 }
 # "" when $res shows the column present with type INTEGER.
-function Test-ColumnPresent($res) {
+function Test-ColumnPresent($res, $columnName) {
   if ($null -eq $res) { return "the column read returned no parsable result" }
   $list = @($res.Rows)
-  if ($list.Count -ne 1) { return ("citizens has " + $list.Count + " last_assertion_at column rows, expected exactly 1") }
-  if ([string]$list[0].type -cne "INTEGER") { return ("citizens.last_assertion_at has type '" + $list[0].type + "', expected INTEGER") }
+  if ($list.Count -ne 1) { return ("citizens has " + $list.Count + " " + $columnName + " column rows, expected exactly 1") }
+  if ([string]$list[0].type -cne "INTEGER") { return ("citizens." + $columnName + " has type '" + $list[0].type + "', expected INTEGER") }
   return ""
+}
+# The catalogue state of the two columns from two reads (each a parsed read result, or $null for a failed read), as @{ Has0024; Has0025; Error }. A failed read is an Error, never 'absent'. 0025 present with 0024 absent
+# is out of order and an Error: the brief applies 0024 first. Each migration is applied only when ITS column is absent (AO3).
+function Get-ColumnState($res0024, $res0025) {
+  if ($null -eq $res0024) { return @{ Has0024 = $false; Has0025 = $false; Error = "the last_assertion_at catalogue read returned no parsable result" } }
+  if ($null -eq $res0025) { return @{ Has0024 = $false; Has0025 = $false; Error = "the assertion_objected_at catalogue read returned no parsable result" } }
+  $has0024 = (@($res0024.Rows).Count -gt 0)
+  $has0025 = (@($res0025.Rows).Count -gt 0)
+  if ($has0025 -and -not $has0024) { return @{ Has0024 = $has0024; Has0025 = $has0025; Error = "citizens.assertion_objected_at is on prod but citizens.last_assertion_at is not: out of order, read the catalogue by hand" } }
+  return @{ Has0024 = $has0024; Has0025 = $has0025; Error = "" }
 }
 # SQL for wrangler goes by --command, never --file: with --file, `d1 execute` goes through D1's import API and returns statistics only, never rows (wrangler-dist/cli.js, the input.file branch), so a SELECT read that
 # way can only fail closed. --file stays for the migration apply, whose result is the exit code alone.
@@ -251,7 +271,9 @@ function Assert-Window($label, $requiredSeconds) {
 }
 # Reads the catalogue and verification on prod and STOPS on any offending row.
 function Assert-Prod-Verified($when) {
-  $why = Test-ColumnPresent (Invoke-D1Read $COLUMN_SQL "the column read")
+  $why = Test-ColumnPresent (Invoke-D1Read (Get-ColumnSql $COLUMN_0024) "the last_assertion_at column read") $COLUMN_0024
+  if ($why -ne "") { Stop-Here ("catalogue check " + $when + " failed: " + $why + ".") }
+  $why = Test-ColumnPresent (Invoke-D1Read (Get-ColumnSql $COLUMN_0025) "the assertion_objected_at column read") $COLUMN_0025
   if ($why -ne "") { Stop-Here ("catalogue check " + $when + " failed: " + $why + ".") }
   $why = Test-VerificationClean (Invoke-D1Command (Get-Content $VERIFY_SQL_PATH -Raw) "the verification")
   if ($why -ne "") { Stop-Here ("verification " + $when + " failed: " + $why + ". Do not deploy or continue; read the rows by hand.") }
@@ -262,6 +284,7 @@ function Assert-Prod-Verified($when) {
 function Test-CitizensServed($body) {
   if ($null -eq $body) { return "the citizens list did not return JSON" }
   if (-not ([string]$body.note).Contains($NOTE_MARKER)) { return "the citizens note does not carry the last_assertion_at wording" }
+  if (-not ([string]$body.note).Contains($NULL_MEANING_MARKER)) { return "the citizens note does not carry the objection meaning of null" }
   $rows = @($body.citizens)
   if ($rows.Count -lt 1) { return "the citizens list carries no rows" }
   foreach ($row in $rows) {
@@ -277,6 +300,7 @@ function Test-CitizensServed($body) {
 # "" when $text is the privacy page carrying the paragraph.
 function Test-PrivacyServed($text) {
   if (-not ([string]$text).Contains($PRIVACY_MARKER)) { return "GET /privacy does not carry the last_assertion_at paragraph" }
+  if (-not ([string]$text).Contains($OBJECTION_PRIVACY_MARKER)) { return "GET /privacy does not carry the objection sentence" }
   return ""
 }
 # The tool result of a JSON-RPC tools/call answer as parsed JSON, or $null.
@@ -352,10 +376,10 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.
 $docMoves = @(git diff --name-status --no-renames $LIVE_BASE_COMMIT HEAD -- src/doc.ts)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-mint check cannot be read." }
 if ($docMoves.Count -gt 0) { Stop-Here ("src/doc.ts changed since " + $LIVE_BASE_COMMIT.Substring(0, 8) + " (" + ($docMoves -join " | ") + "): this wave mints nothing. Not this script's deploy.") }
-# The ONLY migration since the live code is 0024, added (not edited).
+# The ONLY migrations since the live code are 0024 and 0025, both added (not edited).
 $migMoves = @(git diff --name-status --no-renames $LIVE_BASE_COMMIT HEAD -- migrations)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the migration check cannot be read." }
-if ($migMoves.Count -ne 1 -or $migMoves[0] -cne ("A`t" + $MIGRATION_PATH_EXPECTED)) { Stop-Here ("expected exactly one added migration (" + $MIGRATION_PATH_EXPECTED + ") since " + $LIVE_BASE_COMMIT.Substring(0, 8) + ", found: " + ($migMoves -join " | ")) }
+if ($migMoves.Count -ne 2 -or $migMoves[0] -cne ("A`t" + $MIGRATION_PATH_0024) -or $migMoves[1] -cne ("A`t" + $MIGRATION_PATH_0025)) { Stop-Here ("expected exactly two added migrations (" + $MIGRATION_PATH_0024 + " then " + $MIGRATION_PATH_0025 + ") since " + $LIVE_BASE_COMMIT.Substring(0, 8) + ", found: " + ($migMoves -join " | ")) }
 # BEGIN-REVIEWED-SOURCE-CHECK
 git merge-base --is-ancestor $REVIEWED_COMMIT HEAD
 if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain the reviewed commit $($REVIEWED_COMMIT.Substring(0, 8)): this is not the code that was reviewed." }
@@ -367,15 +391,20 @@ Say ("[git] reviewed source: HEAD differs from " + $REVIEWED_COMMIT.Substring(0,
 # END-REVIEWED-SOURCE-CHECK
 if (-not (Select-String -Path "src/society.ts" -Pattern "UPDATE citizens SET last_assertion_at = ? WHERE id = ?" -SimpleMatch -Quiet)) { Stop-Here "src/society.ts does not stamp last_assertion_at: this checkout is not the last-assertion-at wave." }
 if (-not (Select-String -Path "src/society.ts" -Pattern "export const LAST_ASSERTION_NOTE" -SimpleMatch -Quiet)) { Stop-Here "src/society.ts has no LAST_ASSERTION_NOTE: this checkout would not serve the note." }
+if (-not (Select-String -Path "src/society.ts" -Pattern "AND assertion_objected_at IS NULL" -SimpleMatch -Quiet)) { Stop-Here "src/society.ts does not condition the stamp on assertion_objected_at IS NULL: this checkout is not the assertion-objection wave." }
+if (-not (Select-String -Path "src/society.ts" -Pattern "or an objection the operator has upheld" -SimpleMatch -Quiet)) { Stop-Here "src/society.ts does not carry the objection meaning of null in LAST_ASSERTION_NOTE: this checkout would not serve it." }
+if (-not (Select-String -Path "src/privacy.ts" -Pattern "If the holder of a seat's key objects and shows it holds that key" -SimpleMatch -Quiet)) { Stop-Here "src/privacy.ts does not carry the objection sentence: this checkout would not serve it." }
 if (-not (Select-String -Path "src/privacy.ts" -Pattern "This lets readers observe recorded use of a seat's signing key" -SimpleMatch -Quiet)) { Stop-Here "src/privacy.ts does not carry the last_assertion_at paragraph: this checkout would not serve it." }
 if (-not (Select-String -Path "src/governance.ts" -Pattern "export function assertProposalsQuery(" -SimpleMatch -Quiet)) { Stop-Here "src/governance.ts has no assertProposalsQuery: this checkout would drop the unknown-params wave." }
 if (-not (Select-String -Path "src/code-identity.ts" -Pattern "export function codeBlock" -Quiet)) { Stop-Here "src/code-identity.ts has no codeBlock: this checkout would drop served code identity." }
+if (-not (Test-Path $MIGRATION_PATH_0024)) { Stop-Here "$MIGRATION_PATH_0024 is missing." }
+if (-not (Test-Path $MIGRATION_PATH_0025)) { Stop-Here "$MIGRATION_PATH_0025 is missing." }
 if (-not (Test-Path $VERIFY_SQL_PATH)) { Stop-Here "$VERIFY_SQL_PATH is missing: the verification cannot run." }
 $verifyWhy = Test-SingleLineSql (ConvertTo-SingleLineSql (Get-Content $VERIFY_SQL_PATH -Raw))
 if ($verifyWhy -ne "") { Stop-Here "$VERIFY_SQL_PATH cannot be sent as one --command argument: $verifyWhy." }
 if (-not (Select-String -Path "wrangler.jsonc" -Pattern '"version_metadata"' -Quiet)) { Stop-Here "wrangler.jsonc has no version_metadata binding: the Worker could not serve Cloudflare's version id." }
 if (Select-String -Path "wrangler.jsonc" -Pattern '"CODE_COMMIT"' -Quiet) { Stop-Here "wrangler.jsonc configures a CODE_COMMIT var: a deploy that forgot the flag would serve a stale stamp. The stamp comes from this script's --var flag only." }
-Say ("[git] HEAD " + $headSha.Substring(0, 8) + " = main = origin/main = -ExpectedCommit; tree clean; contains " + $LIVE_BASE_COMMIT.Substring(0, 8) + "; src/doc.ts unmoved; the one new migration is " + $MIGRATION_PATH_EXPECTED)
+Say ("[git] HEAD " + $headSha.Substring(0, 8) + " = main = origin/main = -ExpectedCommit; tree clean; contains " + $LIVE_BASE_COMMIT.Substring(0, 8) + "; src/doc.ts unmoved; the two new migrations are " + $MIGRATION_PATH_0024 + " and " + $MIGRATION_PATH_0025)
 
 # 2. the wave's own gates, re-run here so a stale checkout cannot deploy
 # BEGIN-GATES
@@ -411,59 +440,64 @@ if (([string]$listBefore.note).Contains($NOTE_MARKER)) { Stop-Here "GET /api/cit
 
 # 4. THE FIRST PRODUCTION READ. The clock starts BEFORE it is invoked, so the read's own run time (up to $WRANGLER_D1_SECONDS) is inside the window. A READ, so -DryRun runs it too.
 $script:PreflightAt = Get-Date
-$columnRes = Invoke-D1Read $COLUMN_SQL "the column state read"
-if ($null -eq $columnRes) { Stop-Here "the column state read returned no parsable result." }
+$columnRes0024 = Invoke-D1Read (Get-ColumnSql $COLUMN_0024) "the last_assertion_at column state read"
+$columnRes0025 = Invoke-D1Read (Get-ColumnSql $COLUMN_0025) "the assertion_objected_at column state read"
+$colState = Get-ColumnState $columnRes0024 $columnRes0025
+if ($colState.Error -ne "") { Stop-Here $colState.Error }
 Say ("[window] production D1 first read at " + $script:PreflightAt.ToString("o") + "; migration, worker activation and the post-activation verification must finish within " + $WINDOW_SECONDS + " s of this")
-$columnPresent = (@($columnRes.Rows).Count -gt 0)
-if ($columnPresent -and -not $MigrationAlreadyApplied) { Stop-Here "citizens.last_assertion_at is already on prod. If an earlier run applied it, re-run with -MigrationAlreadyApplied (the catalogue and verification still run)." }
-if (-not $columnPresent -and $MigrationAlreadyApplied) { Stop-Here "-MigrationAlreadyApplied was given but citizens.last_assertion_at is not on prod." }
-Say ("[d1] citizens.last_assertion_at on prod before: " + $columnPresent)
+Say ("[d1] on prod before: citizens.last_assertion_at present " + $colState.Has0024 + ", citizens.assertion_objected_at present " + $colState.Has0025 + "; each migration applies only if its own column is absent")
 
 if ($DryRun) {
-  Say "[dry-run] would now: apply $MIGRATION_PATH_EXPECTED to the REMOTE D1 (skipped if -MigrationAlreadyApplied); verify the column and $VERIFY_SQL_PATH (zero rows) on prod; run npx wrangler deploy --var CODE_COMMIT:<the full sha> (bounded) and capture its Current Version ID; poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart; re-run the verification; then ride HTTP and both MCP doors. Nothing was written to the remote and nothing was deployed. The script signs nothing."
+  Say "[dry-run] would now: apply $MIGRATION_PATH_0024 then $MIGRATION_PATH_0025 to the REMOTE D1 (each skipped if its own column is already there); verify both columns and $VERIFY_SQL_PATH (zero rows) on prod; run npx wrangler deploy --var CODE_COMMIT:<the full sha> (bounded) and capture its Current Version ID; poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart; re-run the verification; then ride HTTP and both MCP doors. Nothing was written to the remote and nothing was deployed. The script signs nothing."
   exit 0
 }
 
-# 5. migration 0024 to the REMOTE D1 FIRST (a nullable column, nothing else; applied only when the catalogue read above found the column absent)
+# 5. migrations 0024 then 0025 to the REMOTE D1 FIRST (each a nullable column, nothing else), EACH applied only when the catalogue read above found ITS OWN column absent (AO3); a failed apply stops the run before the next one
 # BEGIN-MIGRATION
-Assert-Window "applying the migration" $WRANGLER_D1_SECONDS
-if (-not $MigrationAlreadyApplied) {
-  Say "[d1] applying $MIGRATION_PATH_EXPECTED to the remote database"
-  $mig = Invoke-Bounded ("npx wrangler d1 execute " + $PROD_DB + " --remote --file " + $MIGRATION_PATH_EXPECTED) $WRANGLER_D1_SECONDS
-  if ($mig.TimedOut) { Stop-Here "migration 0024 timed out after $WRANGLER_D1_SECONDS s; the state is unknown. Read the catalogue by hand; do NOT re-run the file blind (a duplicate ADD COLUMN fails)." }
-  if ($mig.Code -ne 0) { Stop-Here "migration 0024 failed (exit $($mig.Code)); nothing deployed; re-read the catalogue before any retry (do NOT re-run the file blind: a duplicate ADD COLUMN fails)." }
+foreach ($migration in @(@{ Label = "0024"; Path = $MIGRATION_PATH_0024; Present = $colState.Has0024 }, @{ Label = "0025"; Path = $MIGRATION_PATH_0025; Present = $colState.Has0025 })) {
+  if ($migration.Present) {
+    Say ("[d1] migration " + $migration.Label + ": its column is already on prod, not applied")
+    continue
+  }
+  Assert-Window ("applying migration " + $migration.Label) $WRANGLER_D1_SECONDS
+  Say ("[d1] applying " + $migration.Path + " to the remote database")
+  $mig = Invoke-Bounded ("npx wrangler d1 execute " + $PROD_DB + " --remote --file " + $migration.Path) $WRANGLER_D1_SECONDS
+  if ($mig.TimedOut) { Stop-Here ("migration " + $migration.Label + " timed out after " + $WRANGLER_D1_SECONDS + " s; the state is unknown. Read the catalogue by hand; do NOT re-run the file blind (a duplicate ADD COLUMN fails).") }
+  if ($mig.Code -ne 0) { Stop-Here ("migration " + $migration.Label + " failed (exit " + $mig.Code + "); nothing deployed and no later migration was started; re-read the catalogue before any retry (a re-run applies only a migration whose column is absent).") }
 }
 
-# 6. catalogue and verification on prod (db-migration-verification): the worker deploys only if the column is there and the verification returns zero rows
-Assert-Window "the catalogue verification (two reads)" (2 * $WRANGLER_D1_SECONDS)
-Assert-Prod-Verified "after the migration"
-Say "[d1] verified on prod: column present (INTEGER), the verification returns zero rows"
+# END-MIGRATION-APPLY
+
+# 6. catalogue and verification on prod (db-migration-verification): the worker deploys only if both columns are there and the verification returns zero rows
+Assert-Window "the catalogue verification (three reads)" (3 * $WRANGLER_D1_SECONDS)
+Assert-Prod-Verified "after the migrations"
+Say "[d1] verified on prod: both columns present (INTEGER), the verification returns zero rows"
 # END-MIGRATION
 
 # 7. deploy the worker with the commit stamp, capturing its version id, then poll until the served identity is this deploy's
 # BEGIN-DEPLOY-AND-POLL
 Assert-Window "the worker deploy and its poll" ($WRANGLER_DEPLOY_SECONDS + ($POLL_TRIES * ($POLL_DELAY_SECONDS + $POLL_READ_SECONDS)))
 $headNow = (git rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $headNow -cne $headSha) { Stop-Here ("HEAD moved since step 1 (" + $headSha.Substring(0, 8) + " -> " + $headNow + "): the migration is applied, the worker was not deployed. Re-run with -MigrationAlreadyApplied once HEAD is right.") }
+if ($LASTEXITCODE -ne 0 -or $headNow -cne $headSha) { Stop-Here ("HEAD moved since step 1 (" + $headSha.Substring(0, 8) + " -> " + $headNow + "): the migrations are applied, the worker was not deployed. Re-run once HEAD is right (each migration applies only if its own column is absent).") }
 $dirtyNow = @(git status --porcelain)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE) just before the deploy: the worker was not deployed." }
 if ($dirtyNow.Count -gt 0) { Stop-Here ("the working tree changed since step 1 (" + $dirtyNow.Count + " paths: " + ($dirtyNow -join " | ") + "): the worker was not deployed.") }
 Say "[deploy] npx wrangler deploy --var CODE_COMMIT:$($headSha.Substring(0, 8))... (commit $($headSha.Substring(0, 8)))"
 $dep = Invoke-Bounded ("npx wrangler deploy --var CODE_COMMIT:" + $headSha) $WRANGLER_DEPLOY_SECONDS
-if ($dep.TimedOut) { Stop-Here "wrangler deploy timed out after $WRANGLER_DEPLOY_SECONDS s; whether it took effect is unknown. Check 'npx wrangler deployments list' by hand. Migration 0024 is applied and harmless to the old worker." }
-if ($dep.Code -ne 0) { Stop-Here "wrangler deploy failed (exit $($dep.Code)); migration 0024 is applied and harmless to the old worker. Re-run with -MigrationAlreadyApplied. Output: $($dep.Out)" }
+if ($dep.TimedOut) { Stop-Here "wrangler deploy timed out after $WRANGLER_DEPLOY_SECONDS s; whether it took effect is unknown. Check 'npx wrangler deployments list' by hand. Migrations 0024 and 0025 are applied and harmless to the old worker." }
+if ($dep.Code -ne 0) { Stop-Here "wrangler deploy failed (exit $($dep.Code)); migrations 0024 and 0025 are applied and harmless to the old worker. Re-run (each migration applies only if its own column is absent). Output: $($dep.Out)" }
 $versionMatches = @([regex]::Matches($dep.Out, '(?m)^[ \t]*Current Version ID:[ \t]*([0-9a-fA-F-]{36})[ \t]*\r?$'))
 if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current Version ID' on " + $versionMatches.Count + " lines; which one is this deploy's cannot be told. Check 'npx wrangler deployments list' by hand before anything else.") }
 if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
 $versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
-$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migration 0024 stays applied (an extra nullable column the old worker never reads); the old worker records no stamps, so existing stamps go stale, and nothing needs repairing."
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migrations 0024 and 0025 stay applied (two extra nullable columns the old worker never reads); the old worker records no stamps, so existing stamps go stale, and nothing needs repairing; but an old worker stamps a seat whose objection was upheld, so re-check each upheld seat (GET /api/citizens must serve null for it) before relying on a rollback."
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 
 # 8. the verification again AFTER activation (the new worker may already have stamped a key seat; the query must still return zero rows)
 # BEGIN-RECONCILE
-Assert-Window "the post-activation verification (two reads)" (2 * $WRANGLER_D1_SECONDS)
+Assert-Window "the post-activation verification (three reads)" (3 * $WRANGLER_D1_SECONDS)
 Assert-Prod-Verified "after worker activation"
 Assert-Window "completion of the post-activation verification" 0
 Say "[d1] post-activation: the verification returns zero rows"
@@ -498,4 +532,4 @@ foreach ($p in "/", "/api/official", "/openapi.json", "/treasury", "/api/listing
 }
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after the deploy (version $versionId): " + ($bad -join ", ") + ". If a read that answered before now fails: $ROLLBACK_LINE") }
 Say "[ride] 16 public reads -> 200"
-Say "[done] last-assertion-at wave deployed and verified. Public serving verified; production authentication write path NOT exercised: it is not ridden until one signed assertion from keyholder moves its last_assertion_at (the optional step in this script's header). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
+Say "[done] last-assertion-at wave deployed and verified. Public serving verified; production authentication write path NOT exercised: it is not ridden until one signed assertion from keyholder moves its last_assertion_at (the optional step in this script's header). The objection is NOT shown by this ride: it rests on the rehearsal and on the first real run of scripts/assertion-objection.ps1. Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
