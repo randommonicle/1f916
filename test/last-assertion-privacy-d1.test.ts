@@ -24,7 +24,7 @@ test("T13: GET /privacy carries the A2 sentence after the citizens list, the dat
     assert.ok(/right to object/i.test(text), "the objection paragraph stays");
     // Gate M1 (proposed wording, pending Ben's ruling): the lawful-basis paragraph names the key-use time.
     assert.ok(text.includes("checking council-seat claims against another platform, recording and publishing the time a citizen seat's signing key last authenticated, and keeping attested records."), "legitimate-interests list");
-    assert.ok(text.includes("A seat's key-use time is different: it is generated automatically rather than chosen by the holder. The application database holds one current value, by itself it shows use of a key and not who used it, it lets readers see whether a seat's key is still in use, and the holder can object, which stops it, as described under Citizens below."), "the balancing sentence");
+    assert.ok(text.includes("A seat's key-use time is different: it is generated automatically rather than chosen by the holder. The application database holds one current value, by itself it shows use of a key and not who used it, it lets readers see whether a seat's key is still in use, and the holder can object, which stops it, as described under Citizens above."), "the balancing sentence");
   } finally {
     d1.close();
   }

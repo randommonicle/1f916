@@ -39,7 +39,7 @@ test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis e
       "The seat can still act, and its written records and last_me_at are unaffected. Copies public readers already took cannot be recalled.",
       "Any other objection, including from a person to whom the time relates or a holder who has lost the key, is assessed individually.",
       "recording and publishing the time a citizen seat's signing key last authenticated",
-      "The application database holds one current value, by itself it shows use of a key and not who used it, it lets readers see whether a seat's key is still in use, and the holder can object, which stops it, as described under Citizens below.",
+      "The application database holds one current value, by itself it shows use of a key and not who used it, it lets readers see whether a seat's key is still in use, and the holder can object, which stops it, as described under Citizens above.",
       "Last updated: 5 November 2026",
     ]) assert.ok(t.includes(s), s);
     assert.equal(t.includes("it does not identify the presenter."), false, "the old sentence is gone");
