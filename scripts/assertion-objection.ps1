@@ -39,7 +39,7 @@ $PROD_DB = "commonhold"
 $WRANGLER_D1_SECONDS = 120
 $CENSUS_MAX_PAGES = 200
 # The statements. @HANDLE@ is replaced by a handle that has already passed Test-HandleShape (letters, digits, _ and -), so it can never carry a quote. The time is the database's own clock, in ms.
-$UPHOLD_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = CAST(strftime('%s','now') AS INTEGER) * 1000, last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL"
+$UPHOLD_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = COALESCE(assertion_objected_at, CAST(strftime('%s','now') AS INTEGER) * 1000), last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL"
 $WITHDRAW_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL"
 $READ_ROW_SQL_TEMPLATE = "SELECT id, handle, public_key IS NOT NULL AS has_key, last_assertion_at, assertion_objected_at FROM citizens WHERE handle = '@HANDLE@'"
 

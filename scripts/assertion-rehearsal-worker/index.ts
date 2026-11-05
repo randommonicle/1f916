@@ -28,7 +28,7 @@ const NONCE_INSERT =
 const STAMP_UPDATE = "UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?) AND assertion_objected_at IS NULL";
 
 // The operator's two statements, verbatim from scripts/assertion-objection.ps1 (a test pins that they are the ps1's templates), @HANDLE@ replaced by the scratch handle.
-const UPHOLD_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = CAST(strftime('%s','now') AS INTEGER) * 1000, last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL";
+const UPHOLD_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = COALESCE(assertion_objected_at, CAST(strftime('%s','now') AS INTEGER) * 1000), last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL";
 const WITHDRAW_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL";
 
 type Keypair = { privateKey: CryptoKey; publicKey: string };

@@ -90,7 +90,7 @@ test("the SQL templates: single-quote only, no `--`, key seats only, uphold clea
     assert.equal(s.includes("--"), false);
     assert.ok(s.includes("handle = '@HANDLE@'"));
   }
-  assert.equal(up, "UPDATE citizens SET assertion_objected_at = CAST(strftime('%s','now') AS INTEGER) * 1000, last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL");
+  assert.equal(up, "UPDATE citizens SET assertion_objected_at = COALESCE(assertion_objected_at, CAST(strftime('%s','now') AS INTEGER) * 1000), last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL");
   assert.equal(wd, "UPDATE citizens SET assertion_objected_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL");
   assert.equal(wd.includes("last_assertion_at"), false, "a withdrawal never restores or touches the value");
   assert.match(rd, /^SELECT /);

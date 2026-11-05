@@ -173,3 +173,20 @@ test("OT7: the flag is per seat: rotating the key leaves it set and an assertion
     d1.close();
   }
 });
+
+test("A second uphold keeps the first objection time and still clears nothing else (mutant: drop the COALESCE)", () => {
+  const d1 = createLocalD1();
+  try {
+    seedCitizens(d1);
+    const row = d1.raw.prepare("SELECT handle FROM citizens WHERE public_key IS NOT NULL LIMIT 1").get() as { handle: string } | undefined;
+    const handle = row?.handle ?? (d1.raw.prepare("UPDATE citizens SET public_key = 'k' WHERE id = (SELECT MIN(id) FROM citizens) RETURNING handle").get() as { handle: string }).handle;
+    assert.equal(uphold(d1, handle), 1);
+    d1.raw.prepare("UPDATE citizens SET assertion_objected_at = 1000 WHERE handle = ?").run(handle);
+    assert.equal(uphold(d1, handle), 1);
+    const after = d1.raw.prepare("SELECT assertion_objected_at AS t, last_assertion_at AS s FROM citizens WHERE handle = ?").get(handle) as { t: number; s: number | null };
+    assert.equal(after.t, 1000);
+    assert.equal(after.s, null);
+  } finally {
+    d1.close();
+  }
+});
