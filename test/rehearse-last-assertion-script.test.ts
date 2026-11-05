@@ -211,7 +211,7 @@ test("AO3: the worker's objection statements are the operator script's two SQL t
 
 test("AO3: the column order check and the migration block, run for real with stubs: neither column applies 0024 then 0025; '0024 present, 0025 absent' resumes at 0025; both present applies nothing; 0025 without 0024 stops; a failed 0024 stops before 0025 is started", (t) => {
   const from = script.indexOf("$col0024 = Invoke-ScratchRead");
-  const block = script.slice(from, script.indexOf("# 2. the worker:"));
+  const block = script.slice(from, script.indexOf("# 1b. the operator script"));
   assert.ok(block.includes("$MIGRATION_PATH_0025") && block.includes("Test-ColumnOrder"), "the block was found");
   const h = (has0024: boolean, has0025: boolean, mig0024Code: number): string[] => [
     "$ErrorActionPreference = 'Stop'",
@@ -314,4 +314,50 @@ test("the worker, ridden on the local D1 shim: every check passes except rows_wr
   assert.equal(nonces, 0, "every nonce row was deleted");
   const text = JSON.stringify(report);
   assert.equal(/ch1\.|"d":|privateKey|BEGIN/.test(text), false, "no token or key material");
+});
+
+test("C3 (re-gate): the rehearsal's uphold template is the operator script's, verbatim, and the absent handle is a valid handle shape that no scratch citizen carries", () => {
+  const ao = readFileSync(here("../scripts/assertion-objection.ps1"), "utf8").replace(/\r\n/g, "\n");
+  const fromAo = /^[$]UPHOLD_SQL_TEMPLATE = "(.*)"$/m.exec(ao)![1];
+  const fromRehearsal = /^[$]UPHOLD_SQL_TEMPLATE = "(.*)"$/m.exec(script)![1];
+  assert.equal(fromRehearsal, fromAo);
+  const handle = /^[$]ABSENT_HANDLE = "(.*)"$/m.exec(script)![1];
+  assert.match(handle, /^[A-Za-z0-9_-]{2,32}$/);
+  assert.equal(handle.startsWith("a5-rehearsal-"), false, "it cannot match the worker's scratch citizen");
+  assert.ok(script.indexOf("# BEGIN-TRANSPORT-CHECK") > script.indexOf("--remote --file") && script.indexOf("# END-TRANSPORT-CHECK") < script.indexOf("# 2. the worker:"), "the transport check runs after the columns and before the worker starts");
+});
+
+test("C3 (re-gate): the transport check, run for real over the real helper with an npx stub on PATH: changes 0 passes and the statement, the scratch database and --remote --json --command are what the stub saw; changes 1, a missing figure and a failing wrangler each stop with their own message", () => {
+  const block = script.slice(script.indexOf("# BEGIN-TRANSPORT-CHECK"), script.indexOf("# END-TRANSPORT-CHECK"));
+  assert.ok(block.includes("Invoke-ScratchRead") && block.includes("Test-NoRowsChanged"));
+  const go = (answer: string, exitCode = 0): { code: number | null; out: string; seen: string } | null => {
+    const dir = mkdtempSync(join(tmpdir(), "rehearse-transport-"));
+    try {
+      writeFileSync(join(dir, "stub.mjs"), `import fs from "node:fs"; fs.appendFileSync(process.env.RT_DIR + "/seen.txt", process.argv.slice(2).join(" ") + " || " + (process.env.D1_SQL_ARG ?? "") + String.fromCharCode(10)); console.log(${JSON.stringify(answer)}); process.exit(${exitCode});\n`);
+      writeFileSync(join(dir, "npx.cmd"), '@node "%~dp0stub.mjs" %*\r\n');
+      writeFileSync(join(dir, "seen.txt"), "");
+      writeFileSync(join(dir, "h.ps1"), harness(["function Say($m) { Write-Host $m }", block, "Write-Host '[TRANSPORT-DONE]'"]).join("\r\n"));
+      const r = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(dir, "h.ps1")], { encoding: "utf8", env: { ...process.env, PATH: dir + ";" + process.env.PATH, RT_DIR: dir } });
+      if (r.error) return null;
+      return { code: r.status, out: `${r.stdout}${r.stderr}`, seen: readFileSync(join(dir, "seen.txt"), "utf8") };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const ans = (changes?: number) => JSON.stringify([{ results: [], success: true, meta: changes === undefined ? {} : { changes } }]);
+  const ok = go(ans(0));
+  if (!ok) return;
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /\[TRANSPORT-DONE\]/);
+  assert.match(ok.seen, /wrangler d1 execute commonhold-migtest --remote --json --command/);
+  assert.match(ok.seen, /UPDATE citizens SET assertion_objected_at = COALESCE.*WHERE handle = 'no-such-seat-rehearsal-0' AND public_key IS NOT NULL/);
+  const one = go(ans(1))!;
+  assert.equal(one.code, 1);
+  assert.match(one.out, /\[STOP\] transport check failed: the uphold statement for a handle that does not exist changed 1 rows, expected 0/);
+  const none = go(ans())!;
+  assert.match(none.out, /\[STOP\] transport check failed: .*no meta\.changes/);
+  const bad = go("wrangler exploded", 1)!;
+  assert.equal(bad.code, 1);
+  assert.match(bad.out, /\[STOP\] wrangler d1 execute failed \(exit 1\) on the uphold transport check/);
+  assert.doesNotMatch(bad.out, /\[TRANSPORT-DONE\]/);
 });

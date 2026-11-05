@@ -85,9 +85,12 @@ function Read-D1Rows($text) {
   if ($i -lt 0) { return $null }
   try { $parsed = (([string]$text).Substring($i) | ConvertFrom-Json) } catch { return $null }
   if ($null -eq $parsed -or @($parsed).Count -lt 1 -or $null -eq @($parsed)[0].results) { return $null }
-  return @{ Rows = @(@($parsed)[0].results) }
+  $changes = $null
+  $meta = @($parsed)[0].meta
+  if ($null -ne $meta -and $null -ne $meta.PSObject.Properties["changes"]) { $changes = $meta.changes }
+  return @{ Rows = @(@($parsed)[0].results); Changes = $changes }
 }
-# One READ against the scratch database by --command (single-quote-only SQL), bounded. Returns the parsed rows or STOPS.
+# One statement against the scratch database by --command (single-quote-only SQL), bounded. Returns the parsed result (Rows, and Changes from meta.changes) or STOPS. Used for reads and for the one transport check.
 function Invoke-ScratchRead($sql, $label) {
   $why = Test-ScratchTarget $Database
   if ($why -ne "") { Stop-Here $why }
@@ -103,6 +106,16 @@ function Invoke-ScratchRead($sql, $label) {
   $res = Read-D1Rows $r.Out
   if ($null -eq $res) { Stop-Here ("the read for " + $label + " returned no parsable result") }
   return $res
+}
+# The operator's uphold statement, verbatim from scripts/assertion-objection.ps1 (a test pins that), sent below with a handle that does not exist (re-gate C3).
+$UPHOLD_SQL_TEMPLATE = "UPDATE citizens SET assertion_objected_at = COALESCE(assertion_objected_at, CAST(strftime('%s','now') AS INTEGER) * 1000), last_assertion_at = NULL WHERE handle = '@HANDLE@' AND public_key IS NOT NULL"
+$ABSENT_HANDLE = "no-such-seat-rehearsal-0"
+# "" when the answer to the transport check shows meta.changes present and equal to 0, otherwise the reason (a missing figure is a failure, not a pass).
+function Test-NoRowsChanged($res) {
+  if ($null -eq $res) { return "the transport check returned no parsable result" }
+  if ($null -eq $res.Changes) { return "the transport check answer carries no meta.changes, so zero rows changed cannot be shown" }
+  if ([string]$res.Changes -ne "0") { return ("the uphold statement for a handle that does not exist changed " + $res.Changes + " rows, expected 0") }
+  return ""
 }
 # The catalogue read for one citizens column (single quotes and square brackets only, so it can go to wrangler by --command).
 function Get-ColumnShapeSql($columnName) { return ("SELECT name, type, [notnull] AS notnull_flag, dflt_value FROM pragma_table_info('citizens') WHERE name = '" + $columnName + "'") }
@@ -219,6 +232,15 @@ foreach ($migration in @(@{ Label = "0024"; Path = $MIGRATION_PATH_0024; Column 
   if ($why -ne "") { Stop-Here ("the column on the scratch database is not migration " + $migration.Label + "'s: " + $why) }
   Say ("[d1] citizens." + $migration.Column + " present (INTEGER, nullable, no default)")
 }
+
+# 1b. the operator script's transport (re-gate C3): the uphold statement for a handle that does not exist, by wrangler d1 execute --remote --json --command through the same helper, must answer meta.changes 0.
+# It writes nothing (it matches no row) and proves the transport and the JSON shape on real wrangler before a person's objection is the first use of that path.
+# BEGIN-TRANSPORT-CHECK
+$transport = Invoke-ScratchRead ($UPHOLD_SQL_TEMPLATE.Replace("@HANDLE@", $ABSENT_HANDLE)) "the uphold transport check"
+$why = Test-NoRowsChanged $transport
+if ($why -ne "") { Stop-Here ("transport check failed: " + $why) }
+Say ("[transport] the uphold statement for a handle that does not exist answered meta.changes " + $transport.Changes + " through the same helper")
+# END-TRANSPORT-CHECK
 
 # 2. the worker: wrangler dev --remote on a local port, the route called, wrangler stopped in finally
 $logOut = [System.IO.Path]::GetTempFileName()
