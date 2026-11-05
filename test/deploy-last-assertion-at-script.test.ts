@@ -401,3 +401,10 @@ test("AO3: the migration block, run for real with a recording stub for wrangler:
   assert.match(timed.out, /\[STOP\] migration 0024 timed out/);
   assert.deepEqual(applied(timed.out), ["migrations/0024_last_assertion_at.sql"]);
 });
+
+test("L1 (re-gate): the rollback text no longer says the old worker stamps an upheld seat, and says the seat stays clear (the rollback target has no stamp code)", () => {
+  assert.equal(/would stamp the seat again|old worker stamps a seat|re-check each upheld seat/.test(script), false, "the two wrong clauses are gone");
+  assert.ok(script.includes("the seat stays clear: the rollback target has no stamp code"));
+  const line = script.split("\n").find((l) => l.startsWith("$ROLLBACK_LINE = "))!;
+  assert.ok(line.includes("the old worker records no stamps") && !/stamps a seat/.test(line));
+});

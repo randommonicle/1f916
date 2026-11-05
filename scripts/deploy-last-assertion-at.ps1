@@ -19,7 +19,7 @@
 # field is not called ridden. OPTIONAL STEP FOR BEN, after the deploy (the hub writes it, with the existing custody handling, not this script): one signed assertion from keyholder on GET /api/me, then GET /api/citizens must show
 # keyholder's last_assertion_at move from null to a server time inside that minute.
 # ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migrations 0024 and 0025 applied: two extra nullable columns the old worker never reads.
-# The old worker records nothing, so stamps go stale from that moment; nothing needs repairing. Do not drop either column. A rollback after 0024 and 0025 is safe. An objection upheld before a rollback stays recorded; the old worker would stamp the seat again, so do not roll back without re-checking each upheld seat.
+# The old worker records nothing, so stamps go stale from that moment; nothing needs repairing. Do not drop either column. A rollback after 0024 and 0025 is safe. An objection upheld before a rollback stays recorded and the seat stays clear: the rollback target has no stamp code.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs; step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on. Both ship as
 # placeholders: the hub sets them. Step 0a STOPS, before any git or network command, while EITHER holds its placeholder or is not 40 lower-case hex. -ExpectedCommit is required.
 # REVIEWED SOURCE ONLY: step 1 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/).
@@ -491,7 +491,7 @@ if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current 
 if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
 $versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
-$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migrations 0024 and 0025 stay applied (two extra nullable columns the old worker never reads); the old worker records no stamps, so existing stamps go stale, and nothing needs repairing; but an old worker stamps a seat whose objection was upheld, so re-check each upheld seat (GET /api/citizens must serve null for it) before relying on a rollback."
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migrations 0024 and 0025 stay applied (two extra nullable columns the old worker never reads); the old worker records no stamps, so existing stamps go stale, and nothing needs repairing."
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 
