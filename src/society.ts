@@ -651,12 +651,15 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
   // signer's issuedAt, and the guard keeps it monotonic when isolates' clocks differ. It sits after the signature and the resident-binding refusal, so only a verified
   // citizen assertion stamps. The bearer path never reaches here. If the column is absent (worker deployed before 0024) the UPDATE fails, the batch rolls back, the nonce
   // is not burnt and the request fails closed with a 500.
+  // assertion_objected_at (migration 0025, option B, O2): the stamp's last condition. An objection the operator upheld for this seat (by hand, scripts/assertion-objection.ps1) stops the
+  // stamp; the same hand clears the stored value, so the census needs no read-side condition. The seat still authenticates and spends its nonce exactly as before, and the
+  // statement stays one UPDATE in this one batch. If 0025 is absent the UPDATE fails like a missing 0024: roll back, nonce not burnt, 500.
   try {
     await env.DB.batch([
       env.DB.prepare(
         "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
       ).bind(a.nonce, `c:${row.id}:${a.nonce}`, row.id, a.issuedAt + ASSERTION_WINDOW_MS),
-      env.DB.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?)").bind(now, row.id, now),
+      env.DB.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?) AND assertion_objected_at IS NULL").bind(now, row.id, now),
     ]);
   } catch (e) {
     if (/UNIQUE|PRIMARY KEY/i.test(String(e))) {

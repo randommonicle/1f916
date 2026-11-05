@@ -21,7 +21,7 @@ const BAD_SIGNATURE_TEXT = "Signature does not verify against that citizen's reg
 // The two statements authenticateByAssertion batches, verbatim (a test pins that they are the ones in src/society.ts).
 const NONCE_INSERT =
   "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)";
-const STAMP_UPDATE = "UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?)";
+const STAMP_UPDATE = "UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?) AND assertion_objected_at IS NULL";
 
 type Keypair = { privateKey: CryptoKey; publicKey: string };
 type Check = { name: string; expected: unknown; actual: unknown; pass: boolean };

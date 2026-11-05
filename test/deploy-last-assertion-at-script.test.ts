@@ -240,7 +240,7 @@ test("the D1 decision functions, run for real: a zero-row verification passes (a
 test("the verification SQL, run for real over a citizens table: clean after the migration (all NULL), clean with a legitimate key-seat stamp, and it names a secret-held seat's stamp, a zero, a negative and a text stamp; it is a single line the script can send", () => {
   const db = new DatabaseSync(":memory:");
   try {
-    db.exec("CREATE TABLE citizens (id INTEGER PRIMARY KEY, handle TEXT, public_key TEXT, last_assertion_at INTEGER)");
+    db.exec("CREATE TABLE citizens (id INTEGER PRIMARY KEY, handle TEXT, public_key TEXT, last_assertion_at INTEGER, assertion_objected_at INTEGER)");
     db.exec("INSERT INTO citizens (id, handle, public_key, last_assertion_at) VALUES (1, 'bearer', NULL, NULL), (2, 'keyed', 'pk', NULL), (3, 'keyed-stamped', 'pk', 1800000000000)");
     assert.deepEqual(db.prepare(verifySql).all(), [], "clean");
     db.exec("UPDATE citizens SET last_assertion_at = 1800000000000 WHERE id = 1");
@@ -251,6 +251,8 @@ test("the verification SQL, run for real over a citizens table: clean after the 
     assert.equal(db.prepare(verifySql).all().length, 1, "a negative");
     db.exec("UPDATE citizens SET last_assertion_at = 'yesterday' WHERE id = 2");
     assert.equal(db.prepare(verifySql).all().length, 1, "a text value (SQLite keeps it in an INTEGER-affinity column)");
+    db.exec("UPDATE citizens SET last_assertion_at = 1800000000000, assertion_objected_at = 1800000001000 WHERE id = 2");
+    assert.deepEqual((db.prepare(verifySql).all() as { handle: string }[]).map((r) => r.handle), ["keyed"], "a stamp on a seat whose objection was upheld");
   } finally {
     db.close();
   }

@@ -80,3 +80,10 @@ Brief: drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md (amendments A1-A10 override 
 - `scripts/verify-last-assertion-at.sql` gains the offender "a stamp on a flagged seat" (O3).
 - Test `test/assertion-objection-migration.test.ts` (OT8).
 - Red-proofs: clause dropped from the verify SQL: OT8 verify test red; `DEFAULT 0` added to the migration: OT8 column test and no-default check red. Restored.
+
+## Commit B: the stamp stops (O2, O3, O5-O7; OT1, OT2, OT4-OT7)
+
+- `src/society.ts`: the stamp UPDATE gains `AND assertion_objected_at IS NULL`; still the second statement of the one nonce batch. The rehearsal worker's `STAMP_UPDATE` literal follows (its drift test pins it to society.ts). The stamp-suite tests (T1-T11) pass unchanged (OT3). T4 (column absent) now removes both columns through `withoutLastAssertionColumn`.
+- Test `test/assertion-objection-stamp-d1.test.ts` holds the exact uphold and withdraw SQL as exported constants; the script commit pins that the ps1 carries the same literals. The deploy-script verify-SQL test table gained the column and a flagged-seat case.
+- Red-proofs (mutate, run, restore): stamp condition dropped from society.ts: OT1, OT4, OT5, OT7 red. Uphold without the clear: OT2, OT5, OT6 red. Withdraw clearing the stamp instead of the flag: OT6 red. Rotation (`/api/rotate` UPDATE) also clearing the flag: OT7 red.
+- Question 1 of the brief (a stamp batch in flight when the operator acts): D1 batches are transactions and the uphold UPDATE is one statement, so either the stamp commits first (the uphold then clears it) or the uphold commits first (the stamp's condition then fails). Not exercised concurrently here; the rehearsal check in the deploy/rehearsal commit covers "a stamp committed before the uphold is cleared by it" only sequentially.
