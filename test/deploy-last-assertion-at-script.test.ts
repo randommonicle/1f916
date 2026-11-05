@@ -233,12 +233,14 @@ test("the D1 decision functions, run for real: a zero-row verification passes (a
     ["verify-row", `Test-VerificationClean (Read-D1Rows ${q(d1json([{ id: 5, handle: "bearer-a", last_assertion_at: 7, stamp_type: "integer", secret_held: 1 }]))})`, "1 offending row(s), first: citizen 5 bearer-a stamp '7'"],
     ["verify-unparsable", `Test-VerificationClean (Read-D1Rows ${q("boom")})`, "no parsable result"],
     ["verify-norows-object", `Test-VerificationClean (Read-D1Rows ${q(`[{"success":true}]`)})`, "no parsable result"],
-    ["column-good", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER" }]))}) 'last_assertion_at'`, ""],
-    ["column-good-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "INTEGER" }]))}) 'assertion_objected_at'`, ""],
+    ["column-good", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: null }]))}) 'last_assertion_at'`, ""],
+    ["column-good-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "INTEGER", notnull_flag: 0, dflt_value: null }]))}) 'assertion_objected_at'`, ""],
     ["column-absent", `Test-ColumnPresent (Read-D1Rows ${q(d1json([]))}) 'last_assertion_at'`, "0 last_assertion_at column rows"],
     ["column-absent-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([]))}) 'assertion_objected_at'`, "0 assertion_objected_at column rows"],
-    ["column-text", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT" }]))}) 'last_assertion_at'`, "expected INTEGER"],
-    ["column-text-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "TEXT" }]))}) 'assertion_objected_at'`, "citizens.assertion_objected_at has type 'TEXT'"],
+    ["column-text", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "TEXT", notnull_flag: 0, dflt_value: null }]))}) 'last_assertion_at'`, "expected INTEGER"],
+    ["column-text-0025", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "TEXT", notnull_flag: 0, dflt_value: null }]))}) 'assertion_objected_at'`, "citizens.assertion_objected_at has type 'TEXT'"],
+    ["column-notnull", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "assertion_objected_at", type: "INTEGER", notnull_flag: 1, dflt_value: "0" }]))}) 'assertion_objected_at'`, "expected 0 (nullable)"],
+    ["column-default", `Test-ColumnPresent (Read-D1Rows ${q(d1json([{ name: "last_assertion_at", type: "INTEGER", notnull_flag: 0, dflt_value: "0" }]))}) 'last_assertion_at'`, "has a default '0'"],
     ["column-unparsable", `Test-ColumnPresent (Read-D1Rows ${q("Error: no such table")}) 'last_assertion_at'`, "no parsable result"],
   ];
   const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
@@ -400,6 +402,10 @@ test("AO3: the migration block, run for real with a recording stub for wrangler:
   assert.equal(timed.code, 1);
   assert.match(timed.out, /\[STOP\] migration 0024 timed out/);
   assert.deepEqual(applied(timed.out), ["migrations/0024_last_assertion_at.sql"]);
+});
+
+test("L5 (re-gate): the catalogue read asks for notnull and the default, as the rehearsal's does", () => {
+  assert.ok(script.includes("[notnull] AS notnull_flag, dflt_value FROM pragma_table_info('citizens')"));
 });
 
 test("L1 (re-gate): the rollback text no longer says the old worker stamps an upheld seat, and says the seat stays clear (the rollback target has no stamp code)", () => {

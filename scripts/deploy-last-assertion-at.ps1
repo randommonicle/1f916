@@ -75,7 +75,7 @@ $OBJECTION_PRIVACY_MARKER = "If the holder of a seat's key objects and shows it 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
 # The catalogue read for one citizens column (single quotes only, so it can go to wrangler by --command).
-function Get-ColumnSql($columnName) { return ("SELECT name, type FROM pragma_table_info('citizens') WHERE name = '" + $columnName + "'") }
+function Get-ColumnSql($columnName) { return ("SELECT name, type, [notnull] AS notnull_flag, dflt_value FROM pragma_table_info('citizens') WHERE name = '" + $columnName + "'") }
 # The paths in $paths that are NOT on $ALLOWED_PATHS_AFTER_REVIEW (ordinal, case-sensitive; an empty list in is an empty list out).
 function Get-DisallowedPaths($paths) {
   $bad = @()
@@ -211,6 +211,8 @@ function Test-ColumnPresent($res, $columnName) {
   $list = @($res.Rows)
   if ($list.Count -ne 1) { return ("citizens has " + $list.Count + " " + $columnName + " column rows, expected exactly 1") }
   if ([string]$list[0].type -cne "INTEGER") { return ("citizens." + $columnName + " has type '" + $list[0].type + "', expected INTEGER") }
+  if ([string]$list[0].notnull_flag -cne "0") { return ("citizens." + $columnName + " has notnull '" + $list[0].notnull_flag + "', expected 0 (nullable): a NOT NULL column would stop every stamp") }
+  if ($null -ne $list[0].dflt_value) { return ("citizens." + $columnName + " has a default '" + $list[0].dflt_value + "', expected none") }
   return ""
 }
 # The catalogue state of the two columns from two reads (each a parsed read result, or $null for a failed read), as @{ Has0024; Has0025; Error }. A failed read is an Error, never 'absent'. 0025 present with 0024 absent
