@@ -20,8 +20,8 @@ test("0024 adds one nullable last column, existing rows read NULL, and schema.sq
   const pre = createLocalD1({ schemaTransform: withoutLastAssertionColumn });
   try {
     const schemaCols = cols(d1.raw);
-    const last = schemaCols[schemaCols.length - 1]!;
-    assert.equal(last.name, "last_assertion_at", "schema.sql carries the column last");
+    const last = schemaCols[schemaCols.length - 2]!;
+    assert.equal(last.name, "last_assertion_at", "schema.sql carries the column just before 0025's");
 
     const id = insertCitizen(pre);
     const before = cols(pre.raw);

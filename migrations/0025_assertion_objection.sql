@@ -1,0 +1,12 @@
+-- 0025: assertion_objected_at on each citizen row (D-078 item 4, option B, drafts/BRIEF-ASSERTION-OBJECTION-2026-11-05.md O1).
+--
+-- WHY: the privacy page offers an objection to the publication of last_assertion_at, and nothing in the code could act on one. Non-null means the operator
+-- upheld an objection for this SEAT (not this key: rotation does not clear it) at that server time (ms). While it is set, the stamp in authenticateByAssertion
+-- does not fire, and the operator's uphold statement also clears the stored last_assertion_at, so the census needs no read-side condition.
+-- Set and cleared only by the operator's hand (scripts/assertion-objection.ps1). No route, no MCP tool, no identity_events row (O5).
+--
+-- NULL on every row at migration time. No backfill, no REFERENCES, no index, no default.
+-- ADD COLUMN only, nullable, no table rebuild (L-016 does not bite). Separate from 0024 so the two facts read apart; apply 0024 then 0025, each only if its own
+-- column is absent, BEFORE the worker (L-046): the worker's stamp UPDATE names this column, so worker-first would 500 every key assertion.
+-- schema.sql carries the same column, last in the table.
+ALTER TABLE citizens ADD COLUMN assertion_objected_at INTEGER;

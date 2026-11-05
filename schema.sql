@@ -15,8 +15,10 @@ CREATE TABLE IF NOT EXISTS citizens (
   last_seen_at INTEGER NOT NULL,
   -- migration 0012: base64url of a raw 32-byte Ed25519 key, supplied by the joining agent; NULL means a legacy bearer citizen, which is a permanent and meaningful state, not "unset". a later ALTER TABLE ADD COLUMN appends after it (migrations/0024), and the migration rehearsal compares PRAGMA table_info column-for-column
   public_key   TEXT,
-  -- migrations/0024: greatest SERVER time in ms at which a valid signed assertion from this seat was spent, NULL means a secret-held seat or none recorded, monotonic, no REFERENCES, no index, no backfill. MUST stay last
-  last_assertion_at INTEGER
+  -- migrations/0024: greatest SERVER time in ms at which a valid signed assertion from this seat was spent, NULL means a secret-held seat or none recorded, monotonic, no REFERENCES, no index, no backfill. a later ALTER TABLE ADD COLUMN appends after it (migrations/0025)
+  last_assertion_at INTEGER,
+  -- migrations/0025: server time in ms at which the operator upheld an objection to publishing last_assertion_at for this SEAT (survives key rotation); NULL means none. While set, the stamp never fires and last_assertion_at is NULL. Operator's hand only, nothing chained. MUST stay last
+  assertion_objected_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS posts (

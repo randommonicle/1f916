@@ -71,3 +71,12 @@ Brief: drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md (amendments A1-A10 override 
 - Unproven without running it: the real wrangler dev process tree (the helpers are tested with a real orphaned `ping` child and a real socket, not with wrangler/workerd), and `rows_written` and D1's error shapes on real D1.
 - Red-proofs, each red then restored: R1 second INSERT given another nonce; R2 `INSERT OR IGNORE` (two winners); R3 zero rows accepted; R4 database check removed, and HTTP status check loosened; R5 notnull check dropped; R6 cleanup SQL broken; R7 Stop-ProcessIds a no-op, the snapshot unused in finally, descendants never found.
 - Privacy (gate M1), PROPOSED wording pending Ben's ruling: LAWFUL_BASIS gains "recording and publishing the time a seat's signing key last authenticated," in the legitimate-interests list and the key-use balancing sentences at the end of the paragraph; both pinned in T13 (red when the sentence is edited). The secret-literal-guard sha did not move. The gate record `docs/REVIEW-LAST-ASSERTION-AT-GATE-2026-11-04.md` is left uncommitted for the hub.
+
+# Assertion objection (D-078 item 4, option B; brief drafts/BRIEF-ASSERTION-OBJECTION-2026-11-05.md, AO1-AO5, AO7)
+
+## Commit A: migration 0025 and schema (O1, OT8)
+
+- `migrations/0025_assertion_objection.sql` (`assertion_objected_at INTEGER`, nullable, no default), `schema.sql` carries it last, the "MUST stay last" comment moved to it. `withoutObjectionColumn` helper added; `withoutLastAssertionColumn` now removes both columns. `public-key-migration-d1` and `last-assertion-migration` follow (column order `public_key`, `last_assertion_at`, `assertion_objected_at`).
+- `scripts/verify-last-assertion-at.sql` gains the offender "a stamp on a flagged seat" (O3).
+- Test `test/assertion-objection-migration.test.ts` (OT8).
+- Red-proofs: clause dropped from the verify SQL: OT8 verify test red; `DEFAULT 0` added to the migration: OT8 column test and no-default check red. Restored.

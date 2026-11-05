@@ -348,10 +348,20 @@ export function insertSubmission(
   return Number(result.lastInsertRowid);
 }
 
-// A schema.sql text WITHOUT citizens.last_assertion_at (migrations/0024), for tests of the pre-migration state: ALTER TABLE ... DROP COLUMN cannot be used on
+// A schema.sql text WITHOUT citizens.assertion_objected_at (migrations/0025): the state after 0024 and before 0025. ALTER TABLE ... DROP COLUMN cannot be used on
 // citizens because SQLite re-parses the table text and trips on the semicolons inside secret_hash's comment. The column is the last line of the table.
-export function withoutLastAssertionColumn(sql: string): string {
+export function withoutObjectionColumn(sql: string): string {
   const out = sql
+    .replace(/\n  -- migrations\/0025[^\n]*\n  assertion_objected_at INTEGER\r?\n/, "\n")
+    .replace(/(\n  last_assertion_at INTEGER),(\r?\n\);)/, "$1$2");
+  if (out === sql || out.includes("assertion_objected_at INTEGER")) throw new Error("withoutObjectionColumn: schema.sql text did not match");
+  return out;
+}
+
+// A schema.sql text WITHOUT citizens.last_assertion_at and assertion_objected_at (migrations/0024 and 0025), for tests of the pre-migration state. Same DROP COLUMN
+// limitation as above; both columns are the last lines of the table.
+export function withoutLastAssertionColumn(sql: string): string {
+  const out = withoutObjectionColumn(sql)
     .replace(/\n  -- migrations\/0024[^\n]*\n  last_assertion_at INTEGER\r?\n/, "\n")
     .replace(/(\n  public_key   TEXT),(\r?\n\);)/, "$1$2");
   if (out === sql || out.includes("last_assertion_at INTEGER")) throw new Error("withoutLastAssertionColumn: schema.sql text did not match");

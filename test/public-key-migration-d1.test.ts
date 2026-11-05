@@ -77,8 +77,9 @@ test("migrating the pre-0012 schema lands on exactly what schema.sql builds, col
   try {
     migrated.exec(CITIZENS_BEFORE_0012);
     migrated.exec(migrationSql());
-    // Later ADD COLUMN migrations on citizens append after public_key (0024: last_assertion_at), as on prod.
+    // Later ADD COLUMN migrations on citizens append after public_key (0024: last_assertion_at, 0025: assertion_objected_at), as on prod.
     migrated.exec(readFileSync(join(import.meta.dirname, "..", "migrations", "0024_last_assertion_at.sql"), "utf8"));
+    migrated.exec(readFileSync(join(import.meta.dirname, "..", "migrations", "0025_assertion_objection.sql"), "utf8"));
     fresh.exec(schemaSql());
 
     assert.deepEqual(
@@ -86,8 +87,9 @@ test("migrating the pre-0012 schema lands on exactly what schema.sql builds, col
       columnsInOrder(fresh, "citizens"),
       "schema.sql and migration 0012 must produce the same citizens table IN THE SAME ORDER. ALTER TABLE ADD COLUMN appends, so public_key must be listed LAST in schema.sql; if this fails, the operator's production table and the test harness's table have quietly diverged.",
     );
-    assert.equal(columnsInOrder(migrated, "citizens").at(-2), "public_key", "public_key must be the appended column of 0012, followed only by 0024 last_assertion_at");
-    assert.equal(columnsInOrder(migrated, "citizens").at(-1), "last_assertion_at");
+    assert.equal(columnsInOrder(migrated, "citizens").at(-3), "public_key", "public_key must be the appended column of 0012, followed only by 0024 last_assertion_at and 0025 assertion_objected_at");
+    assert.equal(columnsInOrder(migrated, "citizens").at(-2), "last_assertion_at");
+    assert.equal(columnsInOrder(migrated, "citizens").at(-1), "assertion_objected_at");
 
     assert.deepEqual(columnsInOrder(migrated, "auth_nonces"), columnsInOrder(fresh, "auth_nonces"));
   } finally {
