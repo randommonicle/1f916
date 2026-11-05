@@ -340,3 +340,12 @@ test("F1 and F2: a valid handle with consecutive hyphens reaches the database, a
   assert.equal(r.up, "");
   assert.ok(rawScript.includes("$why = Test-WithdrawRecorded $mode $ObjectionTimeRecorded"), "the gate is called on a real run");
 });
+
+test("L3 (re-gate): a handle ending in a line feed is refused, as the server's pattern refuses it (the pattern is anchored with \z, not $)", () => {
+  assert.ok(script.includes("'^[A-Za-z0-9_-]{2,32}\\z'"));
+  const r = results([say("lf", 'Test-HandleShape ("ab" + [char]10)'), say("crlf", 'Test-HandleShape ("ab" + [char]13 + [char]10)'), say("ok", "Test-HandleShape 'ab'")]);
+  if (!r) return;
+  assert.match(r.lf!, /must be 2-32/);
+  assert.match(r.crlf!, /must be 2-32/);
+  assert.equal(r.ok, "");
+});

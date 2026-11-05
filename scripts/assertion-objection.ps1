@@ -50,7 +50,7 @@ function Say($msg) { Write-Host $msg }
 # "" when $h is a citizen handle (2-32 of letters, digits, _ and -; the server's own pattern), otherwise the reason. Case-sensitive character class written out so no locale rule applies.
 function Test-HandleShape($h) {
   if ($null -eq $h -or -not ($h -is [string])) { return "the handle is not a string" }
-  if ($h -cnotmatch '^[A-Za-z0-9_-]{2,32}$') { return "the handle must be 2-32 characters, letters, digits, _ or -" }
+  if ($h -cnotmatch '^[A-Za-z0-9_-]{2,32}\z') { return "the handle must be 2-32 characters, letters, digits, _ or -" }
   return ""
 }
 function Get-Sql($template, $h) {
