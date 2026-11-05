@@ -125,3 +125,13 @@ test("ride: a real withdraw permits a stamp between the write and the read; it n
   assert.equal(still.code, 1);
   assert.match(still.out, /\[STOP\] the stored flag is '1800000000000', expected NULL after a withdrawal/);
 });
+
+test("ride (L6): a withdraw on a seat with no recorded objection stops with its own message and sends no write, real or dry (red: the Test-WithdrawHasFlag call removed)", async () => {
+  for (const extra of [["-SignedRequestVerified", "-ObjectionTimeRecorded", "-ConfirmHandle", "keyed-a"], ["-DryRun"]]) {
+    const r = await ride(["-Handle", "keyed-a", "-Withdraw", ...extra], { reads: [row(null, T0)], changes: 1, census: [T0] });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /\[STOP\] there is no recorded objection to withdraw: the stored assertion_objected_at is NULL, so nothing was written/);
+    assert.equal(r.sql.filter(isWrite).length, 0);
+    assert.doesNotMatch(r.out, /\[done\]/);
+  }
+});

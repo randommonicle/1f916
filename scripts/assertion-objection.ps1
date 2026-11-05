@@ -134,6 +134,11 @@ function Test-PreRow($res) {
   if ([string]$list[0].has_key -ne "1") { return "the seat has no public key: a secret-held seat records no assertion time, so there is nothing to object to" }
   return ""
 }
+# "" unless a withdraw was asked for a seat that has no objection recorded (re-gate L6): there is nothing to withdraw, and a write would only report a no-op as done.
+function Test-WithdrawHasFlag($mode, $row) {
+  if ($mode -ceq "withdraw" -and $null -eq $row.assertion_objected_at) { return "there is no recorded objection to withdraw: the stored assertion_objected_at is NULL, so nothing was written" }
+  return ""
+}
 # "" when exactly one row changed. meta.changes must be present and equal to 1: a missing figure is a failure, not a pass.
 function Test-ChangedOne($res) {
   if ($null -eq $res) { return "the write returned no parsable result" }
@@ -212,6 +217,8 @@ $before = Invoke-D1 (Get-ReadRowSql $Handle) "the stored-row read"
 $why = Test-PreRow $before
 if ($why -ne "") { Stop-Here $why }
 $beforeRow = @($before.Rows)[0]
+$why = Test-WithdrawHasFlag $mode $beforeRow
+if ($why -ne "") { Stop-Here $why }
 Say ("[before] " + $beforeRow.handle + ": stored last_assertion_at '" + $beforeRow.last_assertion_at + "', stored assertion_objected_at '" + $beforeRow.assertion_objected_at + "'")
 $censusBefore = Find-CensusRow $Handle { param($u) Get-CensusPage $u } $CENSUS_MAX_PAGES
 if ($censusBefore.Error -ne "") { Stop-Here $censusBefore.Error }
