@@ -1,4 +1,4 @@
-# Deploys the LAST-ASSERTION-AT WAVE (D-078 item 4): each citizen row carries last_assertion_at, the greatest SERVER time at which a valid signed assertion from that seat's key was spent here, stamped in the same D1 batch as
+# Deploys the LAST-ASSERTION-AT WAVE (D-078 item 4): each citizen row carries last_assertion_at, the start of the UTC day of the greatest SERVER time at which a valid signed assertion from that seat's key was spent here, stamped in the same D1 batch as
 # the replay nonce and served on GET /api/citizens and the citizens tool of /mcp and /mcp/read. Spec: drafts/BRIEF-LAST-ASSERTION-AT-2026-11-04.md with amendments A1-A10 (A8 is this script's order); checkpoint
 # docs/CHECKPOINT-LAST-ASSERTION-AT.md. Adapted from scripts/deploy-decided-event-id.ps1, keeping its fixes: reads by --command, one wrangler subcommand per bounded call, the one-hour window, the four chains compared on length and head.
 # THE ASSERTION OBJECTION (D-078 item 4, option B, drafts/BRIEF-ASSERTION-OBJECTION-2026-11-05.md, amendments AO1-AO7) RIDES THE SAME DEPLOY: migration 0025 adds citizens.assertion_objected_at, the stamp stops for a seat whose objection the operator
@@ -17,7 +17,7 @@
 # WHAT THE RIDE CANNOT DO: public reads cannot execute authenticateByAssertion, and nothing here upholds an objection. The objection is proven by the rehearsal (AO3) and by Ben's first real use of scripts/assertion-objection.ps1, not by this ride
 # (AO7: gate condition C4, a stamp moving after deploy, does not prove it). If the optional step below is declined, the honest report is "public serving verified; production authentication write path not exercised", and the
 # field is not called ridden. OPTIONAL STEP FOR BEN, after the deploy (the hub writes it, with the existing custody handling, not this script): one signed assertion from keyholder on GET /api/me, then GET /api/citizens must show
-# keyholder's last_assertion_at move from null to the start of that UTC day (a value already on today's day start cannot move, so read it first).
+# keyholder's last_assertion_at move to exactly the start of that UTC day. Read the value first: one already on today's day start cannot move and proves nothing, so wait for the next UTC day.
 # ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migrations 0024 and 0025 applied: two extra nullable columns the old worker never reads.
 # The old worker records nothing, so stamps go stale from that moment; nothing needs repairing. Do not drop either column. A rollback after 0024 and 0025 is safe. An objection upheld before a rollback stays recorded and the seat stays clear: the rollback target has no stamp code.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs; step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on. Both ship as
@@ -281,7 +281,7 @@ function Assert-Prod-Verified($when) {
   if ($why -ne "") { Stop-Here ("verification " + $when + " failed: " + $why + ". Do not deploy or continue; read the rows by hand.") }
 }
 # ---- the served-answer checks ----
-# "" when $body is a parsed citizens list whose note carries the field's wording, whose every row carries the stamp key (null is allowed), whose every non-null stamp is a whole number, and whose
+# "" when $body is a parsed citizens list whose note carries the field's wording, whose every row carries the stamp key (null is allowed), whose every non-null stamp is a whole number on a UTC day start, and whose
 # secret-held rows (no public_key) carry null.
 function Test-CitizensServed($body) {
   if ($null -eq $body) { return "the citizens list did not return JSON" }
@@ -535,4 +535,4 @@ foreach ($p in "/", "/api/official", "/openapi.json", "/treasury", "/api/listing
 }
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after the deploy (version $versionId): " + ($bad -join ", ") + ". If a read that answered before now fails: $ROLLBACK_LINE") }
 Say "[ride] 16 public reads -> 200"
-Say "[done] last-assertion-at wave deployed and verified. Public serving verified; production authentication write path NOT exercised: it is not ridden until one signed assertion from keyholder moves its last_assertion_at (the optional step in this script's header). The objection is NOT shown by this ride: it rests on the rehearsal and on the first real run of scripts/assertion-objection.ps1. Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
+Say "[done] last-assertion-at wave deployed and verified. Public serving verified; production authentication write path NOT exercised: it is not ridden until one signed assertion from keyholder sets its last_assertion_at to that UTC day start (the optional step in this script's header). The objection is NOT shown by this ride: it rests on the rehearsal and on the first real run of scripts/assertion-objection.ps1. Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."

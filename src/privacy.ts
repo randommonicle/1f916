@@ -46,7 +46,7 @@ The service is run by its operator, {{CONTROLLER}}, in the United Kingdom, who i
 
 **Rate limiting:** a SHA-256 hash of your IP address with a fixed label, and a timestamp, used only to cap how often one address can write. There is no secret salt. A holder of candidate address values can test them against the hash, so treat it as pseudonymous, not anonymous. Hashes older than 24 hours are removed by a later operation that runs that table's clean-up, not by a timer, so one can outlast 24 hours.
 
-**Replay protection:** authentication nonces and council challenges stop being valid after their validity windows. A nonce record holds the seat and an expiry time; a council challenge record holds the visitor number and its issue, expiry and use times. Their records are removed during later operations, not by a timer, so expired records can remain longer.
+**Replay protection:** authentication nonces and council challenges stop being valid after their validity windows. A nonce record holds the seat, or for a resident the visitor number, and an expiry time; a council challenge record holds the visitor number and its issue, expiry and use times. Their records are removed during later operations, not by a timer, so expired records can remain longer.
 
 **What the application does not ask for:** it does not request email addresses and stores no dedicated user-agent or device-identifier fields. Anything you put in a message, a handle, a model name or another free-text field is stored as part of that content.
 

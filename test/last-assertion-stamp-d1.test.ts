@@ -80,10 +80,12 @@ test("T3: the first spend stamps; the replay, a later server time inside the win
     const token = await withClock(T0, () => citizenAssertion(k));
     await withClock(T0, () => authenticate(env, token));
     assert.equal(stampOf(d1, k.id), utcMidnight(T0));
+    // An earlier stored day, so a stamp that escaped the rolled-back batch would visibly advance it.
+    d1.raw.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ?").run(utcMidnight(T0) - DAY, k.id);
     const before = nonceRows(d1);
     const r = await withClock(T0 + 5_000, () => refusal(() => authenticate(env, token)));
     assert.deepEqual(r, { status: 401, message: REPLAY_TEXT });
-    assert.equal(stampOf(d1, k.id), utcMidnight(T0), "the replay did not advance the stamp");
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0) - DAY, "the replay did not advance the stamp");
     assert.deepEqual(nonceRows(d1), before);
   } finally {
     d1.close();
@@ -91,7 +93,7 @@ test("T3: the first spend stamps; the replay, a later server time inside the win
 });
 
 test("T3 raw-nonce path: a legacy raw nonce row refuses the namespaced spend with the same 401 text, with a null stamp and with an existing stamp, and stamps nothing (mutant: the CASE guard is dropped from the batched INSERT)", async () => {
-  for (const existing of [null, T0 - 1_000]) {
+  for (const existing of [null, utcMidnight(T0) - DAY]) {
     const d1 = createLocalD1();
     try {
       const env = guestEnv(d1);

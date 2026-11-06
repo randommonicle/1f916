@@ -2,7 +2,7 @@
 // authenticate() from src/society.ts through a REAL D1 binding on the SCRATCH database and reports what the Workers D1 binding does with the nonce-plus-stamp batch.
 // Bound to commonhold-migtest only (wrangler.jsonc beside this file; scripts/rehearse-last-assertion.ps1 refuses any other database). Never deploy it.
 // It generates a throwaway Ed25519 keypair inside the Worker, inserts ONE uniquely named scratch citizen, and checks:
-//   c1   first spend returns the citizen; stamp set to a server time; one namespaced nonce row
+//   c1   first spend returns the citizen; stamp set to the UTC day start; one namespaced nonce row
 //   c2   replay of that token: the existing 401 text; stamp (deliberately set EARLIER first, so a wrong update would show) and nonce rows unchanged
 //   c3a  raw-nonce collision, stamp null: the same 401; stamp still null; no namespaced row
 //   c3b  raw-nonce collision, stamp already set: the same 401; stamp unchanged; no namespaced row
