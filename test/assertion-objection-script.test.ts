@@ -297,7 +297,7 @@ test("AO1: an assertion between a withdrawal and the public read passes the with
     const t2 = T0 + 90_000;
     await withClock(t2, async () => call(env, "GET", "/api/me", undefined, bearerHeader(await citizenAssertion(k, null, { t: t2 }), freshIp())));
     const stored = d1.raw.prepare("SELECT id, handle, public_key IS NOT NULL AS has_key, last_assertion_at, assertion_objected_at FROM citizens WHERE handle = 'keyed-a'").all();
-    assert.equal((stored[0] as any).last_assertion_at, t2, "the interleaved assertion did stamp");
+    assert.equal((stored[0] as any).last_assertion_at, t2 - (t2 % 86_400_000), "the interleaved assertion did stamp");
     const afterInterleave = await censusPages(d1, env);
     dir = afterInterleave.dir;
     const storedFile = join(dir, "stored.json");

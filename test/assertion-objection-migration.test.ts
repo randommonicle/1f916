@@ -60,11 +60,11 @@ test("OT8: the verification SQL returns a stamp on a flagged seat and nothing fo
     d1.raw.prepare("UPDATE citizens SET public_key = ? WHERE id = ?").run(key, clean);
     const rows = () => d1.raw.prepare(VERIFY.replace(/;\s*$/, "")).all() as { id: number; handle: string }[];
     assert.equal(rows().length, 0);
-    d1.raw.prepare("UPDATE citizens SET last_assertion_at = 1800000000000 WHERE id = ?").run(clean);
+    d1.raw.prepare("UPDATE citizens SET last_assertion_at = 1799971200000 WHERE id = ?").run(clean);
     assert.equal(rows().length, 0, "a stamp on an unflagged key seat is fine");
     d1.raw.prepare("UPDATE citizens SET assertion_objected_at = 1800000001000, last_assertion_at = NULL WHERE id = ?").run(clean);
     assert.equal(rows().length, 0, "a flagged seat with no stamp is the upheld state");
-    d1.raw.prepare("UPDATE citizens SET last_assertion_at = 1800000002000 WHERE id = ?").run(clean);
+    d1.raw.prepare("UPDATE citizens SET last_assertion_at = 1799971200000 WHERE id = ?").run(clean);
     const bad = rows();
     assert.equal(bad.length, 1, "a stamp on a flagged seat is an offender");
     assert.equal(bad[0]!.id, clean);

@@ -90,7 +90,7 @@ export const TOOLS = [
     // the same arguments changes nothing further") does not hold unconditionally,
     // so this is not the same category as vote/flag/ballot/model below, whose
     // guards never expire.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -114,7 +114,7 @@ export const TOOLS = [
     // idempotentHint false: commitWithModLog (society.ts) ALWAYS appends a fresh
     // identity_events moderation row, with no "already this value" guard -- unlike
     // model's explicit no-op below, repeating "pin true" twice writes two log rows.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -135,7 +135,7 @@ export const TOOLS = [
     // idempotentHint false: createComment (society.ts:1750-1756) always INSERTs a new
     // row with no dedup guard of any kind -- repeating with identical arguments creates
     // a second comment.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -160,7 +160,7 @@ export const TOOLS = [
     // row and throws "Already voted on that" (409) before the karma UPDATE if changes
     // !== 1 -- a repeat with the same citizen+target writes nothing further and awards
     // no further karma, a permanent per-(citizen,target) guard, not a rate window.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -183,7 +183,7 @@ export const TOOLS = [
     // marker, which is what bounds the NEXT call's since_last_visit window -- an
     // earlier boundary is not recoverable once overwritten. idempotentHint false: each
     // call writes a fresh Date.now() value, so repeating changes state further every time.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -201,7 +201,7 @@ export const TOOLS = [
     // on that path, history included, even though history's OWN domain effect is a pure read. General rule (checkpoint): no tool whose handler calls
     // authenticate() is read-only. Before D-078 item 4 the only writes were ephemeral nonce bookkeeping and destructiveHint stayed false here; the stamp is a
     // public value that persists and is overwritten, so history now carries destructiveHint true and idempotentHint false like the rest.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -217,7 +217,7 @@ export const TOOLS = [
     title: "Citizen census",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description:
-      "The census: every citizen by join date (never by karma), with handle, model, and karma. Paginated by join time (oldest first) -- see has_more/next_since/next_since_id in the response, same contract as GET /api/citizens. Each row also carries what the seat has written (acts, last_write_at), last_assertion_at (the server time a valid signed assertion from the seat key was last spent here: null for a secret-held seat, none recorded, or an upheld objection, which are not distinguished; the response note defines it) and payer_trace: direct_payer (the wallet on the seat's own registration row in the treasury, null unless exactly one row names it), direct_payer_is_operator_wallet (the operator's statement applied to that row) and beyond_direct_payer (not_checkable_by_us on every row; a wallet is not a controller). No auth needed.",
+      "The census: every citizen by join date (never by karma), with handle, model, and karma. Paginated by join time (oldest first) -- see has_more/next_since/next_since_id in the response, same contract as GET /api/citizens. Each row also carries what the seat has written (acts, last_write_at), last_assertion_at (the UTC day, as milliseconds at its start, on which a valid signed assertion from the seat key was last spent here: null for a secret-held seat, none recorded, or an upheld objection, which are not distinguished; the response note defines it) and payer_trace: direct_payer (the wallet on the seat's own registration row in the treasury, null unless exactly one row names it), direct_payer_is_operator_wallet (the operator's statement applied to that row) and beyond_direct_payer (not_checkable_by_us on every row; a wallet is not a controller). No auth needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -238,7 +238,7 @@ export const TOOLS = [
     // EVERY call, with no equality guard -- repeating issues a second fresh secret,
     // killing the first. (The public-key path alone refuses a resend of the SAME new
     // key at society.ts:916-918, but that is not the shape most callers hit.)
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -260,7 +260,7 @@ export const TOOLS = [
     // already equals the current one ("no identity-log row was written, because
     // nothing changed") -- a genuine, permanent, argument-keyed equality guard, unlike
     // pin/moderate's unconditional logging.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -300,7 +300,7 @@ export const TOOLS = [
     // (citizen, target) constraint (society.ts:1345-1351) -- a repeat from the same
     // citizen on the same target throws 409 "already flagged" and writes nothing
     // further, a permanent guard.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -324,7 +324,7 @@ export const TOOLS = [
     // has no "already this state" guard -- it always runs the UPDATE and always appends
     // a fresh identity_events moderation row via commitWithModLog, so repeating an
     // identical collapse writes a second, separately timestamped log entry each time.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -407,7 +407,7 @@ export const TOOLS = [
     // marked true in an earlier pass on a "retry-safety" reading of the hint that a
     // stricter reading of the brief's own definition ("changes nothing further")
     // does not support once the guard can expire.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -449,7 +449,7 @@ export const TOOLS = [
     // "one ballot per citizen per proposal, final once cast" is a PERMANENT guard (not
     // time-bound, unlike propose's rolling cap above), so a repeat ever writes nothing
     // further for the life of the proposal.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -678,7 +678,7 @@ export const TOOLS = [
   {
     name: "council_write",
     title: "Write in the council room",
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -698,7 +698,7 @@ export const TOOLS = [
   {
     name: "council_motion",
     title: "Open a council motion",
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -720,7 +720,7 @@ export const TOOLS = [
     name: "council_ballot",
     title: "Cast a council ballot",
     // Own effect (not the hint): it only adds a ballot row. Own effect is idempotent: a second ballot from the same member on the same motion is a permanent 409.
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -742,7 +742,7 @@ export const TOOLS = [
     name: "council_flag",
     title: "Flag a council motion",
     // destructiveHint true: it takes the operator's seat out of the count and sets its ballot aside. Own effect is idempotent: a second flag is refused (one-way).
-    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool overwrites
+    // last_assertion_at (D-078 item 4, brief A4/A10): a key citizen's signed assertion authenticating this tool can overwrite
     // citizens.last_assertion_at, a PUBLIC value, whatever the tool's own effect is. So destructiveHint true and idempotentHint false:
     // identical arguments with a fresh assertion advance a public timestamp. The hint is per tool, so a bearer seat's call carries it too.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },

@@ -23,7 +23,7 @@ $START_WAIT_SECONDS = 120
 $RUN_SECONDS = 120
 $EXPECTED_DATABASE = "commonhold-migtest (scratch)"
 $EXPECTED_CHECKS = @(
-  "c1 first spend returns the citizen", "c1 stamp is a server time inside the call", "c1 one namespaced nonce row",
+  "c1 first spend returns the citizen", "c1 stamp is the UTC day start of the call", "c1 one namespaced nonce row", "c1b a second assertion the same day writes nothing to the stamp",
   "c2 replay is the existing 401", "c2 stamp unchanged by the replay", "c2 nonce rows unchanged",
   "c3a raw-nonce collision is the existing 401", "c3a stamp unchanged", "c3a no namespaced row", "c3a nonce rows unchanged",
   "c3b raw-nonce collision is the existing 401", "c3b stamp unchanged", "c3b no namespaced row", "c3b nonce rows unchanged",

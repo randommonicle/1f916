@@ -8,10 +8,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, seedCitizens, guestEnv, call } from "./helpers/guest.ts";
 import { seedKeyCitizen, seedSecretCitizen, citizenAssertion, withClock } from "./helpers/council.ts";
-import { authenticate } from "../src/society.ts";
+import { authenticate, utcDayStart } from "../src/society.ts";
 
 const A1 =
-  "last_assertion_at is the greatest server timestamp, in milliseconds, recorded for a citizen assertion from this seat whose signature verified against the seat's key at that moment and whose nonce was spent. The server samples the time during authentication, just before verifying the signature, so it is not the signer's clock. Authenticated reads count, and a later refusal by the route or tool does not undo it; a request rejected before the nonce is spent does not count. /mcp/read authenticates nothing and never moves it. Null means a secret-held seat (which has no signature to record), no recorded assertion, or an objection the operator has upheld; these are not distinguished, and null is not evidence the seat is inert. Recording starts when the worker implementing this field serves, after migrations 0024 and 0025, on or after 4 November 2026; earlier signatures were never kept and a worker rolled back to an older version records nothing, so a null or an old value says nothing about those periods. A key rotation does not clear it: compare it with the seat's key_rotation rows on GET /api/events?kind=key_rotation. A recorded assertion shows the corresponding private key signed it; it does not show who presented it, or that it is the same agent as before. It is our record, in our database and in no hash chain, and it enters no figure the society divides by.";
+  "last_assertion_at is the start of the UTC day, in milliseconds, of the latest server time recorded for a citizen assertion from this seat whose signature verified against the seat's key at that moment and whose nonce was spent. Only the day is kept, not the time of day; the value changes at most once a day, on the seat's first assertion of a new day, so someone polling can see roughly when that assertion happened. The server samples the time during authentication, just before verifying the signature, so it is not the signer's clock. Authenticated reads count, and a later refusal by the route or tool does not undo it; a request rejected before the nonce is spent does not count. /mcp/read authenticates nothing and never moves it. Null means a secret-held seat (which has no signature to record), no recorded assertion, or an objection the operator has upheld; these are not distinguished, and null is not evidence the seat is inert. Recording starts when the worker implementing this field serves, after migrations 0024 and 0025, on or after 4 November 2026; earlier signatures were never kept and a worker rolled back to an older version records nothing, so a null or an old value says nothing about those periods. A key rotation does not clear it: compare it, to the day, with the seat's key_rotation rows on GET /api/events?kind=key_rotation. A recorded assertion shows the corresponding private key signed it; it does not show who presented it, or that it is the same agent as before. It is our record, in our database and in no hash chain, and it enters no figure the society divides by.";
 const T0 = 1_800_000_000_000;
 const row = (body: any, handle: string) => body.citizens.find((c: { handle: string }) => c.handle === handle);
 
@@ -36,7 +36,7 @@ test("T9: last_assertion_at is on every row of the HTTP list and both MCP doors,
     }
     await withClock(T0, async () => authenticate(env, await citizenAssertion(k)));
     const rest = await call(env, "GET", "/api/citizens");
-    assert.equal(row(rest.body, "keyed-a").last_assertion_at, T0);
+    assert.equal(row(rest.body, "keyed-a").last_assertion_at, utcDayStart(T0));
     assert.equal(row(rest.body, "bearer-a").last_assertion_at, null);
     assert.ok(s.id > 0);
     for (const p of ["/mcp", "/mcp/read"]) assert.deepEqual(await door(env, p), rest.body, `${p} serves what REST serves`);

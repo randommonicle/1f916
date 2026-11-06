@@ -17,7 +17,7 @@
 //   c8d  the withdraw statement clears the flag, leaves the value NULL, and the next assertion stamps again
 //   c0 / cleanup   the scratch citizen got a usable row id; cleanup (by the unique handle) removed every scratch row, and a cleanup failure is a failing check, never a throw past the report
 // Every row it writes is deleted in finally. The report names each check with expected and actual and carries no key material and no token.
-import { authenticate, SocietyError, type Env } from "../../src/society.ts";
+import { authenticate, utcDayStart, SocietyError, type Env } from "../../src/society.ts";
 import { ASSERTION_WINDOW_MS, DEFAULT_AUDIENCE, buildPayloadSegment, encodeBase64Url, newNonce } from "../../src/keyauth.ts";
 
 const REPLAY_TEXT = "That assertion has already been used. Each one is single-use; sign a fresh one.";
@@ -96,8 +96,14 @@ export default {
       const t2 = Date.now();
       const s1 = await stampOf(citizenId);
       add("c1 first spend returns the citizen", handle, got.handle, got.handle === handle);
-      add("c1 stamp is a server time inside the call", `${t1}..${t2}`, s1, typeof s1 === "number" && s1 >= t1 && s1 <= t2);
+      add("c1 stamp is the UTC day start of the call", `${utcDayStart(t1)} or ${utcDayStart(t2)}`, s1, s1 === utcDayStart(t1) || s1 === utcDayStart(t2));
       add("c1 one namespaced nonce row", 1, await namespacedRows(citizenId, nonce1), (await namespacedRows(citizenId, nonce1)) === 1);
+
+      // c1b: the guard means a later assertion on the same day leaves the row alone. A value one day ahead stands in for "the same day" without a midnight race.
+      const ahead = utcDayStart(Date.now()) + 86_400_000;
+      await setStamp(citizenId, ahead);
+      await authenticate(env, await sign(kp, handle, newNonce()));
+      add("c1b a second assertion the same day writes nothing to the stamp", ahead, await stampOf(citizenId), (await stampOf(citizenId)) === ahead);
 
       // c2: namespaced replay, with a deliberately EARLIER stamp so a wrong update would raise it
       const earlier = (s1 ?? Date.now()) - 1_000_000;
@@ -177,7 +183,7 @@ export default {
       const nonce6 = newNonce();
       const out = await env.DB.batch([
         env.DB.prepare(NONCE_INSERT).bind(nonce6, `c:${citizenId}:${nonce6}`, citizenId, Date.now() + ASSERTION_WINDOW_MS),
-        env.DB.prepare(STAMP_UPDATE).bind(Date.now(), citizenId, Date.now()),
+        env.DB.prepare(STAMP_UPDATE).bind(utcDayStart(Date.now()), citizenId, utcDayStart(Date.now())),
       ]);
       const written = out.map((r) => (r.meta as { rows_written?: number }).rows_written);
       report.rows_written_per_statement = written;

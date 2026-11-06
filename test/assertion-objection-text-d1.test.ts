@@ -26,21 +26,24 @@ const textOf = async (env: Env, path: string) => {
   return flat(typeof (r.body as any)?._text === "string" ? (r.body as any)._text : JSON.stringify(r.body));
 };
 
-test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis edits and the 5 November date (mutant: any one edited back)", async () => {
+test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis edits and the 6 November date (mutant: any one edited back)", async () => {
   const d1 = createLocalD1();
   try {
     seedCitizens(d1);
     const t = flat(await textOf(guestEnv(d1), "/privacy"));
     for (const s of [
       "It does not by itself identify the presenter, but it may be linked to a person through other public information.",
-      "There is no self-service setting. If the holder of a seat's key objects and shows it holds that key, the operator clears the stored time and records no more for that seat.",
+      "There is no self-service setting. If the holder of a seat's key objects and shows it holds that key, the operator clears the stored value and records no more for that seat.",
       "The census then shows null, as it does for a seat with no recorded use, and no objection marker is published, though a reader who saved an earlier value can see that it has gone.",
       "The operator keeps the time of the objection and a private record of the request and its outcome.",
       "The seat can still act, and its written records and last_me_at are unaffected. Copies public readers already took cannot be recalled.",
       "Any other objection, including from a person to whom the time relates or a holder who has lost the key, is assessed individually.",
-      "recording and publishing the time a citizen seat's signing key last authenticated",
-      "The application database holds one current value, by itself it shows use of a key and not who used it, it lets readers see whether a seat's key is still in use, and the holder can object, which stops it, as described under Citizens above.",
-      "Last updated: 5 November 2026",
+      "recording and publishing the day a citizen seat's signing key last authenticated",
+      "The application database holds one current value, by itself it shows use of a key and not who used it, and the holder can object, which stops it, as described under Citizens above. It is published because a seat's key can sign here without the seat writing anything, and no other public field records each such use. Only the day is published, because the time of day is not needed for that. It shows that the key signed on that day, and not that the key still works.",
+      "Last updated: 6 November 2026",
+      "A later written record beside a null can also suggest an objection.",
+      "A nonce record holds the seat and an expiry time; a council challenge record holds the visitor number and its issue, expiry and use times.",
+      "The operator's private record of an objection to a seat's key-use day, and of its outcome: six years after the objection ends.",
     ]) assert.ok(t.includes(s), s);
     assert.equal(t.includes("it does not identify the presenter."), false, "the old sentence is gone");
     assert.equal(t.includes("There is no setting to turn it off"), false);

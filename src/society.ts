@@ -209,8 +209,11 @@ export const OPERATOR_WALLET = "0x3f2950654ef9bf2d73805a77a07e4e14d5f74f16";
 export const BEYOND_DIRECT_PAYER = "not_checkable_by_us";
 
 // The sentence GET /api/citizens' note carries about last_assertion_at (D-078 item 4, brief amendment A1). Exact text, pinned by test/last-assertion-serve-d1.test.ts.
+// Ben, 6 Nov (ruling 3): the stamp keeps the UTC day, not the millisecond.
+export const utcDayStart = (ms: number): number => ms - (ms % 86_400_000);
+
 export const LAST_ASSERTION_NOTE =
-  "last_assertion_at is the greatest server timestamp, in milliseconds, recorded for a citizen assertion from this seat whose signature verified against the seat's key at that moment and whose nonce was spent. The server samples the time during authentication, just before verifying the signature, so it is not the signer's clock. Authenticated reads count, and a later refusal by the route or tool does not undo it; a request rejected before the nonce is spent does not count. /mcp/read authenticates nothing and never moves it. Null means a secret-held seat (which has no signature to record), no recorded assertion, or an objection the operator has upheld; these are not distinguished, and null is not evidence the seat is inert. Recording starts when the worker implementing this field serves, after migrations 0024 and 0025, on or after 4 November 2026; earlier signatures were never kept and a worker rolled back to an older version records nothing, so a null or an old value says nothing about those periods. A key rotation does not clear it: compare it with the seat's key_rotation rows on GET /api/events?kind=key_rotation. A recorded assertion shows the corresponding private key signed it; it does not show who presented it, or that it is the same agent as before. It is our record, in our database and in no hash chain, and it enters no figure the society divides by.";
+  "last_assertion_at is the start of the UTC day, in milliseconds, of the latest server time recorded for a citizen assertion from this seat whose signature verified against the seat's key at that moment and whose nonce was spent. Only the day is kept, not the time of day; the value changes at most once a day, on the seat's first assertion of a new day, so someone polling can see roughly when that assertion happened. The server samples the time during authentication, just before verifying the signature, so it is not the signer's clock. Authenticated reads count, and a later refusal by the route or tool does not undo it; a request rejected before the nonce is spent does not count. /mcp/read authenticates nothing and never moves it. Null means a secret-held seat (which has no signature to record), no recorded assertion, or an objection the operator has upheld; these are not distinguished, and null is not evidence the seat is inert. Recording starts when the worker implementing this field serves, after migrations 0024 and 0025, on or after 4 November 2026; earlier signatures were never kept and a worker rolled back to an older version records nothing, so a null or an old value says nothing about those periods. A key rotation does not clear it: compare it, to the day, with the seat's key_rotation rows on GET /api/events?kind=key_rotation. A recorded assertion shows the corresponding private key signed it; it does not show who presented it, or that it is the same agent as before. It is our record, in our database and in no hash chain, and it enters no figure the society divides by.";
 
 // The sentence GET /api/citizens' note carries about payer_trace: what the three fields establish and what they do not.
 export const PAYER_TRACE_NOTE =
@@ -647,9 +650,9 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
   // for those seconds old and new workers both serve, so a nonce spent namespaced on the new one is replayable on the old one within its window.
   //
   // last_assertion_at (migration 0024, D-078 item 4): the nonce INSERT and the stamp are ONE batch, so one transaction. A replay raises UNIQUE on the first statement and
-  // the batch rolls back, so the stamp does not move (and the same catch below still sees the constraint error). The value is the SERVER's `now` sampled above, never the
+  // the batch rolls back, so the stamp does not move (and the same catch below still sees the constraint error). The value is the UTC day of the SERVER's `now` sampled above, never the
   // signer's issuedAt, and the guard keeps it monotonic when isolates' clocks differ. It sits after the signature and the resident-binding refusal, so only a verified
-  // citizen assertion stamps. The bearer path never reaches here. If the column is absent (worker deployed before 0024) the UPDATE fails, the batch rolls back, the nonce
+  // citizen assertion stamps; the guard also means a later assertion on the same day writes nothing. The bearer path never reaches here. If the column is absent (worker deployed before 0024) the UPDATE fails, the batch rolls back, the nonce
   // is not burnt and the request fails closed with a 500.
   // assertion_objected_at (migration 0025, option B, O2): the stamp's last condition. An objection the operator upheld for this seat (by hand, scripts/assertion-objection.ps1) stops the
   // stamp; the same hand clears the stored value, so the census needs no read-side condition. The seat still authenticates and spends its nonce exactly as before, and the
@@ -659,7 +662,7 @@ async function authenticateByAssertion(env: Env, token: string): Promise<Citizen
       env.DB.prepare(
         "INSERT INTO auth_nonces (nonce, citizen_id, expires_at) VALUES (CASE WHEN EXISTS (SELECT 1 FROM auth_nonces WHERE nonce = ?1) THEN ?1 ELSE ?2 END, ?3, ?4)",
       ).bind(a.nonce, `c:${row.id}:${a.nonce}`, row.id, a.issuedAt + ASSERTION_WINDOW_MS),
-      env.DB.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?) AND assertion_objected_at IS NULL").bind(now, row.id, now),
+      env.DB.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ? AND (last_assertion_at IS NULL OR last_assertion_at < ?) AND assertion_objected_at IS NULL").bind(utcDayStart(now), row.id, utcDayStart(now)),
     ]);
   } catch (e) {
     if (/UNIQUE|PRIMARY KEY/i.test(String(e))) {

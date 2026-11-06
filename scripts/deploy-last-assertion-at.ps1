@@ -17,7 +17,7 @@
 # WHAT THE RIDE CANNOT DO: public reads cannot execute authenticateByAssertion, and nothing here upholds an objection. The objection is proven by the rehearsal (AO3) and by Ben's first real use of scripts/assertion-objection.ps1, not by this ride
 # (AO7: gate condition C4, a stamp moving after deploy, does not prove it). If the optional step below is declined, the honest report is "public serving verified; production authentication write path not exercised", and the
 # field is not called ridden. OPTIONAL STEP FOR BEN, after the deploy (the hub writes it, with the existing custody handling, not this script): one signed assertion from keyholder on GET /api/me, then GET /api/citizens must show
-# keyholder's last_assertion_at move from null to a server time inside that minute.
+# keyholder's last_assertion_at move from null to the start of that UTC day (a value already on today's day start cannot move, so read it first).
 # ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migrations 0024 and 0025 applied: two extra nullable columns the old worker never reads.
 # The old worker records nothing, so stamps go stale from that moment; nothing needs repairing. Do not drop either column. A rollback after 0024 and 0025 is safe. An objection upheld before a rollback stays recorded and the seat stays clear: the rollback target has no stamp code.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs; step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on. Both ship as
@@ -66,7 +66,7 @@ $POLL_DELAY_SECONDS = 5
 $POLL_READ_SECONDS = 60
 $STAMP_FIELD = "last_assertion_at"
 # The first words of the served note and of the privacy paragraph: the ride's markers that the new worker is the one serving.
-$NOTE_MARKER = "last_assertion_at is the greatest server timestamp"
+$NOTE_MARKER = "last_assertion_at is the start of the UTC day"
 $PRIVACY_MARKER = "This lets readers observe recorded use of a seat's signing key"
 # The objection's own markers (AO3): the served note's third null meaning, and the privacy page's objection sentence. Only the worker of THIS wave serves them.
 $NULL_MEANING_MARKER = "or an objection the operator has upheld"
@@ -295,6 +295,7 @@ function Test-CitizensServed($body) {
     if ($null -ne $value) {
       if (-not ([string]$value -match '^[0-9]+$')) { return ("citizen " + $row.handle + " serves last_assertion_at '" + $value + "', not a whole number") }
       if (-not $row.public_key) { return ("citizen " + $row.handle + " has no public_key but serves last_assertion_at " + $value) }
+      if (([int64]$value % 86400000) -ne 0) { return ("citizen " + $row.handle + " serves last_assertion_at " + $value + ", not the start of a UTC day") }
     }
   }
   return ""

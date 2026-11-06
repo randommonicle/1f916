@@ -257,17 +257,19 @@ test("the verification SQL, run for real over a citizens table: clean after the 
   const db = new DatabaseSync(":memory:");
   try {
     db.exec("CREATE TABLE citizens (id INTEGER PRIMARY KEY, handle TEXT, public_key TEXT, last_assertion_at INTEGER, assertion_objected_at INTEGER)");
-    db.exec("INSERT INTO citizens (id, handle, public_key, last_assertion_at) VALUES (1, 'bearer', NULL, NULL), (2, 'keyed', 'pk', NULL), (3, 'keyed-stamped', 'pk', 1800000000000)");
+    db.exec("INSERT INTO citizens (id, handle, public_key, last_assertion_at) VALUES (1, 'bearer', NULL, NULL), (2, 'keyed', 'pk', NULL), (3, 'keyed-stamped', 'pk', 1799971200000)");
     assert.deepEqual(db.prepare(verifySql).all(), [], "clean");
-    db.exec("UPDATE citizens SET last_assertion_at = 1800000000000 WHERE id = 1");
+    db.exec("UPDATE citizens SET last_assertion_at = 1799971200000 WHERE id = 1");
     assert.deepEqual((db.prepare(verifySql).all() as { handle: string }[]).map((r) => r.handle), ["bearer"], "a stamp on a secret-held seat");
     db.exec("UPDATE citizens SET last_assertion_at = NULL WHERE id = 1; UPDATE citizens SET last_assertion_at = 0 WHERE id = 2");
     assert.deepEqual((db.prepare(verifySql).all() as { handle: string }[]).map((r) => r.handle), ["keyed"], "a zero");
     db.exec("UPDATE citizens SET last_assertion_at = -5 WHERE id = 2");
     assert.equal(db.prepare(verifySql).all().length, 1, "a negative");
+    db.exec("UPDATE citizens SET last_assertion_at = 1800000000000 WHERE id = 2");
+    assert.deepEqual((db.prepare(verifySql).all() as { handle: string }[]).map((r) => r.handle), ["keyed"], "a value that is not the start of a UTC day");
     db.exec("UPDATE citizens SET last_assertion_at = 'yesterday' WHERE id = 2");
     assert.equal(db.prepare(verifySql).all().length, 1, "a text value (SQLite keeps it in an INTEGER-affinity column)");
-    db.exec("UPDATE citizens SET last_assertion_at = 1800000000000, assertion_objected_at = 1800000001000 WHERE id = 2");
+    db.exec("UPDATE citizens SET last_assertion_at = 1799971200000, assertion_objected_at = 1800000001000 WHERE id = 2");
     assert.deepEqual((db.prepare(verifySql).all() as { handle: string }[]).map((r) => r.handle), ["keyed"], "a stamp on a seat whose objection was upheld");
   } finally {
     db.close();
@@ -295,19 +297,20 @@ test("the bounded runner, run for real: a quick command returns its stdout and c
 });
 
 test("the served-answer checks, run for real: the list needs the note and a stamp key on EVERY row, a non-null stamp must be a whole number on a row with a public key; the privacy page needs the paragraph; a tool answer that is an error or not JSON is null", (t) => {
-  const NOTE = "Each row also carries ... last_assertion_at is the greatest server timestamp, in milliseconds, recorded for a citizen assertion. Null means a secret-held seat, no recorded assertion, or an objection the operator has upheld;";
+  const NOTE = "Each row also carries ... last_assertion_at is the start of the UTC day, in milliseconds, of the latest server time recorded for a citizen assertion. Null means a secret-held seat, no recorded assertion, or an objection the operator has upheld;";
   const rows = [
     { handle: "bearer", public_key: null, last_assertion_at: null },
-    { handle: "keyed", public_key: "pk", last_assertion_at: 1800000000000 },
+    { handle: "keyed", public_key: "pk", last_assertion_at: 1799971200000 },
   ];
   const listBody = (over: Record<string, unknown>): string => JSON.stringify({ note: NOTE, citizens: rows, ...over });
   const cases: Array<[string, string, string]> = [
     ["list-good", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({}))} })`, ""],
     ["list-nonote", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ note: "no wording" }))} })`, "does not carry the last_assertion_at wording"],
-    ["list-old-note", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ note: "last_assertion_at is the greatest server timestamp, null on a row with a public_key means none recorded" }))} })`, "does not carry the objection meaning of null"],
+    ["list-old-note", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ note: "last_assertion_at is the start of the UTC day, null on a row with a public_key means none recorded" }))} })`, "does not carry the objection meaning of null"],
     ["list-nokey", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [rows[0], { handle: "x", public_key: "pk" }] }))} })`, "citizen x has no last_assertion_at key"],
     ["list-secret-stamped", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [{ handle: "b", public_key: null, last_assertion_at: 5 }] }))} })`, "has no public_key but serves last_assertion_at 5"],
     ["list-text", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [{ handle: "k", public_key: "pk", last_assertion_at: "soon" }] }))} })`, "not a whole number"],
+    ["list-not-day", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [{ handle: "k", public_key: "pk", last_assertion_at: 1800000000000 }] }))} })`, "not the start of a UTC day"],
     ["list-empty", `Test-CitizensServed (Read-JsonBody @{ Body = ${q(listBody({ citizens: [] }))} })`, "no rows"],
     ["list-html", `Test-CitizensServed (Read-JsonBody @{ Body = '<html>' })`, "did not return JSON"],
     ["privacy-good", `Test-PrivacyServed ${q("x This lets readers observe recorded use of a seat's signing key, y. If the holder of a seat's key objects and shows it holds that key, z")}`, ""],
@@ -330,8 +333,8 @@ test("the served-answer checks, run for real: the list needs the note and a stam
 test("the source checks name literals the checkout carries: every Select-String literal is in its file, and the ride's markers are the served note's and the privacy paragraph's own words", () => {
   const society = readFileSync(here("../src/society.ts"), "utf8");
   const privacy = readFileSync(here("../src/privacy.ts"), "utf8");
-  assert.ok(society.includes("last_assertion_at is the greatest server timestamp"));
-  assert.ok(script.includes('"last_assertion_at is the greatest server timestamp"'));
+  assert.ok(society.includes("last_assertion_at is the start of the UTC day"));
+  assert.ok(script.includes('"last_assertion_at is the start of the UTC day"'));
   assert.ok(privacy.includes("This lets readers observe recorded use of a seat's signing key"));
   assert.ok(script.includes(`"This lets readers observe recorded use of a seat's signing key"`));
   assert.ok(privacy.includes("If the holder of a seat's key objects and shows it holds that key"));
