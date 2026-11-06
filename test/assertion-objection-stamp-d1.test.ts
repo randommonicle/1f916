@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { createLocalD1, seedCitizens, guestEnv, call, freshIp } from "./helpers/guest.ts";
 import { seedKeyCitizen, seedSecretCitizen, citizenAssertion, bearerHeader, withClock, rows } from "./helpers/council.ts";
 import { genKeypair } from "./helpers/resident.ts";
-import { authenticate, utcDayStart, SocietyError } from "../src/society.ts";
+import { authenticate, utcMidnight, SocietyError } from "../src/society.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -65,12 +65,12 @@ test("OT2: the uphold statement clears an existing value and sets the flag in ON
     const s = await seedSecretCitizen(d1, "bearer-a");
     await withClock(T0, async () => authenticate(env, await citizenAssertion(k)));
     await withClock(T0, async () => authenticate(env, await citizenAssertion(other)));
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0), "a stamp exists before the objection");
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0), "a stamp exists before the objection");
     assert.equal(uphold(d1, "keyed-a"), 1);
     assert.equal(stampOf(d1, k.id), null, "the stored value is gone, not masked");
     assert.ok(isFlag(flagOf(d1, k.id)), "the flag is the database clock, a whole number of ms");
     assert.ok(Math.abs((flagOf(d1, k.id) as number) - Date.now()) < 60_000, "and it is recent");
-    assert.equal(stampOf(d1, other.id), utcDayStart(T0), "another seat is untouched");
+    assert.equal(stampOf(d1, other.id), utcMidnight(T0), "another seat is untouched");
     assert.equal(flagOf(d1, other.id), null);
     assert.equal(uphold(d1, "bearer-a"), 0, "a secret-held seat has no value to object to");
     assert.equal(flagOf(d1, s.id), null);
@@ -120,7 +120,7 @@ test("OT5: the census, /mcp and /mcp/read all serve null for a flagged seat with
     const rest = await call(env, "GET", "/api/citizens");
     for (const c of rest.body.citizens) assert.ok("last_assertion_at" in c, `${c.handle} carries the key`);
     assert.equal(row(rest.body, "keyed-a").last_assertion_at, null);
-    assert.equal(row(rest.body, "keyed-b").last_assertion_at, utcDayStart(T0), "a seat that did not object still shows its time");
+    assert.equal(row(rest.body, "keyed-b").last_assertion_at, utcMidnight(T0), "a seat that did not object still shows its time");
     for (const p of ["/mcp", "/mcp/read"]) {
       const body = await door(env, p);
       assert.deepEqual(body, rest.body, `${p} serves what REST serves`);
@@ -146,7 +146,7 @@ test("OT6: withdraw clears the flag, the value stays NULL, and the next assertio
     assert.equal(stampOf(d1, k.id), null, "the withdrawal does not restore the cleared value");
     const t2 = T0 + 30_000;
     await withClock(t2, async () => authenticate(env, await citizenAssertion(k, null, { t: t2 })));
-    assert.equal(stampOf(d1, k.id), utcDayStart(t2));
+    assert.equal(stampOf(d1, k.id), utcMidnight(t2));
     assert.equal(withdraw(d1, "bearer-nobody"), 0);
   } finally {
     d1.close();

@@ -134,12 +134,12 @@ test("the worker config binds ONLY the scratch database (name, id, preview id), 
   assert.equal(cfg.triggers, undefined);
   const prodIds = (main.d1_databases ?? []).flatMap((d: { database_id?: string; preview_database_id?: string }) => [d.database_id, d.preview_database_id]);
   assert.equal(prodIds.includes(SCRATCH_ID), false, "the scratch id is not a production id");
-  assert.match(workerSource, /import \{ authenticate, utcDayStart, SocietyError, type Env \} from "\.\.\/\.\.\/src\/society\.ts"/, "the REAL authenticate");
+  assert.match(workerSource, /import \{ authenticate, utcMidnight, SocietyError, type Env \} from "\.\.\/\.\.\/src\/society\.ts"/, "the REAL authenticate");
 });
 
 test("the decision functions, run for real: the scratch target is exact; the config check refuses a wrong name, a wrong id, two databases and bad JSON; the report check refuses a missing check, a failed one, an error and a false pass flag", (t) => {
   const names = workerCheckNames();
-  assert.equal(names.length, 41, `the worker adds 41 named checks: ${names.length}`);
+  assert.equal(names.length, 42, `the worker adds 42 named checks: ${names.length}`);
   const good = { pass: true, database: "commonhold-migtest (scratch)", rows_written_per_statement: [2, 1], checks: names.map((n) => ({ name: n, expected: 1, actual: 1, pass: true })) };
   const withCheck = (idx: number, over: Record<string, unknown>) => ({ ...good, checks: good.checks.map((c, i) => (i === idx ? { ...c, ...over } : c)) });
   const jsonc = (db: Record<string, unknown>[]) => JSON.stringify({ name: "x", d1_databases: db });
@@ -308,7 +308,7 @@ test("the worker, ridden on the local D1 shim: every check passes except rows_wr
   const { report, citizensDelta, nonces } = await ride();
   const failed = report.checks.filter((c) => !c.pass).map((c) => c.name);
   assert.deepEqual(failed, ["c6 rows_written reported for both statements"], JSON.stringify(report.checks.filter((c) => !c.pass)));
-  assert.equal(report.checks.length, 41);
+  assert.equal(report.checks.length, 42);
   assert.equal(report.pass, false, "on the shim the overall verdict is not pass, because rows_written cannot be real here");
   assert.equal(citizensDelta, 0, "the scratch citizen was deleted");
   assert.equal(nonces, 0, "every nonce row was deleted");

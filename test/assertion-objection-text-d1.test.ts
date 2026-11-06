@@ -39,7 +39,7 @@ test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis e
       "The seat can still act, and its written records and last_me_at are unaffected. Copies public readers already took cannot be recalled.",
       "Any other objection, including from a person to whom the time relates or a holder who has lost the key, is assessed individually.",
       "recording and publishing the day a citizen seat's signing key last authenticated",
-      "The application database holds one current value, by itself it shows use of a key and not who used it, and the holder can object, which stops it, as described under Citizens above. It is published because a seat's key can sign here without the seat writing anything, and no other public field records each such use. Only the day is published, because the time of day is not needed for that. It shows that the key signed on that day, and not that the key still works.",
+      "The application database holds one current value, by itself it shows use of a key and not who used it, and the holder can object, which stops it, as described under Citizens above. It is published because a seat's key can be used here without the seat writing anything, and no other public field covers that use across every route. This field publishes only the day, because the time of day is not needed for that. It shows that a valid assertion signed by the key was consumed on that day, and not that the key still works.",
       "Last updated: 6 November 2026",
       "A later written record beside a null can also suggest an objection.",
       "A nonce record holds the seat and an expiry time; a council challenge record holds the visitor number and its issue, expiry and use times.",

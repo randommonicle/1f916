@@ -13,7 +13,7 @@ import { withoutLastAssertionColumn } from "./helpers/local-d1.ts";
 import { seedKeyCitizen, seedSecretCitizen, citizenAssertion, bearerHeader, withClock, rows } from "./helpers/council.ts";
 import { genKeypair, sign } from "./helpers/resident.ts";
 import { insertProposal } from "./helpers/local-d1.ts";
-import { authenticate, utcDayStart, SocietyError } from "../src/society.ts";
+import { authenticate, utcMidnight, SocietyError } from "../src/society.ts";
 import { ASSERTION_WINDOW_MS } from "../src/keyauth.ts";
 
 const REPLAY_TEXT = "That assertion has already been used. Each one is single-use; sign a fresh one.";
@@ -41,7 +41,7 @@ test("T1: a fresh key seat is null; one assertion at issuedAt 100 s back stamps 
     const issued = T0 - 100_000;
     const r = await withClock(T0, async () => call(env, "GET", "/api/me", undefined, hdr(await citizenAssertion(k, null, { t: issued }))));
     assert.equal(r.status, 200);
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0));
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0));
     assert.notEqual(stampOf(d1, k.id), issued);
   } finally {
     d1.close();
@@ -79,11 +79,11 @@ test("T3: the first spend stamps; the replay, a later server time inside the win
     const k = await seedKeyCitizen(d1, "keyed-a");
     const token = await withClock(T0, () => citizenAssertion(k));
     await withClock(T0, () => authenticate(env, token));
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0));
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0));
     const before = nonceRows(d1);
     const r = await withClock(T0 + 5_000, () => refusal(() => authenticate(env, token)));
     assert.deepEqual(r, { status: 401, message: REPLAY_TEXT });
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0), "the replay did not advance the stamp");
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0), "the replay did not advance the stamp");
     assert.deepEqual(nonceRows(d1), before);
   } finally {
     d1.close();
@@ -128,11 +128,11 @@ test("T5: the stamp is monotonic: a stored later value is not moved backwards by
   try {
     const env = guestEnv(d1);
     const k = await seedKeyCitizen(d1, "keyed-a");
-    d1.raw.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ?").run(utcDayStart(T0) + DAY, k.id);
+    d1.raw.prepare("UPDATE citizens SET last_assertion_at = ? WHERE id = ?").run(utcMidnight(T0) + DAY, k.id);
     await withClock(T0, async () => authenticate(env, await citizenAssertion(k)));
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0) + DAY);
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0) + DAY);
     await withClock(T0 + 2 * DAY, async () => authenticate(env, await citizenAssertion(k, null, { t: T0 + 2 * DAY })));
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0) + 2 * DAY, "and it does move forward");
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0) + 2 * DAY, "and it does move forward");
   } finally {
     d1.close();
   }
@@ -146,7 +146,7 @@ test("T6: a route that refuses after authentication still leaves the stamp (an u
     const proposal = insertProposal(d1, { kind: "resolution", status: "open" });
     const r = await withClock(T0, async () => call(env, "POST", `/api/proposal/${proposal}/ballot`, { choice: "yes" }, hdr(await citizenAssertion(k))));
     assert.equal(r.status, 403);
-    assert.equal(stampOf(d1, k.id), utcDayStart(T0));
+    assert.equal(stampOf(d1, k.id), utcMidnight(T0));
     assert.equal(nonceRows(d1).length, 1);
   } finally {
     d1.close();
@@ -175,11 +175,11 @@ test("T8 (A6): rotation authenticates with the old key and stamps t1, the handle
     const t1 = T0;
     const rot = await withClock(t1, async () => call(env, "POST", "/api/rotate", { public_key: fresh.publicKey }, hdr(await citizenAssertion(k, fresh.publicKey))));
     assert.equal(rot.status, 200, JSON.stringify(rot.body));
-    assert.equal(stampOf(d1, k.id), utcDayStart(t1));
+    assert.equal(stampOf(d1, k.id), utcMidnight(t1));
     const t2 = T0 + DAY;
     const me = await withClock(t2, async () => call(env, "GET", "/api/me", undefined, hdr(await citizenAssertion({ handle: k.handle, kp: fresh }, null, { t: t2 }))));
     assert.equal(me.status, 200);
-    assert.equal(stampOf(d1, k.id), utcDayStart(t2));
+    assert.equal(stampOf(d1, k.id), utcMidnight(t2));
   } finally {
     d1.close();
   }
@@ -222,7 +222,7 @@ test("Ruling 3 (day, not millisecond): a second assertion on the same UTC day wr
     const k = await seedKeyCitizen(d1, "keyed-a");
     d1.raw.exec("CREATE TABLE stamp_writes (v INTEGER); CREATE TRIGGER log_stamp AFTER UPDATE OF last_assertion_at ON citizens BEGIN INSERT INTO stamp_writes VALUES (NEW.last_assertion_at); END;");
     const writes = () => (d1.raw.prepare("SELECT v FROM stamp_writes ORDER BY rowid").all() as Array<{ v: number }>).map((r) => r.v);
-    const day = utcDayStart(T0);
+    const day = utcMidnight(T0);
     for (const t of [T0, T0 + 60_000, day + DAY - 1]) {
       await withClock(t, async () => authenticate(env, await citizenAssertion(k, null, { t })));
     }
