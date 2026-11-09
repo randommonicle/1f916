@@ -49,7 +49,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "c05f2f365ea65357cabc5829849f77cd1e0d5de0"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0a STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "82d00d734aceefa01dbd3934bb59d13e8acf8196"
+$REVIEWED_COMMIT = "4521eb6af61f2ff53d895bbdeb83b6c25e588959"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-last-assertion-at.ps1", "test/deploy-last-assertion-at-script.test.ts", "docs/")
 $MIGRATION_PATH_0024 = "migrations/0024_last_assertion_at.sql"

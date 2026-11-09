@@ -77,7 +77,7 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
 test("the pins: v6 hash, BOTH pins set by the hub (live base and the converged commit), the allowlist is this script, its test and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, the migrations are 0024 and 0025 (AO3: no -MigrationAlreadyApplied switch)", () => {
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, /^\$LIVE_BASE_COMMIT = "c05f2f365ea65357cabc5829849f77cd1e0d5de0"$/m);
-  assert.match(script, /^\$REVIEWED_COMMIT = "82d00d734aceefa01dbd3934bb59d13e8acf8196"$/m);
+  assert.match(script, /^\$REVIEWED_COMMIT = "4521eb6af61f2ff53d895bbdeb83b6c25e588959"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-last-assertion-at\.ps1", "test\/deploy-last-assertion-at-script\.test\.ts", "docs\/"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
   assert.match(script, /\[switch\]\$DryRun/);
