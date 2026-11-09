@@ -1891,7 +1891,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       tokensOut += result.usage.output_tokens;
       costEstimateCents += estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens);
 
-      // D-079 follow-up (judgment refusal skip): a model REFUSAL names one item, it does not end the wake. Name it, leave it
+      // Judgment refusal skip (Ben's ruling 9 Nov 2026, drafts/BRIEF-JUDGMENT-REFUSAL-SKIP-2026-11-09.md): a model REFUSAL names one item, it does not end the wake. Name it, leave it
       // pending (a refusal is not a verdict; the status CHECK allows only pending/approved/rejected), run no parse/execute
       // (the text is empty), and fall through to the bottom shouldContinueBatchLoop. NEVER a bare `continue`: a drained scan
       // returns nextCursor null, which means "start at the top", so it would reselect the refused item (test T2).
