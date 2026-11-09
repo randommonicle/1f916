@@ -65,10 +65,10 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
   assert.equal(/\$\w+\s*\|\s*Where-Object[^\n]*-notmatch/.test(code), false);
 });
 
-test("the pins: the v6 hash, both commit pins are still the hub's placeholders, the allowlist is this script, its test and docs/, the parameters are -ExpectedCommit (mandatory) and -DryRun", () => {
+test("the pins: the v6 hash, both commit pins are set (live base d0b8f1d7, reviewed 5d98d7a2), the allowlist is this script, its test and docs/, the parameters are -ExpectedCommit (mandatory) and -DryRun", () => {
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
-  assert.match(script, /^\$LIVE_BASE_COMMIT = "TO-BE-SET-BY-HUB-LIVE-BASE"$/m);
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m);
+  assert.match(script, /^\$LIVE_BASE_COMMIT = "d0b8f1d7ea23e4c244b11a54a368e12047a98f62"$/m);
+  assert.match(script, /^\$REVIEWED_COMMIT = "5d98d7a23564f18f41600c317b38125d917b5e76"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-judgment-refusal-skip\.ps1", "test\/deploy-judgment-refusal-skip-script\.test\.ts", "docs\/"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
   assert.match(script, /\[switch\]\$DryRun/);

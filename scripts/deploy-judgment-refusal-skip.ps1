@@ -26,10 +26,10 @@ $BASE = "https://commonhold.randommonicle.workers.dev"
 # The attested constitution this wave must leave untouched (v6, minted 22 Oct).
 $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 # The commit the live worker serves when this runs. The hub replaces this placeholder with the full sha.
-$LIVE_BASE_COMMIT = "TO-BE-SET-BY-HUB-LIVE-BASE"
+$LIVE_BASE_COMMIT = "d0b8f1d7ea23e4c244b11a54a368e12047a98f62"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "5d98d7a23564f18f41600c317b38125d917b5e76"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-judgment-refusal-skip.ps1", "test/deploy-judgment-refusal-skip-script.test.ts", "docs/")
 $RUNS_URL = "$BASE/api/maintainer-runs"
