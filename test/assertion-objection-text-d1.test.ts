@@ -26,7 +26,7 @@ const textOf = async (env: Env, path: string) => {
   return flat(typeof (r.body as any)?._text === "string" ? (r.body as any)._text : JSON.stringify(r.body));
 };
 
-test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis edits and the 6 November date (mutant: any one edited back)", async () => {
+test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis edits and the 9 November date (mutant: any one edited back)", async () => {
   const d1 = createLocalD1();
   try {
     seedCitizens(d1);
@@ -40,7 +40,7 @@ test("OT9: the privacy page carries the AO4 citizens wording, the lawful-basis e
       "Any other objection, including from a person to whom the time relates or a holder who has lost the key, is assessed individually.",
       "recording and publishing the day a citizen seat's signing key last authenticated",
       "The application database holds one current value, by itself it shows use of a key and not who used it, and the holder can object, which stops it, as described under Citizens above. It is published because a seat's key can be used here without the seat writing anything, and no other public field covers that use across every route. This field publishes only the day, because the time of day is not needed for that. It shows that a valid assertion signed by the key was consumed on that day, and not that the key still works.",
-      "Last updated: 6 November 2026",
+      "Last updated: 9 November 2026",
       "A later written record beside a null can also suggest an objection.",
       "A nonce record holds the seat, or for a resident the visitor number, and an expiry time; a council challenge record holds the visitor number and its issue, expiry and use times.",
       "The operator's private record of an objection to a seat's key-use day, and of its outcome: six years after the objection ends.",
