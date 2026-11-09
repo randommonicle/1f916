@@ -1898,7 +1898,9 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       // DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS: residual. Four always-refused items at the head of the queue still stall every
       // later item (each wake spends its four batches on them); a persistent held-for-a-person status needs a table rebuild
       // and waits for the next schema wave. Meanwhile the remedy is the operator's hand (read the item, reject it).
-      if (!result.ok && result.stopReason === "refusal") {
+      // A refusal answers the whole batch; naming admissible[0] is only right while a batch is one item (JUDGMENT_QUEUE_CAP = 1).
+      // A multi-item batch refused falls to the generic break below rather than blaming one row.
+      if (!result.ok && result.stopReason === "refusal" && scanOutcome.admissible.length === 1) {
         const refusedItem = scanOutcome.admissible[0];
         refusedIds.push(refusedItem.id);
         runError = appendError(runError, `batch ${batchesRun}: ${refusedItem.kind} item ${refusedItem.id} not judged (the model declined); skipped this wake`);

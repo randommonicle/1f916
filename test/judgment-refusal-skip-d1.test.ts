@@ -142,7 +142,7 @@ test("R1 (regression control): a non-refusal failure (http_error 500 after retry
   }
 });
 
-test("R2 (regression control): a refusal in batch 1 of a four-batch scheduled wake stays within the 50-subrequest budget", async () => {
+test("T5 (defect test; its budget assertions only bite on the continued path): a refusal in batch 1 of a four-batch scheduled wake runs all four batches and stays within the 50-subrequest budget", async () => {
   const rpc = makeModelRpcResponder({ judgmentModel: MAINTAINER_MODELS.judgment, clerkModel: MAINTAINER_MODELS.clerk });
   let n = 0;
   const c = installSubrequestCounter((url, init) => {

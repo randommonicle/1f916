@@ -223,7 +223,9 @@ if ([string]$attBefore.code.version_status -ceq "available" -and $attBefore.code
 Say "[live] before: the live worker serves the pinned base $($LIVE_BASE_COMMIT.Substring(0, 8)); rollback target $rollbackTarget"
 $runsBefore = Get-Text $RUNS_URL 30
 if ([string]$runsBefore.Code -cne "200") { Stop-Here "GET /api/maintainer-runs answered $($runsBefore.Code) before the deploy, expected 200: read it by hand." }
-if ((Test-RunsNoteServed $runsBefore) -eq "") { Stop-Here "GET /api/maintainer-runs already serves the refusal sentence: this looks already deployed, verify by hand." }
+$whyBefore = Test-RunsNoteServed $runsBefore
+if ($whyBefore -eq "") { Stop-Here "GET /api/maintainer-runs already serves the refusal sentence: this looks already deployed, verify by hand." }
+if ($whyBefore -cne "GET /api/maintainer-runs note does not contain the refusal sentence") { Stop-Here ("the before-read of GET /api/maintainer-runs is not a usable note: " + $whyBefore + ". Read it by hand.") }
 Say "[live] before: GET /api/maintainer-runs answers 200 and its note does not yet carry the refusal sentence"
 
 if ($DryRun) {

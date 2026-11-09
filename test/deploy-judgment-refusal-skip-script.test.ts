@@ -168,9 +168,13 @@ test("the served-note check, run for real, passes the new note and fails a note 
   }
 });
 
-test("the before-read refuses a worker already serving the sentence and one not answering 200; the poll and the ride both use the check", () => {
+test("the before-read refuses a worker already serving the sentence, one not answering 200, and a 200 that is not a JSON note (CODEX code r1); the poll and the ride both use the check", () => {
   assert.ok(code.includes('[string]$runsBefore.Code -cne "200"'));
-  assert.ok(code.includes('(Test-RunsNoteServed $runsBefore) -eq ""'));
+  assert.ok(code.includes("$whyBefore = Test-RunsNoteServed $runsBefore"));
+  assert.ok(code.includes('if ($whyBefore -eq "") { Stop-Here'));
+  assert.ok(code.includes('if ($whyBefore -cne "GET /api/maintainer-runs note does not contain the refusal sentence") { Stop-Here'));
+  // The accepted reason must be exactly the one Test-RunsNoteServed returns for a JSON note without the sentence.
+  assert.ok(code.includes('return "GET /api/maintainer-runs note does not contain the refusal sentence"'));
   assert.ok(code.includes("Test-RunsNoteServed (Get-Text $RUNS_URL 30)"));
   assert.ok(code.includes("Wait-NewWorker $headSha $versionId $POLL_TRIES"));
   assert.ok(code.includes('"/privacy"') && code.includes('"/api/proposal/8"'));
