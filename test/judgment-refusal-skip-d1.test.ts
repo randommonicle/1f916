@@ -1,6 +1,6 @@
 // A model REFUSAL on one judgment queue item skips that item for the wake instead of ending the wake
 // (docs: drafts/BRIEF-JUDGMENT-REFUSAL-SKIP-2026-11-09.md). Real local D1; the only stub is fetch.
-// T1-T4 are the defect tests (red against the old generic break). R1-R2 are regression controls (green before and after).
+// T1-T5 are the defect tests (red against the old generic break). R1 is the regression control (green before and after).
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/index.ts";
