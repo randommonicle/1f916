@@ -1820,6 +1820,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   // deduplicated report at the end -- never per-batch.
   let cursor: { createdAt: number; id: number } | null = null;
   const allWithheld: Array<{ id: number; reason: string }> = [];
+  const refusedIds: number[] = [];
   let scanLimitHitOverall = false;
   // HIGH 2 companion to §9 (exchange/REVIEW_combined-deploy-pregate_2026-08-16.md
   // CODEX round 1): classification's own chunk statements are priced
@@ -1890,6 +1891,18 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       tokensOut += result.usage.output_tokens;
       costEstimateCents += estimateCostCents(MAINTAINER_MODELS.judgment, result.usage.input_tokens, result.usage.output_tokens);
 
+      // D-079 follow-up (judgment refusal skip): a model REFUSAL names one item, it does not end the wake. Name it, leave it
+      // pending (a refusal is not a verdict; the status CHECK allows only pending/approved/rejected), run no parse/execute
+      // (the text is empty), and fall through to the bottom shouldContinueBatchLoop. NEVER a bare `continue`: a drained scan
+      // returns nextCursor null, which means "start at the top", so it would reselect the refused item (test T2).
+      // DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS: residual. Four always-refused items at the head of the queue still stall every
+      // later item (each wake spends its four batches on them); a persistent held-for-a-person status needs a table rebuild
+      // and waits for the next schema wave. Meanwhile the remedy is the operator's hand (read the item, reject it).
+      if (!result.ok && result.stopReason === "refusal") {
+        const refusedItem = scanOutcome.admissible[0];
+        refusedIds.push(refusedItem.id);
+        runError = appendError(runError, `batch ${batchesRun}: ${refusedItem.kind} item ${refusedItem.id} not judged (the model declined); skipped this wake`);
+      } else {
       if (!result.ok) {
         runError = appendError(runError, `model call failed on batch ${batchesRun} (stop_reason: ${result.stopReason}): ${result.error}`);
         break;
@@ -1906,6 +1919,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       const executed = await executeJudgmentDecisions(env, maintainerCitizen, batchMap, decisions, startedAt);
       batchItemsActioned += executed.actioned;
       if (executed.error) runError = appendError(runError, executed.error);
+      }
     }
 
     // F7: continuation is "the cursor has not reached the end and the
@@ -1947,7 +1961,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   // F7: withheld items are deliberately excluded and separately, loudly
   // reported above -- they must not also inflate overflow_dropped as if
   // they were silently dropped by the JUDGMENT_MAX_BATCHES ceiling.
-  const overflowDropped = computeOverflowDropped(pendingAtStart, batchItemsActioned + allWithheld.length);
+  const overflowDropped = computeOverflowDropped(pendingAtStart, batchItemsActioned + allWithheld.length + refusedIds.length);
   const itemsActioned = expiredStaleBulletins + reconciliation.actioned + batchItemsActioned;
   try {
     await finalizeMaintainerRun(env, runId, {
