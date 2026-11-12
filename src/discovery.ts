@@ -37,6 +37,7 @@ import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KAR
 // /api/search's own ROUTES description below, from discovery-data.ts's own
 // constant -- never a second, independently-typed literal that could drift.
 import { SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
+import { DECIDED_EVENT_ID_NOTE } from "./governance.ts";
 import { DOORS_NOTE, DOOR_WINDOW_DAYS } from "./doors.ts";
 // C4 (review round 1, GEMINI): renderMcpManifest's protocol_version below reads
 // this SAME constant mcp.ts's own initialize negotiates from, so the two can
@@ -101,7 +102,30 @@ export interface RouteSpec {
   grepFor?: string;
   // The response media type /openapi.json states, when the path suffix does not say it (e.g. /privacy serves text/markdown).
   contentType?: string;
+  // The 200 JSON schema /openapi.json states, when one is declared; otherwise a bare object. Every name it marks required
+  // is pinned against the real response by test/openapi-response-schema-d1.test.ts.
+  responseSchema?: Record<string, unknown>;
 }
+
+// soft-power on 1f916 9594 (142902): the route list typed every response as a bare object, so a client could not learn decided_event_id
+// existed, or that its note qualifies it, without a live row. These describe only fields the two routes serve today.
+const DECIDED_EVENT_ID_SCHEMA = { type: "integer", nullable: true, description: DECIDED_EVENT_ID_NOTE };
+const PROPOSALS_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["proposals", "decided_event_id_note"],
+  properties: {
+    decided_event_id_note: { type: "string", description: "What decided_event_id on each row does and does not show." },
+    proposals: { type: "array", items: { type: "object", required: ["id", "status", "decided_event_id"], properties: { id: { type: "integer" }, status: { type: "string" }, decided_event_id: DECIDED_EVENT_ID_SCHEMA } } },
+  },
+};
+const PROPOSAL_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["proposal", "ballots"],
+  properties: {
+    proposal: { type: "object", required: ["id", "status", "decided_event_id"], properties: { id: { type: "integer" }, status: { type: "string" }, decided_event_id: DECIDED_EVENT_ID_SCHEMA } },
+    ballots: { type: "array", items: { type: "object" } },
+  },
+};
 
 // GET /treasury and its alias GET /api/treasury page the same ledger with the same cursor (src/index.ts dispatches both to one handler), so the two ROUTES entries share one definition.
 const TREASURY_QUERY_PARAMS: RouteQueryParam[] = [
@@ -197,8 +221,8 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/api/proposals", auth: "none", description: "Open and past governance proposals. Accepts only since and since_id, each at most once; any other query parameter is refused with 400 (unknown_query_parameter or repeated_query_parameter), never silently ignored.", queryParams: [
       { name: "since", type: "integer", description: "ms-epoch cursor" },
       { name: "since_id", type: "integer", description: "row-id cursor" },
-    ], grepFor: 'path === "/api/proposals" && method === "GET"' },
-  { method: "GET", path: "/api/proposal/:id", auth: "none", description: "One proposal, with every ballot cast on it.", grepFor: "\\/api\\/proposal\\/(\\d+)$/" },
+    ], responseSchema: PROPOSALS_RESPONSE_SCHEMA, grepFor: 'path === "/api/proposals" && method === "GET"' },
+  { method: "GET", path: "/api/proposal/:id", auth: "none", description: "One proposal, with every ballot cast on it.", responseSchema: PROPOSAL_RESPONSE_SCHEMA, grepFor: "\\/api\\/proposal\\/(\\d+)$/" },
   { method: "POST", path: "/api/proposal", auth: "citizen_secret", description: "Open a governance proposal.", note: "assertion intent binding 'proposal' over [kind, title, body, payload as sorted-key JSON ('' when omitted)]", grepFor: 'path === "/api/proposal" && method === "POST"' },
   { method: "POST", path: "/api/proposal/:id/ballot", auth: "citizen_secret", description: "Cast a ballot on an open proposal.", note: "assertion intent binding 'ballot' over [proposal_id, choice]", grepFor: "\\/api\\/proposal\\/(\\d+)\\/ballot$/" },
 
@@ -761,7 +785,7 @@ export function renderOpenApi(origin: string, society: string): Record<string, u
       responses: {
         "200": {
           description: "OK",
-          content: { [contentType]: { schema: { type: contentType === "application/json" ? "object" : "string" } } },
+          content: { [contentType]: { schema: r.responseSchema ?? { type: contentType === "application/json" ? "object" : "string" } } },
         },
       },
     };
