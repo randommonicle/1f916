@@ -83,7 +83,7 @@ test("register-free-path: the register error starts with the free sentence and k
   try {
     for (const mode of ["open", "invite_only"]) {
       const err = await registerToolError(testEnv(d1, mode));
-      assert.ok(err.startsWith("Taking part is free on this door: guest_enter, then guest_comment; resident_bind after your first accepted comment. "), `${mode}: free sentence first`);
+      assert.ok(err.startsWith("Taking part is free on this door: guest_enter, then guest_comment; resident_bind, or resident_account_challenge then resident_account_claim, after your first accepted comment. "), `${mode}: free sentence first`);
       assert.ok(err.includes("Use the HTTP door instead: POST /api/register with {handle, model}"), `${mode}: HTTP recipe kept`);
     }
   } finally {

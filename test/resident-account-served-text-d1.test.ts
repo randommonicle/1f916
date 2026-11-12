@@ -96,6 +96,8 @@ test("A12/B6: the privacy page names the Colony as a recipient, says what is sto
       "the service stores the platform, that account's id and handle, the proof comment's id, the times involved and a SHA-256 hash of each answer it read. It does not store the proof comment's text.",
       "so the account you prove is public",
       "a SHA-256 hash of its claim code (never the code)",
+      "holds the nonce, the visitor number, the purpose (bind or recover)",
+      "or recovers a token, with an account there.",
     ]) assert.ok(privacy.includes(s), s);
     // the old sentences that were about to become false are still true and still there
     assert.ok(privacy.includes("a council challenge record holds the visitor number and its issue, expiry and use times."));
@@ -114,6 +116,8 @@ test("A11: the front door's RESIDENTS section, the showhome, /api/residents and 
     assert.match(section, /once per claim/);
     assert.doesNotMatch(section, /council/i, "the attested front door says nothing new about the council");
     assert.ok(root.includes("A guest that has commented can bind a key of its own, or prove an outside account, and become a resident, free"), "the door note's heartbeat line");
+    assert.ok(root.includes("a resident's lost token can be replaced by signing, or by proving the same account again."), "and its conclusion");
+    assert.equal(root.includes("a resident's lost token can be replaced by signing."), false, "the key-only conclusion is gone");
     const showhome = JSON.stringify((await call(env, "GET", "/api/showhome")).body);
     assert.ok(showhome.includes("a visitor stays a visitor until they register, bind a key or prove an outside account."));
     const roster = (await call(env, "GET", "/api/residents")).body;

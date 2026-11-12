@@ -311,7 +311,7 @@ test("B1: two concurrent recoveries for one resident return ONE token, and the l
     await bindByAccount(env, g, "colony", { accountId: OUTSIDE_COLONY_ID, username: "wren-outside" });
     const a = await askOk(env, { number: g.number }, "colony");
     const b = await askOk(env, { number: g.number }, "colony");
-    // a barrier inside the outside read: both claims have read the old hash before either reaches its batch
+    // a barrier inside the outside read: both claims have taken their token-hash snapshot (before the read) and have finished their outside read before either reaches its batch
     let arrived = 0;
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -339,6 +339,45 @@ test("B1: two concurrent recoveries for one resident return ONE token, and the l
     const token = (winners[0] as any).v.token as string;
     assert.equal(guestRow(d1, g.number)!.token_hash, await sha256Hex(token), "the stored hash is the winner's");
     assert.equal(challengeRows(d1, g.number).filter((c) => c.purpose === "recover" && c.used_at !== null).length, 1, "only the winner's challenge was used");
+  } finally {
+    d1.close();
+  }
+});
+
+test("B1 (staggered): B's outside read is held while A's recovery completes and returns its token; B is then refused, no token, its challenge not consumed, and A's token stays valid (mutant: the old hash is read AFTER the outside read)", async () => {
+  const { d1, env, post } = world();
+  try {
+    const g = await writtenGuest(env, post, "wren");
+    await bindByAccount(env, g, "colony", { accountId: OUTSIDE_COLONY_ID, username: "wren-outside" });
+    const a = await askOk(env, { number: g.number }, "colony");
+    const b = await askOk(env, { number: g.number }, "colony");
+    const { residentAccountClaim } = await import("../src/resident-account.ts");
+    let bReached!: () => void;
+    const reached = new Promise<void>((r) => (bReached = r));
+    let releaseB!: () => void;
+    const hold = new Promise<void>((r) => (releaseB = r));
+    const bFetch = fixtureFetch(colonyProof(b, { accountId: OUTSIDE_COLONY_ID, username: "wren-outside" }));
+    const heldFetch: any = async (url: string, init: any) => {
+      if (url.includes("/comments/")) {
+        bReached();
+        await hold;
+      }
+      return bFetch(url, init);
+    };
+    const bRun = residentAccountClaim(env, { number: g.number, platform: "colony", record_id: CID, claim_code: b.claim_code }, freshIp(), heldFetch).then((v) => ({ ok: true as const, v }), (e) => ({ ok: false as const, e }));
+    await reached; // B has its snapshot and is waiting on the platform
+    const aOut = await claim(env, { number: g.number }, a, "colony", CID, colonyProof(a, { accountId: OUTSIDE_COLONY_ID, username: "wren-outside" }));
+    assert.ok(aOut.ok, JSON.stringify(aOut));
+    if (!aOut.ok) return;
+    const tokenA = aOut.body.token as string;
+    releaseB();
+    const bOut = await bRun;
+    assert.ok(!bOut.ok && (bOut as any).e.status === 409 && (bOut as any).e.code === "resident_account_recovery_lost", "B is refused");
+    assert.equal(usedAt(d1, b.nonce), null, "B's challenge was not consumed");
+    assert.notEqual(usedAt(d1, a.nonce), null);
+    assert.equal(guestRow(d1, g.number)!.token_hash, await sha256Hex(tokenA), "A's token is still the stored one");
+    const still = await call(env, "POST", "/api/guest/comment", { token: tokenA, post_id: post, body: "A's token still works" }, withIp());
+    assert.equal(still.status, 201);
   } finally {
     d1.close();
   }

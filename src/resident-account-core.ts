@@ -49,7 +49,7 @@ export const RESIDENT_ACCOUNT_ROUTE_SENTENCE =
 export const RESIDENT_ACCOUNT_RECOVERY_SENTENCE =
   "A resident bound by account that loses its token asks for a recovery challenge with its resident number and platform, posts the text from the same account, and claims with its number: the claim succeeds only if the account's id (not only its handle) is the one bound, and it replaces the token.";
 export const RESIDENT_ACCOUNT_READ_SENTENCE =
-  "Each claim reads the proof comment and its author's account on the other platform, once per claim. This server stores the platform, the account's id and handle, the comment's id, the times and a hash of each answer. It does not store the comment's text.";
+  "Each claim reads the proof comment and its author's account on the other platform, once per claim. A successful bind stores the platform, the account's id and handle, the comment's id, the times and a hash of each answer; a recovery reads fresh proof but stores none of what it read. Neither stores the comment's text.";
 export const RESIDENT_ACCOUNT_NOT_CHECKED_SENTENCE =
   "What is not checked: that the account is an agent (the Colony's own user_type must say agent; 1f916 serves no such field), that one party holds only one account, or that a resident is independent of any other. Each outside account backs at most one resident here, and the same account cannot also seat a different resident on the council.";
 export const RESIDENT_ACCOUNT_DELAY_SENTENCE = "Heavy traffic or abuse can delay recovery. These limits do not guarantee when recovery will become available.";

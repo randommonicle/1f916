@@ -175,6 +175,10 @@ export async function residentAccountClaim(env: Env, input: Record<string, unkno
     );
   }
 
+  // B1: the token-hash snapshot a recovery's guarded UPDATE compares against is taken HERE, before the outside read, so a recovery that finished while this one was waiting on the
+  // platform makes this one's UPDATE match nothing (re-reading afterwards would adopt the winner's new hash and replace its token).
+  const oldTokenHash = who.purpose === "recover" ? (await env.DB.prepare("SELECT token_hash FROM guests WHERE visitor_id = ?").bind(who.visitorId).first<{ token_hash: string }>())?.token_hash ?? null : null;
+
   const fetcher: FetchLike = fetchImpl ?? ((url, init) => fetch(url, init));
   const verdict = await verifyResidentAccountClaim({ platform, recordId, visitorId: who.visitorId, challenge: { nonce: challenge.nonce, issuedAt: challenge.issued_at }, now: asked }, { fetch: fetcher });
   if (!verdict.ok) {
@@ -214,7 +218,8 @@ export async function residentAccountClaim(env: Env, input: Record<string, unkno
       "resident_account_wrong_account",
     );
   }
-  return recoverToken(env, who, challenge.nonce, codeHash, e);
+  if (oldTokenHash === null) throw new SocietyError(404, `No resident numbered ${who.visitorId}.`, "resident_account_no_account");
+  return recoverToken(env, who, challenge.nonce, codeHash, e, oldTokenHash);
 }
 
 async function bindAccount(env: Env, who: Subject, nonce: string, codeHash: string, e: import("./resident-account-verify.ts").AccountEvidence) {
@@ -272,9 +277,7 @@ async function bindAccount(env: Env, who: Subject, nonce: string, codeHash: stri
   };
 }
 
-async function recoverToken(env: Env, who: Subject, nonce: string, codeHash: string, e: import("./resident-account-verify.ts").AccountEvidence) {
-  const old = await env.DB.prepare("SELECT token_hash FROM guests WHERE visitor_id = ?").bind(who.visitorId).first<{ token_hash: string }>();
-  if (!old) throw new SocietyError(404, `No resident numbered ${who.visitorId}.`, "resident_account_no_account");
+async function recoverToken(env: Env, who: Subject, nonce: string, codeHash: string, e: import("./resident-account-verify.ts").AccountEvidence, oldTokenHash: string) {
   // Minted before the batch (the batch needs its hash) but returned ONLY if the batch took effect: a lost race discards it, and it was never stored.
   const token = newVisitorToken();
   const newHash = await sha256Hex(token);
@@ -289,7 +292,7 @@ async function recoverToken(env: Env, who: Subject, nonce: string, codeHash: str
         WHERE visitor_id = ?2 AND token_hash = ?3
           AND EXISTS (SELECT 1 FROM resident_account_challenges WHERE nonce = ?4 AND visitor_id = ?2 AND purpose = 'recover' AND platform = ?5 AND claim_code_hash = ?6 AND used_at IS NULL AND expires_at > ?7)
           AND EXISTS (SELECT 1 FROM resident_accounts WHERE visitor_id = ?2 AND platform = ?5 AND external_account_id = ?8)`,
-    ).bind(newHash, who.visitorId, old.token_hash, nonce, e.platform, codeHash, now, e.external_account_id),
+    ).bind(newHash, who.visitorId, oldTokenHash, nonce, e.platform, codeHash, now, e.external_account_id),
     // (2) the burn, only if (1) changed a row.
     env.DB.prepare("UPDATE resident_account_challenges SET used_at = ?1 WHERE nonce = ?2 AND used_at IS NULL AND changes() = 1").bind(now, nonce),
     // (3) the visitors fallback: the old hash dies there too, or authenticateGuest would still accept it. Its row count decides nothing (an evicted ring row legitimately changes 0).

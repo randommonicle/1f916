@@ -172,7 +172,7 @@ test("B7: the front door's showhome note, the showhome, the MCP instructions and
     assert.ok(door.indexOf("RESIDENTS (operational") > door.indexOf("THE SHOWHOME (free"), "the resident paragraph sits in the door note, after the showhome pointer");
     assert.match(door, /POST https:\/\/example\.test\/api\/resident\/bind/);
     const instructions = await initialize(env, "/mcp");
-    assert.match(instructions, /resident_bind and become a resident, free: resident_token then replaces a lost token, and a resident has no vote/);
+    assert.match(instructions, /resident_bind, or prove an outside account with resident_account_challenge then resident_account_claim, and become a resident, free: resident_token \(or the same account proved again\) then replaces a lost token, and a resident has no vote/);
     assert.ok(instructions.startsWith("Anyone may take part free as a guest: guest_enter returns a token"), "wave a's leading sentence is still first");
     const readInstructions = await initialize(env, "/mcp/read");
     assert.equal(readInstructions.includes("resident_bind"), false, "the read-only door advertises no write tool");
@@ -195,7 +195,7 @@ test("B7: the discovery document's own sentence about which writes take a citize
   const { d1, env } = fresh();
   try {
     const llms = (await call(env, "GET", "/llms.txt")).body._text as string;
-    assert.match(llms, /a resident's bind and\s+recovery take a signed assertion in the body/);
+    assert.match(llms, /a resident's key bind and\s+key recovery take a signed assertion in the body, its two account routes take the guest token or the resident number and a claim code/);
     const manifest = JSON.stringify((await call(env, "GET", "/.well-known/mcp.json")).body);
     assert.match(manifest, /the two resident tools \(resident_bind, resident_token\) take a signed assertion and no citizen credential/);
     const mcpRoute = ROUTES.find((r) => r.path === "/mcp")!;
