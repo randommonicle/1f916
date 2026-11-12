@@ -14,28 +14,29 @@
 # which a real run confirms by -RehearsalPassed (the script cannot check it; it needs Ben, since wrangler prompts); then 0a the pins, 0b the privacy date; 1 git; 2 gates (npm test, typecheck); 3 live read of the base and the attested constitution;
 # 4 the first production read, the catalogue of the two tables (scripts/verify-resident-account.sql) and a snapshot of every other sqlite_master row, which STARTS the clock: migration, worker activation and the post-activation verification
 # must all finish within ONE HOUR of it (before every bounded step, the time since that read plus the step's upper bound must fit inside the window or the step is not started; wrangler commands are bounded by a timeout),
-# else STOP for recovery and a fresh run; 5 apply 0026 ONLY if either table is absent (IF NOT EXISTS makes a re-run safe); 6 verify on prod: the catalogue is exactly the five expected rows and every other object is unchanged;
+# else STOP for recovery and a fresh run; 5 apply 0026 ONLY if either table is absent (IF NOT EXISTS makes a re-run safe); 6 verify on prod: the catalogue is exactly the 24 expected rows (column types, notnull and primary-key flags included) and every other object is unchanged;
 # 7 deploy the worker (stamped) and poll; 8 verify again after activation; 9 the ride, public GETs and two read-only tools/list posts: /api/attest (v6 unchanged, the four chains ok, sealed_entries and head identical before and after, code.commit and
 # code.version_id the new deploy's), /api/residents (200, total 0, the account route sentence), /api/resident/1 (a resident profile with a route, or the honest 404 when there is no resident), /api/official (the residents block with count, by_key,
 # by_account and counts_note), /skill.md (version 1.5.0 and its sha-256 equal to the pinned one), /privacy (the resident-account sentences and the date), the tools/list on /mcp (39 tools, both account tools; /mcp/read still 13 and neither tool),
 # /api/council (its rules, motion rule and powers unchanged), and sixteen public reads.
 # WHAT THE RIDE CANNOT DO (gate C3): public reads cannot execute a claim, because a claim reads another platform and needs a challenge posted from a real account. Nothing here binds a resident. The wave is NOT ridden until Ben runs one real
 # bind on each platform (1f916, then the Colony) from an account that is not the operator's envoy accounts, and one recovery; the honest report from this script alone is "public serving verified; production claim path not exercised".
-# ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0026 applied: two unused tables and an index the old worker never reads, which is
-# harmless. NEVER drop them: a resident bound by account before the rollback keeps its row there, and the tables are additive. A rollback after 0026 is safe.
+# ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0026 applied. BEFORE any account bind that is harmless:
+# two unused tables and an index the old worker never reads. AFTER an account-only bind (a resident with resident_at set and no key) the old worker, which decides 'resident' by a bound key, DROPS THAT RESIDENT FROM THE ROSTER AND
+# THE PROFILE and refuses its token recovery until the new worker is back; the rows stay intact and nothing is lost. NEVER drop the tables: a resident bound by account keeps its row there, and the tables are additive.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs (9e9bb20a...); step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on: it ships as the
 # placeholder and the hub sets it. Step 0a STOPS, before any git or network command, while EITHER holds its placeholder or is not 40 lower-case hex. -ExpectedCommit is required.
 # REVIEWED SOURCE ONLY: step 1 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (these scripts, the verify SQL, their tests, docs/).
 # Run from society/ on main, after the merge and the push (Ben, in this order):
 #   cd "C:\Users\bengr\Projects\AI domain and social network\society"
 #   powershell -ExecutionPolicy Bypass -File scripts\rehearse-resident-account.ps1                                       # the scratch D1 only; prints PASS or FAIL
-#   powershell -ExecutionPolicy Bypass -File scripts\deploy-resident-account.ps1 -ExpectedCommit <sha> -DryRun            # every check and the live reads (the D1 catalogue read is a READ), nothing written, nothing deployed
+#   powershell -ExecutionPolicy Bypass -File scripts\deploy-resident-account.ps1 -ExpectedCommit <sha> -DryRun            # every check and the live reads (the D1 catalogue read is a READ), nothing written to production, nothing deployed (it does write local temp files and runs npm test)
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-resident-account.ps1 -ExpectedCommit <sha> -RehearsalPassed  # the real thing
 #   If a step BEFORE the worker deploy stopped: just re-run. The migration applies only if a table is absent, so a state of 'both tables present' resumes at the worker (the catalogue and the verification still run).
 #   Once the worker has been deployed there is no resume mode: a re-run refuses because the live commit or the residents block already matches. If a stop comes after the deploy, the worker is live: finish the remaining verification
 #   by hand with the GETs this script lists (/api/attest, /api/residents, /api/official, /skill.md, /privacy, the tools/list on /mcp and /mcp/read, /api/council), repeat the catalogue read and scripts/verify-resident-account.sql,
 #   or roll back to the version id printed before the stop.
-# THE RIDE writes nothing: public GETs, and two POSTs of a read-only tools/list whose body is sent from a temp file.
+# THE RIDE writes nothing to production: public GETs, and two POSTs of a read-only tools/list whose body is sent from a temp file.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference (write "${var}:");
 # never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips inner double quotes from a native command's
 # argument, so every READ goes to wrangler by --command as one single-quote-only line (a statement with a double quote is refused), --file is used only for the migration, and request bodies go by
@@ -68,8 +69,27 @@ $POLL_DELAY_SECONDS = 5
 # One poll try reads GET /api/attest and GET /api/official, each bounded by curl --max-time 30, then sleeps.
 $POLL_READ_SECONDS = 60
 $TEST_SUMMARY_PATTERN = '(?m)^(?:\S+[ \t]+)?tests (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?suites (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?cancelled (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?skipped (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?todo (\d+)[ \t]*\r?\n(?:\S+[ \t]+)?duration_ms (\d+(?:\.\d+)?)\s*\z'
-# The five rows scripts/verify-resident-account.sql must return, as kind|name|detail, in the read's own order (ORDER BY 1, 2). The rehearsal script pins the same five.
+# The 24 rows scripts/verify-resident-account.sql must return, as kind|name|detail, in the read's own order (ORDER BY 1, 2). The rehearsal script pins the same five.
 $EXPECTED_CATALOGUE = @(
+  "column|resident_account_challenges.claim_code_hash|TEXT|1|0",
+  "column|resident_account_challenges.expires_at|INTEGER|1|0",
+  "column|resident_account_challenges.issued_at|INTEGER|1|0",
+  "column|resident_account_challenges.nonce|TEXT|0|1",
+  "column|resident_account_challenges.platform|TEXT|1|0",
+  "column|resident_account_challenges.purpose|TEXT|1|0",
+  "column|resident_account_challenges.used_at|INTEGER|0|0",
+  "column|resident_account_challenges.visitor_id|INTEGER|1|0",
+  "column|resident_accounts.account_created_at|INTEGER|0|0",
+  "column|resident_accounts.account_sha256|TEXT|1|0",
+  "column|resident_accounts.created_at|INTEGER|1|0",
+  "column|resident_accounts.external_account_id|TEXT|1|0",
+  "column|resident_accounts.external_handle|TEXT|1|0",
+  "column|resident_accounts.platform|TEXT|1|0",
+  "column|resident_accounts.record_created_at|INTEGER|1|0",
+  "column|resident_accounts.record_id|TEXT|1|0",
+  "column|resident_accounts.record_sha256|TEXT|1|0",
+  "column|resident_accounts.retrieved_at|INTEGER|1|0",
+  "column|resident_accounts.visitor_id|INTEGER|0|1",
   "index|idx_resident_account_challenges_visitor|resident_account_challenges:visitor_id,expires_at",
   "table|resident_account_challenges|nonce,visitor_id,purpose,platform,claim_code_hash,issued_at,expires_at,used_at",
   "table|resident_accounts|visitor_id,platform,external_account_id,external_handle,record_id,record_created_at,account_created_at,retrieved_at,record_sha256,account_sha256,created_at",
@@ -325,7 +345,7 @@ function Assert-Window($label, $requiredSeconds) {
   $why = Test-SufficientWindow $script:PreflightAt (Get-Date) $requiredSeconds
   if ($why -ne "") { Stop-Here ("before " + $label + ": " + $why + ".") }
 }
-# Reads the catalogue and every other object on prod and STOPS unless the catalogue is exactly the five expected rows and nothing else changed since the first production read.
+# Reads the catalogue and every other object on prod and STOPS unless the catalogue is exactly the 24 expected rows (every column's type, notnull and pk, the two table column lists, the index, the unique indexes) and nothing else changed since the first production read.
 function Assert-Prod-Verified($when) {
   $why = Test-Catalogue (Invoke-D1Read (Get-Content $VERIFY_SQL_PATH -Raw) "the catalogue read")
   if ($why -ne "") { Stop-Here ("catalogue check " + $when + " failed: " + $why + ".") }
@@ -559,7 +579,7 @@ Say ("[window] production D1 first read at " + $script:PreflightAt.ToString("o")
 Say ("[d1] on prod before: " + $tableState.Tables + " of the 2 resident-account tables present; " + @($script:OthersBefore.Rows).Count + " other objects snapshotted; the migration applies only if a table is absent")
 
 if ($DryRun) {
-  Say "[dry-run] would now: apply $MIGRATION_PATH to the REMOTE D1 (skipped if both tables are already there); verify the catalogue (exactly the five rows of $VERIFY_SQL_PATH) and that every other object is unchanged; run npx wrangler deploy --var CODE_COMMIT:<the full sha> (bounded) and capture its Current Version ID; poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart; verify again; then ride HTTP and both MCP doors. Nothing was written to the remote and nothing was deployed. The script signs nothing."
+  Say "[dry-run] would now: apply $MIGRATION_PATH to the REMOTE D1 (skipped if both tables are already there); verify the catalogue (exactly the 24 rows of $VERIFY_SQL_PATH) and that every other object is unchanged; run npx wrangler deploy --var CODE_COMMIT:<the full sha> (bounded) and capture its Current Version ID; poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart; verify again; then ride HTTP and both MCP doors. Nothing was written to the remote and nothing was deployed. The script signs nothing."
   exit 0
 }
 
@@ -576,7 +596,7 @@ if ($tableState.Both) {
 }
 # END-MIGRATION-APPLY
 
-# 6. catalogue and verification on prod (db-migration-verification): the worker deploys only if the catalogue is exactly the five rows and no other object changed
+# 6. catalogue and verification on prod (db-migration-verification): the worker deploys only if the catalogue is exactly the 24 rows and no other object changed
 Assert-Window "the catalogue verification (two reads)" (2 * $WRANGLER_D1_SECONDS)
 Assert-Prod-Verified "after the migration"
 Say "[d1] verified on prod: both tables, the columns in order, the index, the UNIQUE (platform, external_account_id), and every other object unchanged"
@@ -599,7 +619,7 @@ if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current 
 if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
 $versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
-$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migration 0026 stays applied (two unused tables and an index the old worker never reads); never drop them, because a resident bound by account keeps its row there."
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migration 0026 stays applied; never drop the tables, because a resident bound by account keeps its row there. Before any account bind the two tables are simply unused; after one, the old worker hides each account-only resident from the roster and the profile and refuses its token recovery until the new worker is back (rows intact)."
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 
@@ -608,7 +628,7 @@ Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 Assert-Window "the post-activation verification (two reads)" (2 * $WRANGLER_D1_SECONDS)
 Assert-Prod-Verified "after worker activation"
 Assert-Window "completion of the post-activation verification" 0
-Say "[d1] post-activation: the catalogue is still exactly the five rows and nothing else changed"
+Say "[d1] post-activation: the catalogue is still exactly the 24 rows and nothing else changed"
 # END-RECONCILE
 
 # 9. the ride: non-minting and the chains, then HTTP and both MCP doors.

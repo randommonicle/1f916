@@ -1,10 +1,16 @@
 -- Catalogue read for migrations/0026_resident_accounts.sql (D-082). Used by scripts/rehearse-resident-account.ps1 (scratch D1) and scripts/deploy-resident-account.ps1 (prod). A READ: it writes nothing.
--- One row per fact the migration must have produced, in a fixed order:
---   table   the two new tables, with their columns in order (pragma_table_info);
+-- One row per fact the migration must have produced, in a fixed order (ORDER BY kind, name):
+--   column  every column of the two new tables as <table>.<column> with type|notnull|pk (pragma_table_info), so resident_accounts.visitor_id INTEGER PRIMARY KEY (one account per resident) and
+--           resident_account_challenges.nonce TEXT PRIMARY KEY are verified, not assumed: an INTEGER PRIMARY KEY has no separate index, so only the pk flag shows it;
 --   index   the one named index on them (idx_resident_account_challenges_visitor), as <table>:<columns>;
+--   table   the two new tables, with their columns in order (pragma_table_info);
 --   unique  every unique index on them, as <table>:<origin>:<columns> (origin u = a UNIQUE constraint, pk = a primary key): the UNIQUE (platform, external_account_id) that makes one outside account back at most one resident, ever.
--- The scripts compare these rows with the expected ones they pin; anything missing, extra among the tables, or in another order is a failure. Single line after full-line comments are stripped, single quotes only.
-SELECT 'table' AS kind, m.name AS name, (SELECT group_concat(c.name, ',') FROM pragma_table_info(m.name) AS c) AS detail
+-- The scripts compare these rows with the expected ones they pin; anything missing, extra, or different is a failure. Single line after full-line comments are stripped, single quotes only.
+SELECT 'column' AS kind, t.name || '.' || c.name AS name, c.type || '|' || c.[notnull] || '|' || c.pk AS detail
+FROM sqlite_master AS t, pragma_table_info(t.name) AS c
+WHERE t.type = 'table' AND t.name IN ('resident_accounts', 'resident_account_challenges')
+UNION ALL
+SELECT 'table', m.name, (SELECT group_concat(c.name, ',') FROM pragma_table_info(m.name) AS c)
 FROM sqlite_master AS m
 WHERE m.type = 'table' AND m.name IN ('resident_accounts', 'resident_account_challenges')
 UNION ALL

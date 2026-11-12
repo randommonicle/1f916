@@ -73,8 +73,8 @@ test("the scratch database only: the name is pinned, never the production name, 
   assert.match(script, /^\$MIGRATION_PATH = "migrations\/0026_resident_accounts\.sql"$/m);
   assert.equal(/\$PROD_DB|"commonhold"|'commonhold'/.test(code), false, "the production database name appears nowhere");
   const wrangler = code.split("\n").filter((l) => l.includes("npx wrangler"));
-  assert.equal(wrangler.length, 2, "one read command and one apply command");
-  for (const l of wrangler) assert.ok(l.includes("npx wrangler d1 execute \" + $SCRATCH_DB") || l.includes("npx wrangler d1 execute " + '" + $SCRATCH_DB'), `names the scratch constant: ${l.trim()}`);
+  assert.equal(wrangler.length, 3, "the d1 info resolution, one read command and one apply command");
+  for (const l of wrangler) assert.ok(l.includes("npx wrangler d1 execute \" + $SCRATCH_DB") || l.includes("npx wrangler d1 info \" + $SCRATCH_DB"), `names the scratch constant: ${l.trim()}`);
   assert.equal((code.match(/--file /g) ?? []).length, 1);
   assert.ok(code.includes("--file \" + $MIGRATION_PATH"));
   assert.equal(/wrangler deploy|wrangler dev|DROP\s|DELETE\s|UPDATE\s|INSERT\s/i.test(code), false, "nothing deploys or writes but the migration file");
@@ -102,14 +102,95 @@ test("any other database name is refused (run for real), the scratch name passes
   assert.equal(results(m.out).get("prod"), "", "mutant: the name check is gone -> production would be accepted");
 });
 
-test("the catalogue and the other-objects comparison, run for real: the real migration's five rows pass; a missing or reordered row, an unparsable read, a changed or dropped object, a tiny snapshot all fail", (t) => {
+test("D1: the target is proved, not assumed: a local config that names the scratch database as a database_name or a binding is refused (jsonc, toml, any env block), comments do not trip it, and the check is wired before any apply", (t) => {
+  const prod = '{ "d1_databases": [ { "binding": "DB", "database_name": "commonhold", "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42" } ] }';
+  const aliasName = '{ "d1_databases": [ { "binding": "DB", "database_name": "commonhold-migtest", "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42" } ] }';
+  const aliasBinding = '{ "d1_databases": [ { "binding": "commonhold-migtest", "database_name": "commonhold", "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42" } ] }';
+  const aliasEnv = '{ "d1_databases": [ { "binding": "DB", "database_name": "commonhold", "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42" } ], "env": { "staging": { "d1_databases": [ { "binding": "X", "database_name": "commonhold-migtest", "database_id": "45fc49db-8483-4a29-ac54-153fa3c83b42" } ] } } }';
+  const toml = '[[d1_databases]]\nbinding = "DB"\ndatabase_name = "commonhold-migtest"\ndatabase_id = "45fc49db-8483-4a29-ac54-153fa3c83b42"\n';
+  const commented = '// "database_name": "commonhold-migtest" was the old scratch name\n' + prod;
+  const cases: Array<[string, string, string]> = [
+    ["cfg-prod", prod, ""],
+    ["cfg-commented", commented, ""],
+    ["cfg-name", aliasName, "names commonhold-migtest as a database_name or a binding"],
+    ["cfg-binding", aliasBinding, "names commonhold-migtest"],
+    ["cfg-env", aliasEnv, "names commonhold-migtest"],
+    ["cfg-toml", toml, "names commonhold-migtest"],
+  ];
+  const run = runPs(harness(cases.map(([name, text]) => `Write-Host ("RESULT ${name} [" + (Test-ConfigDoesNotNameScratch ${q(text)} 'wrangler.jsonc') + "]")`)));
+  if (!run) return t.skip("no PowerShell available");
+  const got = results(run.out);
+  for (const [name, , expect] of cases) {
+    const v = got.get(name);
+    assert.ok(v !== undefined, `${name} produced a result: ${run.out}`);
+    if (expect === "") assert.equal(v, "", name);
+    else assert.ok(v!.includes(expect), `${name}: '${v}' mentions '${expect}'`);
+  }
+  const real = readFileSync(here("../wrangler.jsonc"), "utf8");
+  const live = runPs(harness([`Write-Host ("RESULT real [" + (Test-ConfigDoesNotNameScratch ${q(real)} 'wrangler.jsonc') + "]")`, `Write-Host ("RESULT ids [" + ((Get-ConfigDatabaseIds ${q(real)}) -join ",") + "]")`]))!;
+  assert.equal(results(live.out).get("real"), "", "the checked-in wrangler.jsonc does not alias the scratch name");
+  assert.equal(results(live.out).get("ids"), /"database_id":\s*"([0-9a-f-]{36})"/.exec(real)![1], "and its database_id is read as production's");
+  // wired: after the name check, before the first read or apply of the scratch database
+  const i = script.indexOf("Test-ConfigDoesNotNameScratch $configText");
+  assert.ok(i > script.indexOf("# 0b.") && i < script.indexOf("Invoke-ScratchRead \"SELECT name FROM sqlite_master"), "the config check runs before any read of the scratch database");
+  assert.ok(script.indexOf("npx wrangler d1 info") < script.indexOf("--file \" + $MIGRATION_PATH"), "and the account's own uuid is resolved before the apply");
+  // a mutated copy that never refuses lets the alias through
+  const mutated = script.replace('if ([regex]::IsMatch($clean, $pattern))', "if ($false)");
+  assert.notEqual(mutated, script);
+  const m = runPs(harness([`Write-Host ("RESULT alias [" + (Test-ConfigDoesNotNameScratch ${q(aliasName)} 'x') + "]")`], defsOf(mutated)))!;
+  assert.equal(results(m.out).get("alias"), "", "mutant: the alias check is gone -> the alias passes");
+});
+
+test("D1: the scratch database's UUID is resolved from the account and must be well-formed and differ from production's database_id: a UUID equal to production's, a malformed one, no JSON, a wrong name and a missing id are each refused", (t) => {
+  const PROD = "45fc49db-8483-4a29-ac54-153fa3c83b42";
+  const SCRATCH = "465f489c-f1ca-446e-8f5f-d35ea53fd720";
+  const info = (o: Record<string, unknown>): string => "banner line\n" + JSON.stringify(o);
+  const cases: Array<[string, string, string]> = [
+    ["ok", `& { $r = Get-ScratchUuid ${q(info({ uuid: SCRATCH, name: "commonhold-migtest" }))}; $r.Error + (Test-ScratchUuid $r.Uuid @('${PROD}')) }`, ""],
+    ["upper-ok", `& { $r = Get-ScratchUuid ${q(info({ uuid: SCRATCH.toUpperCase(), name: "commonhold-migtest" }))}; $r.Error + (Test-ScratchUuid $r.Uuid @('${PROD}')) }`, ""],
+    ["equals-prod", `& { $r = Get-ScratchUuid ${q(info({ uuid: PROD, name: "commonhold-migtest" }))}; $r.Error + (Test-ScratchUuid $r.Uuid @('${PROD}')) }`, "which is production's database_id"],
+    ["equals-prod-upper", `& { $r = Get-ScratchUuid ${q(info({ uuid: PROD.toUpperCase(), name: "commonhold-migtest" }))}; $r.Error + (Test-ScratchUuid $r.Uuid @('${PROD}')) }`, "which is production's database_id"],
+    ["malformed", `& { $r = Get-ScratchUuid ${q(info({ uuid: "not-a-uuid", name: "commonhold-migtest" }))}; $r.Error + (Test-ScratchUuid $r.Uuid @('${PROD}')) }`, "not a well-formed UUID"],
+    ["no-json", `& { $r = Get-ScratchUuid 'Error: not found'; $r.Error }`, "no JSON object"],
+    ["no-uuid", `& { $r = Get-ScratchUuid ${q(info({ name: "commonhold-migtest" }))}; $r.Error }`, "no uuid"],
+    ["wrong-name", `& { $r = Get-ScratchUuid ${q(info({ uuid: SCRATCH, name: "commonhold" }))}; $r.Error }`, "not commonhold-migtest"],
+    ["no-prod-id", `Test-ScratchUuid '${SCRATCH}' @()`, "production's id cannot be compared"],
+  ];
+  const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
+  if (!run) return t.skip("no PowerShell available");
+  const got = results(run.out);
+  for (const [name, , expect] of cases) {
+    const v = got.get(name);
+    assert.ok(v !== undefined, `${name} produced a result: ${run.out}`);
+    if (expect === "") assert.equal(v, "", name);
+    else assert.ok(v!.includes(expect), `${name}: '${v}' mentions '${expect}'`);
+  }
+  assert.equal(readFileSync(here("../wrangler.jsonc"), "utf8").includes(SCRATCH), false, "the scratch id is not in the production config");
+});
+
+test("D2: the rehearsal's catalogue pins column types and primary keys too: visitor_id INTEGER (pk 0) is refused", (t) => {
+  const db = new DatabaseSync(":memory:");
+  let json: string;
+  try {
+    db.exec(migrationSql.replace("visitor_id          INTEGER PRIMARY KEY", "visitor_id          INTEGER"));
+    json = d1json(db.prepare(verifySql).all());
+  } finally {
+    db.close();
+  }
+  const run = runPs(harness([`Write-Host ("RESULT bad [" + (Test-Catalogue (Read-D1Rows ${q(json)})) + "]")`, `Write-Host ("RESULT good [" + (Test-Catalogue (Read-D1Rows ${q(d1json(realCatalogue()))})) + "]")`]));
+  if (!run) return t.skip("no PowerShell available");
+  assert.match(results(run.out).get("bad") ?? "", /resident_accounts\.visitor_id\|INTEGER\|0\|1/);
+  assert.equal(results(run.out).get("good"), "");
+});
+
+test("the catalogue and the other-objects comparison, run for real: the real migration's 24 rows pass; a missing or reordered row, an unparsable read, a changed or dropped object, a tiny snapshot all fail", (t) => {
   const real = realCatalogue();
-  const pinned = [...script.slice(script.indexOf("$EXPECTED_CATALOGUE = @("), script.indexOf("# Every sqlite_master row")).matchAll(/"((?:index|table|unique)\|[^"]+)"/g)].map((m) => m[1]!);
+  const pinned = [...script.slice(script.indexOf("$EXPECTED_CATALOGUE = @("), script.indexOf("# Every sqlite_master row")).matchAll(/"((?:column|index|table|unique)\|[^"]+)"/g)].map((m) => m[1]!);
   assert.deepEqual(pinned, real.map((r) => `${r.kind}|${r.name}|${r.detail}`), "the pinned rows are what the migration builds");
   const rows = Array.from({ length: 25 }, (_, i) => ({ type: "table", name: `t${i}`, tbl_name: `t${i}`, sql: `CREATE TABLE t${i} (id INTEGER)` }));
   const cases: Array<[string, string, string]> = [
     ["cat-good", `Test-Catalogue (Read-D1Rows ${q(d1json(real))})`, ""],
-    ["cat-short", `Test-Catalogue (Read-D1Rows ${q(d1json(real.slice(1)))})`, "returned 4 rows, expected 5"],
+    ["cat-short", `Test-Catalogue (Read-D1Rows ${q(d1json(real.slice(1)))})`, "returned 23 rows, expected 24"],
     ["cat-swapped", `Test-Catalogue (Read-D1Rows ${q(d1json([real[1], real[0], ...real.slice(2)]))})`, "catalogue row 1 is"],
     ["cat-unparsable", `Test-Catalogue (Read-D1Rows ${q("Error")})`, "no parsable result"],
     ["oth-same", `Test-OthersUnchanged (Read-D1Rows ${q(d1json(rows))}) (Read-D1Rows ${q(d1json(rows))}) 'x'`, ""],

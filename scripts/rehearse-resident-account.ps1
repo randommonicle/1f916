@@ -1,9 +1,13 @@
 # Rehearses migrations/0026_resident_accounts.sql (D-082, residency by an outside account) on the SCRATCH D1 only, through real wrangler, and proves from the catalogue what it did. Nothing else: this script runs no worker and deploys nothing.
 # BEN'S HAND ONLY (wrangler prompts; the builder never runs it). THE SCRATCH DATABASE ONLY: the name is pinned below and the script refuses any other (it will not run against 'commonhold').
+# THE TARGET IS PROVED, NOT ASSUMED (review D1): wrangler resolves a database_name or binding named in a local wrangler config to that entry's UUID WITHOUT asking the server, so the name 'commonhold-migtest' could be an alias of
+# production. Before any apply this script (a) STOPS if wrangler.jsonc, wrangler.json or wrangler.toml at the repo root (every env block; the configs wrangler loads from here) names commonhold-migtest as a database_name or a
+# binding, and (b) resolves the scratch database's UUID from the ACCOUNT (npx wrangler d1 info commonhold-migtest --json, a read) and STOPS unless it is a well-formed UUID that differs from every database_id in those configs
+# (production's). Both UUIDs are printed; they are not secrets.
 # What it proves, each a named line and all required for PASS:
 #   1 BEFORE: the scratch database carries the production schema (citizens and guests exist) and a snapshot of the sqlite_master sql of every table, index and trigger that is NOT one of the two new tables or their indexes;
 #   2 the migration applies (exit 0); it is additive and every statement is CREATE ... IF NOT EXISTS, so a re-run is safe and this script applies it TWICE on purpose;
-#   3 AFTER: scripts/verify-resident-account.sql (the catalogue read the deploy script also uses) returns exactly the five expected rows: resident_accounts and resident_account_challenges with their columns in order, the index
+#   3 AFTER: scripts/verify-resident-account.sql (the catalogue read the deploy script also uses) returns exactly the 24 expected rows (every column's type, notnull and pk among them): resident_accounts and resident_account_challenges with their columns in order, the index
 #     idx_resident_account_challenges_visitor on (visitor_id, expires_at), the UNIQUE (platform, external_account_id) on resident_accounts, and the nonce primary key on the challenges table;
 #   4 NO PRE-EXISTING OBJECT CHANGED: the snapshot of every other sqlite_master row is identical before, after the first apply and after the second;
 #   5 the second apply changed nothing: the catalogue rows are identical after the first and the second apply.
@@ -21,8 +25,27 @@ $MIGRATION_PATH = "migrations/0026_resident_accounts.sql"
 $VERIFY_SQL_PATH = "scripts/verify-resident-account.sql"
 $WRANGLER_D1_SECONDS = 120
 $NEW_TABLES = @("resident_accounts", "resident_account_challenges")
-# The five rows the catalogue read must return, as kind|name|detail, in the read's own order (ORDER BY 1, 2).
+# The 24 rows the catalogue read must return, as kind|name|detail, in the read's own order (ORDER BY 1, 2).
 $EXPECTED_CATALOGUE = @(
+  "column|resident_account_challenges.claim_code_hash|TEXT|1|0",
+  "column|resident_account_challenges.expires_at|INTEGER|1|0",
+  "column|resident_account_challenges.issued_at|INTEGER|1|0",
+  "column|resident_account_challenges.nonce|TEXT|0|1",
+  "column|resident_account_challenges.platform|TEXT|1|0",
+  "column|resident_account_challenges.purpose|TEXT|1|0",
+  "column|resident_account_challenges.used_at|INTEGER|0|0",
+  "column|resident_account_challenges.visitor_id|INTEGER|1|0",
+  "column|resident_accounts.account_created_at|INTEGER|0|0",
+  "column|resident_accounts.account_sha256|TEXT|1|0",
+  "column|resident_accounts.created_at|INTEGER|1|0",
+  "column|resident_accounts.external_account_id|TEXT|1|0",
+  "column|resident_accounts.external_handle|TEXT|1|0",
+  "column|resident_accounts.platform|TEXT|1|0",
+  "column|resident_accounts.record_created_at|INTEGER|1|0",
+  "column|resident_accounts.record_id|TEXT|1|0",
+  "column|resident_accounts.record_sha256|TEXT|1|0",
+  "column|resident_accounts.retrieved_at|INTEGER|1|0",
+  "column|resident_accounts.visitor_id|INTEGER|0|1",
   "index|idx_resident_account_challenges_visitor|resident_account_challenges:visitor_id,expires_at",
   "table|resident_account_challenges|nonce,visitor_id,purpose,platform,claim_code_hash,issued_at,expires_at,used_at",
   "table|resident_accounts|visitor_id,platform,external_account_id,external_handle,record_id,record_created_at,account_created_at,retrieved_at,record_sha256,account_sha256,created_at",
@@ -32,6 +55,8 @@ $EXPECTED_CATALOGUE = @(
 # Every sqlite_master row that is not one of the new tables or an index on them. The migration must leave these byte for byte as they were.
 $OTHER_OBJECTS_SQL = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name NOT IN ('resident_accounts', 'resident_account_challenges') ORDER BY type, name"
 $MIN_OTHER_OBJECTS = 20
+$ROOT_CONFIGS = @("wrangler.jsonc", "wrangler.json", "wrangler.toml")
+$UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
 function Say($msg) { Write-Host $msg }
@@ -125,6 +150,50 @@ function Test-OthersUnchanged($before, $after, $label) {
   if ($a -cne $b) { return ("a pre-existing table, index or trigger changed (" + $label + "): the snapshots differ") }
   return ""
 }
+# The text of a wrangler config without its full-line comments (// for jsonc/json, # for toml).
+function Remove-ConfigComments($text) {
+  $kept = @()
+  foreach ($line in (([string]$text).Replace("`r`n", "`n").Split("`n"))) {
+    $t = $line.Trim()
+    if ($t.StartsWith("//") -or $t.StartsWith("#")) { continue }
+    $kept += $line
+  }
+  return ($kept -join "`n")
+}
+# "" when a wrangler config text does NOT name the scratch database as a database_name or a binding (jsonc "key": "value" or toml key = "value", any env block), otherwise the reason. A local entry with either would make
+# wrangler use that entry's configured UUID for `d1 execute commonhold-migtest` without asking the account.
+function Test-ConfigDoesNotNameScratch($text, $label) {
+  $clean = Remove-ConfigComments $text
+  $pattern = '(?i)["'']?(database_name|binding)["'']?\s*[:=]\s*["'']' + [regex]::Escape($SCRATCH_DB) + '["'']'
+  if ([regex]::IsMatch($clean, $pattern)) { return ($label + " names " + $SCRATCH_DB + " as a database_name or a binding: wrangler would resolve it to that entry's UUID without asking the account, so this rehearsal cannot show where the migration goes") }
+  return ""
+}
+# Every database_id value in a wrangler config text (production's, whatever it is called), lower-cased.
+function Get-ConfigDatabaseIds($text) {
+  $ids = @()
+  foreach ($m in [regex]::Matches((Remove-ConfigComments $text), '(?i)["'']?database_id["'']?\s*[:=]\s*["'']([^"'']+)["'']')) { $ids += $m.Groups[1].Value.ToLowerInvariant() }
+  return @($ids)
+}
+# The UUID of the scratch database from `wrangler d1 info <name> --json` output (banner text before the first brace is ignored), as @{ Uuid; Error }. The object's name, when present, must be the scratch name.
+function Get-ScratchUuid($text) {
+  $i = ([string]$text).IndexOf("{")
+  if ($i -lt 0) { return @{ Uuid = ""; Error = "d1 info returned no JSON object" } }
+  try { $info = (([string]$text).Substring($i) | ConvertFrom-Json) } catch { return @{ Uuid = ""; Error = "d1 info returned JSON that does not parse" } }
+  $uuid = ""
+  if ($null -ne $info.PSObject.Properties["uuid"]) { $uuid = [string]$info.uuid } elseif ($null -ne $info.PSObject.Properties["id"]) { $uuid = [string]$info.id }
+  if ($uuid -eq "") { return @{ Uuid = ""; Error = "d1 info carries no uuid" } }
+  if ($null -ne $info.PSObject.Properties["name"] -and [string]$info.name -cne $SCRATCH_DB) { return @{ Uuid = $uuid; Error = ("d1 info answers for the database '" + $info.name + "', not " + $SCRATCH_DB) } }
+  return @{ Uuid = $uuid.ToLowerInvariant(); Error = "" }
+}
+# "" when $uuid is a well-formed lower-case UUID that is none of the production database ids, otherwise the reason.
+function Test-ScratchUuid($uuid, $prodIds) {
+  if ([string]$uuid -cnotmatch $UUID_PATTERN) { return ("the scratch database's id '" + $uuid + "' is not a well-formed UUID") }
+  if (@($prodIds).Count -lt 1) { return "no database_id was found in the repo's wrangler config, so production's id cannot be compared" }
+  foreach ($id in @($prodIds)) {
+    if ($uuid -ceq [string]$id) { return ("the scratch database " + $SCRATCH_DB + " resolves to " + $uuid + ", which is production's database_id: this would migrate production") }
+  }
+  return ""
+}
 # END-OF-DEFINITIONS (nothing above runs wrangler)
 
 $why = Test-ScratchTarget $Database
@@ -135,14 +204,30 @@ foreach ($path in $MIGRATION_PATH, $VERIFY_SQL_PATH) {
 $verifySql = Get-Content $VERIFY_SQL_PATH -Raw
 $why = Test-SingleLineSql (ConvertTo-SingleLineSql $verifySql)
 if ($why -ne "") { Stop-Here ("$VERIFY_SQL_PATH cannot be sent as one --command argument: " + $why) }
-Say ("[target] " + $SCRATCH_DB)
+# 0b. the target is proved: no local config aliases the scratch name, and the account's own UUID for it is not production's
+$prodIds = @()
+foreach ($configPath in $ROOT_CONFIGS) {
+  if (-not (Test-Path $configPath)) { continue }
+  $configText = Get-Content $configPath -Raw
+  $why = Test-ConfigDoesNotNameScratch $configText $configPath
+  if ($why -ne "") { Stop-Here $why }
+  $prodIds += @(Get-ConfigDatabaseIds $configText)
+}
+$info = Invoke-Bounded ("npx wrangler d1 info " + $SCRATCH_DB + " --json") $WRANGLER_D1_SECONDS
+if ($info.TimedOut) { Stop-Here ("wrangler d1 info timed out after " + $WRANGLER_D1_SECONDS + " s: the scratch database's id could not be resolved.") }
+if ($info.Code -ne 0) { Stop-Here ("wrangler d1 info failed (exit " + $info.Code + "): the scratch database's id could not be resolved.") }
+$resolved = Get-ScratchUuid $info.Out
+if ($resolved.Error -ne "") { Stop-Here $resolved.Error }
+$why = Test-ScratchUuid $resolved.Uuid $prodIds
+if ($why -ne "") { Stop-Here $why }
+Say ("[target] " + $SCRATCH_DB + " resolves to " + $resolved.Uuid + " on the account; production's database_id in the repo config is " + ($prodIds -join ", ") + ": they differ")
 
 # 1. before: the production schema is there, and the snapshot of everything else
 $base = Invoke-ScratchRead "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('citizens', 'guests', 'council_claims')" "the base tables read"
 if (@($base.Rows).Count -ne 3) { Stop-Here ("the scratch database has " + @($base.Rows).Count + " of citizens, guests and council_claims: load it with the production schema first.") }
 $before = Invoke-ScratchRead $OTHER_OBJECTS_SQL "the other objects, before"
 $catBefore = Invoke-ScratchRead $verifySql "the catalogue, before"
-Say ("[before] " + @($before.Rows).Count + " other objects snapshotted; " + @($catBefore.Rows).Count + " of the 5 catalogue rows present (a re-run starts with all 5)")
+Say ("[before] " + @($before.Rows).Count + " other objects snapshotted; " + @($catBefore.Rows).Count + " of the 24 catalogue rows present (a re-run starts with all 24)")
 
 # 2. apply, twice: IF NOT EXISTS makes the second a no-op
 $snapshots = @()

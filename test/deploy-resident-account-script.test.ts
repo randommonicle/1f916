@@ -302,7 +302,14 @@ test("the header carries the rollback text and every duty (rehearsal first, the 
     "ONE HOUR",
     "worker rollback",
     "leaves migration 0026 applied",
-    "NEVER drop them",
+    "BEFORE any account bind that is harmless",
+    "AFTER an account-only bind",
+    "DROPS THAT RESIDENT FROM THE ROSTER AND",
+    "refuses its token recovery until the new worker is back",
+    "NEVER drop the tables",
+    "writes nothing to production",
+    "nothing written to production",
+    "it does write local temp files and runs npm test",
     "MIGRATION FIRST",
     "C1",
     "C3",
@@ -322,6 +329,12 @@ test("the header carries the rollback text and every duty (rehearsal first, the 
     "one real",
     "REVIEWED SOURCE ONLY",
   ]) assert.ok(header.includes(needle), `header names: ${needle}`);
+});
+
+test("D3: the printed rollback line distinguishes a rollback before any bind from one after an account-only bind, and still says never drop the tables", () => {
+  const line = script.split("\n").find((l) => l.startsWith("$ROLLBACK_LINE = "))!;
+  for (const needle of ["never drop the tables", "Before any account bind the two tables are simply unused", "after one, the old worker hides each account-only resident from the roster and the profile and refuses its token recovery until the new worker is back (rows intact)"]) assert.ok(line.includes(needle), needle);
+  assert.equal(/two unused tables and an index the old worker never reads\); never drop them/.test(script), false, "the old flat 'harmless' wording is gone");
 });
 
 test("the one-hour window, run for real: inside passes; just over, a missing first read and a clock far past all stop; a step that would end outside the window is refused", (t) => {
@@ -345,12 +358,12 @@ test("the one-hour window, run for real: inside passes; just over, a missing fir
   assert.match(run.out, /RESULT toolate \[the first production read completed 3500 s ago and the next bounded step may need up to 200 s/, run.out);
 });
 
-test("the verify SQL over the REAL migration returns exactly the five rows the script pins, and is a single line the script can send", (t) => {
+test("the verify SQL over the REAL migration returns exactly the 24 rows the script pins, and is a single line the script can send", (t) => {
   const real = realCatalogue().map((r) => `${r.kind}|${r.name}|${r.detail}`);
-  const pinned = [...between(script, "$EXPECTED_CATALOGUE = @(", "# Every sqlite_master row").matchAll(/"((?:index|table|unique)\|[^"]+)"/g)].map((m) => m[1]!);
+  const pinned = [...between(script, "$EXPECTED_CATALOGUE = @(", "# Every sqlite_master row").matchAll(/"((?:column|index|table|unique)\|[^"]+)"/g)].map((m) => m[1]!);
   assert.deepEqual(pinned, real, "the pinned rows are what the migration builds");
   const rehearse = readFileSync(here("../scripts/rehearse-resident-account.ps1"), "utf8");
-  const rehearsePinned = [...between(rehearse, "$EXPECTED_CATALOGUE = @(", "# Every sqlite_master row").matchAll(/"((?:index|table|unique)\|[^"]+)"/g)].map((m) => m[1]!);
+  const rehearsePinned = [...between(rehearse, "$EXPECTED_CATALOGUE = @(", "# Every sqlite_master row").matchAll(/"((?:column|index|table|unique)\|[^"]+)"/g)].map((m) => m[1]!);
   assert.deepEqual(rehearsePinned, pinned, "the rehearsal pins the same five rows");
   assert.equal(/^\$OTHER_OBJECTS_SQL = (".*")$/m.exec(script)![1], /^\$OTHER_OBJECTS_SQL = (".*")$/m.exec(rehearse)![1], "and the same other-objects read");
   const run = runPs(harness([`$one = ConvertTo-SingleLineSql ${q(verifySql)}`, 'Write-Host ("RESULT single [" + (Test-SingleLineSql $one) + "]")', 'Write-Host ("RESULT nolines [" + ($one.Contains("`n")) + "]")', `Write-Host ("RESULT other [" + (Test-SingleLineSql $OTHER_OBJECTS_SQL) + "]")`]));
@@ -366,10 +379,10 @@ test("the catalogue decision, run for real over the real rows: the exact five pa
   const mutate = (f: (rows: typeof real) => typeof real) => d1json(f(real.map((r) => ({ ...r }))));
   const cases: Array<[string, string, string]> = [
     ["cat-good", `Test-Catalogue (Read-D1Rows ${q(d1json(real))})`, ""],
-    ["cat-missing-unique", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => r.filter((x) => !x.detail.endsWith("platform,external_account_id"))))})`, "returned 4 rows, expected 5"],
-    ["cat-extra", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => [...r, { kind: "table", name: "stray", detail: "a" }]))})`, "returned 6 rows, expected 5"],
-    ["cat-column-order", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => r.map((x) => (x.name === "resident_accounts" ? { ...x, detail: x.detail.replace("visitor_id,platform", "platform,visitor_id") } : x))))})`, "catalogue row 3 is"],
-    ["cat-unique-wrong-origin", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => r.map((x) => (x.detail.includes(":u:") ? { ...x, detail: x.detail.replace(":u:", ":c:") } : x))))})`, "catalogue row 5 is"],
+    ["cat-missing-unique", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => r.filter((x) => !x.detail.endsWith("platform,external_account_id"))))})`, "returned 23 rows, expected 24"],
+    ["cat-extra", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => [...r, { kind: "table", name: "stray", detail: "a" }]))})`, "returned 25 rows, expected 24"],
+    ["cat-column-order", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => r.map((x) => (x.name === "resident_accounts" ? { ...x, detail: x.detail.replace("visitor_id,platform", "platform,visitor_id") } : x))))})`, "catalogue row 2"],
+    ["cat-unique-wrong-origin", `Test-Catalogue (Read-D1Rows ${q(mutate((r) => r.map((x) => (x.detail.includes(":u:") ? { ...x, detail: x.detail.replace(":u:", ":c:") } : x))))})`, "catalogue row 24 is"],
     ["cat-unparsable", `Test-Catalogue (Read-D1Rows ${q("Error: no such table")})`, "no parsable result"],
     ["state-none", `& { $s = Get-TableState (Read-D1Rows ${q(d1json([]))}); [string]$s.Tables + '|' + [string]$s.Both + '|' + $s.Error }`, "0|False|"],
     ["state-one", `& { $s = Get-TableState (Read-D1Rows ${q(d1json(real.filter((r) => r.name === "resident_accounts")))}); [string]$s.Tables + '|' + [string]$s.Both + '|' + $s.Error }`, "1|False|"],
@@ -386,6 +399,39 @@ test("the catalogue decision, run for real over the real rows: the exact five pa
     if (expect === "") assert.equal(v, "", name);
     else assert.ok(v!.includes(expect), `${name}: '${v}' mentions '${expect}'`);
   }
+});
+
+test("D2: the catalogue pins every column's type, notnull and pk: a schema with visitor_id INTEGER (pk 0), a nonce that is not the primary key, a changed type or a NOT NULL drift each fail (built from the real migration with one defect, read through the real verify SQL)", (t) => {
+  const defective = (from: string, to: string): string => {
+    assert.ok(migrationSql.includes(from), `the migration carries: ${from}`);
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec(migrationSql.replace(from, to));
+      return d1json(db.prepare(verifySql).all());
+    } finally {
+      db.close();
+    }
+  };
+  const cases: Array<[string, string, string]> = [
+    ["ok", d1json(realCatalogue()), ""],
+    ["visitor-not-pk", defective("visitor_id          INTEGER PRIMARY KEY", "visitor_id          INTEGER"), "resident_accounts.visitor_id|INTEGER|0|1"],
+    ["nonce-not-pk", defective("nonce           TEXT    PRIMARY KEY", "nonce           TEXT"), "resident_account_challenges.nonce"],
+    ["type-drift", defective("record_created_at   INTEGER NOT NULL", "record_created_at   TEXT    NOT NULL"), "resident_accounts.record_created_at"],
+    ["notnull-drift", defective("claim_code_hash TEXT    NOT NULL", "claim_code_hash TEXT"), "resident_account_challenges.claim_code_hash"],
+  ];
+  const run = runPs(harness(cases.map(([name, json]) => `Write-Host ("RESULT ${name} [" + (Test-Catalogue (Read-D1Rows ${q(json)})) + "]")`)));
+  if (!run) return t.skip("no PowerShell available");
+  const got = results(run.out);
+  assert.equal(got.get("ok"), "", run.out);
+  for (const [name, , expect] of cases.slice(1)) {
+    const v = got.get(name);
+    assert.ok(v !== undefined && v !== "", `${name} was refused: ${run.out}`);
+    assert.ok(v!.includes(expect), `${name}: '${v}' mentions '${expect}'`);
+  }
+  // the defect the review named leaves the OLD five-row shape identical: the new rows are what catch it
+  const noColumns = (json: string): string => JSON.stringify([{ results: (JSON.parse(json)[0].results as Array<{ kind: string }>).filter((r) => r.kind !== "column"), success: true, meta: {} }]);
+  const old = runPs(harness([`Write-Host ("RESULT old [" + (Test-Catalogue (Read-D1Rows ${q(noColumns(cases[1]![1]))})) + "]")`]))!;
+  assert.match(results(old.out).get("old") ?? "", /returned 5 rows, expected 24/);
 });
 
 test("the other-objects comparison, run for real: identical snapshots pass; a changed table sql, a dropped object or a trivially small snapshot (a wrong database) or an unreadable one stops", (t) => {
@@ -646,6 +692,6 @@ test("the key gates CAN FAIL: a mutated copy of the script turns the harness ans
     const d = defsOf(s);
     return runPs(harness([`Write-Host ("RESULT c [" + (Test-Catalogue (Read-D1Rows ${q(d1json(realCatalogue().slice(1)))})) + "]")`], d))!.out;
   };
-  assert.match(catCase(script), /RESULT c \[the catalogue read returned 4 rows/);
+  assert.match(catCase(script), /RESULT c \[the catalogue read returned 23 rows/);
   assert.match(catCase(mutate("if ($got.Count -ne $EXPECTED_CATALOGUE.Count)", "if ($false)")), /RESULT c \[catalogue row 1 is/, "mutant: the row-count check is gone -> the failure moves to a different message (row 1), proving the count gate was the one that fired");
 });
