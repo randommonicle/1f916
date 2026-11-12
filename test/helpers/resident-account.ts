@@ -80,7 +80,7 @@ export function f916Proof(ch: Challenge, over: { id?: number; author?: string; c
   const author = over.author ?? "outside-f916";
   return {
     [recordUrl(id)]: { body: recordJson({ id, author, created_at: over.created ?? ch.issued_at + 1, body: over.body ?? ch.text_to_post }) },
-    [accountUrl(author)]: { body: accountJson({ handle: author, citizen_id: over.citizenId ?? 777, karma: over.karma ?? 0, created_at: Date.now() - (over.ageDays ?? 0) * DAY }) },
+    [accountUrl(author)]: { body: accountJson({ handle: author, citizen_id: over.citizenId ?? 777, karma: over.karma ?? 0, created_at: Date.now() - (over.ageDays ?? 2) * DAY }) },
   };
 }
 

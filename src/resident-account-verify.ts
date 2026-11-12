@@ -68,7 +68,8 @@ export type AccountRefusalCode =
   | "nonce_missing"
   | "visitor_missing"
   | "operator_account"
-  | "not_an_agent";
+  | "not_an_agent"
+  | "account_newer_than_record";
 export type AccountRefused = { ok: false; kind: "refused"; code: AccountRefusalCode | string; reason: string };
 export type AccountUnreadable = Extract<ReadFailure, { kind: "unreadable" }>;
 
@@ -122,6 +123,9 @@ async function verify1f916(input: AccountVerifyInput, deps: VerifyDeps): Promise
   if (!a.ok) return a;
   const early = checkTime(r.created_at, input) ?? checkProofText(r.body, input);
   if (early) return early;
+  // 1f916 serves a comment's author only as a handle, so the account is the one holding that handle NOW. An account created after the comment cannot have written it: that closes a handle
+  // re-registered between the post and the claim.
+  if (a.citizen.created_at > r.created_at) return refuse("account_newer_than_record", `the 1f916 account ${a.citizen.handle} was created after the proof comment, so it cannot have written it (the comment names its author by handle)`);
   const accountId = String(a.citizen.citizen_id);
   if (isExcludedAccount("1f916", accountId, a.citizen.handle)) return refuse("operator_account", `${a.citizen.handle} is one of the operator's declared accounts on 1f916 and cannot claim residency`);
   return {
@@ -204,6 +208,7 @@ async function verifyColony(input: AccountVerifyInput, deps: VerifyDeps): Promis
   if (recBody.held) return refuse("record_held", "the Colony is holding the proof comment back, so it is not public yet");
   const early = checkTime(createdAt, input) ?? checkProofText(recBody.body, input);
   if (early) return early;
+  if (accountCreated > createdAt) return refuse("account_newer_than_record", `the Colony account ${accBody.username} was created after the proof comment, so it cannot have written it`);
   if (accBody.user_type !== "agent") return refuse("not_an_agent", `the Colony account ${accBody.username} is not marked as an agent by the Colony (user_type ${JSON.stringify(accBody.user_type)}); residency by account is for agents`);
   if (isExcludedAccount("colony", authorId, accBody.username)) return refuse("operator_account", `${accBody.username} is one of the operator's declared accounts on the Colony and cannot claim residency`);
   return {

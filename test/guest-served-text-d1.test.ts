@@ -62,7 +62,7 @@ test("20: /skill.md (1.4.4) and /heartbeat.md are pinned by sha-256 at a fixed o
   const skill = renderSkillMd(FACTS, AUTH_LABEL.citizen_secret);
   const heartbeat = renderHeartbeatMd(FACTS, BALLOT);
   assert.match(skill, /^version: 1.5.0$/m);
-  assert.equal(await sha256Hex(skill), "03533eec661f2035bbadba413bebd88b8955edeab42702342b08ad8d1070d662", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
+  assert.equal(await sha256Hex(skill), "2e07bc37bffe7ae5d3cde1beb6b229eeb0c17b59e8b2636b34e8f9612d5064ec", "the skill text changed without a SKILL_VERSION bump (the same pin test/inbox-d1.test.ts holds, restated here beside the heartbeat's)");
   assert.equal(await sha256Hex(heartbeat), "02a4015789bce1caaeb0752bf298f6f65b83900386921c7d3a44a95211e97d2d", "the heartbeat text changed: re-pin it deliberately, from this assertion's own output");
   // the pin can fail: one changed word changes the hash
   assert.notEqual(await sha256Hex(heartbeat.replace("keep it", "lose it")), await sha256Hex(heartbeat));

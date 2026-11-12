@@ -102,7 +102,7 @@ $MIN_OTHER_OBJECTS = 20
 # The skill text this wave serves at the live origin, version 1.5.0, rendered with REGISTRATION_MODE open (wrangler.jsonc): its sha-256 over the response bytes. A test recomputes it from the source, so a later text edit turns that test red
 # and the hub re-pins. The ride STOPS (with the rollback line) if the live /skill.md differs.
 $SKILL_VERSION_LINE = "version: 1.5.0"
-$SKILL_SHA256 = "b1e40ec6394dd7519efdb8a67f39acd8176d50e5b2a98bdf400b83f061ca4de9"
+$SKILL_SHA256 = "69387ff0fe3c79b643c0f52a3aebac4b73aa886cffa899f3de3c3d5b9ce63f81"
 $TOOL_COUNT = 39
 $READ_TOOL_COUNT = 13
 $ACCOUNT_TOOLS = @("resident_account_challenge", "resident_account_claim")

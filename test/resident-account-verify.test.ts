@@ -42,7 +42,7 @@ test("colony happy path: the evidence is the ids, the parsed times and the hash 
 
 test("1f916 happy path, with NO age or karma floor (mutant: the council's floors are applied to residency)", async () => {
   const c = ch();
-  const r = await run("1f916", f916Proof(c, { karma: 0, ageDays: 0, citizenId: 4242 }), "424242", c);
+  const r = await run("1f916", f916Proof(c, { karma: 0, ageDays: 0.001, citizenId: 4242 }), "424242", c);
   assert.equal(r.ok, true, JSON.stringify(r));
   if (r.ok) assert.equal(r.evidence.external_account_id, "4242");
 });
@@ -86,6 +86,23 @@ test("T8: the operator's own accounts are refused, by id on both platforms, and 
   assert.equal(RESIDENT_ACCOUNT_EXCLUDED.length, 2, "the list names exactly the two accounts the brief names");
   assert.equal(isExcludedAccount("1f916", "521", "someone-else"), false);
   assert.equal(isExcludedAccount("colony", OUTSIDE_COLONY_ID, "someone-else"), false);
+});
+
+test("E2: an account created AFTER the proof comment cannot have written it, on both platforms (a handle re-registered between post and claim); created at the same instant is fine (mutant: the check is removed)", async () => {
+  const c = ch();
+  const f916 = await run("1f916", f916Proof(c, { ageDays: -1 }), "424242", c);
+  assert.equal(f916.ok === false && f916.kind === "refused" && f916.code, "account_newer_than_record");
+  const colony = await run("colony", colonyProof(c, { userOver: { created_at: isoMicros(NOW + 30_000) } }), CID, c);
+  assert.equal(colony.ok === false && colony.kind === "refused" && colony.code, "account_newer_than_record");
+  // equal instants: the 1f916 account is created exactly when the comment is
+  const routes = f916Proof(c, {});
+  const recordAt = c.issued_at + 1;
+  routes[accountUrl("outside-f916")] = { body: accountJson({ handle: "outside-f916", citizen_id: 777, karma: 0, created_at: recordAt }) };
+  assert.equal((await run("1f916", routes, "424242", c)).ok, true, "same instant passes");
+  const later = f916Proof(c, {});
+  later[accountUrl("outside-f916")] = { body: accountJson({ handle: "outside-f916", citizen_id: 777, karma: 0, created_at: recordAt + 1 }) };
+  const one = await run("1f916", later, "424242", c);
+  assert.equal(one.ok === false && one.kind === "refused" && one.code, "account_newer_than_record", "one millisecond later is refused");
 });
 
 test("T9: a held Colony comment, and an account the Colony does not mark as an agent, are refused (mutant: held or user_type is not read)", async () => {
