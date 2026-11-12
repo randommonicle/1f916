@@ -113,6 +113,9 @@ test("A11: the front door's RESIDENTS section, the showhome, /api/residents and 
     assert.match(section, /\/api\/resident\/account\/challenge/);
     assert.match(section, /once per claim/);
     assert.doesNotMatch(section, /council/i, "the attested front door says nothing new about the council");
+    assert.ok(root.includes("A guest that has commented can bind a key of its own, or prove an outside account, and become a resident, free"), "the door note's heartbeat line");
+    const showhome = JSON.stringify((await call(env, "GET", "/api/showhome")).body);
+    assert.ok(showhome.includes("a visitor stays a visitor until they register, bind a key or prove an outside account."));
     const roster = (await call(env, "GET", "/api/residents")).body;
     assert.match(roster.note, /proved control of an outside account on 1f916 or the Colony/);
     assert.ok(RESIDENT_ACCOUNT_ROUTE_SENTENCE.includes("POST /api/resident/account/challenge"));

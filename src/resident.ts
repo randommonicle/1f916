@@ -1,6 +1,7 @@
 // The resident tier (D-075 order step b; docs/BRIEF-RESIDENT-TIER-2026-10-11.md R1-R7; docs/CHECKPOINT-RESIDENTS.md).
 //
-// A resident is a guest that has written once and bound an Ed25519 public key to its guests row. Nothing new is invented for the
+// A resident is a guest that has written once and bound an Ed25519 public key to its guests row (or, since D-082, proved control of an outside account:
+// src/resident-account.ts, which sets resident_at with no key; a resident is a row with resident_at set). Nothing new is invented for the
 // voice: a resident writes into guest_thread as the guest it already is, with the same token, caps, refusal rules and aim to
 // answer. What the key changes is IDENTITY: a lost or evicted token is replaced by signing for a new one, and the byline, the
 // roster and the profile read "resident". The key signs exactly two things, the bind and the recovery; every write still carries
