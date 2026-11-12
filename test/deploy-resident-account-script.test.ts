@@ -95,10 +95,10 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
   assert.equal(/\$\w+\s*\|\s*Where-Object[^\n]*-notmatch/.test(code), false);
 });
 
-test("the pins: v6 hash, the live base is the full sha of 9e9bb20a, the reviewed commit is 6c6e032c (set by the hub), the allowlist covers the scripts, the verify SQL, their tests and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, ONE migration (0026)", () => {
+test("the pins: v6 hash, the live base is the full sha of 9e9bb20a, the reviewed commit is be959abe (set by the hub), the allowlist covers the scripts, the verify SQL, their tests and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, ONE migration (0026)", () => {
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, /^\$LIVE_BASE_COMMIT = "9e9bb20a5913bfbb030eca5d563e0da5a4ea41c7"$/m);
-  assert.match(script, /^\$REVIEWED_COMMIT = "6c6e032c5d07acba2b347bb98b5e0e159997b1c5"$/m);
+  assert.match(script, /^\$REVIEWED_COMMIT = "be959abe190a2dab14ac6c85766bad2353898679"$/m);
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(
     script,
@@ -247,6 +247,7 @@ test("the steps are in the load-bearing order: pins, rehearsal, date, git, gates
     "# BEGIN-REVIEWED-SOURCE-CHECK",
     "# BEGIN-GATES",
     'Read-Attest "before the deploy"',
+    "# BEGIN-PROD-TARGET",
     "$script:PreflightAt = Get-Date",
     "$catRes = Invoke-D1Read (Get-Content $VERIFY_SQL_PATH -Raw)",
     "$tableState = Get-TableState $catRes",
@@ -277,8 +278,8 @@ test("the steps are in the load-bearing order: pins, rehearsal, date, git, gates
   const executed = wranglerLines.filter((l) => /Invoke-Bounded(Sql)? \("npx wrangler /.test(l));
   assert.deepEqual(
     executed.map((l) => /npx wrangler (\S+)/.exec(l)![1]).sort(),
-    ["d1", "d1", "deploy"],
-    "d1 execute (the --command read and the migration) and one stamped deploy, each through the bounded runner",
+    ["d1", "d1", "d1", "deploy"],
+    "d1 info (the production id), d1 execute (the --command read and the migration) and one stamped deploy, each through the bounded runner",
   );
   for (const l of wranglerLines.filter((l) => !executed.includes(l))) assert.match(l, /Stop-Here|Say |ROLLBACK_LINE|dry-run|rollbackTarget/, `any other mention of wrangler is message text: ${l.trim().slice(0, 80)}`);
   assert.equal((code.match(/Start-Process/g) ?? []).length, 1, "one process launcher");
@@ -335,6 +336,59 @@ test("D3: the printed rollback line distinguishes a rollback before any bind fro
   const line = script.split("\n").find((l) => l.startsWith("$ROLLBACK_LINE = "))!;
   for (const needle of ["never drop the tables", "Before any account bind the two tables are simply unused", "after one, the old worker hides each account-only resident from the roster and the profile and refuses its token recovery until the new worker is back (rows intact)"]) assert.ok(line.includes(needle), needle);
   assert.equal(/two unused tables and an index the old worker never reads\); never drop them/.test(script), false, "the old flat 'harmless' wording is gone");
+});
+
+test("E1: the production target is proved before the first production read (under -DryRun too): the account's uuid for 'commonhold' must equal the database_id the config pairs with that name, and no other root config or env block may map the name elsewhere", (t) => {
+  const PROD = "45fc49db-8483-4a29-ac54-153fa3c83b42";
+  const OTHER = "465f489c-f1ca-446e-8f5f-d35ea53fd720";
+  const cfg = (extra: string): string => `{ "d1_databases": [ { "binding": "DB", "database_name": "commonhold", "database_id": "${PROD}" } ]${extra} }`;
+  const envBlock = (name: string, binding: string, id: string): string => `, "env": { "staging": { "d1_databases": [ { "binding": "${binding}", "database_name": "${name}", "database_id": "${id}" } ] } }`;
+  const toml = (id: string): string => `[[d1_databases]]\nbinding = "DB"\ndatabase_name = "commonhold"\ndatabase_id = "${id}"\n`;
+  const real = readFileSync(here("../wrangler.jsonc"), "utf8");
+  const info = (o: Record<string, unknown>): string => "banner\n" + JSON.stringify(o);
+  const entries = (text: string, isToml = false): string => `(Get-ConfigD1Entries ${q(text)} $${isToml ? "true" : "false"})`;
+  const target = (uuid: string, ...texts: string[]): string => `Test-ProdTarget ${q(uuid)} @(${texts.map((x) => "@(" + (x.startsWith("[[") ? entries(x, true) : entries(x)) + ")").join(" + ")})`;
+  const cases: Array<[string, string, string]> = [
+    ["real-entries", `& { $e = @(${entries(real)}); [string]@($e).Count + '|' + $e[0].Name + '|' + $e[0].Id }`, `1|commonhold|${/"database_id":\s*"([0-9a-f-]{36})"/.exec(real)![1]}`],
+    ["real-target", target(/"database_id":\s*"([0-9a-f-]{36})"/.exec(real)![1]!, real), ""],
+    ["match", target(PROD, cfg("")), ""],
+    ["match-upper-config", target(PROD, cfg("").replace(PROD, PROD.toUpperCase())), ""],
+    ["match-toml", target(PROD, toml(PROD)), ""],
+    ["account-differs", target(OTHER, cfg("")), "maps the name commonhold to database_id"],
+    ["env-maps-elsewhere", target(PROD, cfg(envBlock("commonhold", "DB", OTHER))), "maps the name commonhold to database_id '" + OTHER + "'"],
+    ["env-binding-maps-elsewhere", target(PROD, cfg(envBlock("something-else", "commonhold", OTHER))), "maps the name commonhold"],
+    ["env-other-name-fine", target(PROD, cfg(envBlock("scratch", "S", OTHER))), ""],
+    ["toml-maps-elsewhere", target(PROD, cfg(""), toml(OTHER)), "maps the name commonhold"],
+    ["no-entry", `Test-ProdTarget '${PROD}' @()`, "no wrangler config entry pairs database_name commonhold"],
+    ["malformed", target("not-a-uuid", cfg("")), "not a well-formed UUID"],
+    ["unparsable-config", `[string]($null -eq (Get-ConfigD1Entries 'not json {' $false))`, "True"],
+    ["info-ok", `& { $r = Get-D1InfoUuid ${q(info({ uuid: PROD, name: "commonhold" }))} 'commonhold'; $r.Error + $r.Uuid }`, PROD],
+    ["info-wrong-name", `& { $r = Get-D1InfoUuid ${q(info({ uuid: PROD, name: "commonhold-migtest" }))} 'commonhold'; $r.Error }`, "not commonhold"],
+    ["info-no-json", `& { $r = Get-D1InfoUuid 'Error' 'commonhold'; $r.Error }`, "no JSON object"],
+    ["info-no-uuid", `& { $r = Get-D1InfoUuid ${q(info({ name: "commonhold" }))} 'commonhold'; $r.Error }`, "no uuid"],
+  ];
+  const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
+  if (!run) return t.skip("no PowerShell available");
+  const got = results(run.out);
+  for (const [name, , expect] of cases) {
+    const v = got.get(name);
+    assert.ok(v !== undefined, `${name} produced a result: ${run.out}`);
+    if (expect === "") assert.equal(v, "", name);
+    else assert.ok(v!.includes(expect), `${name}: '${v}' mentions '${expect}'`);
+  }
+  // wired: after the gates and the live reads, before the first production read and before the dry-run exit; read-only (d1 info)
+  const i = script.indexOf("# BEGIN-PROD-TARGET");
+  assert.ok(i > script.indexOf("# END-GATES") && i < script.indexOf("$script:PreflightAt = Get-Date") && i < script.indexOf("if ($DryRun)"), "the target proof runs before the first production read, under -DryRun too");
+  const block = script.slice(i, script.indexOf("# END-PROD-TARGET"));
+  assert.ok(block.includes('npx wrangler d1 info " + $PROD_DB + " --json"'));
+  assert.equal(/--remote|execute|--file/.test(block), false, "the proof is a read: no execute, no file, no write");
+  assert.ok(block.includes("Say (\"[target] \" + $PROD_DB + \" resolves to \" + $prodResolved.Uuid"), "both ids are printed");
+  // a mutated copy that never compares lets a mismatch through
+  const mutated = script.replace('if ([string]$e.Id -cne $uuid) { return', "if ($false) { return");
+  assert.notEqual(mutated, script);
+  const md = defsOf(mutated);
+  const m = runPs(harness([`Write-Host ("RESULT mismatch [" + (${target(OTHER, cfg("")).replace("Test-ProdTarget", "Test-ProdTarget")}) + "]")`], md))!;
+  assert.equal(results(m.out).get("mismatch"), "", "mutant: the id comparison is gone -> a config that points elsewhere passes");
 });
 
 test("the one-hour window, run for real: inside passes; just over, a missing first read and a clock far past all stop; a step that would end outside the window is refused", (t) => {

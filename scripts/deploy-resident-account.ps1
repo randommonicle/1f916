@@ -9,6 +9,9 @@
 # differ by a byte; after the deploy it STOPS if the constitution is not still v6 with its template hash. The only migration added since the live base must be migrations/0026_resident_accounts.sql (added, not edited).
 # THE PRIVACY DATE: src/privacy.ts says "Last updated: 12 November 2026". Step 0b STOPS, before any git, npm, wrangler or network command, unless the date in that file equals the UTC date of the run: if Ben deploys on another day,
 # re-date src/privacy.ts first (a docs-and-text commit; the reviewed-source allowlist below does NOT cover src/, so the hub re-reviews and re-pins). -DryRun is stopped by it too.
+# THE PRODUCTION TARGET IS PROVED, NOT ASSUMED (review E1): every D1 command here names the database 'commonhold', and wrangler resolves a database_name or binding in a local config to that entry's UUID without asking the account. Before the first
+# production read (so under -DryRun too) the script resolves the account's own UUID for 'commonhold' (npx wrangler d1 info commonhold --json, a read) and STOPS unless it is a well-formed UUID equal to the database_id wrangler.jsonc pairs with
+# the name 'commonhold' AND no other root wrangler config or env block maps that name (as database_name or binding) to a different id. Both ids are printed. The files are only read.
 # THIS SCRIPT DOES NOT SIGN ANYTHING and holds no key, no token and no custody file. It writes only what its steps say: migration 0026 to production D1 (only if a table is absent), and the stamped worker.
 # ORDER: the rehearsal of the migration on the scratch D1 (scripts/rehearse-resident-account.ps1: both tables, the columns, the index, the UNIQUE (platform, external_account_id), no other object changed, a second apply a no-op) has PASSED,
 # which a real run confirms by -RehearsalPassed (the script cannot check it; it needs Ben, since wrangler prompts); then 0a the pins, 0b the privacy date; 1 git; 2 gates (npm test, typecheck); 3 live read of the base and the attested constitution;
@@ -55,12 +58,14 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "9e9bb20a5913bfbb030eca5d563e0da5a4ea41c7"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0a STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "6c6e032c5d07acba2b347bb98b5e0e159997b1c5"
+$REVIEWED_COMMIT = "be959abe190a2dab14ac6c85766bad2353898679"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-resident-account.ps1", "scripts/rehearse-resident-account.ps1", "scripts/verify-resident-account.sql", "test/deploy-resident-account-script.test.ts", "test/rehearse-resident-account-script.test.ts", "docs/")
 $MIGRATION_PATH = "migrations/0026_resident_accounts.sql"
 $VERIFY_SQL_PATH = "scripts/verify-resident-account.sql"
 $PRIVACY_PATH = "src/privacy.ts"
+$ROOT_CONFIGS = @("wrangler.jsonc", "wrangler.json", "wrangler.toml")
+$UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 $WINDOW_SECONDS = 3600
 $WRANGLER_D1_SECONDS = 120
 $WRANGLER_DEPLOY_SECONDS = 300
@@ -453,6 +458,71 @@ function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
   }
   Stop-Here ("the new worker was never shown live in " + $tries + " reads (last: " + $last + "). The deploy is not shown to be live. " + $ROLLBACK_LINE)
 }
+# The text of a wrangler config without its full-line comments (// for jsonc/json, # for toml).
+function Remove-ConfigComments($text) {
+  $kept = @()
+  foreach ($line in (([string]$text).Replace("`r`n", "`n").Split("`n"))) {
+    $t = $line.Trim()
+    if ($t.StartsWith("//") -or $t.StartsWith("#")) { continue }
+    $kept += $line
+  }
+  return ($kept -join "`n")
+}
+# Every D1 entry a wrangler config text declares, top level and in every env block, as @{ Name; Binding; Id } (empty strings when absent). $isToml selects the toml reader (a [[...d1_databases]] block per entry);
+# otherwise the text is jsonc/json. $null when a jsonc/json text does not parse (the caller STOPS: an unreadable config is never "no alias").
+function Get-ConfigD1Entries($text, $isToml) {
+  $entries = @()
+  $clean = Remove-ConfigComments $text
+  if ($isToml) {
+    foreach ($block in ([regex]::Split($clean, '(?m)^\s*\[\[[^\]]*d1_databases\]\]\s*$') | Select-Object -Skip 1)) {
+      $chunk = ([regex]::Split($block, '(?m)^\s*\[')[0])
+      $name = ""; $binding = ""; $id = ""
+      $m = [regex]::Match($chunk, '(?m)^\s*database_name\s*=\s*"([^"]*)"'); if ($m.Success) { $name = $m.Groups[1].Value }
+      $m = [regex]::Match($chunk, '(?m)^\s*binding\s*=\s*"([^"]*)"'); if ($m.Success) { $binding = $m.Groups[1].Value }
+      $m = [regex]::Match($chunk, '(?m)^\s*database_id\s*=\s*"([^"]*)"'); if ($m.Success) { $id = $m.Groups[1].Value.ToLowerInvariant() }
+      $entries += @(@{ Name = $name; Binding = $binding; Id = $id })
+    }
+    return @($entries)
+  }
+  try { $cfg = ($clean | ConvertFrom-Json) } catch { return $null }
+  $lists = @(, @($cfg.d1_databases))
+  if ($null -ne $cfg.env) { foreach ($envProp in $cfg.env.PSObject.Properties) { $lists += @(, @($envProp.Value.d1_databases)) } }
+  foreach ($list in $lists) {
+    foreach ($d in @($list)) {
+      if ($null -eq $d) { continue }
+      $name = ""; $binding = ""; $id = ""
+      if ($null -ne $d.PSObject.Properties["database_name"]) { $name = [string]$d.database_name }
+      if ($null -ne $d.PSObject.Properties["binding"]) { $binding = [string]$d.binding }
+      if ($null -ne $d.PSObject.Properties["database_id"]) { $id = ([string]$d.database_id).ToLowerInvariant() }
+      $entries += @(@{ Name = $name; Binding = $binding; Id = $id })
+    }
+  }
+  return @($entries)
+}
+# The UUID of $expectedName from `wrangler d1 info <name> --json` output (banner text before the first brace is ignored), as @{ Uuid; Error }. The object's name, when present, must be $expectedName.
+function Get-D1InfoUuid($text, $expectedName) {
+  $i = ([string]$text).IndexOf("{")
+  if ($i -lt 0) { return @{ Uuid = ""; Error = "d1 info returned no JSON object" } }
+  try { $info = (([string]$text).Substring($i) | ConvertFrom-Json) } catch { return @{ Uuid = ""; Error = "d1 info returned JSON that does not parse" } }
+  $uuid = ""
+  if ($null -ne $info.PSObject.Properties["uuid"]) { $uuid = [string]$info.uuid } elseif ($null -ne $info.PSObject.Properties["id"]) { $uuid = [string]$info.id }
+  if ($uuid -eq "") { return @{ Uuid = ""; Error = "d1 info carries no uuid" } }
+  if ($null -ne $info.PSObject.Properties["name"] -and [string]$info.name -cne $expectedName) { return @{ Uuid = $uuid; Error = ("d1 info answers for the database '" + $info.name + "', not " + $expectedName) } }
+  return @{ Uuid = $uuid.ToLowerInvariant(); Error = "" }
+}
+# "" when $uuid (the account's id for the production database) is a well-formed lower-case UUID, there is at least one config entry whose database_name is the production name, and EVERY entry that maps the production name (as
+# database_name or binding) carries exactly that id, otherwise the reason. $entries is every D1 entry of every root config.
+function Test-ProdTarget($uuid, $entries) {
+  if ([string]$uuid -cnotmatch $UUID_PATTERN) { return ("the production database's id '" + $uuid + "' is not a well-formed UUID") }
+  $named = @(@($entries) | Where-Object { [string]$_.Name -ceq $PROD_DB })
+  if ($named.Count -lt 1) { return ("no wrangler config entry pairs database_name " + $PROD_DB + " with a database_id, so the id the account reports cannot be compared") }
+  foreach ($e in @($entries)) {
+    if ([string]$e.Name -ceq $PROD_DB -or [string]$e.Binding -ceq $PROD_DB) {
+      if ([string]$e.Id -cne $uuid) { return ("a wrangler config entry maps the name " + $PROD_DB + " to database_id '" + $e.Id + "' but the account says " + $uuid + ": wrangler would send the migration to the config's database, not the account's. Not this script's deploy") }
+    }
+  }
+  return ""
+}
 # END-OF-DEFINITIONS (nothing above runs git, npm, wrangler or the network)
 
 # 0a. the two pins, BEFORE any git, npm, wrangler or network command: a placeholder is never a commit, and a malformed pin must not reach `git merge-base`
@@ -566,6 +636,25 @@ if ($null -eq $officialBefore) { Stop-Here "GET /api/official did not return JSO
 if ($null -ne $officialBefore.residents -and $null -ne $officialBefore.residents.PSObject.Properties["by_account"]) { Stop-Here "GET /api/official already serves residents.by_account: this looks already deployed, verify by hand." }
 $councilRulesBefore = Get-CouncilRules (Read-JsonBody (Get-Text "$BASE/api/council" 30 $null))
 if ($null -eq $councilRulesBefore) { Stop-Here "GET /api/council could not be read before the deploy: the rules cannot be compared after it." }
+
+# 3b. THE PRODUCTION TARGET (E1): the account's own UUID for the database every D1 command below names, compared with the root wrangler configs. A READ, so -DryRun runs it too.
+# BEGIN-PROD-TARGET
+$prodEntries = @()
+foreach ($configPath in $ROOT_CONFIGS) {
+  if (-not (Test-Path $configPath)) { continue }
+  $found = Get-ConfigD1Entries (Get-Content $configPath -Raw) ($configPath.EndsWith(".toml"))
+  if ($null -eq $found) { Stop-Here "$configPath does not parse: the production database's id cannot be compared." }
+  $prodEntries += @($found)
+}
+$prodInfo = Invoke-Bounded ("npx wrangler d1 info " + $PROD_DB + " --json") $WRANGLER_D1_SECONDS
+if ($prodInfo.TimedOut) { Stop-Here ("wrangler d1 info timed out after " + $WRANGLER_D1_SECONDS + " s: the production database's id could not be resolved. Nothing was written.") }
+if ($prodInfo.Code -ne 0) { Stop-Here ("wrangler d1 info failed (exit " + $prodInfo.Code + "): the production database's id could not be resolved. Nothing was written.") }
+$prodResolved = Get-D1InfoUuid $prodInfo.Out $PROD_DB
+if ($prodResolved.Error -ne "") { Stop-Here ($prodResolved.Error + ". Nothing was written.") }
+$why = Test-ProdTarget $prodResolved.Uuid $prodEntries
+if ($why -ne "") { Stop-Here ($why + ". Nothing was written.") }
+Say ("[target] " + $PROD_DB + " resolves to " + $prodResolved.Uuid + " on the account; the repo's wrangler config pairs " + $PROD_DB + " with " + $prodResolved.Uuid + ": they are equal")
+# END-PROD-TARGET
 
 # 4. THE FIRST PRODUCTION READ. The clock starts BEFORE it is invoked, so the read's own run time (up to $WRANGLER_D1_SECONDS) is inside the window. READS, so -DryRun runs them too.
 $script:PreflightAt = Get-Date
