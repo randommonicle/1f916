@@ -327,7 +327,8 @@ test("the header carries the rollback text and every duty (rehearsal first, the 
     "there is no resume mode",
     "a step BEFORE the worker deploy stopped",
     "/mcp/read still 13",
-    "one real",
+    "403 operator_account",
+    "no operator account binds",
     "REVIEWED SOURCE ONLY",
   ]) assert.ok(header.includes(needle), `header names: ${needle}`);
 });
