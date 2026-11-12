@@ -54,7 +54,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "9e9bb20a5913bfbb030eca5d563e0da5a4ea41c7"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0a STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "6c6e032c5d07acba2b347bb98b5e0e159997b1c5"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-resident-account.ps1", "scripts/rehearse-resident-account.ps1", "scripts/verify-resident-account.sql", "test/deploy-resident-account-script.test.ts", "test/rehearse-resident-account-script.test.ts", "docs/")
 $MIGRATION_PATH = "migrations/0026_resident_accounts.sql"

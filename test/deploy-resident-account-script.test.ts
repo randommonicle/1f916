@@ -95,10 +95,10 @@ test("no PowerShell traps: one spelling per variable, no `$var:` drive reference
   assert.equal(/\$\w+\s*\|\s*Where-Object[^\n]*-notmatch/.test(code), false);
 });
 
-test("the pins: v6 hash, the live base is the full sha of 9e9bb20a, the reviewed commit is the hub's placeholder, the allowlist covers the scripts, the verify SQL, their tests and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, ONE migration (0026)", () => {
+test("the pins: v6 hash, the live base is the full sha of 9e9bb20a, the reviewed commit is 6c6e032c (set by the hub), the allowlist covers the scripts, the verify SQL, their tests and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, ONE migration (0026)", () => {
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, /^\$LIVE_BASE_COMMIT = "9e9bb20a5913bfbb030eca5d563e0da5a4ea41c7"$/m);
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m);
+  assert.match(script, /^\$REVIEWED_COMMIT = "6c6e032c5d07acba2b347bb98b5e0e159997b1c5"$/m);
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(
     script,
