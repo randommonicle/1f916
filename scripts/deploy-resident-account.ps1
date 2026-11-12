@@ -499,7 +499,8 @@ function Get-ConfigD1Entries($text, $isToml) {
   }
   return @($entries)
 }
-# The UUID of $expectedName from `wrangler d1 info <name> --json` output (banner text before the first brace is ignored), as @{ Uuid; Error }. The object's name, when present, must be $expectedName.
+# The UUID of $expectedName from `wrangler d1 info <name> --json` output (banner text before the first brace is ignored), as @{ Uuid; Error }. The object must carry a name equal to $expectedName: wrangler looks the
+# uuid up from the config, so the name the account returns is the only independent evidence that the config's id is production (CODEX r3).
 function Get-D1InfoUuid($text, $expectedName) {
   $i = ([string]$text).IndexOf("{")
   if ($i -lt 0) { return @{ Uuid = ""; Error = "d1 info returned no JSON object" } }
@@ -507,7 +508,8 @@ function Get-D1InfoUuid($text, $expectedName) {
   $uuid = ""
   if ($null -ne $info.PSObject.Properties["uuid"]) { $uuid = [string]$info.uuid } elseif ($null -ne $info.PSObject.Properties["id"]) { $uuid = [string]$info.id }
   if ($uuid -eq "") { return @{ Uuid = ""; Error = "d1 info carries no uuid" } }
-  if ($null -ne $info.PSObject.Properties["name"] -and [string]$info.name -cne $expectedName) { return @{ Uuid = $uuid; Error = ("d1 info answers for the database '" + $info.name + "', not " + $expectedName) } }
+  if ($null -eq $info.PSObject.Properties["name"] -or [string]$info.name -eq "") { return @{ Uuid = $uuid; Error = "d1 info carries no database name, so the config's id cannot be proved to be " + $expectedName } }
+  if ([string]$info.name -cne $expectedName) { return @{ Uuid = $uuid; Error = ("d1 info answers for the database '" + $info.name + "', not " + $expectedName) } }
   return @{ Uuid = $uuid.ToLowerInvariant(); Error = "" }
 }
 # "" when $uuid (the account's id for the production database) is a well-formed lower-case UUID, there is at least one config entry whose database_name is the production name, and EVERY entry that maps the production name (as

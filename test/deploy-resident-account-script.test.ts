@@ -365,6 +365,8 @@ test("E1: the production target is proved before the first production read (unde
     ["info-ok", `& { $r = Get-D1InfoUuid ${q(info({ uuid: PROD, name: "commonhold" }))} 'commonhold'; $r.Error + $r.Uuid }`, PROD],
     ["info-wrong-name", `& { $r = Get-D1InfoUuid ${q(info({ uuid: PROD, name: "commonhold-migtest" }))} 'commonhold'; $r.Error }`, "not commonhold"],
     ["info-no-json", `& { $r = Get-D1InfoUuid 'Error' 'commonhold'; $r.Error }`, "no JSON object"],
+    ["info-no-name", `& { $r = Get-D1InfoUuid ${q(info({ uuid: PROD }))} 'commonhold'; $r.Error }`, "carries no database name"],
+    ["info-empty-name", `& { $r = Get-D1InfoUuid ${q(info({ uuid: PROD, name: "" }))} 'commonhold'; $r.Error }`, "carries no database name"],
     ["info-no-uuid", `& { $r = Get-D1InfoUuid ${q(info({ name: "commonhold" }))} 'commonhold'; $r.Error }`, "no uuid"],
   ];
   const run = runPs(harness(cases.map(([name, expr]) => `Write-Host ("RESULT ${name} [" + (${expr}) + "]")`)));
