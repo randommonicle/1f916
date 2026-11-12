@@ -41,6 +41,8 @@ const GUEST_READERS: Record<string, string[]> = {
   // the council (D-075 step c): the roster reads guests (a seat needs a still-bound key, and the handle) and guest_thread (a resident's and a citizen's last write, and the
   // presence floor of three distinct UTC days). Not under src/maintainer/, no model call; test/council-isolation-d1.test.ts pins that no maintainer file names a council table.
   "council.ts": ["guest_thread", "guests"],
+  // residency by an outside account (D-082): the claim guards its writes on the guest's current token_hash and sets resident_at; the recovery replaces token_hash. Not under src/maintainer/, no model call.
+  "resident-account.ts": ["guests"],
 };
 
 function walk(dir: string): string[] {

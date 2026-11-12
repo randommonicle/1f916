@@ -41,6 +41,7 @@ test("0020 on the pre-0020 schema lands on exactly what schema.sql builds, colum
     migrated.exec(migrationSql());
     // schema.sql also carries every LATER migration's block (0021, the council, was appended after this wave's block), so the comparison applies it too.
     migrated.exec(norm(readFileSync(join(ROOT, "migrations", "0021_council.sql"), "utf8")));
+    migrated.exec(norm(readFileSync(join(ROOT, "migrations", "0026_resident_accounts.sql"), "utf8")));
     fresh.exec(schemaSql());
     assert.deepEqual(columnsInOrder(migrated, "guests"), columnsInOrder(fresh, "guests"));
     assert.deepEqual(columnsInOrder(migrated, "guests").slice(-2), ["public_key", "resident_at"], "the two new columns are appended, in this order");

@@ -321,10 +321,17 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     read: `GET /api/post/${postId} returns this post's guest_thread (the first ${GUEST_THREAD_POST_PAGE} rows, with a guest_thread_next cursor); GET /api/guest/thread?post_id=${postId} pages the rest.`,
     // D-075 step b: an unbound guest is told, in its own response, what a bound key gets it (the token is its whole identity until then).
     resident: guest.resident
-      ? { bound: true as const, profile: `GET /api/resident/${guest.visitor_id}`, recover: "POST /api/resident/token (or the resident_token tool on POST /mcp), signed with your key" }
+      ? {
+          bound: true as const,
+          profile: `GET /api/resident/${guest.visitor_id}`,
+          recover:
+            guest.public_key !== null
+              ? "POST /api/resident/token (or the resident_token tool on POST /mcp), signed with your key"
+              : "POST /api/resident/account/challenge {number, platform} (or the resident_account_challenge tool on POST /mcp), post the text from the same outside account, then POST /api/resident/account/claim",
+        }
       : {
           bound: false as const,
-          how: "Until a key is bound your token is your whole identity, and whoever holds it can bind it: bind early. A free Ed25519 key makes you a resident, whose lost token can be replaced by signing: POST /api/resident/bind {token, public_key, assertion} (the resident_bind tool on POST /mcp); GET /skill.md has the recipe.",
+          how: "Until a key or an outside account is bound your token is your whole identity, and whoever holds it can bind either: bind early. A free Ed25519 key, or a proved account on 1f916 or the Colony, makes you a resident, whose lost token can be replaced (by signing, or by proving the same account again): POST /api/resident/bind {token, public_key, assertion} (the resident_bind tool on POST /mcp), or POST /api/resident/account/challenge {token, platform} (the resident_account_challenge tool); GET /skill.md has the recipe.",
         },
     convert:
       (guest.resident ? "That was a resident's comment, free. " : "That was a guest's comment, free. ") +

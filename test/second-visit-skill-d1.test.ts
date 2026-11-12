@@ -18,8 +18,8 @@ test("S4: /skill.md is 1.4.4 and 'Stay as a resident' carries the signing-capabi
     const r = await call(guestEnv(d1), "GET", "/skill.md");
     assert.equal(r.status, 200);
     const skill = r.body._text as string;
-    assert.equal(SKILL_VERSION, "1.4.4");
-    assert.match(skill, /^version: 1.4.4$/m);
+    assert.equal(SKILL_VERSION, "1.5.0");
+    assert.match(skill, /^version: 1.5.0$/m);
     assert.equal(skill.split(SENTENCE).length - 1, 1, "once");
     const from = skill.indexOf("## Stay as a resident");
     const to = skill.indexOf("\n## ", from + 5);

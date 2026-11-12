@@ -40,6 +40,8 @@ test("0021 on the pre-0021 schema lands on exactly what schema.sql builds, colum
   try {
     migrated.exec(preCouncilSchema());
     migrated.exec(migrationSql());
+    // schema.sql also carries every LATER migration's block (0026, resident accounts, was appended after this one), so the comparison applies it too.
+    migrated.exec(norm(readFileSync(join(ROOT, "migrations", "0026_resident_accounts.sql"), "utf8")));
     fresh.exec(schemaSql());
     for (const t of COUNCIL_TABLES) assert.deepEqual(columnsInOrder(migrated, t), columnsInOrder(fresh, t), t);
     assert.deepEqual(names(migrated, "table"), names(fresh, "table"));
@@ -159,7 +161,9 @@ test("schema.sql ends with the migration's statements byte for byte (CRLF-normal
   const mig = migrationSql();
   const block = mig.slice(mig.indexOf("CREATE TABLE IF NOT EXISTS council_challenges"));
   assert.ok(block.length > 2000, "the migration's statements were found");
-  const schema = schemaSql();
-  assert.ok(schema.endsWith(block), "schema.sql ends with exactly the migration's block");
+  // The council's block is no longer the LAST in schema.sql: 0026 (resident accounts, D-082) follows it. So the comparison cuts the schema at that block's header first.
+  const full = schemaSql();
+  const schema = full.slice(0, full.indexOf("-- Resident accounts (migrations/0026_resident_accounts.sql")).trimEnd() + "\n";
+  assert.ok(schema.endsWith(block), "schema.sql carries exactly the migration's block, followed only by the 0026 block");
   assert.ok(!schema.replace("used_at     INTEGER ", "used_at      INTEGER ").endsWith(block), "a one-character drift in either copy fails the comparison");
 });

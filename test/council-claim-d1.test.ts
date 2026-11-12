@@ -548,10 +548,19 @@ test("claim by a guest with no bound key is refused as not a resident, whatever 
   const { d1, env } = world();
   try {
     const { r, ch } = await ready(d1, env, "wren");
-    d1.raw.prepare("UPDATE guests SET public_key = NULL WHERE visitor_id = ?").run(r.number);
+    // a guest that is no resident at all (no key and no resident_at): refused as not a resident
+    d1.raw.prepare("UPDATE guests SET public_key = NULL, resident_at = NULL WHERE visitor_id = ?").run(r.number);
     const out = await claim(env, r, proof(ch, "wren-acct"));
     assert.ok(!out.ok);
     assert.deepEqual([out.status, out.code], [403, "council_not_a_resident"]);
+    assert.equal(claimRows(d1).length, 0);
+    // D-082 (brief B4): a resident with no key (bound by an outside account, resident_at set) is refused with its own code, before any outside read
+    d1.raw.prepare("UPDATE guests SET resident_at = ? WHERE visitor_id = ?").run(Date.now(), r.number);
+    const calls: any[] = [];
+    const noKey = await claim(env, r, proof(ch, "wren-acct"), {}, calls);
+    assert.ok(!noKey.ok);
+    assert.deepEqual([noKey.status, noKey.code], [403, "council_needs_key"]);
+    assert.equal(calls.length, 0, "no outside fetch ran");
     assert.equal(claimRows(d1).length, 0);
   } finally {
     d1.close();

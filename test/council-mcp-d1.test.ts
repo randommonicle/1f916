@@ -36,7 +36,7 @@ test("tools/list: /mcp lists the council read tool and all six write tools; /mcp
     for (const w of WRITE_TOOLS) assert.ok(full.includes(w), `/mcp lists ${w}`);
     assert.ok(read.includes("council"));
     for (const w of WRITE_TOOLS) assert.equal(read.includes(w), false, `/mcp/read must not list ${w}`);
-    assert.equal(full.length, 37);
+    assert.equal(full.length, 39);
     assert.equal(read.length, 13);
     // the council tool's description carries the phrase the door's own cross-check reads
     const desc = (await rpc(handleMcp, c.env, "tools/list")).result.tools.find((t: any) => t.name === "council").description as string;

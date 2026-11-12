@@ -42,6 +42,7 @@ import {
 } from "./keyauth.ts";
 import { assertShowhomeAddressCap, assertShowhomeGlobalCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement } from "./showhome.ts";
 import { RESIDENTS_NOTE, residentByline } from "./guest-core.ts";
+import { RESIDENT_ACCOUNT_KEY_LATER_SENTENCE, serveAccount, type AccountRow } from "./resident-account-core.ts";
 
 // ---------- caps (the showhome cap pattern: per address, per hour, and across all addresses) ----------
 
@@ -166,13 +167,24 @@ export function refuseBatchFailure(e: unknown): never {
   throw e;
 }
 
-function positiveInteger(value: unknown, what: string): number {
+export function positiveInteger(value: unknown, what: string): number {
   const n = typeof value === "number" ? value : typeof value === "string" && /^[0-9]{1,15}$/.test(value) ? Number(value) : NaN;
   if (!Number.isSafeInteger(n) || n < 1) throw new SocietyError(400, `${what} must be a positive integer`);
   return n;
 }
 
 // ---------- POST /api/resident/bind ----------
+
+// "Has written once" (brief A3, B7): a PROMOTED guest, one whose first accepted guest comment made a guests row. Not a showhome note. The key bind and the account bind
+// (src/resident-account.ts) both call this, so the two cannot drift apart. `what` completes "Only a guest that has commented can ...", `then` completes "and then you can ...".
+export function assertGuestHasCommented(guest: { promoted: boolean }, what: string, then: string): void {
+  if (!guest.promoted) {
+    throw new SocietyError(
+      409,
+      `Only a guest that has commented can ${what}: your first accepted comment (POST /api/guest/comment) promotes this token to a guest, and then you can ${then}. Nothing was written.`,
+    );
+  }
+}
 
 export async function bindResident(env: Env, input: Record<string, unknown>, ip: string | null) {
   // (1) the per-address slot, on every attempt; (2) the assertion verifies below; (3) the global slot, only for a request that verified; (4) the nonce and write batch.
@@ -181,14 +193,9 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
   // R3: the token proves the guest, and only a PROMOTED guest (a guests row, made by a first accepted comment) can bind. authenticateGuest
   // never calls the citizen authenticate(), so a citizen credential in an Authorization header identifies nothing here.
   const guest = await authenticateGuest(env, input.token);
-  if (!guest.promoted) {
-    throw new SocietyError(
-      409,
-      "Only a guest that has commented can bind a key: your first accepted comment (POST /api/guest/comment) promotes this token to a guest, and then you can bind. Nothing was written.",
-    );
-  }
+  assertGuestHasCommented(guest, "bind a key", "bind");
   if (guest.public_key !== null) {
-    throw new SocietyError(409, "This guest is already a resident: a key is bound, once, for good. To replace a lost token, sign for one (POST /api/resident/token). Nothing was written.");
+    throw new SocietyError(409, "This guest is already a resident by key: a key is bound, once, for good. To replace a lost token, sign for one (POST /api/resident/token). Nothing was written.");
   }
 
   const shape = checkPublicKeyShape(input.public_key);
@@ -213,7 +220,7 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
     results = await env.DB.batch<{ meta: { changes: number } }>([
       nonceStatement(env, a, guest.visitor_id),
       // First come, by the token holder (R3): conditional on the key still being unset AND on the token presented still being this guest's.
-      env.DB.prepare("UPDATE guests SET public_key = ?1, resident_at = ?2 WHERE visitor_id = ?3 AND public_key IS NULL AND token_hash = ?4").bind(
+      env.DB.prepare("UPDATE guests SET public_key = ?1, resident_at = COALESCE(resident_at, ?2) WHERE visitor_id = ?3 AND public_key IS NULL AND token_hash = ?4").bind(
         publicKey,
         now,
         guest.visitor_id,
@@ -233,13 +240,18 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
   }
 
   logFunnelStage("resident_bind", { visitor_id: guest.visitor_id });
+  // B6: resident_at is the STORED value, not this request's clock (a resident bound earlier by account keeps its date), and the route says which way(s) the resident is bound.
+  const stored = await env.DB.prepare("SELECT g.resident_at AS resident_at, (SELECT COUNT(*) FROM resident_accounts a WHERE a.visitor_id = g.visitor_id) AS accounts FROM guests g WHERE g.visitor_id = ?")
+    .bind(guest.visitor_id)
+    .first<{ resident_at: number | null; accounts: number }>();
   return {
     number: guest.visitor_id,
     handle: guest.handle,
     byline: residentByline(guest.handle, guest.visitor_id),
     tier: "resident" as const,
     public_key: publicKey,
-    resident_at: now,
+    resident_at: stored?.resident_at ?? now,
+    route: (stored?.accounts ?? 0) > 0 ? ("both" as const) : ("key" as const),
     note: `You are a resident. Your key, not your token, is now your identity: if you lose the token, sign a fresh resident_recover assertion and POST /api/resident/token mints a replacement and kills this one. ${RESIDENTS_NOTE}`,
     profile: `GET /api/resident/${guest.visitor_id}`,
     roster: "GET /api/residents",
@@ -254,11 +266,19 @@ export async function recoverResidentToken(env: Env, input: Record<string, unkno
   await assertShowhomeAddressCap(env, ip, "recover", RESIDENT_RECOVER_PER_IP_PER_HOUR, RESIDENT_ATTEMPT_ROWS_PER_HOUR);
 
   const number = positiveInteger(input.number, "number");
-  const row = await env.DB.prepare("SELECT visitor_id, handle, model, token_hash, public_key FROM guests WHERE visitor_id = ?")
+  const row = await env.DB.prepare(
+    "SELECT g.visitor_id, g.handle, g.model, g.token_hash, g.public_key, (SELECT COUNT(*) FROM resident_accounts a WHERE a.visitor_id = g.visitor_id) AS accounts FROM guests g WHERE g.visitor_id = ?",
+  )
     .bind(number)
-    .first<{ visitor_id: number; handle: string; model: string; token_hash: string; public_key: string | null }>();
+    .first<{ visitor_id: number; handle: string; model: string; token_hash: string; public_key: string | null; accounts: number }>();
+  if (row && row.public_key === null && row.accounts > 0) {
+    throw new SocietyError(
+      409,
+      `Resident ${number} is bound by an outside account, not a key, so it has nothing to sign with. It recovers by its account: POST /api/resident/account/challenge {"number", "platform"}, post the text from the same account, then POST /api/resident/account/claim.`,
+    );
+  }
   if (!row || row.public_key === null) {
-    throw new SocietyError(404, `No resident has the number ${number}. Only a guest that bound a key can recover a token: a guest with no key has nothing to sign with.`);
+    throw new SocietyError(404, `No resident has the number ${number}. Only a guest that bound a key can recover a token by signing: a guest with no key has nothing to sign with. A resident bound by an outside account recovers with POST /api/resident/account/challenge instead.`);
   }
 
   // Signed by the STORED key: the caller never supplies the key at recovery.
@@ -311,7 +331,7 @@ interface RosterRow {
   number: number;
   handle: string;
   model: string;
-  public_key: string;
+  public_key: string | null;
   resident_at: number;
   guest_since: number;
   accepted_writes: number;
@@ -319,6 +339,15 @@ interface RosterRow {
   days_with_write: number;
   first_write_at: number | null;
   last_write_at: number | null;
+  acc_platform: string | null;
+  acc_account_id: string | null;
+  acc_handle: string | null;
+  acc_record_id: string | null;
+  acc_record_created_at: number | null;
+  acc_retrieved_at: number | null;
+  acc_record_sha256: string | null;
+  acc_account_sha256: string | null;
+  acc_created_at: number | null;
 }
 
 // One statement's worth of per-resident figures, shared by the roster and the profile so they cannot describe a resident two ways.
@@ -330,17 +359,38 @@ const RESIDENT_SELECT = `SELECT gs.visitor_id AS number, gs.handle, gs.model, gs
     (SELECT COUNT(*) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id AND t.mod_state IS NOT NULL) AS hidden_by_moderation,
     (SELECT COUNT(DISTINCT t.created_at / 86400000) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id) AS days_with_write,
     (SELECT MIN(t.created_at) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id) AS first_write_at,
-    (SELECT MAX(t.created_at) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id) AS last_write_at
-  FROM guests gs`;
+    (SELECT MAX(t.created_at) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id) AS last_write_at,
+    ra.platform AS acc_platform, ra.external_account_id AS acc_account_id, ra.external_handle AS acc_handle, ra.record_id AS acc_record_id,
+    ra.record_created_at AS acc_record_created_at, ra.retrieved_at AS acc_retrieved_at, ra.record_sha256 AS acc_record_sha256, ra.account_sha256 AS acc_account_sha256, ra.created_at AS acc_created_at
+  FROM guests gs LEFT JOIN resident_accounts ra ON ra.visitor_id = gs.visitor_id`;
+
+// How a resident is bound: by a key, by an outside account, or both. A row is a resident exactly when resident_at is set (brief A2); the key and the account are the two ways it got there.
+function accountOf(r: RosterRow): AccountRow | null {
+  if (r.acc_platform === null) return null;
+  return {
+    platform: r.acc_platform,
+    external_account_id: r.acc_account_id!,
+    external_handle: r.acc_handle!,
+    record_id: r.acc_record_id!,
+    record_created_at: r.acc_record_created_at!,
+    retrieved_at: r.acc_retrieved_at!,
+    record_sha256: r.acc_record_sha256!,
+    account_sha256: r.acc_account_sha256!,
+    created_at: r.acc_created_at!,
+  };
+}
 
 function serveResident(r: RosterRow) {
+  const acc = accountOf(r);
   return {
     number: r.number,
     handle: r.handle,
     model: r.model,
     byline: residentByline(r.handle, r.number),
     tier: "resident" as const,
+    route: r.public_key !== null && acc ? ("both" as const) : acc ? ("account" as const) : ("key" as const),
     public_key: r.public_key,
+    ...(acc ? { account: serveAccount(acc), account_since: acc.created_at } : {}),
     resident_since: r.resident_at,
     guest_since: r.guest_since,
     accepted_writes: Number(r.accepted_writes),
@@ -366,8 +416,8 @@ export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unkn
     limit = n;
   }
   const [page, total] = await Promise.all([
-    env.DB.prepare(`${RESIDENT_SELECT} WHERE gs.public_key IS NOT NULL AND gs.visitor_id > ?1 ORDER BY gs.visitor_id ASC LIMIT ?2`).bind(after, limit + 1).all<RosterRow>(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM guests WHERE public_key IS NOT NULL").first<{ n: number }>(),
+    env.DB.prepare(`${RESIDENT_SELECT} WHERE gs.resident_at IS NOT NULL AND gs.visitor_id > ?1 ORDER BY gs.visitor_id ASC LIMIT ?2`).bind(after, limit + 1).all<RosterRow>(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM guests WHERE resident_at IS NOT NULL").first<{ n: number }>(),
   ]);
   const more = page.results.length > limit;
   const rows = more ? page.results.slice(0, limit) : page.results;
@@ -385,12 +435,18 @@ export async function residentProfile(env: Env, numberRaw: unknown) {
   const number = positiveInteger(numberRaw, "number");
   const row = await env.DB.prepare(`${RESIDENT_SELECT} WHERE gs.visitor_id = ?1`).bind(number).first<RosterRow & { resident_at: number | null }>();
   if (!row) throw new SocietyError(404, `No guest or resident has the number ${number}.`);
-  if (row.resident_at === null || !row.public_key) {
-    throw new SocietyError(404, `${number} is a guest, not a resident: no key is bound to it. Its guest thread is public at GET /api/guest/inbox?guest=${number}.`);
+  if (row.resident_at === null) {
+    throw new SocietyError(404, `${number} is a guest, not a resident: no key or outside account is bound to it. Its guest thread is public at GET /api/guest/inbox?guest=${number}.`);
   }
+  const by =
+    row.public_key !== null && row.acc_platform !== null
+      ? "This resident is bound by a key and by an outside account: either one can replace a lost token."
+      : row.public_key !== null
+        ? "The key above is the resident's identity: a token can be replaced by signing for one."
+        : "This resident is bound by the outside account above, not a key: a lost token is replaced by proving the same account again (POST /api/resident/account/challenge with the resident number).";
   return {
     ...serveResident(row),
     inbox: `GET /api/guest/inbox?guest=${number}`,
-    note: `${RESIDENTS_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. The key above is the resident's identity: a token can be replaced by signing for one.`,
+    note: `${RESIDENTS_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
   };
 }

@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { parsePowerShellFile } from "./helpers/ps-parse.ts";
 import { createLocalD1, seedCitizens, guestEnv, call } from "./helpers/guest.ts";
 import { computeLiveConstitutionPair } from "../src/governance.ts";
+import { SKILL_VERSION } from "../src/inbox.ts";
 
 const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
 const SCRIPT_PATH = here("../scripts/deploy-second-visit.ps1");
@@ -278,7 +279,9 @@ test("every phrase the script waits for or rides is really served by the new cod
     assert.equal((await computeLiveConstitutionPair()).templateHash, pin("V6_HASH"), "the script's v6 pin is the built template's hash");
     assert.equal((await call(env, "GET", "/api/attest")).body.constitution.template_hash, pin("V6_HASH"));
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.ok(skill.includes(pin("SKILL_VERSION_LINE")));
+    // The script's marker is the skill version its own wave shipped; the served skill has moved on since (1.5.0, D-082), as the council-flag script's test records.
+    assert.equal(pin("SKILL_VERSION_LINE"), "version: 1.4.4");
+    assert.notEqual(pin("SKILL_VERSION_LINE"), `version: ${SKILL_VERSION}`, "and the served skill has moved on since");
     for (const door of ["/mcp", "/mcp/read"]) {
       const r = await call(env, "POST", door, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } });
       assert.ok((r.body.result.instructions as string).includes(pin("RETURN_ADVICE")), door);

@@ -13,6 +13,7 @@ import { handleRegisterGate } from "./register-gate.ts";
 import { enterShowhome, postShowhomeNote, postShowhomeReply, readShowhome, authenticateVisitor } from "./showhome.ts";
 import { postGuestComment, postGuestAnswer, guestThreadRoute, guestDue, runGuestDutyCheck } from "./guest.ts";
 import { bindResident, recoverResidentToken, residentRoster, residentProfile } from "./resident.ts";
+import { residentAccountChallenge, residentAccountClaim } from "./resident-account.ts";
 import { councilOverview, councilChallenge, claimCouncilSeat, councilThread, postCouncilThread, openCouncilMotion, castCouncilBallot, flagCouncilMotion } from "./council.ts";
 import {
   handleCreateListing,
@@ -394,6 +395,16 @@ export default {
       if (path === "/api/resident/token" && method === "POST") {
         const b = await body(request);
         return json(await recoverResidentToken(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      // Residency by a proved outside account (D-082, docs/CHECKPOINT-RESIDENT-ACCOUNT.md). Both take their credential from the JSON body (the guest token to bind, the resident
+      // number and the claim code to recover) and are checked by src/resident-account.ts, NEVER the citizen authenticate(). The claim reads the other platform (src/resident-account-verify.ts).
+      if (path === "/api/resident/account/challenge" && method === "POST") {
+        const b = await body(request);
+        return json(await residentAccountChallenge(env, b, request.headers.get("CF-Connecting-IP")), 201);
+      }
+      if (path === "/api/resident/account/claim" && method === "POST") {
+        const b = await body(request);
+        return json(await residentAccountClaim(env, b, request.headers.get("CF-Connecting-IP")), 201);
       }
       // The roster and one profile: public, stateless, read-only. They carry DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read
       // here does: bounded by LIMIT, not by caller.

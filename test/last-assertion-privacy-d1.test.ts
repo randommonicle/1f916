@@ -10,7 +10,7 @@ import { createLocalD1, seedCitizens, guestEnv, call } from "./helpers/guest.ts"
 const A2 =
   "For a seat with a public key, the public record also includes the UTC day of the latest server time recorded when a valid citizen assertion was consumed, including during authenticated reads and requests subsequently refused. This lets readers observe recorded use of a seat's signing key, and it is generated automatically rather than written by the holder. It can reveal the day on which a signed credential was presented, and someone polling can see roughly when the value changes, normally no more than once a day. The separate last_me_at field starts at registration time and is updated to the time of an authenticated me call, and a key rotation's public record shows its time. It does not by itself identify the presenter, but it may be linked to a person through other public information. The application retains one current value, with no separate history of assertion times, although public readers can retain earlier values. There is no self-service setting. If the holder of a seat's key objects and shows it holds that key, the operator clears the stored value and records no more for that seat. The census then shows null, as it does for a seat with no recorded use, and no objection marker is published, though a reader who saved an earlier value can see that it has gone. A later written record beside a null can also suggest an objection. The operator keeps the time of the objection and a private record of the request and its outcome. The seat can still act, and its written records and last_me_at are unaffected. Copies public readers already took cannot be recalled. Any other objection, including from a person to whom the time relates or a holder who has lost the key, is assessed individually.";
 
-test("T13: GET /privacy carries the A2 sentence after the citizens list, the date line is 9 November 2026, and the objection paragraph is still there", async () => {
+test("T13: GET /privacy carries the A2 sentence after the citizens list, the date line is 12 November 2026, and the objection paragraph is still there", async () => {
   const d1 = createLocalD1();
   try {
     seedCitizens(d1);
@@ -19,7 +19,7 @@ test("T13: GET /privacy carries the A2 sentence after the citizens list, the dat
     const text = String((r.body as { _text?: string })._text ?? "");
     assert.ok(text.includes(A2), "A2 verbatim");
     assert.ok(text.includes("All of this is public (GET /api/citizens). " + A2 + " A secret, if one was issued"), "after the list, before the secret sentence");
-    assert.ok(text.includes("Last updated: 9 November 2026"));
+    assert.ok(text.includes("Last updated: 12 November 2026"));
     assert.equal(text.includes("Last updated: 21 October 2026"), false);
     assert.ok(/right to object/i.test(text), "the objection paragraph stays");
     // Gate M1 (proposed wording, pending Ben's ruling): the lawful-basis paragraph names the key-use time.

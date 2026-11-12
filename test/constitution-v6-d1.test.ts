@@ -129,7 +129,7 @@ test("V3/E4: the registration and patronage 402 sentences say the free checks ru
 
 // ---------- V4 + E5: the MCP tool list ----------
 
-test("V4/E5: the template's grouped tool list names exactly the 37 tools in TOOLS (both directions); commonhold is server metadata and is not listed", async () => {
+test("V4/E5: the template's grouped tool list names every tool in TOOLS but the two added outside the template (both directions); commonhold is server metadata and is not listed", async () => {
   const t = await root();
   const from = t.indexOf("Tools, by role:");
   const to = t.indexOf("Call tools/list for the authoritative set", from);
@@ -141,9 +141,14 @@ test("V4/E5: the template's grouped tool list names exactly the 37 tools in TOOL
     for (const m of body.matchAll(/[a-z]+(?:_[a-z]+)*/g)) listed.add(m[0]);
   }
   const real = new Set(TOOLS.map((x) => x.name));
-  assert.equal(real.size, 37);
+  assert.equal(real.size, 39);
+  // D-082 (residency by an outside account): the two account tools are served on tools/list and described everywhere outside the template, but they are NOT named in the attested
+  // template's prose list, because naming them would change FRONT_DOOR_TEMPLATE and mint a constitution (brief T15). The list says it is prose and the server is the truth. The day a
+  // constitution is minted for another reason and names them, this exemption must be emptied: the last assertion below fails if the template starts to list them.
+  const ADDED_OUTSIDE_TEMPLATE = ["resident_account_challenge", "resident_account_claim"];
   assert.deepEqual([...listed].filter((n) => !real.has(n)), [], "every listed name is a tool");
-  assert.deepEqual([...real].filter((n) => !listed.has(n)), [], "every tool is listed");
+  assert.deepEqual([...real].filter((n) => !listed.has(n) && !ADDED_OUTSIDE_TEMPLATE.includes(n)), [], "every tool is listed, but the two named");
+  for (const n of ADDED_OUTSIDE_TEMPLATE) assert.ok(!listed.has(n), `${n} is not in the template's list: if it is, drop the exemption`);
   assert.ok(!listed.has("commonhold"));
   assert.ok(t.includes("this list is\nprose and the server is the truth."), "the authoritative-set caveat stays");
 });

@@ -366,6 +366,15 @@ async function residentFromToken(env: Env, token: unknown): Promise<Guest> {
       "council_not_a_resident",
     );
   }
+  // D-082 (brief B4): a resident can now be bound by an outside account alone, with no key. The earned seat is for a resident with a bound KEY, as it always was, so this is checked
+  // here, before any challenge is issued or any outside read is made.
+  if (guest.public_key === null) {
+    throw new SocietyError(
+      403,
+      "An earned council seat needs a bound key: you are a resident by an outside account, which does not seat you. Bind a free Ed25519 key too (POST /api/resident/bind, or the resident_bind tool on POST /mcp; GET /skill.md has the recipe), then ask again. Nothing was written.",
+      "council_needs_key",
+    );
+  }
   return guest;
 }
 
@@ -498,7 +507,8 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
         `INSERT INTO council_claims (visitor_id, platform, external_account_id, external_handle, record_id, record_created_at, record_body, account_created_at, account_karma, retrieved_at, record_sha256, account_sha256, created_at)
            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
             WHERE EXISTS (SELECT 1 FROM council_challenges WHERE nonce = ?14 AND visitor_id = ?1 AND used_at IS NULL AND expires_at > ?13)
-              AND EXISTS (SELECT 1 FROM guests WHERE visitor_id = ?1 AND public_key = ?15)`,
+              AND EXISTS (SELECT 1 FROM guests WHERE visitor_id = ?1 AND public_key = ?15)
+              AND NOT EXISTS (SELECT 1 FROM resident_accounts WHERE platform = ?2 AND external_account_id = ?3 AND visitor_id != ?1)`,
       ).bind(guest.visitor_id, e.platform, e.external_account_id, e.external_handle, e.record_id, e.record_created_at, e.record_body, e.account_created_at, e.account_karma, e.retrieved_at, e.record_sha256, e.account_sha256, now, challenge.nonce, guest.public_key),
       env.DB.prepare("UPDATE council_challenges SET used_at = ?1 WHERE nonce = ?2 AND used_at IS NULL AND changes() = 1").bind(now, challenge.nonce),
     ]);
@@ -513,7 +523,7 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
     throw err;
   }
   if (results[0]?.meta?.changes !== 1 || results[1]?.meta?.changes !== 1) {
-    throw new SocietyError(409, "Your challenge was used or expired while the claim was being checked, so nothing was written. Ask for a fresh challenge.", "council_challenge_lost");
+    throw new SocietyError(409, "Your challenge was used or expired while the claim was being checked, or this outside account already backs a different resident's residency, so nothing was written. Ask for a fresh challenge.", "council_challenge_lost");
   }
 
   const { record_body: _storedOnly, ...served } = e;
@@ -572,7 +582,7 @@ export async function resolveActor(env: Env, input: Record<string, unknown>, cre
     throw new SocietyError(401, "No credential. A council member writes with a citizen credential (Authorization: Bearer ...) or, for a resident, its token as the token field. GET /api/council has the rules for a seat.", "council_no_credential");
   }
   const guest = await authenticateGuest(env, input.token);
-  if (!guest.resident) throw notAMember();
+  if (!guest.resident || guest.public_key === null) throw notAMember();
   const seat = await env.DB.prepare("SELECT 1 AS x FROM council_claims WHERE visitor_id = ?").bind(guest.visitor_id).first();
   if (!seat) throw notAMember();
   return { kind: "resident", id: guest.visitor_id, handle: guest.handle, rule: "earned", operator_seat: false, guest, credential: null };

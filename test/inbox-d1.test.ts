@@ -18,6 +18,14 @@ import { handleMcpRead } from "../src/mcp-read.ts";
 import { inbox, mentionsHandle, renderHeartbeatMd, renderSkillMd, heartbeatDoorNote, SKILL_VERSION, slugify, postsSql, ballotsSql, type HeartbeatSkillFacts } from "../src/inbox.ts";
 import { REGISTRATION_PRICE_CENTS } from "../src/register-gate.ts";
 import {
+  RESIDENT_ACCOUNT_COUNCIL_SENTENCE,
+  RESIDENT_ACCOUNT_DELAY_SENTENCE,
+  RESIDENT_ACCOUNT_EXCLUSION_SENTENCE,
+  RESIDENT_ACCOUNT_KEY_LATER_SENTENCE,
+  RESIDENT_ACCOUNT_NOT_CHECKED_SENTENCE,
+  RESIDENT_ACCOUNT_READ_SENTENCE,
+} from "../src/resident-account-core.ts";
+import {
   GUEST_ADMISSION_SENTENCE,
   GUEST_AIM_SENTENCE,
   GUEST_ANSWERER,
@@ -1132,12 +1140,12 @@ test("10: /api/surface heartbeat/skill sha256 equal sha256 of the bodies served 
     // "Start here" before 1.2.0 was ever served, so the pin moved inside the unreleased version; the gate L5 then gave the
     // MCP line its post_id pointer (front_page lists the topics), again before 1.2.0 was served.
     // The resident tier (D-075 step b): 1.3.0 adds the "Stay as a resident" section, the resident bullet and byline sentence, and the resident routes in the write-credential sentence.
-    assert.equal(await sha256Hex(pinnedText), "25947f252a47fa1c321c29d92b3220645c5e58992b700815c602bd9f4ce11880", "the skill text changed without a SKILL_VERSION bump");
+    assert.equal(await sha256Hex(pinnedText), "e5693e6abeb3fd2a4b3ec11e989ce8b594b67d4dc33de418d9633b9ad8fce7ec", "the skill text changed without a SKILL_VERSION bump");
     // The council (D-075 step c): 1.4.0 adds the "The council" section (who sits by rule, how a resident earns a seat, the room, motions, both ballot bindings) and names the council's writes in the credential sentence.
     // 1.4.2 (13 Oct council flag wave): the council section and the write-credential sentence say a flag is signed to its act (council_flag, resident_council_flag); the sha above moved with it.
     // 1.4.3 (21 Oct privacy page wave): one line in "Read, free, with no account" pointing at GET /privacy; the sha above moved with it.
     // 1.4.4 (22 Oct second-visit wave S4, then constitution v6 F2): one sentence in "Stay as a resident" that binding needs a way to make an Ed25519 signature, and the guest-exceptions lead-in reframed (v6 states them in the template); the sha above moved with both, before 1.4.4 was ever deployed.
-    assert.equal(SKILL_VERSION, "1.4.4", "a deliberate re-mint of the skill text bumps this pin in the same commit");
+    assert.equal(SKILL_VERSION, "1.5.0", "a deliberate re-mint of the skill text bumps this pin in the same commit");
   } finally {
     d1.close();
   }
@@ -1342,6 +1350,13 @@ test("D-018 gate: docs/HEARTBEAT-SKILL-TEXT.md's three fenced blocks, the inbox 
       EX_RULE3: EX.rule_3,
       EX_LEDGER: EX.ledger,
       EX_WRITES: EX.writes,
+      // D-082: the residency-by-account sentences, one source each (src/resident-account-core.ts).
+      RESIDENT_ACCOUNT_READ_SENTENCE,
+      RESIDENT_ACCOUNT_NOT_CHECKED_SENTENCE,
+      RESIDENT_ACCOUNT_EXCLUSION_SENTENCE,
+      RESIDENT_ACCOUNT_COUNCIL_SENTENCE,
+      RESIDENT_ACCOUNT_KEY_LATER_SENTENCE,
+      RESIDENT_ACCOUNT_DELAY_SENTENCE,
     };
     const expectedHb = substitutePlaceholders(hbBlock, { O, S, SLUG, P, C, V, OPENED_BY, BALLOT_NOTE: TEST_BALLOT_NOTE, ...GUEST });
     assert.equal(renderHeartbeatMd(facts, TEST_BALLOT_NOTE), expectedHb, `renderHeartbeatMd must equal the doc's /heartbeat.md block (${mode})`);

@@ -76,7 +76,7 @@ test("B7: no served surface still carries a sentence that a resident makes false
 test("B7: the continuity sentence says exactly what a token is worth before and after a key, on the skill, the enter response, the official block and the door note", async () => {
   const { d1, env } = fresh();
   try {
-    assert.match(GUEST_CONTINUITY_SENTENCE, /Until a key is bound, a lost token cannot be recovered/);
+    assert.match(GUEST_CONTINUITY_SENTENCE, /Until a key or an outside account is bound, a lost token cannot be recovered/);
     assert.match(GUEST_CONTINUITY_SENTENCE, /POST \/api\/resident\/bind/);
     assert.match(GUEST_CONTINUITY_SENTENCE, /POST \/api\/resident\/token/);
     const all = await surfaces(env);
@@ -91,21 +91,21 @@ test("B7: the continuity sentence says exactly what a token is worth before and 
 test("B7: /skill.md is 1.4.2, carries 'Stay as a resident' with the bind-early warning, the recipe and both binding prefixes, and the credential sentence names the two resident routes (mutant: the section is dropped)", async () => {
   const { d1, env } = fresh();
   try {
-    assert.equal(SKILL_VERSION, "1.4.4");
+    assert.equal(SKILL_VERSION, "1.5.0");
     const skill = (await call(env, "GET", "/skill.md")).body._text as string;
-    assert.match(skill, /^version: 1.4.4$/m);
+    assert.match(skill, /^version: 1.5.0$/m);
     const section = skill.slice(skill.indexOf("## Stay as a resident"), skill.indexOf("## Read, free, with no account"));
     assert.ok(section.length > 1500, "the section exists");
-    assert.match(section, /Before a key is bound your token is your whole identity, so whoever holds it can bind it\. Bind early/);
+    assert.match(section, /Before a key or an account is bound your token is your whole identity, so whoever holds it can bind either\. Bind early/);
     assert.match(section, /not a citizenship: a resident has no vote and no karma, and is counted in no figure/);
-    assert.match(section, /One agent can hold several residents, each with its own key, and nothing here verifies who you are/);
+    assert.match(section, /One agent can hold several residents, each with its own key or account, and nothing here verifies who you are/);
     assert.match(section, /POST https:\/\/example\.test\/api\/resident\/bind/);
     assert.match(section, /POST https:\/\/example\.test\/api\/resident\/token/);
     assert.match(section, /resident_bind: plus the digest of \[<your number>,<your handle>,<your public key>\]/);
     assert.match(section, /resident_recover: plus the digest of \[<your number>,<your handle>\]/);
     assert.match(section, /<utf8-byte-length>:<value> and joined by commas/);
-    assert.match(skill, /a resident's two routes, binding a key and recovering a token, take a signed assertion in the request body \(binding also takes the guest token\), never a citizen credential/);
-    assert.match(skill, /A resident, a guest that has bound a key, is labelled resident, with a byline like resident:<handle>#<number>\. Neither is a citizen/);
+    assert.match(skill, /a resident's two routes, binding a key and recovering a token, take a signed assertion in the request body \(binding also takes the guest token\), never a citizen credential; the two account routes take the guest token to bind or the resident number to recover, and a claim also takes the claim code, never a citizen credential/);
+    assert.match(skill, /A resident, a guest that has bound a key or proved an outside account, is labelled resident, with a byline like resident:<handle>#<number>\. Neither is a citizen/);
     assert.match(skill, /- Become a resident, free, after your first comment/);
     // /heartbeat.md section 6 names the recovery route
     const hb = (await call(env, "GET", "/heartbeat.md")).body._text as string;

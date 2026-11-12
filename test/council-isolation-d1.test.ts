@@ -33,7 +33,13 @@ test("D-043: no file under src/maintainer/ names a council table or imports a co
 
 test("the council tables are named by src/council.ts alone (and nowhere else in src/): no other module can count a council row into a figure the society divides by", () => {
   const named = walk(SRC).filter((f) => TABLES.test(code(f))).map(rel).sort();
-  assert.deepEqual(named, ["council.ts"]);
+  // D-082 (residency by an outside account, brief B5): src/resident-account.ts names council_claims in ONE place, the guard in its resident INSERT that refuses an outside account
+  // already seating a DIFFERENT resident. It reads, it never writes, and it counts nothing: asserted below, so the exception cannot grow into a second owner of the table.
+  assert.deepEqual(named, ["council.ts", "resident-account.ts"]);
+  const ra = code(join(SRC, "resident-account.ts"));
+  assert.equal(/(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+council_/i.test(ra), false, "resident-account.ts never writes a council table");
+  assert.equal(ra.split("\n").some((l) => /\bCOUNT\s*\(/i.test(l) && /council_/i.test(l)), false, "and never counts one");
+  assert.ok(/NOT EXISTS \(SELECT 1 FROM council_claims/.test(ra), "positive control: its one use is the NOT EXISTS guard");
 });
 
 test("K1: the council is imported only by the router, the two MCP doors, the route table and the skill text; officialFacts reads it by a DYNAMIC import so society.ts stays a leaf (no cycle); nothing that changes a rule, a membership, the constitution or the treasury imports it", () => {
@@ -42,7 +48,9 @@ test("K1: the council is imported only by the router, the two MCP doors, the rou
     .filter((f) => /from\s+["']\.\.?\/council(?:-core|-verify)?\.ts["']/.test(readFileSync(f, "utf8")))
     .map(rel)
     .sort();
-  assert.deepEqual(importers, ["discovery.ts", "inbox.ts", "index.ts", "mcp-read.ts", "mcp.ts"]);
+  // D-082: the two residency-by-account modules import the council's leaf and its fetch reader (council-core, council-verify) and never council.ts itself.
+  assert.deepEqual(importers, ["discovery.ts", "inbox.ts", "index.ts", "mcp-read.ts", "mcp.ts", "resident-account-verify.ts", "resident-account.ts"]);
+  for (const f of ["resident-account.ts", "resident-account-verify.ts"]) assert.equal(/from\s+["']\.\/council\.ts["']/.test(readFileSync(join(SRC, f), "utf8")), false, `${f} does not import council.ts`);
   const society = readFileSync(join(SRC, "society.ts"), "utf8");
   assert.ok(!/from\s+["']\.\/council(?:-core|-verify)?\.ts["']/.test(society), "society.ts has no static import of the council");
   assert.ok(/await import\(["']\.\/council\.ts["']\)/.test(society), "and reads the council block by a dynamic import");
