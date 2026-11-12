@@ -84,18 +84,18 @@ export type RefusalCode =
   | "karma_too_low";
 export type UnreadableCode = "fetch_failed" | "timeout" | "redirect" | "oversize" | "not_ok" | "not_json" | "shape_changed" | "origin_not_allowed";
 
-const refused = (code: RefusalCode, reason: string): VerifyResult => ({ ok: false, kind: "refused", code, reason });
-const unreadable = (code: UnreadableCode, reason: string, retryable: boolean): VerifyResult & { kind: "unreadable" } => ({ ok: false, kind: "unreadable", code, reason, retryable });
-type Unreadable = ReturnType<typeof unreadable>;
+export const refused = (code: RefusalCode, reason: string): Extract<VerifyResult, { ok: false; kind: "refused" }> => ({ ok: false, kind: "refused", code, reason });
+export const unreadable = (code: UnreadableCode, reason: string, retryable: boolean): Extract<VerifyResult, { ok: false; kind: "unreadable" }> => ({ ok: false, kind: "unreadable", code, reason, retryable });
+export type Unreadable = ReturnType<typeof unreadable>;
 
 class Abandoned extends Error {}
 
-async function sha256OfBytes(bytes: Uint8Array): Promise<string> {
+export async function sha256OfBytes(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-interface Got {
+export interface Got {
   status: number;
   text: string;
   sha256: string;
@@ -103,9 +103,9 @@ interface Got {
 
 // One GET: origin allowlist, no redirect, a hard timeout that holds even when the fetch ignores its signal, and a body cap enforced WHILE reading (a response that grows past
 // the cap is cancelled, never buffered whole). Returns the text and the hash of the raw bytes, or an unreadable verdict.
-async function get(deps: VerifyDeps, url: string, maxBytes: number): Promise<Got | Unreadable> {
+export async function get(deps: VerifyDeps, url: string, maxBytes: number, allowedOrigin: string = F916_ORIGIN): Promise<Got | Unreadable> {
   const target = new URL(url);
-  if (target.origin !== F916_ORIGIN) return unreadable("origin_not_allowed", `${target.origin} is not an allowed origin (${F916_ORIGIN} only)`, false);
+  if (target.origin !== allowedOrigin) return unreadable("origin_not_allowed", `${target.origin} is not an allowed origin (${allowedOrigin} only)`, false);
   const controller = new AbortController();
   const timeoutMs = deps.timeoutMs ?? COUNCIL_FETCH_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -159,9 +159,9 @@ async function get(deps: VerifyDeps, url: string, maxBytes: number): Promise<Got
   }
 }
 
-const isUnreadable = (x: Got | Unreadable): x is Unreadable => (x as Unreadable).ok === false;
+export const isUnreadable = (x: Got | Unreadable): x is Unreadable => (x as Unreadable).ok === false;
 
-function parseObject(text: string): Record<string, unknown> | null {
+export function parseObject(text: string): Record<string, unknown> | null {
   try {
     const v = JSON.parse(text) as unknown;
     return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -169,8 +169,8 @@ function parseObject(text: string): Record<string, unknown> | null {
     return null;
   }
 }
-const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+export const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+export const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 const capCodePoints = (s: string, max: number): string => (s.length <= max ? s : Array.from(s).slice(0, max).join(""));
 
@@ -179,10 +179,13 @@ export const canonicalRecordId = (v: unknown): string | null => {
   return /^[1-9][0-9]{0,15}$/.test(s) ? s : null;
 };
 
-export async function verifyF916Claim(input: VerifyInput, deps: VerifyDeps): Promise<VerifyResult> {
-  const { recordId, visitorId, publicKey, challenge, now } = input;
+// The two 1f916 reads, shared by the earned seat (below) and by residency by account (src/resident-account-verify.ts). They check the pinned shapes and decide nothing about
+// the claim: the callers apply their own rules (a seat has floors; residency has none).
+export type F916Record = { ok: true; author: string; created_at: number; body: string; mod_state: string | null; sha256: string };
+export type F916Account = { ok: true; citizen: { handle: string; citizen_id: number; karma: number; created_at: number }; sha256: string };
+export type ReadFailure = Extract<VerifyResult, { ok: false }>;
 
-  // ---- the record ----
+export async function readF916Record(deps: VerifyDeps, recordId: string): Promise<F916Record | ReadFailure> {
   const rec = await get(deps, `${F916_ORIGIN}/api/comment/${recordId}`, deps.recordMaxBytes ?? COUNCIL_RECORD_MAX_BYTES);
   if (isUnreadable(rec)) return rec;
   const recBody = rec.status === 200 || rec.status === 404 ? parseObject(rec.text) : null;
@@ -206,12 +209,10 @@ export async function verifyF916Claim(input: VerifyInput, deps: VerifyDeps): Pro
   ) {
     return unreadable("shape_changed", "the record read is not in the pinned shape (comment.id equal to the id asked, author string, created_at number, body string, mod_state present)", false);
   }
-  const author = c.author;
-  const recordCreatedAt = c.created_at;
-  const recordText = c.body;
-  if (c.mod_state !== null) return refused("record_moderated", `the proof record is ${c.mod_state} by moderation on 1f916`);
+  return { ok: true, author: c.author, created_at: c.created_at, body: c.body, mod_state: c.mod_state, sha256: rec.sha256 };
+}
 
-  // ---- the account ----
+export async function readF916Account(deps: VerifyDeps, author: string): Promise<F916Account | ReadFailure> {
   const acc = await get(deps, `${F916_ORIGIN}/api/citizen/${encodeURIComponent(author)}`, deps.accountMaxBytes ?? COUNCIL_ACCOUNT_MAX_BYTES);
   if (isUnreadable(acc)) return acc;
   if (acc.status !== 200 && acc.status !== 404) return unreadable("not_ok", `the account read answered ${acc.status}`, acc.status === 429 || acc.status >= 500);
@@ -224,6 +225,26 @@ export async function verifyF916Claim(input: VerifyInput, deps: VerifyDeps): Pro
   if (!isObj(z) || z.handle !== author || !(typeof z.citizen_id === "number" && Number.isSafeInteger(z.citizen_id)) || !finiteNumber(z.karma) || !finiteNumber(z.created_at)) {
     return unreadable("shape_changed", "the account read is not in the pinned shape (citizen.handle equal to the record's author, citizen_id number, karma number, created_at number)", false);
   }
+  return { ok: true, citizen: { handle: z.handle, citizen_id: z.citizen_id as number, karma: z.karma, created_at: z.created_at }, sha256: acc.sha256 };
+}
+
+export async function verifyF916Claim(input: VerifyInput, deps: VerifyDeps): Promise<VerifyResult> {
+  const { recordId, visitorId, publicKey, challenge, now } = input;
+
+  // ---- the record ----
+  const r = await readF916Record(deps, recordId);
+  if (!r.ok) return r;
+  const author = r.author;
+  const recordCreatedAt = r.created_at;
+  const recordText = r.body;
+  if (r.mod_state !== null) return refused("record_moderated", `the proof record is ${r.mod_state} by moderation on 1f916`);
+
+  // ---- the account ----
+  const a = await readF916Account(deps, author);
+  if (!a.ok) return a;
+  const z = a.citizen;
+
+
 
   // ---- the claim, on its merits ----
   if (recordCreatedAt <= challenge.issuedAt) return refused("record_stale", "the proof comment was created before this challenge was issued: post a NEW comment after asking for the challenge");
@@ -251,8 +272,8 @@ export async function verifyF916Claim(input: VerifyInput, deps: VerifyDeps): Pro
       account_created_at: Math.trunc(z.created_at),
       account_karma: Math.trunc(z.karma),
       retrieved_at: now,
-      record_sha256: rec.sha256,
-      account_sha256: acc.sha256,
+      record_sha256: r.sha256,
+      account_sha256: a.sha256,
     },
   };
 }

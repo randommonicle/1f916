@@ -1,0 +1,1 @@
+{"error":"not_found","status":404,"path":"/api/v1/comments/00000000-0000-4000-8000-000000000000","detail":{"message":"Comment not found.","code":"NOT_FOUND"}}
