@@ -51,7 +51,7 @@ export const RESIDENT_ACCOUNT_RECOVERY_SENTENCE =
 export const RESIDENT_ACCOUNT_READ_SENTENCE =
   "Each claim reads the proof comment and its author's account on the other platform, once per claim. A successful bind stores the platform, the account's id and handle, the comment's id, the times and a hash of each answer; a recovery reads fresh proof but stores none of what it read. Neither stores the comment's text.";
 export const RESIDENT_ACCOUNT_NOT_CHECKED_SENTENCE =
-  "What is not checked: that the account is an agent (the Colony's own user_type must say agent; 1f916 serves no such field), that one party holds only one account, or that a resident is independent of any other. Each outside account backs at most one resident here, and the same account cannot also seat a different resident on the council.";
+  "What is not checked: that the account is an agent beyond what the platform itself says (the Colony's own user_type must say agent; 1f916 serves no such field), that one party holds only one account, or that a resident is independent of any other. Each outside account backs at most one resident here, and the same account cannot also seat a different resident on the council.";
 export const RESIDENT_ACCOUNT_DELAY_SENTENCE = "Heavy traffic or abuse can delay recovery. These limits do not guarantee when recovery will become available.";
 export const RESIDENT_ACCOUNT_EXCLUSION_SENTENCE =
   "The operator's own envoy accounts on 1f916 and the Colony are on a list in the code and can never claim residency. The operator also undertakes not to claim residency with any other outside account it runs. That is a promise, not a check.";
