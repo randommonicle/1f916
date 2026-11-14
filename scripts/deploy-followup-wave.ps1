@@ -2,7 +2,8 @@
 # (and COUNTS_TOWARD_NOTE on /api/residents); W3 refusals after a rate row no longer say "Nothing was written"; W4 descriptions on all MCP tool arguments.
 # Exchange: exchange/REVIEW_followup-wave-code-2026-11-14.md (both seats converged). Gate: docs/REVIEW-FOLLOWUP-WAVE-GATE-2026-11-14.md (Sonnet, DEPLOYABLE).
 # ONE worker deploy. Ben's hand only (D-017). One fail-fast script (L-046, L-069). NO MIGRATION, NO D1 COMMAND, NO MINT: step 0 STOPS if migrations/ or schema.sql differ between the live
-# base and HEAD, and STOPS unless the FRONT_DOOR_TEMPLATE text in src/doc.ts is byte-identical between the live base and HEAD (this wave edits src/doc.ts OUTSIDE the hashed template only).
+# base and HEAD, and the NO-MINT proof is the EVALUATED template: after the full suite, step 1b re-runs test/constitution-v6-d1.test.ts on its own and STOPS unless it passes with its pinned v6 template_hash test
+# (the hash /api/attest computes from FRONT_DOOR_TEMPLATE with every interpolation resolved), and the ride re-reads the v6 hash live. src/doc.ts may change outside the template (this wave does).
 # Wrangler is used for exactly ONE thing: the stamped deploy. Derived mechanically from the 12 Nov openapi proposal schema deploy script (this ride makes GET requests only).
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs; step 2 PROVES it against the live GET /api/attest code.commit.
 # $REVIEWED_COMMIT is the commit the review converged on. Step 0a STOPS, before any git or network command, while EITHER still holds its placeholder or is not 40 lower-case hex.
@@ -119,27 +120,21 @@ function Test-RunsNoteServed($r, $needle) {
   if (-not ([string]$j.note).Contains($needle)) { return "GET /api/residents note does not contain the text" }
   return ""
 }
-# BEGIN-TEMPLATE-FN
-# The text of the FRONT_DOOR_TEMPLATE declaration in a src/doc.ts text: from the declaration's opening backtick to the next backtick (the template holds none), or $null when either is missing.
-function Get-FrontDoorTemplate($text) {
-  $tick = [string][char]96
-  $decl = "export const FRONT_DOOR_TEMPLATE = " + $tick
-  $start = ([string]$text).IndexOf($decl, [System.StringComparison]::Ordinal)
-  if ($start -lt 0) { return $null }
-  $end = ([string]$text).IndexOf($tick, $start + $decl.Length, [System.StringComparison]::Ordinal)
-  if ($end -lt 0) { return $null }
-  return ([string]$text).Substring($start, $end - $start + 1)
-}
-# "" when the FRONT_DOOR_TEMPLATE text is byte-identical in the two doc.ts texts, otherwise the reason it is not.
-function Test-TemplateUnmoved($baseText, $headText) {
-  $baseT = Get-FrontDoorTemplate $baseText
-  $headT = Get-FrontDoorTemplate $headText
-  if ($null -eq $baseT) { return "FRONT_DOOR_TEMPLATE was not found in src/doc.ts at the live base" }
-  if ($null -eq $headT) { return "FRONT_DOOR_TEMPLATE was not found in src/doc.ts at HEAD" }
-  if ($baseT -cne $headT) { return "the FRONT_DOOR_TEMPLATE text differs between the live base and HEAD" }
+# BEGIN-V6-PIN-FN
+# The v6 pin test's name: it renders FRONT_DOOR_TEMPLATE through GET /api/attest (every ${...} resolved) and asserts template_hash equals the v6 hash.
+$V6_PIN_TEST_FILE = "test/constitution-v6-d1.test.ts"
+$V6_PIN_TEST_NAME = "v6 template hash: /api/attest serves the pinned v6 hash and no longer the v5 one"
+# "" when $out (the output of running $V6_PIN_TEST_FILE alone) and $code (its exit code) show the pinned test ran and passed with nothing failing, otherwise the reason.
+function Test-V6PinRun($out, $code) {
+  $failM = [regex]::Matches($out, '(?m)^(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$')
+  $passM = [regex]::Matches($out, '(?m)^(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?$')
+  if ($failM.Count -lt 1 -or $passM.Count -lt 1) { return "the v6 pin test run carries no pass/fail summary" }
+  if ($code -ne 0 -or $failM[$failM.Count - 1].Groups[1].Value -ne "0") { return "the v6 pin test failed (exit $code)" }
+  if ($passM[$passM.Count - 1].Groups[1].Value -eq "0") { return "the v6 pin test ran no test" }
+  if (-not $out.Contains($V6_PIN_TEST_NAME)) { return "the v6 pin test's template_hash test did not run" }
   return ""
 }
-# END-TEMPLATE-FN
+# END-V6-PIN-FN
 # Polls (GETs only) until the served block is this deploy's AND /api/residents carries the note text, or STOPS (with $ROLLBACK_LINE) after $tries reads.
 function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
   $last = "never read"
@@ -194,15 +189,6 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.
 $moves = @(git diff --name-status --no-renames $LIVE_BASE_COMMIT HEAD -- migrations schema.sql)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-mint and no-migration check cannot be read." }
 if ($moves.Count -gt 0) { Stop-Here ("migrations/ or schema.sql changed since " + $LIVE_BASE_COMMIT.Substring(0, 8) + " (" + ($moves -join " | ") + "): this wave mints nothing and has no migration. Not this script's deploy.") }
-# Non-minting: this wave edits src/doc.ts, but the hashed constitution template (FRONT_DOOR_TEMPLATE) must be byte-identical to the live base's.
-# BEGIN-TEMPLATE-CHECK
-$baseDoc = @(git show "${LIVE_BASE_COMMIT}:src/doc.ts")
-if ($LASTEXITCODE -ne 0) { Stop-Here "git show of src/doc.ts at the live base failed (exit $LASTEXITCODE): the no-mint check cannot be read." }
-$headDoc = @(git show "HEAD:src/doc.ts")
-if ($LASTEXITCODE -ne 0) { Stop-Here "git show of src/doc.ts at HEAD failed (exit $LASTEXITCODE): the no-mint check cannot be read." }
-$whyTemplate = Test-TemplateUnmoved ($baseDoc -join "`n") ($headDoc -join "`n")
-if ($whyTemplate -ne "") { Stop-Here ($whyTemplate + ": this wave mints nothing. Not this script's deploy.") }
-# END-TEMPLATE-CHECK
 # BEGIN-REVIEWED-SOURCE-CHECK
 git merge-base --is-ancestor $REVIEWED_COMMIT HEAD
 if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain the reviewed commit $($REVIEWED_COMMIT.Substring(0, 8)): this is not the code that was reviewed." }
@@ -228,7 +214,7 @@ if (-not (Select-String -Path "src/privacy.ts" -Pattern "export async function h
 if (-not (Select-String -Path "src/code-identity.ts" -Pattern "export function codeBlock" -Quiet)) { Stop-Here "src/code-identity.ts has no codeBlock: this checkout would drop served code identity." }
 if (-not (Select-String -Path "wrangler.jsonc" -Pattern '"version_metadata"' -Quiet)) { Stop-Here "wrangler.jsonc has no version_metadata binding: the Worker could not serve Cloudflare's version id." }
 if (Select-String -Path "wrangler.jsonc" -Pattern '"CODE_COMMIT"' -Quiet) { Stop-Here "wrangler.jsonc configures a CODE_COMMIT var: a deploy that forgot the flag would serve a stale stamp. The stamp comes from this script's --var flag only." }
-Say ("[git] HEAD " + $headSha.Substring(0, 8) + " = main = origin/main = -ExpectedCommit; tree clean; contains " + $LIVE_BASE_COMMIT.Substring(0, 8) + "; FRONT_DOOR_TEMPLATE, migrations and schema.sql unmoved")
+Say ("[git] HEAD " + $headSha.Substring(0, 8) + " = main = origin/main = -ExpectedCommit; tree clean; contains " + $LIVE_BASE_COMMIT.Substring(0, 8) + "; migrations and schema.sql unmoved")
 
 # 1. the wave's own gates, re-run here so a stale checkout cannot deploy
 # BEGIN-GATES
@@ -247,6 +233,17 @@ if ($testCode -ne 0 -or $failN -ne "0" -or $passN -eq "0") { Stop-Here ("npm tes
 if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
 Say ("[tests] pass " + $passN + ", fail 0; typecheck clean")
 # END-GATES
+# 1b. the no-mint proof on the evaluated template: the v6 pin test on its own, its hash literal present, its template_hash test named in the run.
+# BEGIN-V6-PIN-CHECK
+if (-not ((Get-Content -Raw -Encoding UTF8 $V6_PIN_TEST_FILE).Contains($V6_HASH))) { Stop-Here "$V6_PIN_TEST_FILE no longer carries the v6 hash ${V6_HASH}: the no-mint proof is gone." }
+$ErrorActionPreference = "Continue"
+$v6Out = (node --experimental-strip-types --test --test-reporter=spec $V6_PIN_TEST_FILE 2>&1 | Out-String)
+$v6Code = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$whyV6 = Test-V6PinRun $v6Out $v6Code
+if ($whyV6 -ne "") { Stop-Here ($whyV6 + ": the evaluated constitution template may have moved; this wave mints nothing. Not this script's deploy.") }
+Say ("[no-mint] " + $V6_PIN_TEST_FILE + " passes: the evaluated template hashes to v6 " + $V6_HASH.Substring(0, 8))
+# END-V6-PIN-CHECK
 
 # 2. live, before: non-minting baseline, the live worker is the base this wave was checked against, and /api/residents does not yet carry the note text (so the propagation poll proves something)
 $attBefore = Read-Attest "before the deploy"

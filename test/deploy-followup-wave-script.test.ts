@@ -1,7 +1,7 @@
 // scripts/deploy-followup-wave.ps1 is WRITTEN AND NEVER RUN by the builder (no deploy, no wrangler, not even -DryRun, which reads the live worker over HTTP). It is proven here by what can be
 // proven without running it: it parses under PowerShell's own parser, is ASCII with LF endings, has none of the repo's PowerShell traps, has the load-bearing step order, no migration or D1 step,
 // a single wrangler use, a ride of public GETs with no request body at all, step 0a stops on the placeholder before any git or network command, the served-note check (Test-RunsNoteServed) and the
-// FRONT_DOOR_TEMPLATE no-mint check (Test-TemplateUnmoved) are run for real against good and bad inputs. Derived from the 12 Nov openapi proposal schema deploy script test; the served check is
+// no-mint check on the v6 pin test's run (Test-V6PinRun) are run for real against good and bad inputs. Derived from the 12 Nov openapi proposal schema deploy script test; the served check is
 // GET /api/residents carrying COUNTS_TOWARD_NOTE in its note field.
 //
 // Run: npm test
@@ -26,7 +26,7 @@ const pinBlock = script.slice(script.indexOf("# BEGIN-PIN-CHECK"), script.indexO
 const NOTE_MARKER = "counts_toward lists the society figures this row enters";
 const UNIQ_MARKER = "it is not a uniqueness claim";
 const LIVE = "ed0ce5ae02ec28b80b6510f6352e25e8682bd85c";
-const tmplBlock = script.slice(script.indexOf("# BEGIN-TEMPLATE-FN"), script.indexOf("# END-TEMPLATE-FN"));
+const v6Block = script.slice(script.indexOf("# BEGIN-V6-PIN-FN"), script.indexOf("# END-V6-PIN-FN"));
 
 function runPs(lines: string[]): { code: number | null; out: string } | null {
   const dir = mkdtempSync(join(tmpdir(), "deploy-followup-wave-"));
@@ -104,20 +104,20 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
 });
 
 test("the steps are in the load-bearing order, there is no migration or D1 step, wrangler is used once (the stamped deploy), and the ride sends no POST and no request body", () => {
-  const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-TEMPLATE-CHECK", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", 'Read-Attest "before the deploy"', "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", 'Read-Attest "after the deploy"', "Test-RunsNoteServed $runsNow $RUNS_NOTE_MARKER"];
+  const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", "BEGIN-V6-PIN-CHECK", 'Read-Attest "before the deploy"', "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", 'Read-Attest "after the deploy"', "Test-RunsNoteServed $runsNow $RUNS_NOTE_MARKER"];
   let last = -1;
   for (const needle of order) {
     const i = script.indexOf(needle.startsWith("BEGIN-") ? "# " + needle : needle);
     assert.ok(i > last, `${needle} comes after the previous step`);
     last = i;
   }
-  assert.equal(/\bd1\b|migrations apply|execute --remote/i.test(code.replace(/migrations\b/g, "").replace(/schema\.sql/g, "")), false, "no D1 command");
+  assert.equal(/\bd1\b|migrations apply|execute --remote/i.test(code.replace(/migrations\b/g, "").replace(/schema\.sql/g, "").replace(/test\/constitution-v6-d1\.test\.ts/g, "")), false, "no D1 command (the v6 pin test's file name is the one d1 mention allowed)");
   assert.equal((code.match(/= \(npx wrangler /g) ?? []).length, 1, "exactly one executed wrangler command (the other mentions are text in messages)");
   assert.match(code, /npx wrangler deploy --var "CODE_COMMIT:\$headSha"/);
   assert.equal(/Invoke-WebRequest|Invoke-RestMethod|-Method\s+Post/i.test(code), false, "no PowerShell web cmdlets");
   assert.equal(/-X\s+POST|--data/.test(code), false, "no POST and no request body (PS 5.1 strips inner quotes from native arguments, Addendum 104 s8)");
   assert.ok(code.includes("-- migrations schema.sql") && !code.includes("-- src/doc.ts migrations"), "the no-migration diff names migrations and schema.sql only");
-  assert.ok(code.includes("Test-TemplateUnmoved ($baseDoc -join") && code.includes("git show \"${LIVE_BASE_COMMIT}:src/doc.ts\"") && code.includes("git show \"HEAD:src/doc.ts\""), "the no-mint check reads src/doc.ts at the live base and at HEAD");
+  assert.ok(code.includes("$whyV6 = Test-V6PinRun $v6Out $v6Code") && code.includes('if ($whyV6 -ne "") { Stop-Here'), "the no-mint check is the evaluated v6 pin run, and it stops on any reason");
 });
 
 test("the marker and url are what the served route carries: the counts_toward text is COUNTS_TOWARD_NOTE in src/resident.ts, the uniqueness sentence is served on /api/residents, and the script pins the url", () => {
@@ -149,7 +149,7 @@ test("the source checks name literals the checkout carries: the carried schema a
 type Cap = { code: string; body: string };
 
 test("the served-schema check, run for real, passes a note with the text and fails one without it, the text only outside the note field, a wrong-case text, a non-200, a non-JSON body and an empty body", (t) => {
-  const fns = defs.slice(defs.indexOf("function Read-JsonBody"), defs.indexOf("# BEGIN-TEMPLATE-FN"));
+  const fns = defs.slice(defs.indexOf("function Read-JsonBody"), defs.indexOf("# BEGIN-V6-PIN-FN"));
   const q = (s: string): string => "'" + s.replace(/'/g, "''") + "'";
   const cap = (c: Cap): string => `@{ Code = ${q(c.code)}; Type = 'application/json'; Body = ${q(c.body)} }`;
   const good: Cap = { code: "200", body: JSON.stringify({ residents: [], note: "The residents. " + NOTE_MARKER + "; it is empty." }) };
@@ -224,53 +224,36 @@ test("CODEX r1: the ride re-checks code identity, HEAD and a clean tree are re-r
   assert.match(run.out, /RESULT version \[code\.version_id is 'b{8}-/, run.out);
 });
 
-// ---- the step-0 no-mint rule: FRONT_DOOR_TEMPLATE text byte-identical between the live base and HEAD (src/doc.ts may change outside it) ----
-const TICK = String.fromCharCode(96);
-const docText = (tmpl: string, outside: string): string => `// header ${outside}\nexport const FRONT_DOOR_TEMPLATE = ${TICK}${tmpl}${TICK};\nexport const OTHER = 1; // ${outside}\n`;
-
-test("step 0's template rule, run for real: a template-only change STOPS, an outside-only change passes, an unchanged file passes, a missing template (either side) or an unterminated one STOPS", (t) => {
+// ---- the no-mint proof: the evaluated v6 pin test (CODEX r1: a substring compare of the template source missed interpolation, comments and concatenation) ----
+test("step 1b's check of the v6 pin run: a pass with the named test passes; a failure, a non-zero exit, no test run, a missing summary or the named test absent each STOP", (t) => {
+  const name = "v6 template hash: /api/attest serves the pinned v6 hash and no longer the v5 one";
   const q = (s: string): string => "'" + s.replace(/'/g, "''") + "'";
-  const cases: Array<[string, string, string, string]> = [
-    ["same", docText("A {{NAME}} B", "x"), docText("A {{NAME}} B", "x"), ""],
-    ["outside", docText("A {{NAME}} B", "x"), docText("A {{NAME}} B", "changed outside the template"), ""],
-    ["template", docText("A {{NAME}} B", "x"), docText("A {{NAME}} B!", "x"), "differs"],
-    ["templatews", docText("A B", "x"), docText("A  B", "x"), "differs"],
-    ["nobase", "export const OTHER = 1;\n", docText("A", "x"), "not found in src/doc.ts at the live base"],
-    ["nohead", docText("A", "x"), "export const OTHER = 1;\n", "not found in src/doc.ts at HEAD"],
-    ["unterminated", docText("A", "x"), `export const FRONT_DOOR_TEMPLATE = ${TICK}never closed`, "not found in src/doc.ts at HEAD"],
+  const cases: Array<[string, string, number, string]> = [
+    ["ok", `✔ ${name} (5ms)\nℹ pass 6\nℹ fail 0\n`, 0, ""],
+    ["fail", `✖ ${name} (5ms)\nℹ pass 5\nℹ fail 1\n`, 1, "failed"],
+    ["exit", `✔ ${name} (5ms)\nℹ pass 6\nℹ fail 0\n`, 1, "failed"],
+    ["none", "ℹ pass 0\nℹ fail 0\n", 0, "ran no test"],
+    ["nosummary", `✔ ${name}\n`, 0, "no pass/fail summary"],
+    ["unnamed", "✔ some other test (5ms)\nℹ pass 6\nℹ fail 0\n", 0, "did not run"],
   ];
   const run = runPs([
     "$ErrorActionPreference = 'Stop'",
-    tmplBlock,
-    ...cases.map(([name, base, head]) => `Write-Host ("RESULT ${name} [" + (Test-TemplateUnmoved ${q(base)} ${q(head)}) + "]")`),
+    v6Block,
+    ...cases.map(([n, out, code]) => `Write-Host ("RESULT ${n} [" + (Test-V6PinRun ${q(out)} ${code}) + "]")`),
   ]);
   if (!run) return t.skip("no PowerShell available");
-  for (const [name, , , expect] of cases) {
-    const m = new RegExp(`RESULT ${name} \\[(.*)\\]`).exec(run.out);
-    assert.ok(m, `${name} produced a result: ${run.out}`);
-    if (expect === "") assert.equal(m![1], "", name);
-    else assert.ok(m![1].includes(expect), `${name}: '${m![1]}' mentions '${expect}'`);
+  for (const [n, , , expect] of cases) {
+    const m = new RegExp(`RESULT ${n} \\[(.*)\\]`).exec(run.out);
+    assert.ok(m, `${n} produced a result: ${run.out}`);
+    if (expect === "") assert.equal(m![1], "", n);
+    else assert.ok(m![1].includes(expect), `${n}: '${m![1]}' mentions '${expect}'`);
   }
 });
 
-test("the template rule reads the real src/doc.ts: it extracts a non-empty template from the checkout and finds it unmoved against itself", (t) => {
-  const real = readFileSync(here("../src/doc.ts"), "utf8");
-  const dir = mkdtempSync(join(tmpdir(), "deploy-followup-wave-doc-"));
-  try {
-    const f = join(dir, "doc.ts");
-    writeFileSync(f, real);
-    const run = runPs([
-      "$ErrorActionPreference = 'Stop'",
-      tmplBlock,
-      `$d = Get-Content -Raw -Encoding UTF8 '${f}'`,
-      'Write-Host ("RESULT len " + (Get-FrontDoorTemplate $d).Length)',
-      'Write-Host ("RESULT self [" + (Test-TemplateUnmoved $d $d) + "]")',
-    ]);
-    if (!run) return t.skip("no PowerShell available");
-    const len = /RESULT len (\d+)/.exec(run.out);
-    assert.ok(len && Number(len[1]) > 1000, run.out);
-    assert.match(run.out, /RESULT self \[\]/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+test("step 1b names a real test: the pinned test name and the v6 hash are both in test/constitution-v6-d1.test.ts, and the step runs that file alone", () => {
+  const pin = readFileSync(here("../test/constitution-v6-d1.test.ts"), "utf8");
+  assert.ok(pin.includes("v6 template hash: /api/attest serves the pinned v6 hash and no longer the v5 one"));
+  assert.ok(pin.includes("dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"));
+  assert.match(script, /\$v6Out = \(node --experimental-strip-types --test --test-reporter=spec \$V6_PIN_TEST_FILE 2>&1 \| Out-String\)/);
+  assert.ok(!script.includes("FRONT_DOOR_TEMPLATE = "), "no substring template proof remains");
 });
