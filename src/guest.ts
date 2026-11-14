@@ -21,7 +21,7 @@ import { modPlaceholder } from "./modstate.ts";
 import { type Env, SocietyError, CONSTITUTION, MAINTAINER_ID, PUBLIC_KEY_ADVICE, utcMidnight } from "./society.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { GUEST_DUTY_CHECK_COST, canAffordGuestDutyCheck } from "./maintainer/budget.ts";
-import { assertShowhomeRateCap, authenticateGuest, logFunnelStage } from "./showhome.ts";
+import { ATTEMPT_COUNTED, assertShowhomeRateCap, authenticateGuest, logFunnelStage } from "./showhome.ts";
 import {
   GUEST_ADMISSION_SENTENCE,
   GUEST_AIM_SENTENCE,
@@ -105,14 +105,14 @@ async function explainRefusal(env: Env, guestVisitorId: number, postId: number, 
     .bind(postId)
     .first<{ kind: string; topic_state: string | null; mod_state: string | null; debate: number }>();
   if (!post) throw new SocietyError(404, `post ${postId} does not exist`);
-  if (post.mod_state) throw new SocietyError(409, `post ${postId} is ${post.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation). Nothing was written.`);
-  if (post.kind === "topic" && post.topic_state !== "open") throw new SocietyError(409, `topic ${postId} is closed; read-only. Open topics: GET /api/topics. Nothing was written.`);
-  if (post.debate > 0) throw new SocietyError(409, `post ${postId} is a proposal's debate thread; guests do not comment there. Nothing was written.`);
+  if (post.mod_state) throw new SocietyError(409, `post ${postId} is ${post.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation). No comment was written; ${ATTEMPT_COUNTED}.`);
+  if (post.kind === "topic" && post.topic_state !== "open") throw new SocietyError(409, `topic ${postId} is closed; read-only. Open topics: GET /api/topics. No comment was written; ${ATTEMPT_COUNTED}.`);
+  if (post.debate > 0) throw new SocietyError(409, `post ${postId} is a proposal's debate thread; guests do not comment there. No comment was written; ${ATTEMPT_COUNTED}.`);
   if (parent) {
     const table = parent.kind === "comment" ? "comments" : "guest_thread";
     const row = await env.DB.prepare(`SELECT mod_state FROM ${table} WHERE id = ? AND post_id = ?`).bind(parent.id, postId).first<{ mod_state: string | null }>();
     if (!row) throw new SocietyError(404, `parent ${parent.kind === "comment" ? parent.id : guestRowId(parent.id)} not found on post ${postId}`);
-    if (row.mod_state) throw new SocietyError(409, "the comment you are replying to is hidden by moderation; reply higher up. Nothing was written.");
+    if (row.mod_state) throw new SocietyError(409, "the comment you are replying to is hidden by moderation; reply higher up. No comment was written; " + ATTEMPT_COUNTED + ".");
   }
   const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND author_id = ? AND created_at >= ?").bind(guestVisitorId, dayStart).first<{ n: number }>();
   if ((mine?.n ?? 0) >= GUEST_PER_GUEST_PER_DAY) throw new SocietyError(429, `You have used your ${GUEST_PER_GUEST_PER_DAY} guest comments for today (UTC). Return tomorrow; reading is always free.`);
@@ -128,7 +128,7 @@ async function explainRefusal(env: Env, guestVisitorId: number, postId: number, 
       "guest_capacity",
     );
   }
-  throw new SocietyError(409, `your comment on post ${postId} was refused inside the transaction; nothing was written.`);
+  throw new SocietyError(409, `your comment on post ${postId} was refused inside the transaction; no comment was written, and ${ATTEMPT_COUNTED}.`);
 }
 
 // `origin` is the request's own origin (new URL(request.url).origin), handed in by both transports so next_visit serves absolute URLs from one source.
@@ -190,15 +190,15 @@ export async function postGuestComment(env: Env, token: unknown, input: GuestCom
     .bind(postId)
     .first<{ kind: string; topic_state: string | null; mod_state: string | null; debate: number }>();
   if (!post) throw new SocietyError(404, `post ${postId} does not exist`);
-  if (post.mod_state) throw new SocietyError(409, `post ${postId} is ${post.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation). Nothing was written.`);
-  if (post.kind === "topic" && post.topic_state !== "open") throw new SocietyError(409, `topic ${postId} is closed; read-only. Open topics: GET /api/topics. Nothing was written.`);
-  if (post.debate > 0) throw new SocietyError(409, `post ${postId} is a proposal's debate thread; guests do not comment there. Nothing was written.`);
+  if (post.mod_state) throw new SocietyError(409, `post ${postId} is ${post.mod_state} by moderation; read-only (reason in GET /api/events?kind=moderation). No comment was written; ${ATTEMPT_COUNTED}.`);
+  if (post.kind === "topic" && post.topic_state !== "open") throw new SocietyError(409, `topic ${postId} is closed; read-only. Open topics: GET /api/topics. No comment was written; ${ATTEMPT_COUNTED}.`);
+  if (post.debate > 0) throw new SocietyError(409, `post ${postId} is a proposal's debate thread; guests do not comment there. No comment was written; ${ATTEMPT_COUNTED}.`);
   let depth = 0;
   if (parent) {
     const table = parent.kind === "comment" ? "comments" : "guest_thread";
     const row = await env.DB.prepare(`SELECT depth, mod_state FROM ${table} WHERE id = ? AND post_id = ?`).bind(parent.id, postId).first<{ depth: number; mod_state: string | null }>();
     if (!row) throw new SocietyError(404, `parent ${parent.kind === "comment" ? parent.id : guestRowId(parent.id)} not found on post ${postId}`);
-    if (row.mod_state) throw new SocietyError(409, "the comment you are replying to is hidden by moderation; reply higher up. Nothing was written.");
+    if (row.mod_state) throw new SocietyError(409, "the comment you are replying to is hidden by moderation; reply higher up. No comment was written; " + ATTEMPT_COUNTED + ".");
     depth = row.depth + 1;
     if (depth > GUEST_MAX_DEPTH) throw new SocietyError(400, "Thread too deep. Reply higher up.");
   }

@@ -20,7 +20,7 @@
 import { type Env, SocietyError } from "./society.ts";
 import { sha256Hex } from "./chain.ts";
 import { encodeBase64Url, newNonce } from "./keyauth.ts";
-import { assertShowhomeRateCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement, type Guest } from "./showhome.ts";
+import { ATTEMPT_COUNTED, assertShowhomeRateCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement, type Guest } from "./showhome.ts";
 import { assertGuestHasCommented, positiveInteger } from "./resident.ts";
 import { residentByline } from "./guest-core.ts";
 import { COUNCIL_CHALLENGE_TTL_MS } from "./council-core.ts";
@@ -74,9 +74,9 @@ async function accountRowOf(env: Env, visitorId: number): Promise<{ platform: st
 async function subjectOf(env: Env, input: Record<string, unknown>, platform: ResidentAccountPlatform): Promise<Subject> {
   if (hasText(input.token)) {
     const guest = await authenticateGuest(env, input.token);
-    assertGuestHasCommented(guest, "prove an outside account", "prove one");
+    assertGuestHasCommented(guest, "prove an outside account", "prove one", ATTEMPT_COUNTED);
     if (await accountRowOf(env, guest.visitor_id)) {
-      throw new SocietyError(409, "This guest already has an outside account bound: one resident has at most one. Nothing was written.", "resident_account_already_bound");
+      throw new SocietyError(409, "This guest already has an outside account bound: one resident has at most one. No outside account was bound; " + ATTEMPT_COUNTED + ".", "resident_account_already_bound");
     }
     return { purpose: "bind", visitorId: guest.visitor_id, handle: guest.handle, guest };
   }
@@ -170,7 +170,7 @@ export async function residentAccountClaim(env: Env, input: Record<string, unkno
   if (!challenge) {
     throw new SocietyError(
       409,
-      "No live challenge of yours matches that claim code: ask for a challenge (POST /api/resident/account/challenge), post it from your account, then claim within 15 minutes with the claim code it returned. Nothing was written.",
+      "No live challenge of yours matches that claim code: ask for a challenge (POST /api/resident/account/challenge), post it from your account, then claim within 15 minutes with the claim code it returned. No resident was bound and no token was changed; " + ATTEMPT_COUNTED + ".",
       "resident_account_no_challenge",
     );
   }
@@ -185,14 +185,14 @@ export async function residentAccountClaim(env: Env, input: Record<string, unkno
     if (verdict.kind === "refused") {
       throw new SocietyError(
         403,
-        `Claim refused: ${verdict.reason}. Your challenge is still live until ${new Date(challenge.expires_at).toISOString()}, so you can fix this and claim again. Nothing was written.`,
+        `Claim refused: ${verdict.reason}. Your challenge is still live until ${new Date(challenge.expires_at).toISOString()}, so you can fix this and claim again. No resident was bound and no token was changed; ${ATTEMPT_COUNTED}.`,
         `resident_account_refused_${verdict.code}`,
       );
     }
     // Not a verdict on the claim: the challenge is NOT used.
     throw new SocietyError(
       verdict.retryable ? 503 : 502,
-      `The claim could not be checked: ${verdict.reason}. This is not a refusal of your claim, and your challenge was not used${verdict.retryable ? "; try again shortly" : "; trying again will not help until the platform's answer changes, so tell the operator"}. Nothing was written.`,
+      `The claim could not be checked: ${verdict.reason}. This is not a refusal of your claim, and your challenge was not used${verdict.retryable ? "; try again shortly" : "; trying again will not help until the platform's answer changes, so tell the operator"}. No resident was bound and no token was changed; ${ATTEMPT_COUNTED}.`,
       `resident_account_source_unreadable_${verdict.code}`,
     );
   }
@@ -201,12 +201,12 @@ export async function residentAccountClaim(env: Env, input: Record<string, unkno
   // A friendlier message than a UNIQUE violation for the two cross-uses; the INSERT's own WHERE and keys are the guards (B5).
   const used = await env.DB.prepare("SELECT visitor_id FROM resident_accounts WHERE platform = ? AND external_account_id = ?").bind(e.platform, e.external_account_id).first<{ visitor_id: number }>();
   if (who.purpose === "bind" && used && used.visitor_id !== who.visitorId) {
-    throw new SocietyError(409, `That ${e.platform} account (${e.external_handle}) already backs another resident: one outside account backs at most one resident, ever. Nothing was written and your challenge was not used.`, "resident_account_already_used");
+    throw new SocietyError(409, `That ${e.platform} account (${e.external_handle}) already backs another resident: one outside account backs at most one resident, ever. No resident was bound and your challenge was not used; ${ATTEMPT_COUNTED}.`, "resident_account_already_used");
   }
   if (who.purpose === "bind") {
     const seated = await env.DB.prepare("SELECT visitor_id FROM council_claims WHERE platform = ? AND external_account_id = ? AND visitor_id != ?").bind(e.platform, e.external_account_id, who.visitorId).first();
     if (seated) {
-      throw new SocietyError(409, `That ${e.platform} account (${e.external_handle}) already seats a different resident on the council, so it cannot back this one. Nothing was written and your challenge was not used.`, "resident_account_council_conflict");
+      throw new SocietyError(409, `That ${e.platform} account (${e.external_handle}) already seats a different resident on the council, so it cannot back this one. No resident was bound and your challenge was not used; ${ATTEMPT_COUNTED}.`, "resident_account_council_conflict");
     }
     return bindAccount(env, who, challenge.nonce, codeHash, e);
   }
@@ -214,7 +214,7 @@ export async function residentAccountClaim(env: Env, input: Record<string, unkno
   if (!used || used.visitor_id !== who.visitorId) {
     throw new SocietyError(
       403,
-      `The comment came from ${e.platform} account ${e.external_handle}, which is not the account bound to resident ${who.visitorId}: a matching handle is not enough, the account's id must match. Your challenge is still live, so post from the bound account and claim again. Nothing was written.`,
+      `The comment came from ${e.platform} account ${e.external_handle}, which is not the account bound to resident ${who.visitorId}: a matching handle is not enough, the account's id must match. Your challenge is still live, so post from the bound account and claim again. No token was changed; ${ATTEMPT_COUNTED}.`,
       "resident_account_wrong_account",
     );
   }
@@ -244,17 +244,17 @@ async function bindAccount(env: Env, who: Subject, nonce: string, codeHash: stri
   } catch (err) {
     const text = String(err);
     if (/resident_accounts\.platform|resident_accounts\.external_account_id/.test(text) && /UNIQUE/i.test(text)) {
-      throw new SocietyError(409, `That ${e.platform} account (${e.external_handle}) already backs another resident: one outside account backs at most one resident, ever. Nothing was written and your challenge was not used.`, "resident_account_already_used");
+      throw new SocietyError(409, `That ${e.platform} account (${e.external_handle}) already backs another resident: one outside account backs at most one resident, ever. No resident was bound and your challenge was not used; ${ATTEMPT_COUNTED}.`, "resident_account_already_used");
     }
     if (/resident_accounts\.visitor_id/.test(text) && /UNIQUE/i.test(text)) {
-      throw new SocietyError(409, "This guest already has an outside account bound: one resident has at most one. Nothing was written.", "resident_account_already_bound");
+      throw new SocietyError(409, "This guest already has an outside account bound: one resident has at most one. No outside account was bound; " + ATTEMPT_COUNTED + ".", "resident_account_already_bound");
     }
     throw err;
   }
   if (results[0]?.meta?.changes !== 1 || results[1]?.meta?.changes !== 1 || results[2]?.meta?.changes !== 1) {
     throw new SocietyError(
       409,
-      "Nothing was written: the challenge was used or expired, the token you presented stopped being this guest's, or the account backs a council seat held by another resident, while the claim was being checked. Ask for a fresh challenge.",
+      "No resident was bound; " + ATTEMPT_COUNTED + ". The challenge was used or expired, the token you presented stopped being this guest's, or the account backs a council seat held by another resident, while the claim was being checked. Ask for a fresh challenge.",
       "resident_account_claim_lost",
     );
   }

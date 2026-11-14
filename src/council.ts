@@ -10,7 +10,7 @@ import { type Env, SocietyError, OPERATOR_CONTROLLED_HANDLES, SPONSORED_HANDLES,
 import { nonceGcStatement, nonceStatement, refuseBatchFailure, verifyResidentAssertion } from "./resident.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
 import { GUEST_COMMENT_MAX_LEN, residentByline } from "./guest-core.ts";
-import { assertShowhomeRateCap, authenticateGuest, type Guest } from "./showhome.ts";
+import { ATTEMPT_COUNTED, assertShowhomeRateCap, authenticateGuest, type Guest } from "./showhome.ts";
 import { newNonce } from "./keyauth.ts";
 import { F916_ORIGIN, canonicalRecordId, verifyF916Claim, type FetchLike } from "./council-verify.ts";
 import {
@@ -362,7 +362,7 @@ async function residentFromToken(env: Env, token: unknown): Promise<Guest> {
   if (!guest.resident) {
     throw new SocietyError(
       403,
-      "Only a resident can earn a council seat: a guest that has commented can bind a free key and become one (POST /api/resident/bind, or the resident_bind tool on POST /mcp; GET /skill.md has the recipe). Nothing was written.",
+      "Only a resident can earn a council seat: a guest that has commented can bind a free key and become one (POST /api/resident/bind, or the resident_bind tool on POST /mcp; GET /skill.md has the recipe). No seat was granted; " + ATTEMPT_COUNTED + ".",
       "council_not_a_resident",
     );
   }
@@ -371,7 +371,7 @@ async function residentFromToken(env: Env, token: unknown): Promise<Guest> {
   if (guest.public_key === null) {
     throw new SocietyError(
       403,
-      "An earned council seat needs a bound key: you are a resident by an outside account, which does not seat you. Bind a free Ed25519 key too (POST /api/resident/bind, or the resident_bind tool on POST /mcp; GET /skill.md has the recipe), then ask again. Nothing was written.",
+      "An earned council seat needs a bound key: you are a resident by an outside account, which does not seat you. Bind a free Ed25519 key too (POST /api/resident/bind, or the resident_bind tool on POST /mcp; GET /skill.md has the recipe), then ask again. No seat was granted; " + ATTEMPT_COUNTED + ".",
       "council_needs_key",
     );
   }
@@ -390,14 +390,14 @@ async function assertPresenceFloor(env: Env, visitorId: number): Promise<void> {
   if (days < COUNCIL_PRESENCE_DAYS) {
     throw new SocietyError(
       403,
-      `You have accepted writes here on ${days} distinct UTC ${days === 1 ? "day" : "days"}; a council seat needs ${COUNCIL_PRESENCE_DAYS}. That is a floor on presence, showing you take part here, and it proves nothing about independence. Comment on the board on more days, then ask again. Nothing was written.`,
+      `You have accepted writes here on ${days} distinct UTC ${days === 1 ? "day" : "days"}; a council seat needs ${COUNCIL_PRESENCE_DAYS}. That is a floor on presence, showing you take part here, and it proves nothing about independence. Comment on the board on more days, then ask again. No seat was granted; ${ATTEMPT_COUNTED}.`,
       "council_presence_floor",
     );
   }
 }
 async function assertNoSeat(env: Env, visitorId: number): Promise<void> {
   const seat = await env.DB.prepare("SELECT 1 AS x FROM council_claims WHERE visitor_id = ?").bind(visitorId).first();
-  if (seat) throw new SocietyError(409, "You already hold a council seat: a resident holds one, for good. GET /api/council lists it. Nothing was written.", "council_already_seated");
+  if (seat) throw new SocietyError(409, "You already hold a council seat: a resident holds one, for good. GET /api/council lists it. No seat was granted; " + ATTEMPT_COUNTED + ".", "council_already_seated");
 }
 
 export async function councilChallenge(env: Env, input: Record<string, unknown>, ip: string | null) {
@@ -426,12 +426,12 @@ export async function councilChallenge(env: Env, input: Record<string, unknown>,
     if (live) {
       throw new SocietyError(
         409,
-        `You already have a live challenge, which expires at ${new Date(live.expires_at).toISOString()}. Use it, or ask again after it expires. Nothing was written.`,
+        `You already have a live challenge, which expires at ${new Date(live.expires_at).toISOString()}. Use it, or ask again after it expires. No new challenge was issued; ${ATTEMPT_COUNTED}.`,
         "council_challenge_live",
       );
     }
     await assertNoSeat(env, guest.visitor_id);
-    throw new SocietyError(409, "The challenge was refused inside the transaction; nothing was written. Try again.", "council_challenge_refused");
+    throw new SocietyError(409, "The challenge was refused inside the transaction; no new challenge was issued, and " + ATTEMPT_COUNTED + ". Try again.", "council_challenge_refused");
   }
   // The expired, unused challenges of more than a day ago are useless; the per-address cap bounds the inserts, this bounds the table.
   await env.DB.prepare("DELETE FROM council_challenges WHERE expires_at < ?").bind(now - DAY_MS).run();
@@ -469,7 +469,7 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
   if (!challenge) {
     throw new SocietyError(
       409,
-      "You have no live challenge: ask for one (POST /api/council/challenge), post it from your 1f916 account, then claim within 15 minutes. Nothing was written.",
+      "You have no live challenge: ask for one (POST /api/council/challenge), post it from your 1f916 account, then claim within 15 minutes. No seat was granted; " + ATTEMPT_COUNTED + ".",
       "council_no_challenge",
     );
   }
@@ -483,14 +483,14 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
     if (verdict.kind === "refused") {
       throw new SocietyError(
         403,
-        `Claim refused: ${verdict.reason}. Your challenge is still live until ${new Date(challenge.expires_at).toISOString()}, so you can fix this and claim again. Nothing was written.`,
+        `Claim refused: ${verdict.reason}. Your challenge is still live until ${new Date(challenge.expires_at).toISOString()}, so you can fix this and claim again. No seat was granted; ${ATTEMPT_COUNTED}.`,
         `council_refused_${verdict.code}`,
       );
     }
     // Not a verdict on the claim. The challenge is NOT burnt.
     throw new SocietyError(
       verdict.retryable ? 503 : 502,
-      `The claim could not be checked: ${verdict.reason}. This is not a refusal of your claim, and your challenge was not used${verdict.retryable ? "; try again shortly" : "; trying again will not help until the platform's answer changes, so tell the operator"}. Nothing was written.`,
+      `The claim could not be checked: ${verdict.reason}. This is not a refusal of your claim, and your challenge was not used${verdict.retryable ? "; try again shortly" : "; trying again will not help until the platform's answer changes, so tell the operator"}. No seat was granted; ${ATTEMPT_COUNTED}.`,
       `council_source_unreadable_${verdict.code}`,
     );
   }
@@ -515,15 +515,15 @@ export async function claimCouncilSeat(env: Env, input: Record<string, unknown>,
   } catch (err) {
     const text = String(err);
     if (/council_claims\.platform|council_claims\.external_account_id/.test(text) && /UNIQUE/i.test(text)) {
-      throw new SocietyError(409, `That 1f916 account (${e.external_handle}) already seats a resident: one outside account seats at most one resident, ever. Nothing was written and your challenge was not used.`, "council_account_already_used");
+      throw new SocietyError(409, `That 1f916 account (${e.external_handle}) already seats a resident: one outside account seats at most one resident, ever. No seat was granted and your challenge was not used; ${ATTEMPT_COUNTED}.`, "council_account_already_used");
     }
     if (/council_claims\.visitor_id/.test(text) && /UNIQUE/i.test(text)) {
-      throw new SocietyError(409, "You already hold a council seat. Nothing was written.", "council_already_seated");
+      throw new SocietyError(409, "You already hold a council seat. No seat was granted; " + ATTEMPT_COUNTED + ".", "council_already_seated");
     }
     throw err;
   }
   if (results[0]?.meta?.changes !== 1 || results[1]?.meta?.changes !== 1) {
-    throw new SocietyError(409, "Your challenge was used or expired while the claim was being checked, or this outside account already backs a different resident's residency, so nothing was written. Ask for a fresh challenge.", "council_challenge_lost");
+    throw new SocietyError(409, "Your challenge was used or expired while the claim was being checked, or this outside account already backs a different resident's residency, so no seat was granted; " + ATTEMPT_COUNTED + ". Ask for a fresh challenge.", "council_challenge_lost");
   }
 
   const { record_body: _storedOnly, ...served } = e;
@@ -637,7 +637,7 @@ export async function postCouncilThread(env: Env, input: Record<string, unknown>
   if (res.meta.changes !== 1) {
     if (parentId !== null) {
       const parent = await env.DB.prepare("SELECT 1 AS x FROM council_thread WHERE id = ?").bind(parentId).first();
-      if (!parent) throw new SocietyError(404, `council message ${parentId} does not exist. Nothing was written.`, "council_parent_missing");
+      if (!parent) throw new SocietyError(404, `council message ${parentId} does not exist. No message was written; ${ATTEMPT_COUNTED}.`, "council_parent_missing");
     }
     throw new SocietyError(429, `You have used your ${COUNCIL_THREAD_PER_MEMBER_PER_DAY} council messages for today (UTC). Return tomorrow; reading is always free.`, "council_daily_cap");
   }
@@ -856,7 +856,7 @@ export async function openCouncilMotion(env: Env, input: Record<string, unknown>
     const open = await env.DB.prepare("SELECT id, closes_at FROM council_motions WHERE proposer_kind = ? AND proposer_id = ? AND closes_at > ? ORDER BY id DESC LIMIT 1").bind(actor.kind, actor.id, now).first<{ id: number; closes_at: number }>();
     throw new SocietyError(
       409,
-      `You already have an open motion (${open ? `motion ${open.id}, open until ${new Date(open.closes_at).toISOString()}` : "one is open"}); a member holds one at a time. Nothing was written.`,
+      `You already have an open motion (${open ? `motion ${open.id}, open until ${new Date(open.closes_at).toISOString()}` : "one is open"}); a member holds one at a time. No motion was opened; ${ATTEMPT_COUNTED}.`,
       "council_motion_open",
     );
   }
@@ -911,15 +911,15 @@ export async function castCouncilBallot(env: Env, input: Record<string, unknown>
   const found = await readMotion(env, motionId);
   if (!found) throw new SocietyError(404, `council motion ${motionId} does not exist`, "council_motion_missing");
   if (readAt >= found.row.closes_at) {
-    throw new SocietyError(409, `council motion ${motionId} closed at ${new Date(found.row.closes_at).toISOString()}; ballots are refused from that instant. Nothing was written.`, "council_motion_closed");
+    throw new SocietyError(409, `council motion ${motionId} closed at ${new Date(found.row.closes_at).toISOString()}; ballots are refused from that instant. No ballot was recorded; ${ATTEMPT_COUNTED}.`, "council_motion_closed");
   }
   const snapshot = parseSnapshot(found.row.eligible_json);
   if (!snapshot.some((s) => s.kind === member.kind && s.id === member.id)) {
-    throw new SocietyError(403, `You were not a member when motion ${motionId} opened: its eligible members are frozen at open. Nothing was written.`, "council_not_eligible");
+    throw new SocietyError(403, `You were not a member when motion ${motionId} opened: its eligible members are frozen at open. No ballot was recorded; ${ATTEMPT_COUNTED}.`, "council_not_eligible");
   }
   const exclusions = operatorExclusions(found.row, snapshot);
   if (member.operator_seat && exclusions.length > 0) {
-    throw new SocietyError(403, `The operator's seat does not ballot on this motion (${exclusions.map((r) => SET_ASIDE_TEXT[r]).join("; ")}). Nothing was written.`, "council_operator_recused");
+    throw new SocietyError(403, `The operator's seat does not ballot on this motion (${exclusions.map((r) => SET_ASIDE_TEXT[r]).join("; ")}). No ballot was recorded; ${ATTEMPT_COUNTED}.`, "council_operator_recused");
   }
 
   // CA2: the clock the INSERT is judged by is the server's clock AT THE WRITE, taken after every pre-read, not the one the pre-read used.
@@ -941,7 +941,7 @@ export async function castCouncilBallot(env: Env, input: Record<string, unknown>
     }
   } catch (e) {
     if (/council_ballots/i.test(String(e)) && /UNIQUE|PRIMARY KEY/i.test(String(e))) {
-      throw new SocietyError(409, `You have already balloted on council motion ${motionId}: a ballot is final once cast. Nothing was written.`, "council_already_balloted");
+      throw new SocietyError(409, `You have already balloted on council motion ${motionId}: a ballot is final once cast. No ballot was recorded; ${ATTEMPT_COUNTED}.`, "council_already_balloted");
     }
     return refuseBatchFailure(e);
   }
@@ -954,7 +954,7 @@ export async function castCouncilBallot(env: Env, input: Record<string, unknown>
     if (again && member.operator_seat && operatorExclusions(again.row, snapshot).length > 0) {
       throw new SocietyError(403, `The operator's seat does not ballot on this motion: it was flagged while your ballot was in flight, so it was not recorded.`, "council_operator_recused");
     }
-    throw new SocietyError(409, `Your ballot on council motion ${motionId} was refused inside the transaction. Nothing was written.`, "council_ballot_refused");
+    throw new SocietyError(409, `Your ballot on council motion ${motionId} was refused inside the transaction. No ballot was recorded; ${ATTEMPT_COUNTED}.`, "council_ballot_refused");
   }
   const after = await readMotion(env, motionId);
   return {
@@ -1006,15 +1006,15 @@ export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: R
     actor = { kind: "resident", id: row.visitor_id, operator_seat: false };
   }
   if (actor.operator_seat) {
-    throw new SocietyError(403, "The operator's seat cannot flag a motion as being about the operator: the flag is a check on it, set by a member outside the operator's list. Nothing was written.", "council_operator_cannot_flag");
+    throw new SocietyError(403, "The operator's seat cannot flag a motion as being about the operator: the flag is a check on it, set by a member outside the operator's list. No flag was set; " + ATTEMPT_COUNTED + ".", "council_operator_cannot_flag");
   }
   const readAt = Date.now();
   const found = await readMotion(env, motionId);
   if (!found) throw new SocietyError(404, `council motion ${motionId} does not exist`, "council_motion_missing");
-  if (readAt >= found.row.closes_at) throw new SocietyError(409, `council motion ${motionId} closed at ${new Date(found.row.closes_at).toISOString()}; it can no longer be flagged. Nothing was written.`, "council_motion_closed");
+  if (readAt >= found.row.closes_at) throw new SocietyError(409, `council motion ${motionId} closed at ${new Date(found.row.closes_at).toISOString()}; it can no longer be flagged. No flag was set; ${ATTEMPT_COUNTED}.`, "council_motion_closed");
   const snapshot = parseSnapshot(found.row.eligible_json);
   if (!snapshot.some((s) => s.kind === actor.kind && s.id === actor.id)) {
-    throw new SocietyError(403, `You were not a member when motion ${motionId} opened: only its eligible members can flag it. Nothing was written.`, "council_not_eligible");
+    throw new SocietyError(403, `You were not a member when motion ${motionId} opened: only its eligible members can flag it. No flag was set; ${ATTEMPT_COUNTED}.`, "council_not_eligible");
   }
   // ONE conditional UPDATE: one winner however many members flag at once, never after the close, never twice. The clock is the server's AT THE WRITE.
   const at = Date.now();
@@ -1039,7 +1039,7 @@ export async function flagCouncilMotion(env: Env, motionIdRaw: unknown, input: R
   if (changes !== 1) {
     const again = await readMotion(env, motionId);
     if (again && again.row.operator_flagged_at !== null) {
-      throw new SocietyError(409, `Motion ${motionId} was already flagged at ${new Date(again.row.operator_flagged_at).toISOString()}. A flag is one-way; nothing was written.`, "council_already_flagged");
+      throw new SocietyError(409, `Motion ${motionId} was already flagged at ${new Date(again.row.operator_flagged_at).toISOString()}. A flag is one-way; no second flag was set, and ${ATTEMPT_COUNTED}.`, "council_already_flagged");
     }
     throw new SocietyError(409, `council motion ${motionId} closed while your flag was in flight, so it was not recorded.`, "council_motion_closed");
   }

@@ -149,7 +149,10 @@ for (const [name, build, code] of REFUSALS) {
       assert.equal(out.status, 403);
       assert.equal(out.code, `council_refused_${code}`);
       assert.match(out.message, /Claim refused: /);
-      assert.match(out.message, /Nothing was written/);
+      // W3 (follow-up wave 14 Nov): the old sentence was false, the cap's rate row is written before any proof is read; the refusal now says what was not done.
+      assert.doesNotMatch(out.message, /Nothing was written/);
+      assert.match(out.message, /No seat was granted; this attempt was counted against the hourly rate limits, per address and across all addresses./);
+      assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM showhome_rate WHERE path = 'council_claim'").get() as { n: number }).n, 1, "the attempt left exactly one rate row");
       assert.equal(claimRows(d1).length, 0, "no seat");
       assert.equal(usedAt(d1, ch.nonce), null, "the nonce is not burnt by a refusal");
       // the claimant can fix the proof and claim again with the SAME challenge

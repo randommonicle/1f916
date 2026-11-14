@@ -41,7 +41,7 @@ import {
   withinWindow,
   type ParsedAssertion,
 } from "./keyauth.ts";
-import { assertShowhomeAddressCap, assertShowhomeGlobalCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement } from "./showhome.ts";
+import { BIND_ATTEMPT_COUNTED, assertShowhomeAddressCap, assertShowhomeGlobalCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement } from "./showhome.ts";
 import { RESIDENTS_NOTE, residentByline } from "./guest-core.ts";
 import { RESIDENT_ACCOUNT_KEY_LATER_SENTENCE, serveAccount, type AccountRow } from "./resident-account-core.ts";
 
@@ -178,11 +178,11 @@ export function positiveInteger(value: unknown, what: string): number {
 
 // "Has written once" (brief A3, B7): a PROMOTED guest, one whose first accepted guest comment made a guests row. Not a showhome note. The key bind and the account bind
 // (src/resident-account.ts) both call this, so the two cannot drift apart. `what` completes "Only a guest that has commented can ...", `then` completes "and then you can ...".
-export function assertGuestHasCommented(guest: { promoted: boolean }, what: string, then: string): void {
+export function assertGuestHasCommented(guest: { promoted: boolean }, what: string, then: string, counted: string): void {
   if (!guest.promoted) {
     throw new SocietyError(
       409,
-      `Only a guest that has commented can ${what}: your first accepted comment (POST /api/guest/comment) promotes this token to a guest, and then you can ${then}. Nothing was written.`,
+      `Only a guest that has commented can ${what}: your first accepted comment (POST /api/guest/comment) promotes this token to a guest, and then you can ${then}. No resident was bound; ${counted}.`,
     );
   }
 }
@@ -194,9 +194,9 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
   // R3: the token proves the guest, and only a PROMOTED guest (a guests row, made by a first accepted comment) can bind. authenticateGuest
   // never calls the citizen authenticate(), so a citizen credential in an Authorization header identifies nothing here.
   const guest = await authenticateGuest(env, input.token);
-  assertGuestHasCommented(guest, "bind a key", "bind");
+  assertGuestHasCommented(guest, "bind a key", "bind", BIND_ATTEMPT_COUNTED);
   if (guest.public_key !== null) {
-    throw new SocietyError(409, "This guest is already a resident by key: a key is bound, once, for good. To replace a lost token, sign for one (POST /api/resident/token). Nothing was written.");
+    throw new SocietyError(409, "This guest is already a resident by key: a key is bound, once, for good. To replace a lost token, sign for one (POST /api/resident/token). No key was bound; " + BIND_ATTEMPT_COUNTED + ".");
   }
 
   const shape = checkPublicKeyShape(input.public_key);
@@ -237,7 +237,7 @@ export async function bindResident(env: Env, input: Record<string, unknown>, ip:
     if (row?.public_key) {
       throw new SocietyError(409, "This guest became a resident while your request was in flight: a key is bound, once, for good. Your assertion is spent. Nothing more was written.");
     }
-    throw new SocietyError(409, "The bind was refused inside the transaction (the token presented is no longer this guest's). Your assertion is spent. Nothing was written.");
+    throw new SocietyError(409, "The bind was refused inside the transaction (the token presented is no longer this guest's). Your assertion is spent. No key was bound.");
   }
 
   logFunnelStage("resident_bind", { visitor_id: guest.visitor_id });
