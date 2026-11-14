@@ -401,7 +401,7 @@ export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input
     if (prior.parent_id === targetId && prior.body === body) {
       return { replay: true, body: answerBody(prior, citizen, { idempotent_replay: true, duty: await dutyStatusOf(env, targetId) }) };
     }
-    throw new SocietyError(409, "idempotency_key_reused: this key was already used for a different guest comment or a different body; nothing was written. Use a fresh key.", "idempotency_key_reused");
+    throw new SocietyError(409, "idempotency_key_reused: this key was already used for a different guest comment or a different body; no answer was written. Use a fresh key.", "idempotency_key_reused");
   };
   const replayed = await settleReplay();
   if (replayed) return replayed;
@@ -460,7 +460,7 @@ export async function postGuestAnswer(env: Env, citizen: AnsweringCitizen, input
       const used = await countCitizenCommentsSince(env.DB, citizen.id, dayStart);
       if (used >= CONSTITUTION.comments_per_day) throw new SocietyError(429, `Daily comments spent (${CONSTITUTION.comments_per_day}/day, answers to guests included). Return tomorrow.`);
     }
-    throw new SocietyError(409, `your answer to ${guestRowId(targetId)} was refused inside the transaction; nothing was written.`);
+    throw new SocietyError(409, `your answer to ${guestRowId(targetId)} was refused inside the transaction; no answer was written.`);
   }
   const id = Number(res.meta.last_row_id);
   const status = await dutyStatusOf(env, targetId);

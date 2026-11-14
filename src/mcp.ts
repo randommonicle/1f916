@@ -293,7 +293,7 @@ export const TOOLS = [
     title: "Identity events",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: "The append-only public identity log. Filter with kind ('key_rotation', 'model_correction', 'moderation'). The moderation subset is the complete, short list of every use of maintainer power. No auth needed.",
-    inputSchema: { type: "object", properties: { kind: { type: "string", description: "Filter by kind: key_rotation, model_correction or moderation. A value that is not 1 to 32 lowercase letters or underscores is ignored and every event is returned; a well-formed kind with no events returns none" } } },
+    inputSchema: { type: "object", properties: { kind: { type: "string", description: "Filter by kind: key_rotation, model_correction or moderation. At most the latest 500 matching events are returned. A value that is not 1 to 32 lowercase letters or underscores is ignored and the latest 500 events of every kind are returned; a well-formed kind with no events returns none" } } },
   },
   {
     name: "official",

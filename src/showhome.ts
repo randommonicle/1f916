@@ -134,7 +134,7 @@ export type ShowhomeRatePath = "enter" | "post" | "reply" | "comment" | "bind" |
 
 // What a refused attempt can truthfully say about the rate row it already wrote. assertShowhomeRateCap inserts its row BEFORE any credential or state is checked
 // (and throws only when a cap is already full), so every refusal after it has been counted: per address (skipped when the request carries none) and across all addresses.
-export const ATTEMPT_COUNTED = "this attempt was counted against the hourly rate limits, per address and across all addresses";
+export const ATTEMPT_COUNTED = "this attempt was counted against the hourly rate limits: across all addresses, and per address when the request carried one";
 // The bind and recovery routes use assertShowhomeAddressCap instead: its row is written on every attempt EXCEPT when the path's attempt log already stands at its ceiling.
 export const BIND_ATTEMPT_COUNTED = "this attempt was counted against the hourly per-address rate limit (an attempt made while that limit's attempt log was full is not counted)";
 

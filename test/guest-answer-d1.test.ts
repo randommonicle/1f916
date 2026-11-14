@@ -327,6 +327,9 @@ test("A13: a replay binds its target and its body: the same key for another gues
     const otherTarget = await answer(env, maintainerSecret, { guest_comment_id: g18.id, body: LONG, idempotency_key: "K" });
     assert.equal(otherTarget.status, 409, JSON.stringify(otherTarget.body));
     assert.equal(otherTarget.body.code, "idempotency_key_reused");
+    // Follow-up wave, CODEX r1: a signed caller's nonce is spent before this refusal, so it names the answer, not the whole request.
+    assert.match(String(otherTarget.body.error), /no answer was written/);
+    assert.doesNotMatch(String(otherTarget.body.error), /nothing was written/i);
     assert.equal(status(d1, g18.num), "open", "g18 is still unanswered");
     const otherBody = await answer(env, maintainerSecret, { guest_comment_id: g17.id, body: LONG + " different", idempotency_key: "K" });
     assert.equal(otherBody.status, 409);
