@@ -1,0 +1,276 @@
+// scripts/deploy-followup-wave.ps1 is WRITTEN AND NEVER RUN by the builder (no deploy, no wrangler, not even -DryRun, which reads the live worker over HTTP). It is proven here by what can be
+// proven without running it: it parses under PowerShell's own parser, is ASCII with LF endings, has none of the repo's PowerShell traps, has the load-bearing step order, no migration or D1 step,
+// a single wrangler use, a ride of public GETs with no request body at all, step 0a stops on the placeholder before any git or network command, the served-note check (Test-RunsNoteServed) and the
+// FRONT_DOOR_TEMPLATE no-mint check (Test-TemplateUnmoved) are run for real against good and bad inputs. Derived from the 12 Nov openapi proposal schema deploy script test; the served check is
+// GET /api/residents carrying COUNTS_TOWARD_NOTE in its note field.
+//
+// Run: npm test
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { parsePowerShellFile } from "./helpers/ps-parse.ts";
+
+const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
+const SCRIPT_PATH = here("../scripts/deploy-followup-wave.ps1");
+const rawScript = readFileSync(SCRIPT_PATH, "utf8");
+const script = rawScript.replace(/\r\n/g, "\n");
+const code = script.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+const defs = script.slice(script.indexOf('$ErrorActionPreference = "Stop"'), script.indexOf("# END-OF-DEFINITIONS"));
+const pinBlock = script.slice(script.indexOf("# BEGIN-PIN-CHECK"), script.indexOf("# END-PIN-CHECK"));
+
+const NOTE_MARKER = "counts_toward lists the society figures this row enters";
+const UNIQ_MARKER = "it is not a uniqueness claim";
+const LIVE = "ed0ce5ae02ec28b80b6510f6352e25e8682bd85c";
+const tmplBlock = script.slice(script.indexOf("# BEGIN-TEMPLATE-FN"), script.indexOf("# END-TEMPLATE-FN"));
+
+function runPs(lines: string[]): { code: number | null; out: string } | null {
+  const dir = mkdtempSync(join(tmpdir(), "deploy-followup-wave-"));
+  try {
+    const ps1 = join(dir, "harness.ps1");
+    writeFileSync(ps1, lines.join("\r\n"));
+    const r = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1], { encoding: "utf8" });
+    if (r.error) return null;
+    return { code: r.status, out: `${r.stdout}${r.stderr}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the script parses under PowerShell's own parser with zero errors, is ASCII only and has LF line endings", (t) => {
+  assert.equal(/[^\x00-\x7f]/.test(rawScript), false, "ASCII only");
+  assert.equal(rawScript.includes("\r"), false, "LF line endings");
+  const parsed = parsePowerShellFile(SCRIPT_PATH);
+  if (!parsed.available) {
+    t.skip(`${parsed.reason}; the static checks still run`);
+    return;
+  }
+  assert.equal(parsed.errors, 0, `parse errors: ${parsed.detail}`);
+});
+
+test("no PowerShell traps: one spelling per variable, no `$var:` drive reference, stderr merged only under Continue, no -notmatch over a pipeline", () => {
+  const names = new Map<string, Set<string>>();
+  for (const m of code.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    const set = names.get(m[1].toLowerCase()) ?? new Set<string>();
+    set.add(m[1]);
+    names.set(m[1].toLowerCase(), set);
+  }
+  assert.deepEqual([...names.values()].filter((s) => s.size > 1).map((s) => [...s].join(" / ")), []);
+  assert.equal(/\$[A-Za-z_][A-Za-z0-9_]*:/.test(code.replace(/\$\(/g, "")), false);
+  for (const m of code.matchAll(/2>&1/g)) {
+    const before = code.slice(0, m.index);
+    assert.ok(before.lastIndexOf('$ErrorActionPreference = "Continue"') > before.lastIndexOf('$ErrorActionPreference = "Stop"'));
+  }
+  assert.equal(/\$\w+\s*\|\s*Where-Object[^\n]*-notmatch/.test(code), false);
+});
+
+test("the pins: the v6 hash, both commit pins are set (live base ed0ce5ae, reviewed 8ab9f1e9), the allowlist is this script, its test and docs/, the parameters are -ExpectedCommit (mandatory) and -DryRun", () => {
+  assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
+  assert.match(script, /^\$LIVE_BASE_COMMIT = "ed0ce5ae02ec28b80b6510f6352e25e8682bd85c"$/m);
+  assert.match(script, /^\$REVIEWED_COMMIT = "8ab9f1e9fc51e0dfd03c97f34a729d75ee3bd375"$/m);
+  assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-followup-wave\.ps1", "test\/deploy-followup-wave-script\.test\.ts", "docs\/"\)$/m);
+  assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
+  assert.match(script, /\[switch\]\$DryRun/);
+});
+
+test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm, wrangler or network command (the pin block is run for real), and the same block passes full shas", (t) => {
+  const stubs = ["git", "npm", "npx", "curl.exe"].map((n) => `function ${n} { throw "${n} must not run in step 0a" }`);
+  const harness = (live: string, reviewed: string): string[] => [
+    "$ErrorActionPreference = 'Stop'",
+    ...stubs,
+    "function Stop-Here($msg) { Write-Host \"[STOP] $msg\"; exit 1 }",
+    `$LIVE_BASE_COMMIT = "${live}"`,
+    '$LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"',
+    `$REVIEWED_COMMIT = "${reviewed}"`,
+    '$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"',
+    pinBlock,
+    'Write-Host "[PASSED-PINS]"',
+  ];
+  const FULL = "0123456789abcdef0123456789abcdef01234567";
+  const stopped = runPs(harness(LIVE, "TO-BE-SET-BY-HUB"));
+  if (!stopped) return t.skip("no PowerShell available");
+  assert.equal(stopped.code, 1);
+  assert.match(stopped.out, /\[STOP\].*REVIEWED_COMMIT still holds the placeholder/);
+  assert.match(runPs(harness("TO-BE-SET-BY-HUB-LIVE-BASE", FULL))!.out, /\[STOP\].*LIVE_BASE_COMMIT still holds the placeholder/);
+  assert.match(runPs(harness(LIVE, "ABCDEF0123456789ABCDEF0123456789ABCDEF01"))!.out, /\[STOP\].*not 40 lower-case hex/);
+  assert.match(runPs(harness("ed0ce5ae", FULL))!.out, /\[STOP\].*LIVE_BASE_COMMIT.*not 40 lower-case hex/);
+  const ok = runPs(harness(LIVE, FULL))!;
+  assert.equal(ok.code, 0);
+  assert.match(ok.out, /\[PASSED-PINS\]/);
+});
+
+test("the steps are in the load-bearing order, there is no migration or D1 step, wrangler is used once (the stamped deploy), and the ride sends no POST and no request body", () => {
+  const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-TEMPLATE-CHECK", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", 'Read-Attest "before the deploy"', "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", 'Read-Attest "after the deploy"', "Test-RunsNoteServed $runsNow $RUNS_NOTE_MARKER"];
+  let last = -1;
+  for (const needle of order) {
+    const i = script.indexOf(needle.startsWith("BEGIN-") ? "# " + needle : needle);
+    assert.ok(i > last, `${needle} comes after the previous step`);
+    last = i;
+  }
+  assert.equal(/\bd1\b|migrations apply|execute --remote/i.test(code.replace(/migrations\b/g, "").replace(/schema\.sql/g, "")), false, "no D1 command");
+  assert.equal((code.match(/= \(npx wrangler /g) ?? []).length, 1, "exactly one executed wrangler command (the other mentions are text in messages)");
+  assert.match(code, /npx wrangler deploy --var "CODE_COMMIT:\$headSha"/);
+  assert.equal(/Invoke-WebRequest|Invoke-RestMethod|-Method\s+Post/i.test(code), false, "no PowerShell web cmdlets");
+  assert.equal(/-X\s+POST|--data/.test(code), false, "no POST and no request body (PS 5.1 strips inner quotes from native arguments, Addendum 104 s8)");
+  assert.ok(code.includes("-- migrations schema.sql") && !code.includes("-- src/doc.ts migrations"), "the no-migration diff names migrations and schema.sql only");
+  assert.ok(code.includes("Test-TemplateUnmoved ($baseDoc -join") && code.includes("git show \"${LIVE_BASE_COMMIT}:src/doc.ts\"") && code.includes("git show \"HEAD:src/doc.ts\""), "the no-mint check reads src/doc.ts at the live base and at HEAD");
+});
+
+test("the marker and url are what the served route carries: the counts_toward text is COUNTS_TOWARD_NOTE in src/resident.ts, the uniqueness sentence is served on /api/residents, and the script pins the url", () => {
+  const res = readFileSync(here("../src/resident.ts"), "utf8");
+  const guest = readFileSync(here("../src/guest-core.ts"), "utf8");
+  assert.ok(res.includes(`export const COUNTS_TOWARD_NOTE = "${NOTE_MARKER}`), "src/resident.ts COUNTS_TOWARD_NOTE starts with the marker");
+  assert.ok(guest.includes(UNIQ_MARKER), "RESIDENTS_NOTE carries the uniqueness sentence");
+  assert.ok(script.includes(`$RUNS_NOTE_MARKER = "${NOTE_MARKER}"`));
+  assert.ok(script.includes(`$UNIQUENESS_MARKER = "${UNIQ_MARKER}"`));
+  assert.ok(script.includes('$RUNS_URL = "$BASE/api/residents"'));
+});
+
+test("the source checks name literals the checkout carries: the carried schema and refusal anchors, the COUNTS_TOWARD_NOTE anchor, and every other Select-String literal is in its file", () => {
+  assert.ok(code.includes('Select-String -Path "src/discovery.ts" -Pattern "responseSchema: PROPOSAL_RESPONSE_SCHEMA"'));
+  assert.ok(code.includes('Select-String -Path "src/resident.ts" -Pattern "export const COUNTS_TOWARD_NOTE"'));
+  assert.ok(code.includes('Select-String -Path "src/maintainer/judgment.ts" -Pattern "DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS"'));
+  assert.ok(code.includes('Select-String -Path "src/maintainer/runs.ts" -Pattern "a judgment item the model declined to judge"'));
+  let n = 0;
+  for (const m of code.matchAll(/Select-String -Path "([^"]+)" -Pattern ('[^']+'|"[^"]+")/g)) {
+    const file = m[1];
+    if (file === "wrangler.jsonc") continue;
+    const lit = m[2].slice(1, -1);
+    assert.ok(readFileSync(here(`../${file}`), "utf8").includes(lit), `${file} carries '${lit}'`);
+    n++;
+  }
+  assert.ok(n >= 9, `checked ${n} literals`);
+});
+
+type Cap = { code: string; body: string };
+
+test("the served-schema check, run for real, passes a note with the text and fails one without it, the text only outside the note field, a wrong-case text, a non-200, a non-JSON body and an empty body", (t) => {
+  const fns = defs.slice(defs.indexOf("function Read-JsonBody"), defs.indexOf("# BEGIN-TEMPLATE-FN"));
+  const q = (s: string): string => "'" + s.replace(/'/g, "''") + "'";
+  const cap = (c: Cap): string => `@{ Code = ${q(c.code)}; Type = 'application/json'; Body = ${q(c.body)} }`;
+  const good: Cap = { code: "200", body: JSON.stringify({ residents: [], note: "The residents. " + NOTE_MARKER + "; it is empty." }) };
+  const cases: Array<[string, Cap, string]> = [
+    ["good", good, ""],
+    ["nosentence", { code: "200", body: JSON.stringify({ residents: [], note: "The residents, oldest first." }) }, "does not contain"],
+    ["outsidenote", { code: "200", body: JSON.stringify({ residents: [{ x: NOTE_MARKER }], note: "nothing here" }) }, "does not contain"],
+    ["nonote", { code: "200", body: JSON.stringify({ residents: [] }) }, "does not contain"],
+    ["case", { code: "200", body: JSON.stringify({ note: NOTE_MARKER.toUpperCase() }) }, "does not contain"],
+    ["500", { code: "500", body: good.body }, "expected 200"],
+    ["html", { code: "200", body: "<html>x</html>" }, "did not return JSON"],
+    ["empty", { code: "200", body: "" }, "did not return JSON"],
+  ];
+  const lines = [
+    "$ErrorActionPreference = 'Stop'",
+    `$RUNS_NOTE_MARKER = ${q(NOTE_MARKER)}`,
+    fns,
+    ...cases.map(([name, c]) => `Write-Host ("RESULT ${name} [" + (Test-RunsNoteServed ${cap(c)} $RUNS_NOTE_MARKER) + "]")`),
+  ];
+  const run = runPs(lines);
+  if (!run) return t.skip("no PowerShell available");
+  for (const [name, , expect] of cases) {
+    const m = new RegExp(`RESULT ${name} \\[(.*)\\]`).exec(run.out);
+    assert.ok(m, `${name} produced a result: ${run.out}`);
+    if (expect === "") assert.equal(m![1], "", name);
+    else assert.ok(m![1].includes(expect), `${name}: '${m![1]}' mentions '${expect}'`);
+  }
+});
+
+test("the before-read refuses a worker already serving the text, one not answering 200, and a 200 that is not a JSON note (CODEX code r1); the poll and the ride both use the check", () => {
+  assert.ok(code.includes('[string]$runsBefore.Code -cne "200"'));
+  assert.ok(code.includes("$whyBefore = Test-RunsNoteServed $runsBefore $RUNS_NOTE_MARKER"));
+  assert.ok(code.includes('if ($whyBefore -eq "") { Stop-Here'));
+  assert.ok(code.includes('if ($whyBefore -cne "GET /api/residents note does not contain the text") { Stop-Here'));
+  // The accepted reason must be exactly the one Test-RunsNoteServed returns for a JSON note without the sentence.
+  assert.ok(code.includes('return "GET /api/residents note does not contain the text"'));
+  assert.ok(code.includes("Test-RunsNoteServed (Get-Text $RUNS_URL 30) $RUNS_NOTE_MARKER"));
+  assert.ok(code.includes("Test-RunsNoteServed $runsNow $UNIQUENESS_MARKER"), "the ride also checks the uniqueness sentence");
+  assert.ok(code.includes("Wait-NewWorker $headSha $versionId $POLL_TRIES"));
+  assert.ok(code.includes('"/privacy"') && code.includes('"/api/proposal/8"'));
+});
+
+test("CODEX r1: the ride re-checks code identity, HEAD and a clean tree are re-read just before wrangler bundles", (t) => {
+  // Order: the re-read sits after step 0's checks and before the one wrangler deploy; the ride's identity check sits after the poll.
+  const reread = code.indexOf("$headNow = (git rev-parse HEAD).Trim()");
+  const dirtyNow = code.indexOf("$dirtyNow = @(git status --porcelain)");
+  const deploy = code.indexOf('npx wrangler deploy --var "CODE_COMMIT:$headSha"');
+  const poll = code.indexOf("Wait-NewWorker $headSha $versionId $POLL_TRIES");
+  const rideId = code.indexOf("Test-CodeIdentityServed $attAfter.code $headSha $versionId");
+  // `code` has comment lines stripped, so the step-0 anchor is a retained code line (CODEX r2: a comment anchor read as -1).
+  const step0 = code.indexOf("$unreviewed = @(Get-DisallowedPaths $afterReview)");
+  for (const [name, at] of [["step0", step0], ["reread", reread], ["dirtyNow", dirtyNow], ["deploy", deploy], ["poll", poll], ["rideId", rideId]] as const) assert.ok(at >= 0, `anchor ${name} found`);
+  assert.ok(reread > step0 && reread < deploy, "HEAD re-read between step 0 and the deploy");
+  assert.ok(dirtyNow > reread && dirtyNow < deploy, "clean tree re-read between step 0 and the deploy");
+  assert.ok(code.includes("$headNow -cne $headSha") && code.includes("$dirtyNow.Count -gt 0) { Stop-Here"));
+  assert.ok(rideId > poll && rideId < code.indexOf("[ride] attest:"), "the ride's attest read is identity-checked before it is reported");
+
+  // Executed: the identity check passes this deploy's commit and version and fails another commit or another version.
+  const fn = defs.slice(defs.indexOf("function Test-CodeIdentityServed"), defs.indexOf("# The JSON body of a captured GET answer"));
+  const A = "a".repeat(40), B = "b".repeat(40), VA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", VB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const c = (commit: string, v: string): string => `([pscustomobject]@{ commit_status = 'stamped'; commit = '${commit}'; version_status = 'available'; version_id = '${v}' })`;
+  const run = runPs([
+    "$ErrorActionPreference = 'Stop'",
+    fn,
+    `Write-Host ("RESULT good [" + (Test-CodeIdentityServed ${c(A, VA)} '${A}' '${VA}') + "]")`,
+    `Write-Host ("RESULT commit [" + (Test-CodeIdentityServed ${c(B, VA)} '${A}' '${VA}') + "]")`,
+    `Write-Host ("RESULT version [" + (Test-CodeIdentityServed ${c(A, VB)} '${A}' '${VA}') + "]")`,
+  ]);
+  if (!run) return t.skip("no PowerShell available");
+  assert.match(run.out, /RESULT good \[\]/, run.out);
+  assert.match(run.out, /RESULT commit \[code\.commit is 'b{40}'/, run.out);
+  assert.match(run.out, /RESULT version \[code\.version_id is 'b{8}-/, run.out);
+});
+
+// ---- the step-0 no-mint rule: FRONT_DOOR_TEMPLATE text byte-identical between the live base and HEAD (src/doc.ts may change outside it) ----
+const TICK = String.fromCharCode(96);
+const docText = (tmpl: string, outside: string): string => `// header ${outside}\nexport const FRONT_DOOR_TEMPLATE = ${TICK}${tmpl}${TICK};\nexport const OTHER = 1; // ${outside}\n`;
+
+test("step 0's template rule, run for real: a template-only change STOPS, an outside-only change passes, an unchanged file passes, a missing template (either side) or an unterminated one STOPS", (t) => {
+  const q = (s: string): string => "'" + s.replace(/'/g, "''") + "'";
+  const cases: Array<[string, string, string, string]> = [
+    ["same", docText("A {{NAME}} B", "x"), docText("A {{NAME}} B", "x"), ""],
+    ["outside", docText("A {{NAME}} B", "x"), docText("A {{NAME}} B", "changed outside the template"), ""],
+    ["template", docText("A {{NAME}} B", "x"), docText("A {{NAME}} B!", "x"), "differs"],
+    ["templatews", docText("A B", "x"), docText("A  B", "x"), "differs"],
+    ["nobase", "export const OTHER = 1;\n", docText("A", "x"), "not found in src/doc.ts at the live base"],
+    ["nohead", docText("A", "x"), "export const OTHER = 1;\n", "not found in src/doc.ts at HEAD"],
+    ["unterminated", docText("A", "x"), `export const FRONT_DOOR_TEMPLATE = ${TICK}never closed`, "not found in src/doc.ts at HEAD"],
+  ];
+  const run = runPs([
+    "$ErrorActionPreference = 'Stop'",
+    tmplBlock,
+    ...cases.map(([name, base, head]) => `Write-Host ("RESULT ${name} [" + (Test-TemplateUnmoved ${q(base)} ${q(head)}) + "]")`),
+  ]);
+  if (!run) return t.skip("no PowerShell available");
+  for (const [name, , , expect] of cases) {
+    const m = new RegExp(`RESULT ${name} \\[(.*)\\]`).exec(run.out);
+    assert.ok(m, `${name} produced a result: ${run.out}`);
+    if (expect === "") assert.equal(m![1], "", name);
+    else assert.ok(m![1].includes(expect), `${name}: '${m![1]}' mentions '${expect}'`);
+  }
+});
+
+test("the template rule reads the real src/doc.ts: it extracts a non-empty template from the checkout and finds it unmoved against itself", (t) => {
+  const real = readFileSync(here("../src/doc.ts"), "utf8");
+  const dir = mkdtempSync(join(tmpdir(), "deploy-followup-wave-doc-"));
+  try {
+    const f = join(dir, "doc.ts");
+    writeFileSync(f, real);
+    const run = runPs([
+      "$ErrorActionPreference = 'Stop'",
+      tmplBlock,
+      `$d = Get-Content -Raw -Encoding UTF8 '${f}'`,
+      'Write-Host ("RESULT len " + (Get-FrontDoorTemplate $d).Length)',
+      'Write-Host ("RESULT self [" + (Test-TemplateUnmoved $d $d) + "]")',
+    ]);
+    if (!run) return t.skip("no PowerShell available");
+    const len = /RESULT len (\d+)/.exec(run.out);
+    assert.ok(len && Number(len[1]) > 1000, run.out);
+    assert.match(run.out, /RESULT self \[\]/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
