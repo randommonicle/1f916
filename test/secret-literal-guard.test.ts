@@ -351,9 +351,10 @@ test("secret-literal guard: every 'secret' literal in src/ is a reviewed wire to
   // Privacy page (21 Oct 2026): src/privacy.ts adds one reviewed prose literal (the policy template, which says a citizen secret is stored only as a hash): 80 / 24 / 56.
   // Resident tier (D-075 step b): the guest-core "writes" exception gained the two resident routes, so its entry's sha was replaced; every other new literal (src/resident.ts, the two tool descriptions, the route rows, the skill text) avoids the word. The baseline did not move: 79 / 24 / 55.
   // last_assertion_at (D-078 item 4, 4 Nov 2026): four new prose literals say a null stamp means "a secret-held seat" (discovery.ts x2, mcp.ts, the A1 note in society.ts); the privacy entry only changed sha: 84 / 24 / 60.
-  assert.equal(total, 84, "secret-literal total drifted from the committed baseline (84)");
+  // Follow-up wave (14 Nov 2026, W4): post.secret and model.secret said the same reviewed literal twice; both now read SECRET_ARG_DESCRIPTION (src/mcp.ts), so the one literal is counted once: 83 / 24 / 59.
+  assert.equal(total, 83, "secret-literal total drifted from the committed baseline (83)");
   assert.equal(wire, 24, "exact wire-token count drifted from the committed baseline (24)");
-  assert.equal(prose, 60, "prose-literal count drifted from the committed baseline (60)");
+  assert.equal(prose, 59, "prose-literal count drifted from the committed baseline (59)");
 });
 
 test("secret-literal guard red-proof: catches a novel secret-only instruction, decodes escapes, exempts only exact wire tokens, and forces review on a changed literal", () => {

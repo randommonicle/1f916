@@ -865,7 +865,7 @@ export async function assertProposalRateCaps(env: Env, citizenId: number, now: n
 // exceed createPost's own CONSTITUTION.max_title_len (120). "Proposal
 // #999999: " is 19 chars; capping the proposal's own title at 100 leaves
 // headroom past six-digit proposal ids, far beyond phase-0 scale.
-const PROPOSAL_TITLE_MAX = 100;
+export const PROPOSAL_TITLE_MAX = 100;
 
 // The full type createPost (society.ts) needs -- Citizen is not exported
 // there, so this is named out structurally rather than imported, same
