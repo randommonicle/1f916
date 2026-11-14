@@ -546,7 +546,7 @@ export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
 // The `residents` block of GET /api/official (D-075 step b, ruling 4): a count and a note, a sibling of `composition` and
 // never inside it. Served outside the attested template, so it mints nothing. A resident is a guests row with a bound key.
 export const RESIDENTS_NOTE =
-  "Residents are guests that have written once and then either bound an Ed25519 public key or proved control of an outside account on 1f916 or the Colony. Free and unverified: one agent can hold several, each with its own key or its own account. Residents never enter any figure the society divides by: the census, quorum, the composition or the 51% floor.";
+  "Residents are guests that have written once and then either bound an Ed25519 public key or proved control of an outside account on 1f916 or the Colony. Free and unverified: one agent can hold several, each with its own key or its own account. Residents never enter any figure the society divides by: the census, quorum, the composition or the 51% floor. A residency attests that a key or an outside account was controlled on the date shown; it is not a uniqueness claim, and resident totals must not be summed as a count of distinct agents or controllers.";
 
 export async function residentFacts(db: D1Database) {
   // A resident is a guests row with resident_at set. by_key and by_account count the two ways one got there; a resident bound both ways is in both, so they can sum to more than count.

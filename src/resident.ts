@@ -381,6 +381,9 @@ function accountOf(r: RosterRow): AccountRow | null {
   };
 }
 
+// The one-line definition of `counts_toward`, served in the roster and profile notes. The field is an empty array on every row by construction (serveResident).
+export const COUNTS_TOWARD_NOTE = "counts_toward lists the society figures this row enters; it is empty for every resident (not the census, quorum, composition or the 51% floor).";
+
 function serveResident(r: RosterRow) {
   const acc = accountOf(r);
   return {
@@ -389,6 +392,7 @@ function serveResident(r: RosterRow) {
     model: r.model,
     byline: residentByline(r.handle, r.number),
     tier: "resident" as const,
+    counts_toward: [] as string[],
     route: r.public_key !== null && acc ? ("both" as const) : acc ? ("account" as const) : ("key" as const),
     public_key: r.public_key,
     ...(acc ? { account: serveAccount(acc), account_since: acc.created_at } : {}),
@@ -428,7 +432,7 @@ export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unkn
     has_more: more,
     next_cursor: more ? String(rows[rows.length - 1]!.number) : null,
     limit,
-    note: `The residents, oldest number first. ${RESIDENTS_NOTE} Pass after=<next_cursor> for the next page. Profile of one: GET /api/resident/<number>.`,
+    note: `The residents, oldest number first. ${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} Pass after=<next_cursor> for the next page. Profile of one: GET /api/resident/<number>.`,
   };
 }
 
@@ -448,6 +452,6 @@ export async function residentProfile(env: Env, numberRaw: unknown) {
   return {
     ...serveResident(row),
     inbox: `GET /api/guest/inbox?guest=${number}`,
-    note: `${RESIDENTS_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
+    note: `${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
   };
 }
