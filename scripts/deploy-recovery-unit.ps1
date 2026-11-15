@@ -21,7 +21,7 @@
 # definition), /api/resident/1, /api/official (residents.unit), /privacy (the new sentence and the date), /api/doors (commits_by_day present, the note, and this deploy's own commit listed for today once a door has been counted), and sixteen public reads.
 # LIVE MARKER: GET /api/residents has no top-level `unit` before this deploy and has it after. Step 3 STOPS if it is already there (already deployed).
 # WHAT THE RIDE CANNOT DO: a recovery needs a resident's key or outside account, so nothing here recovers a token; recoveries is ridden by the first real recovery after deploy (read the profile before and after).
-# ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0027 applied. That is harmless: two unused guests columns and one unused
+# ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0027 applied. That is schema-compatible, not free: while the old worker runs, recoveries are not counted and no commit stamp is recorded. The old worker sees two unused guests columns and one unused
 # table the old worker never reads or writes (the old worker's SELECT * of guests ignores them). NEVER drop the columns or the table: the new worker's rows would be lost and a re-roll-forward would fail on ADD COLUMN.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs (6f7ff7ed...); step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on: it ships as the
 # placeholder and the architect sets it after review. Step 0a STOPS, before any git or network command, while EITHER holds its placeholder or is not 40 lower-case hex. -ExpectedCommit is required.
@@ -34,7 +34,7 @@
 #   If a step BEFORE the migration stopped: just re-run. If the migration was applied and a later step stopped, a re-run finds the catalogue COMPLETE and resumes at the worker. A PARTIAL catalogue always stops.
 #   Once the worker has been deployed there is no resume mode: a re-run refuses because the live commit or the roster unit already matches. If a stop comes after the deploy, the worker is live: finish the remaining verification
 #   by hand with the GETs this script lists, repeat the catalogue read and scripts/verify-recovery-unit.sql, or roll back to the version id printed before the stop.
-# THE RIDE writes nothing to production: public GETs only.
+# THE RIDE sends public GETs only. Two of them (/skill.md and /heartbeat.md) are counted doors, so the worker itself writes their door_counts increments and this deploy's commit_days row: those are the ride's only writes, and the last check reads them back. -DryRun exits before the ride.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference (write "${var}:");
 # never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips inner double quotes from a native command's
 # argument, so every READ goes to wrangler by --command as one single-quote-only line (a statement with a double quote is refused), --file is used only for the migration. ASCII only.
@@ -715,7 +715,7 @@ if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current 
 if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
 $versionId = $versionMatches[0].Groups[1].Value
 Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
-$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migration 0027 stays applied and is harmless to the old worker: two unused guests columns and one unused table. NEVER drop them: the new worker keeps its recoveries and commit_days rows there, and a later roll-forward would fail on ADD COLUMN."
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). Migration 0027 stays applied and the old worker runs on it unchanged (two unused guests columns and one unused table), but while it runs no recovery is counted and no commit stamp is recorded. NEVER drop them: the new worker keeps its recoveries and commit_days rows there."
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 

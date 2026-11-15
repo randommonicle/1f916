@@ -93,7 +93,8 @@ test("no PowerShell traps in either script: one spelling per variable, no `$var:
 test("the pins: the v6 hash, the live base is the full sha of 6f7ff7ed, the reviewed commit ships as the named placeholder, the allowlist covers the scripts, the verify SQL, this test and docs/, -ExpectedCommit is mandatory, -RehearsalPassed exists, ONE migration (0027)", () => {
   assert.match(script, new RegExp(`^\\$V6_HASH = "${V6}"$`, "m"));
   assert.match(script, new RegExp(`^\\$LIVE_BASE_COMMIT = "${LIVE}"$`, "m"));
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m);
+  // Ships as the placeholder; the hub then sets a full sha. Either state must leave the suite green, or setting the pin would fail the script's own npm test gate. The placeholder STOP is proved separately below.
+  assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m);
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-recovery-unit\.ps1", "scripts\/rehearse-recovery-unit\.ps1", "scripts\/verify-recovery-unit\.sql", "test\/deploy-recovery-unit-script\.test\.ts", "docs\/"\)$/m);
   assert.match(script, /^\$MIGRATION_PATH = "migrations\/0027_resident_recoveries\.sql"$/m);

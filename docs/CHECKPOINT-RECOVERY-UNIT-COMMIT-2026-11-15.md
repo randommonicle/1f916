@@ -59,3 +59,10 @@ Deploy tooling (`test/deploy-recovery-unit-script.test.ts`)
 ## Still to do (not done here)
 
 The scratch-D1 rehearsal and the deploy are Ben's hand; the REVIEWED pin; the privacy-text read; the first real recovery after deploy is the ride of `recoveries`.
+
+## After the build: review (15 Nov, hub)
+
+- Superseded above: the `/privacy` counters paragraph now names `commits_by_day`, and the `src/discovery.ts` descriptions for `/api/doors`, `/api/residents` and `/api/resident/:number` name the new fields (`98970d84`, corrected in `67b2acb0`). A re-date is three files: `src/privacy.ts`, `RECOVERIES_SINCE`, and the privacy hash in `test/secret-literal-guard.test.ts`; discovery derives its date.
+- Code review, both seats converged (CODEX r2, DEEPSEEK r1): `exchange/REVIEW_recovery-unit-code-2026-11-15.md`. CODEX r1 found the first privacy sentence overstated (it said "counted request" and "first recorded"), a second hard-coded date, and missing counter assertions on the refused, expired and replayed account recovery.
+- Deploy tooling: `exchange/REVIEW_recovery-unit-deploy-script-2026-11-15.md` and its continuation `...-2-2026-11-15.md`. DEEPSEEK found the v6 pin run accepted a skipped, TODO or cancelled named test, and a doors retry that could not produce the stamp. CODEX found that setting the reviewed pin would have failed the script's own test gate, and that "the ride writes nothing" was false (counted doors write).
+- Sonnet gate: DEPLOYABLE WITH CONDITIONS, HIGH 0, MEDIUM 1, LOW 4: `docs/REVIEW-RECOVERY-UNIT-GATE-2026-11-15.md`.
