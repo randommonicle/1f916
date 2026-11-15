@@ -22,7 +22,7 @@
 # LIVE MARKER: GET /api/residents has no top-level `unit` before this deploy and has it after. Step 3 STOPS if it is already there (already deployed).
 # WHAT THE RIDE CANNOT DO: a recovery needs a resident's key or outside account, so nothing here recovers a token; recoveries is ridden by the first real recovery after deploy (read the profile before and after).
 # ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0027 applied. That is schema-compatible, not free: while the old worker runs, recoveries are not counted and no commit stamp is recorded. The old worker sees two unused guests columns and one unused
-# table the old worker never reads or writes (the old worker's SELECT * of guests ignores them). NEVER drop the columns or the table: the new worker's rows would be lost and a re-roll-forward would fail on ADD COLUMN.
+# table the old worker never reads or writes (the old worker's SELECT * of guests ignores them). NEVER drop the columns or the table: the new worker's rows would be lost.
 # TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs (6f7ff7ed...); step 3 PROVES it against the live GET /api/attest code.commit. $REVIEWED_COMMIT is the commit the review converged on: it ships as the
 # placeholder and the architect sets it after review. Step 0a STOPS, before any git or network command, while EITHER holds its placeholder or is not 40 lower-case hex. -ExpectedCommit is required.
 # REVIEWED SOURCE ONLY: step 1 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (these scripts, the verify SQL, their test, docs/).
