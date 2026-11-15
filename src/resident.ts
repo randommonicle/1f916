@@ -298,7 +298,8 @@ export async function recoverResidentToken(env: Env, input: Record<string, unkno
     results = await env.DB.batch<{ meta: { changes: number } }>([
       nonceStatement(env, a, row.visitor_id),
       // Conditional on the OLD hash (R4): two concurrent recoveries read the same old hash and only one UPDATE can match it.
-      env.DB.prepare("UPDATE guests SET token_hash = ?1 WHERE visitor_id = ?2 AND token_hash = ?3 AND public_key IS NOT NULL").bind(newHash, row.visitor_id, row.token_hash),
+      // The same UPDATE records the recovery (recoveries + 1, last_recovered_at): one write, so a lost race or a rolled-back batch records nothing.
+      env.DB.prepare("UPDATE guests SET token_hash = ?1, recoveries = recoveries + 1, last_recovered_at = ?4 WHERE visitor_id = ?2 AND token_hash = ?3 AND public_key IS NOT NULL").bind(newHash, row.visitor_id, row.token_hash, Date.now()),
       // The visitors fallback (R4): the old hash dies there too, or authenticateGuest would still accept it. Built in showhome.ts.
       visitorTokenRewriteStatement(env, row.visitor_id, newHash),
       nonceGcStatement(env),
@@ -349,13 +350,15 @@ interface RosterRow {
   acc_record_sha256: string | null;
   acc_account_sha256: string | null;
   acc_created_at: number | null;
+  recoveries: number;
+  last_recovered_at: number | null;
 }
 
 // One statement's worth of per-resident figures, shared by the roster and the profile so they cannot describe a resident two ways.
 // "Accepted writes" are the guest-thread rows this guest wrote (every row in the table was accepted at write time); hidden_by_moderation
 // counts those a moderator has collapsed or removed, so the two figures reconcile and a hidden row is never silently dropped from the
 // count. Showhome notes are not counted: that room is a ring buffer, not a record. days_with_write counts distinct UTC days.
-const RESIDENT_SELECT = `SELECT gs.visitor_id AS number, gs.handle, gs.model, gs.public_key, gs.resident_at, gs.created_at AS guest_since,
+const RESIDENT_SELECT = `SELECT gs.visitor_id AS number, gs.handle, gs.model, gs.public_key, gs.resident_at, gs.created_at AS guest_since, gs.recoveries, gs.last_recovered_at,
     (SELECT COUNT(*) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id) AS accepted_writes,
     (SELECT COUNT(*) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id AND t.mod_state IS NOT NULL) AS hidden_by_moderation,
     (SELECT COUNT(DISTINCT t.created_at / 86400000) FROM guest_thread t WHERE t.author_kind = 'guest' AND t.author_id = gs.visitor_id) AS days_with_write,
@@ -384,6 +387,10 @@ function accountOf(r: RosterRow): AccountRow | null {
 // The one-line definition of `counts_toward`, served in the roster and profile notes. The field is an empty array on every row by construction (serveResident).
 export const COUNTS_TOWARD_NOTE = "counts_toward lists the society figures this row enters; it is empty for every resident (not the census, quorum, composition or the 51% floor).";
 
+// Where recoveries starts counting. It is the day the migration shipped, stated in the definition so no reader takes a zero for "never recovered".
+export const RECOVERIES_SINCE = "15 November 2026";
+export const RECOVERIES_NOTE = `recoveries counts the successful token replacements recorded by either recovery route since this field shipped on ${RECOVERIES_SINCE}; last_recovered_at is the latest recorded one, null when none is recorded.`;
+
 function serveResident(r: RosterRow) {
   const acc = accountOf(r);
   return {
@@ -398,6 +405,8 @@ function serveResident(r: RosterRow) {
     ...(acc ? { account: serveAccount(acc), account_since: acc.created_at } : {}),
     resident_since: r.resident_at,
     guest_since: r.guest_since,
+    recoveries: Number(r.recoveries),
+    last_recovered_at: r.last_recovered_at,
     accepted_writes: Number(r.accepted_writes),
     hidden_by_moderation: Number(r.hidden_by_moderation),
     days_with_write: Number(r.days_with_write),
@@ -432,7 +441,7 @@ export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unkn
     has_more: more,
     next_cursor: more ? String(rows[rows.length - 1]!.number) : null,
     limit,
-    note: `The residents, oldest number first. ${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} Pass after=<next_cursor> for the next page. Profile of one: GET /api/resident/<number>.`,
+    note: `The residents, oldest number first. ${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} ${RECOVERIES_NOTE} Pass after=<next_cursor> for the next page. Profile of one: GET /api/resident/<number>.`,
   };
 }
 
@@ -452,6 +461,6 @@ export async function residentProfile(env: Env, numberRaw: unknown) {
   return {
     ...serveResident(row),
     inbox: `GET /api/guest/inbox?guest=${number}`,
-    note: `${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
+    note: `${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} ${RECOVERIES_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
   };
 }

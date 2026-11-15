@@ -19,7 +19,8 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dirname, "..");
 const norm = (s: string) => s.replace(/\r\n/g, "\n");
 const migrationSql = () => norm(readFileSync(join(ROOT, "migrations", "0021_council.sql"), "utf8"));
-const schemaSql = () => norm(readFileSync(join(ROOT, "schema.sql"), "utf8"));
+// schema.sql also carries the 0027 block (recoveries, commit days), appended after every migration these tests rehearse, so they compare against the schema cut at its header.
+const schemaSql = () => norm(readFileSync(join(ROOT, "schema.sql"), "utf8")).split("-- Recovery counts and commit days (migrations/0027_resident_recoveries.sql")[0]!.trimEnd() + "\n";
 const HEADER = "-- The council (migrations/0021_council.sql";
 const COUNCIL_TABLES = ["council_ballots", "council_challenges", "council_claims", "council_motions", "council_thread"];
 

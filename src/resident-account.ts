@@ -288,7 +288,7 @@ async function recoverToken(env: Env, who: Subject, nonce: string, codeHash: str
     // (1) Conditional on the OLD hash read above (two concurrent recoveries read the same one; only one UPDATE can match it), on the selected challenge still being live, and on the
     //     bound account still being the one that posted.
     env.DB.prepare(
-      `UPDATE guests SET token_hash = ?1
+      `UPDATE guests SET token_hash = ?1, recoveries = recoveries + 1, last_recovered_at = ?7
         WHERE visitor_id = ?2 AND token_hash = ?3
           AND EXISTS (SELECT 1 FROM resident_account_challenges WHERE nonce = ?4 AND visitor_id = ?2 AND purpose = 'recover' AND platform = ?5 AND claim_code_hash = ?6 AND used_at IS NULL AND expires_at > ?7)
           AND EXISTS (SELECT 1 FROM resident_accounts WHERE visitor_id = ?2 AND platform = ?5 AND external_account_id = ?8)`,

@@ -13,7 +13,8 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dirname, "..");
 const norm = (s: string) => s.replace(/\r\n/g, "\n");
 const migrationSql = () => norm(readFileSync(join(ROOT, "migrations", "0026_resident_accounts.sql"), "utf8"));
-const schemaSql = () => norm(readFileSync(join(ROOT, "schema.sql"), "utf8"));
+// schema.sql also carries the 0027 block (recoveries, commit days), appended after every migration these tests rehearse, so they compare against the schema cut at its header.
+const schemaSql = () => norm(readFileSync(join(ROOT, "schema.sql"), "utf8")).split("-- Recovery counts and commit days (migrations/0027_resident_recoveries.sql")[0]!.trimEnd() + "\n";
 const HEADER = "-- Resident accounts (migrations/0026_resident_accounts.sql";
 type Db = InstanceType<typeof DatabaseSync>;
 const columnsInOrder = (db: Db, table: string): string[] => (db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as { name: string }[]).map((r) => r.name);

@@ -655,3 +655,14 @@ CREATE TABLE IF NOT EXISTS resident_accounts (
   created_at          INTEGER NOT NULL,
   UNIQUE (platform, external_account_id)     -- one outside account backs at most one resident, ever
 );
+
+-- Recovery counts and commit days (migrations/0027_resident_recoveries.sql; drafts/BRIEF-RECOVERY-UNIT-COMMIT-2026-11-15.md R1, R3): guests gains recoveries and last_recovered_at by ALTER, exactly as the migration appends them, plus the commit_days table. Everything from the first ALTER below to the end of this file MUST stay byte-for-byte identical to the same block in the migration. MUST stay last.
+ALTER TABLE guests ADD COLUMN recoveries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE guests ADD COLUMN last_recovered_at INTEGER;
+
+CREATE TABLE IF NOT EXISTS commit_days (
+  day           TEXT    NOT NULL,   -- UTC date, YYYY-MM-DD
+  code_commit   TEXT    NOT NULL,   -- the 40-hex stamp the deploy carried, or the literal 'unstamped'
+  first_seen_at INTEGER NOT NULL,   -- unix ms carried by the first insert that landed
+  PRIMARY KEY (day, code_commit)
+);
