@@ -7,9 +7,11 @@
 --   unique       every unique index on commit_days, as <table>:<origin>:<columns> (origin pk = the primary key (day, code_commit)).
 -- Before the migration this returns only the guests_tail row; the deploy script sorts the three objects into absent, complete or partial from the column and table rows.
 -- Single line after full-line comments are stripped, single quotes only.
-SELECT 'column' AS kind, t.name || '.' || c.name AS name, c.type || '|' || c.[notnull] || '|' || c.pk AS detail
-FROM sqlite_master AS t, pragma_table_info(t.name) AS c
-WHERE (t.type = 'table' AND t.name = 'commit_days') OR (t.type = 'table' AND t.name = 'guests' AND c.name IN ('recoveries', 'last_recovered_at'))
+-- REAL D1 (found by the scratch rehearsal, 15 Nov 2026; node:sqlite accepts both forms): the column term names its two tables itself and never joins sqlite_master to pragma_table_info under an OR. That join made the
+-- planner call pragma_table_info on every table, D1's own internal ones included, and D1 refused the statement (not authorized: SQLITE_AUTH). D1 also allows at most five terms in a compound SELECT, so the term is not split in two.
+SELECT 'column' AS kind, n.tn || '.' || c.name AS name, c.type || '|' || c.[notnull] || '|' || c.pk AS detail
+FROM (SELECT 'commit_days' AS tn UNION ALL SELECT 'guests') AS n, pragma_table_info(n.tn) AS c
+WHERE n.tn = 'commit_days' OR c.name IN ('recoveries', 'last_recovered_at')
 UNION ALL
 SELECT 'default', 'guests.' || c.name, COALESCE(c.dflt_value, '')
 FROM pragma_table_info('guests') AS c
