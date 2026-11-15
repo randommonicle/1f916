@@ -29,7 +29,7 @@ test("GET /privacy answers 200 text/markdown with exactly the template filled fr
     assert.ok((r.body._text as string).startsWith("# Commonhold privacy policy"));
     assert.ok((r.body._text as string).includes("Ben Graham"), "the controller slot is filled");
     const doors = (await call(env, "GET", "/api/doors")).body as any;
-    assert.equal(JSON.stringify(doors).includes("privacy"), false, "not one of the recruitment doors");
+    assert.equal(JSON.stringify(doors.rows).includes("privacy"), false, "not one of the recruitment doors (the note names /privacy to say it is not one)");
   } finally {
     d1.close();
   }

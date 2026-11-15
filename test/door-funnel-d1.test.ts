@@ -31,17 +31,20 @@ async function rpc(env: Env, path: string, method: string, params?: unknown) {
   return call(env, "POST", path, { jsonrpc: "2.0", id: 1, method, params }, { "CF-Connecting-IP": freshIp() });
 }
 
-// An env whose database throws on every statement except the door-counter INSERT: a tool that reaches the database throws a plain Error.
+const COUNTER_SQL = /^INSERT (OR IGNORE )?INTO (door_counts|commit_days)/;
+
+// An env whose database throws on every statement except the door-counter writes: a tool that reaches the database throws a plain Error.
 function throwing(env: Env): Env {
   const db = env.DB;
   return {
     ...env,
     DB: {
       prepare(sql: string) {
-        if (!sql.startsWith("INSERT INTO door_counts")) throw new Error("boom: the database is down");
+        if (!COUNTER_SQL.test(sql)) throw new Error("boom: the database is down");
         return db.prepare(sql);
       },
-      batch: () => Promise.reject(new Error("boom: the database is down")),
+      // The counter is one batch of its two statements (door_counts upsert, commit_days insert): only an all-counter batch reaches the real database.
+      batch: (stmts: Array<{ __sql: string }>) => (stmts.every((s) => COUNTER_SQL.test(s.__sql)) ? db.batch(stmts as never) : Promise.reject(new Error("boom: the database is down"))),
     },
   } as unknown as Env;
 }

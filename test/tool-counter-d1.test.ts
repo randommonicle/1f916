@@ -27,7 +27,7 @@ function today(d1: LocalD1): Record<string, number> {
 
 const rpc = (env: Env, path: string, method: string, params?: unknown) => call(env, "POST", path, { jsonrpc: "2.0", id: 1, method, params }, { "CF-Connecting-IP": freshIp() });
 
-// Wraps env.DB: the door-counter INSERT for the doors in `failing` throws; `gate` (if given) holds every door-counter INSERT back;
+// Wraps env.DB: the door-counter batch for the doors in `failing` throws; `gate` (if given) holds every door-counter batch back;
 // others: "throw" makes every other statement throw (a tool that reaches the database then fails with a plain Error).
 function wrapped(env: Env, opts: { failing?: string[]; gate?: Promise<void>; others?: "throw" | "real" } = {}): Env {
   const db = env.DB;
@@ -36,24 +36,18 @@ function wrapped(env: Env, opts: { failing?: string[]; gate?: Promise<void>; oth
     DB: {
       prepare(sql: string) {
         const st = db.prepare(sql);
-        if (!sql.startsWith("INSERT INTO door_counts")) {
-          if (opts.others === "throw") throw new Error("boom: the database is down");
-          return st;
-        }
-        return {
-          bind: (...args: unknown[]) => {
-            const bound = st.bind(...args);
-            return {
-              run: async () => {
-                if (opts.gate) await opts.gate;
-                if (opts.failing?.includes(String(args[1]))) throw new Error("boom: the counter is down");
-                return bound.run();
-              },
-            };
-          },
-        };
+        if (!/^INSERT (OR IGNORE )?INTO (door_counts|commit_days)/.test(sql) && opts.others === "throw") throw new Error("boom: the database is down");
+        return st;
       },
-      batch: (stmts: unknown[]) => db.batch(stmts as never),
+      // the counter is one batch (the door_counts upsert and the commit_days insert): gate and failure apply to the batch that carries the named door's upsert
+      batch: async (stmts: Array<{ __sql: string; __args: unknown[] }>) => {
+        const upsert = stmts.find((s) => s.__sql.startsWith("INSERT INTO door_counts"));
+        if (upsert) {
+          if (opts.gate) await opts.gate;
+          if (opts.failing?.includes(String(upsert.__args[1]))) throw new Error("boom: the counter is down");
+        }
+        return db.batch(stmts as never);
+      },
     },
   } as unknown as Env;
 }
@@ -223,6 +217,13 @@ test("T5: the write budget: (every listed tool x the per-tool cap + every fixed 
     assert.ok(TOOLS.length >= 37 && readTools >= 13, "the lists are the ones being counted");
     const increments = (TOOLS.length + readTools) * TOOL_DOOR_DAILY_CAP + DOORS.length * DOOR_DAILY_CAP;
     assert.ok(increments * 2 < 60_000, `${increments} increments x2 = ${increments * 2} must stay under 60000`);
+    // R3 (commit_days): one new row plus its primary-key index write per distinct stamp per day, so the budget is increments x2 + 2S. S, the distinct stamps counted in one UTC day
+    // INCLUDING 'unstamped', is bounded by a stated constant, not by raising the threshold: one stamp per deploy and a handful of deploys a day at most (the project has shipped at most
+    // three in a day), so 20 is generous; a duplicate (day, stamp) insert is INSERT OR IGNORE and writes nothing.
+    const MAX_STAMPS_PER_DAY = 20;
+    const withStamps = increments * 2 + 2 * MAX_STAMPS_PER_DAY;
+    assert.ok(withStamps < 60_000, `${increments} increments x2 + 2 x ${MAX_STAMPS_PER_DAY} stamps = ${withStamps} must stay under 60000`);
+    assert.equal(increments * 2, 50_400, "the formula's fixed part is the 50,400 the brief names for today's lists (update the brief, not the threshold, if the lists grow)");
     assert.equal(TOOL_DOOR_DAILY_CAP, 100);
   } finally {
     d1.close();

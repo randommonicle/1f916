@@ -269,17 +269,12 @@ function gated(env: Env, gate: Promise<void>): Env {
   return {
     ...env,
     DB: {
-      prepare(sql: string) {
-        const st = db.prepare(sql);
-        if (!sql.startsWith("INSERT INTO door_counts")) return st;
-        return {
-          bind: (...args: unknown[]) => {
-            const bound = st.bind(...args);
-            return { run: async () => (await gate, bound.run()) };
-          },
-        };
+      prepare: (sql: string) => db.prepare(sql),
+      // the counter is one batch: hold it back (and only it) until the gate opens
+      batch: async (stmts: Array<{ __sql: string }>) => {
+        if (stmts.some((s) => s.__sql.startsWith("INSERT INTO door_counts"))) await gate;
+        return db.batch(stmts as never);
       },
-      batch: (stmts: unknown[]) => db.batch(stmts as never),
     },
   } as unknown as Env;
 }
@@ -322,7 +317,8 @@ test("C2: with a ctx, no counted route waits for its count: ctx.waitUntil receiv
 
 const DAY_MS = 86_400_000;
 const NOTE =
-  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at 2000 a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at 100, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request.";
+  "Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at 2000 a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at 100, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request."
+  + " commits_by_day lists, for each UTC day in the window, the deploy stamps (a 40-hex commit, or unstamped) that accompanied at least one completed door-counting attempt that day, including attempts after that door's count had capped; first_seen_at is the time carried by the first insert that landed, not necessarily the earliest such request. It is the operator's stamp (a commonhold_statement, as /api/attest's provenance says), not proof of the running bytes. A day may show several stamps, and a deployment without a completed door-counting attempt contributes no stamp observation, so this is not a complete deployment timeline and it does not say which /privacy response anyone received (/privacy is not a counted door). Days before this shipped have no entry.";
 
 test("C3: GET /api/doors serves the last 30 UTC days newest first, {day, door, n, at_cap} per row, and the note verbatim; no credential", async () => {
   const { d1, env } = fresh();

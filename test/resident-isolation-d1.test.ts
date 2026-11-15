@@ -125,7 +125,7 @@ test("isolation: the MCP resident tools take no `secret` argument and ignore one
 test("isolation: a whole resident life (enter, comment, bind, recover, roster, profile) writes only the guest, showhome and resident tables; every other table's row count is unchanged (mutant: a resident write touches citizens, a ballot, a chain or the treasury)", async () => {
   const { d1, env, post } = await fresh();
   try {
-    const resident = new Set(["guests", "guest_thread", "visitors", "showhome_notes", "showhome_replies", "showhome_rate", "resident_nonces", "door_counts", "sqlite_sequence"]);
+    const resident = new Set(["guests", "guest_thread", "visitors", "showhome_notes", "showhome_replies", "showhome_rate", "resident_nonces", "door_counts", "commit_days", "sqlite_sequence"]);
     const tables = (d1.raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((t) => t.name);
     assert.ok(tables.length > 25, "the census of tables is real");
     const snap = () => Object.fromEntries(tables.filter((t) => !resident.has(t)).map((t) => [t, count(d1, `SELECT COUNT(*) AS n FROM ${t}`)]));

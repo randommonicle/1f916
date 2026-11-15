@@ -22,6 +22,7 @@
 // writes (separate caps, either can fail alone), so mcp_tool_call and the per-tool rows need not reconcile exactly.
 
 import type { Env } from "./society.ts";
+import { codeIdentity } from "./code-identity.ts";
 
 // DEFERRED-LISTING-ATTRIBUTION: these doors do not say which registry listing sent a connection; that needs a distinct URL per listing (for example /mcp?via=smithery) and every listing republished, Ben's decision (docs/BRIEF-DOOR-FUNNEL-2026-10-13.md A6, A7).
 export const DOORS = [
@@ -69,9 +70,19 @@ export function utcDay(ms: number): string {
 // is left alone (the DO UPDATE's WHERE is false, so the statement changes nothing).
 const COUNT_SQL = "INSERT INTO door_counts (day, door, n) VALUES (?, ?, 1) ON CONFLICT (day, door) DO UPDATE SET n = n + 1 WHERE door_counts.n < ?";
 
+// The second statement of the one batch (migrations/0027_resident_recoveries.sql, R3): which deploy stamp accompanied a completed door-counting attempt on this UTC day. INSERT OR IGNORE, so a
+// repeat of (day, stamp) changes nothing; it runs whether or not the door row is at its cap. It is the OPERATOR's stamp (a commonhold_statement), never proof of the running bytes.
+const COMMIT_DAY_SQL = "INSERT OR IGNORE INTO commit_days (day, code_commit, first_seen_at) VALUES (?, ?, ?)";
+export const UNSTAMPED = "unstamped";
+
+// Rows written per day by the commit_days statement: one new row (plus its primary-key index write) per distinct stamp that day, S, so 2S; the existing conservative budget of the door
+// counters (test/tool-counter-d1.test.ts T5) is therefore 50,400 + 2S. A duplicate insert writes nothing.
 export async function countDoor(env: Env, door: Door | ToolDoor, now = Date.now()): Promise<void> {
   try {
-    await env.DB.prepare(COUNT_SQL).bind(utcDay(now), door, capFor(door)).run();
+    const day = utcDay(now);
+    const stamp = codeIdentity(env).commit ?? UNSTAMPED;
+    // ONE batch (one transaction): either both statements land or neither does, and neither can fail the request (the catch below).
+    await env.DB.batch([env.DB.prepare(COUNT_SQL).bind(day, door, capFor(door)), env.DB.prepare(COMMIT_DAY_SQL).bind(day, stamp, now)]);
   } catch (e) {
     // Never thrown: a counter that cannot write (a missing table, a D1 error) must not turn a request into a failure.
     console.log(JSON.stringify({ level: "warn", event: "door_count_failed", door, message: String(e) }));
@@ -98,7 +109,7 @@ export function recordDoor(env: Env, ctx: WaitUntil | undefined, door: Door | To
 export const DOOR_WINDOW_DAYS = 30;
 
 export const DOORS_NOTE =
-  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at ${DOOR_DAILY_CAP} a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at ${TOOL_DOOR_DAILY_CAP}, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request.`;
+  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at ${DOOR_DAILY_CAP} a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at ${TOOL_DOOR_DAILY_CAP}, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request. commits_by_day lists, for each UTC day in the window, the deploy stamps (a 40-hex commit, or unstamped) that accompanied at least one completed door-counting attempt that day, including attempts after that door's count had capped; first_seen_at is the time carried by the first insert that landed, not necessarily the earliest such request. It is the operator's stamp (a commonhold_statement, as /api/attest's provenance says), not proof of the running bytes. A day may show several stamps, and a deployment without a completed door-counting attempt contributes no stamp observation, so this is not a complete deployment timeline and it does not say which /privacy response anyone received (/privacy is not a counted door). Days before this shipped have no entry.`;
 
 export interface DoorRow {
   day: string;
@@ -109,12 +120,20 @@ export interface DoorRow {
 
 // The last DOOR_WINDOW_DAYS UTC days (today and the 29 before it), newest day first, one row per (day, door) that has a count. Public and
 // read-only. A (day, door) with no row had no counted request, and is simply absent.
-export async function doorsReport(env: Env, now = Date.now()): Promise<{ window_days: number; rows: DoorRow[]; note: string }> {
+export interface CommitDayRow {
+  day: string;
+  commit: string;
+  first_seen_at: number;
+}
+
+export async function doorsReport(env: Env, now = Date.now()): Promise<{ window_days: number; rows: DoorRow[]; commits_by_day: CommitDayRow[]; note: string }> {
   const since = utcDay(now - (DOOR_WINDOW_DAYS - 1) * 86_400_000);
   const { results } = await env.DB.prepare("SELECT day, door, n FROM door_counts WHERE day >= ? ORDER BY day DESC, door ASC").bind(since).all<{ day: string; door: string; n: number }>();
+  const commits = await env.DB.prepare("SELECT day, code_commit, first_seen_at FROM commit_days WHERE day >= ? ORDER BY day DESC, first_seen_at ASC, code_commit ASC").bind(since).all<{ day: string; code_commit: string; first_seen_at: number }>();
   return {
     window_days: DOOR_WINDOW_DAYS,
     rows: results.map((r) => ({ day: r.day, door: r.door, n: r.n, at_cap: r.n >= capFor(r.door) })),
+    commits_by_day: commits.results.map((c) => ({ day: c.day, commit: c.code_commit, first_seen_at: c.first_seen_at })),
     note: DOORS_NOTE,
   };
 }

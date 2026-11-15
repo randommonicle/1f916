@@ -216,7 +216,7 @@ test("8 (NEW): a refused HTTP request executes zero D1 statements; a refused MCP
       n = 0;
       const r = await rpc(env, door, "proposals", { status: "open" });
       assert.equal(r.isError, true);
-      assert.equal(n, 2, `${door}: ${n} counted statements`);
+      assert.equal(n, 4, `${door}: ${n} counted statements`); // two door-counting attempts, each one batch of two statements (the door_counts upsert and the commit_days insert)
       assert.deepEqual([countsOf(total), countsOf(perTool)], [before[0] + 1, before[1] + 1], `${door} receipts`);
     }
   } finally {
