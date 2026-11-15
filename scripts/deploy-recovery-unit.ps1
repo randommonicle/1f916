@@ -425,6 +425,10 @@ function Test-V6PinRun($out, $code) {
   if ($code -ne 0 -or $failM[$failM.Count - 1].Groups[1].Value -ne "0") { return "the v6 pin test failed (exit $code)" }
   if ($passM[$passM.Count - 1].Groups[1].Value -eq "0") { return "the v6 pin test ran no test" }
   if (-not $out.Contains($V6_PIN_TEST_NAME)) { return "the v6 pin test's template_hash test did not run" }
+  # The name appearing is not a result: a skipped test is printed too. With fail 0, the name printed and skipped 0, the named test ran and passed.
+  $skipM = [regex]::Matches($out, '(?m)^(?:\S+[ \t]+)?skipped (\d+)[ \t]*\r?$')
+  if ($skipM.Count -lt 1) { return "the v6 pin test run carries no skipped count" }
+  if ($skipM[$skipM.Count - 1].Groups[1].Value -ne "0") { return "the v6 pin test run skipped a test, so the named test's result is not proved" }
   return ""
 }
 # END-V6-PIN-FN
@@ -728,9 +732,11 @@ Say ("[ride] attest: v6 " + $V6_HASH.Substring(0, 8) + " unchanged; the four cha
 $why = Test-RosterServed (Read-JsonBody (Get-Text "$BASE/api/residents" 30 $null))
 if ($why -ne "") { Stop-Here "GET /api/residents: $why. $ROLLBACK_LINE" }
 Say "[ride] GET /api/residents -> 200, unit resident_record, the recoveries definition, every row with unit, recoveries and last_recovered_at"
-$why = Test-ProfileServed (Get-Text "$BASE/api/resident/1" 30 $null)
+$profileRead = Get-Text "$BASE/api/resident/1" 30 $null
+$why = Test-ProfileServed $profileRead
 if ($why -ne "") { Stop-Here "GET /api/resident/1: $why. $ROLLBACK_LINE" }
-Say "[ride] GET /api/resident/1 -> the honest answer for a number with no resident (or a profile with unit, recoveries and last_recovered_at)"
+if ([string]$profileRead.Code -ceq "404") { Say "[ride] GET /api/resident/1 -> 404, no resident 1: the profile's new fields are NOT RIDDEN here (a 404 carries none, and the old worker answers the same). The roster check above is the proof that the new worker serves." }
+else { Say "[ride] GET /api/resident/1 -> 200, a profile with unit, recoveries and last_recovered_at" }
 $why = Test-OfficialResidents (Read-JsonBody (Get-Text "$BASE/api/official" 30 $null))
 if ($why -ne "") { Stop-Here "GET /api/official: $why. $ROLLBACK_LINE" }
 Say "[ride] GET /api/official -> the residents block with count, by_key, by_account, unit and counts_note"
@@ -753,7 +759,8 @@ for ($n = 1; $n -le 4; $n++) {
   $doorsWhy = Test-DoorsServed $doorsBody
   if ($doorsWhy -eq "") { $doorsWhy = Test-CommitListed $doorsBody $headSha ((Get-Date).ToUniversalTime()) }
   if ($doorsWhy -eq "") { break }
-  if ($n -lt 4) { Start-Sleep -Seconds 3 }
+  # A retry repeats a counted door first: /api/doors is not a counted door, so if the earlier counts never landed, polling it alone could not produce the stamp.
+  if ($n -lt 4) { Start-Sleep -Seconds 3; $null = Get-Text "$BASE/skill.md" 30 $null }
 }
 if ($doorsWhy -ne "") { Stop-Here "GET /api/doors: $doorsWhy. $ROLLBACK_LINE" }
 Say "[ride] GET /api/doors -> commits_by_day present, the note, and this deploy's commit listed for today"

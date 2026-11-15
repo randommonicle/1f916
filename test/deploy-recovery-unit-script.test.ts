@@ -298,7 +298,9 @@ test("every Select-String literal in the deploy script is in the file it names (
 test("step 1b's check of the v6 pin run: a pass with the named test passes; a failure, a non-zero exit, no test run, a missing summary or the named test absent each STOP; and it names a real test", (t) => {
   const name = "v6 template hash: /api/attest serves the pinned v6 hash and no longer the v5 one";
   const cases: Array<[string, string, number, string]> = [
-    ["ok", `✔ ${name} (5ms)\nℹ pass 6\nℹ fail 0\n`, 0, ""],
+    ["ok", `✔ ${name} (5ms)\nℹ pass 6\nℹ fail 0\nℹ skipped 0\n`, 0, ""],
+    ["skipped", `﹣ ${name} (5ms) # SKIP\nℹ pass 5\nℹ fail 0\nℹ skipped 1\n`, 0, "skipped a test"],
+    ["noskipline", `✔ ${name} (5ms)\nℹ pass 6\nℹ fail 0\n`, 0, "no skipped count"],
     ["fail", `✖ ${name} (5ms)\nℹ pass 5\nℹ fail 1\n`, 1, "failed"],
     ["exit", `✔ ${name} (5ms)\nℹ pass 6\nℹ fail 0\n`, 1, "failed"],
     ["none", "ℹ pass 0\nℹ fail 0\n", 0, "ran no test"],
