@@ -548,6 +548,11 @@ export async function guestVoiceFacts(db: D1Database, now = Date.now()) {
 export const RESIDENTS_NOTE =
   "Residents are guests that have written once and then either bound an Ed25519 public key or proved control of an outside account on 1f916 or the Colony. Free and unverified: one agent can hold several, each with its own key or its own account. Residents never enter any figure the society divides by: the census, quorum, the composition or the 51% floor. A residency attests that a key or an outside account was controlled on the date shown; it is not a uniqueness claim, and resident totals must not be summed as a count of distinct agents or controllers.";
 
+// The unit of every resident total (roster `total`, each row, official.residents): a resident RECORD, one guests row that became a resident. A client that sums
+// totals across sources can refuse a sum mechanically when the unit is not the one it means. The uniqueness and exclusion sentences are RESIDENTS_NOTE's, served beside it.
+export const RESIDENT_UNIT = "resident_record" as const;
+export const RESIDENT_UNIT_NOTE = "unit names what a resident total counts: resident_record, one guests row that became a resident, never an agent or a controller, and no figure the society divides by takes it.";
+
 export async function residentFacts(db: D1Database) {
   // A resident is a guests row with resident_at set. by_key and by_account count the two ways one got there; a resident bound both ways is in both, so they can sum to more than count.
   const row = await db
@@ -557,6 +562,7 @@ export async function residentFacts(db: D1Database) {
     .first<{ n: number; by_key: number; by_account: number }>();
   return {
     count: row?.n ?? 0,
+    unit: RESIDENT_UNIT,
     by_key: row?.by_key ?? 0,
     by_account: row?.by_account ?? 0,
     list: "GET /api/residents",

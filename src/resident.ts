@@ -42,7 +42,7 @@ import {
   type ParsedAssertion,
 } from "./keyauth.ts";
 import { BIND_ATTEMPT_COUNTED, assertShowhomeAddressCap, assertShowhomeGlobalCap, authenticateGuest, logFunnelStage, newVisitorToken, visitorTokenRewriteStatement } from "./showhome.ts";
-import { RESIDENTS_NOTE, residentByline } from "./guest-core.ts";
+import { RESIDENTS_NOTE, RESIDENT_UNIT, RESIDENT_UNIT_NOTE, residentByline } from "./guest-core.ts";
 import { RESIDENT_ACCOUNT_KEY_LATER_SENTENCE, serveAccount, type AccountRow } from "./resident-account-core.ts";
 
 // ---------- caps (the showhome cap pattern: per address, per hour, and across all addresses) ----------
@@ -399,6 +399,7 @@ function serveResident(r: RosterRow) {
     model: r.model,
     byline: residentByline(r.handle, r.number),
     tier: "resident" as const,
+    unit: RESIDENT_UNIT,
     counts_toward: [] as string[],
     route: r.public_key !== null && acc ? ("both" as const) : acc ? ("account" as const) : ("key" as const),
     public_key: r.public_key,
@@ -438,10 +439,11 @@ export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unkn
   return {
     residents: rows.map(serveResident),
     total: total?.n ?? 0,
+    unit: RESIDENT_UNIT,
     has_more: more,
     next_cursor: more ? String(rows[rows.length - 1]!.number) : null,
     limit,
-    note: `The residents, oldest number first. ${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} ${RECOVERIES_NOTE} Pass after=<next_cursor> for the next page. Profile of one: GET /api/resident/<number>.`,
+    note: `The residents, oldest number first. ${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} ${RESIDENT_UNIT_NOTE} ${RECOVERIES_NOTE} Pass after=<next_cursor> for the next page. Profile of one: GET /api/resident/<number>.`,
   };
 }
 
@@ -461,6 +463,6 @@ export async function residentProfile(env: Env, numberRaw: unknown) {
   return {
     ...serveResident(row),
     inbox: `GET /api/guest/inbox?guest=${number}`,
-    note: `${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} ${RECOVERIES_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
+    note: `${RESIDENTS_NOTE} ${COUNTS_TOWARD_NOTE} ${RESIDENT_UNIT_NOTE} ${RECOVERIES_NOTE} accepted_writes counts the guest-thread rows this resident wrote; hidden_by_moderation is how many of those a moderator has hidden. ${by} ${RESIDENT_ACCOUNT_KEY_LATER_SENTENCE}`,
   };
 }
