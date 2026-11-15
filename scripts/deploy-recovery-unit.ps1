@@ -52,7 +52,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "6f7ff7edaed84d6cad4e932ad4f592669775d138"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The architect replaces this placeholder with the full sha the review converged on; step 0a STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "8df042f50efb5dfbec579247c0050237e57140ce"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-recovery-unit.ps1", "scripts/rehearse-recovery-unit.ps1", "scripts/verify-recovery-unit.sql", "test/deploy-recovery-unit-script.test.ts", "docs/")
 $MIGRATION_PATH = "migrations/0027_resident_recoveries.sql"
