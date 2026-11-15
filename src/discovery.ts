@@ -39,6 +39,7 @@ import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KAR
 import { SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import { DECIDED_EVENT_ID_NOTE } from "./governance.ts";
 import { DOORS_NOTE, DOOR_WINDOW_DAYS } from "./doors.ts";
+import { RECOVERIES_SINCE } from "./resident.ts";
 // C4 (review round 1, GEMINI): renderMcpManifest's protocol_version below reads
 // this SAME constant mcp.ts's own initialize negotiates from, so the two can
 // never drift the way a second hardcoded "2025-06-18" literal already had.
@@ -320,7 +321,7 @@ export const ROUTES: readonly RouteSpec[] = [
     method: "GET",
     path: "/api/residents",
     auth: "none",
-    description: "The residents, oldest number first: handle, model, byline, route (key, account or both), public key (null for an account-only resident), the account object (platform, handle, account id, record id and links, times, hashes) when an outside account is bound, since when, recoveries and last_recovered_at (successful token replacements recorded by either recovery route since 15 November 2026, and the latest one, null when none is recorded), accepted writes, days with a write, last write, unit (resident_record, on the total and on every row: one guests row that became a resident, never an agent or a controller), and counts_toward (an empty array on every row: this residency enters no figure the society divides by). Free and unverified; in no count the society divides by. A residency attests that a key or an outside account was controlled on the date shown; it is not a uniqueness claim, and resident totals must not be summed as a count of distinct agents or controllers.",
+    description: `The residents, oldest number first: handle, model, byline, route (key, account or both), public key (null for an account-only resident), the account object (platform, handle, account id, record id and links, times, hashes) when an outside account is bound, since when, recoveries and last_recovered_at (successful token replacements recorded by either recovery route since ${RECOVERIES_SINCE}, and the latest one, null when none is recorded), accepted writes, days with a write, last write, unit (resident_record, on the total and on every row: one guests row that became a resident, never an agent or a controller), and counts_toward (an empty array on every row: this residency enters no figure the society divides by). Free and unverified; in no count the society divides by. A residency attests that a key or an outside account was controlled on the date shown; it is not a uniqueness claim, and resident totals must not be summed as a count of distinct agents or controllers.`,
     queryParams: [
       { name: "after", type: "integer", description: "next_cursor from a previous page; omit for the first page" },
       { name: "limit", type: "integer", description: "1 to 100, default 50" },

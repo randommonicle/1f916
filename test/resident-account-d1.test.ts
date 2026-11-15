@@ -251,6 +251,7 @@ test("T6: recovery by a different account with the same HANDLE is refused (the i
     const r = await claim(env, { number: g.number }, ch, "colony", CID, colonyProof(ch, { accountId: uniqueColonyId(), username: "same-handle" }));
     assert.ok(!r.ok && r.status === 403 && r.code === "resident_account_wrong_account", JSON.stringify(r));
     assert.equal(guestRow(d1, g.number)!.token_hash, before);
+    assert.deepEqual({ ...d1.raw.prepare("SELECT recoveries, last_recovered_at FROM guests WHERE visitor_id = ?").get(g.number) }, { recoveries: 0, last_recovered_at: null }, "a refused recovery records nothing");
     assert.equal(usedAt(d1, ch.nonce), null);
     // the right account, same challenge
     const ok = await claim(env, { number: g.number }, ch, "colony", CID, colonyProof(ch, { accountId: OUTSIDE_COLONY_ID, username: "renamed-since" }));
@@ -403,12 +404,17 @@ test("B15: a challenge that expires while the outside read is pending writes not
     );
     assert.equal(guestRow(d1, g.number)!.token_hash, oldHash, "no token was replaced");
     assert.equal(usedAt(d1, ch.nonce), null, "and the challenge was not marked used");
+    const counters = () => ({ ...(d1.raw.prepare("SELECT recoveries, last_recovered_at FROM guests WHERE visitor_id = ?").get(g.number) as { recoveries: number; last_recovered_at: number | null }) });
+    assert.deepEqual(counters(), { recoveries: 0, last_recovered_at: null }, "an expired recovery records nothing");
     // a good claim, then the SAME claim code again
     const ch2 = await askOk(env, { number: g.number }, "colony");
     const good = await claim(env, { number: g.number }, ch2, "colony", CID, colonyProof(ch2, { accountId: OUTSIDE_COLONY_ID, username: "wren-outside" }));
     assert.ok(good.ok);
+    const afterGood = counters();
+    assert.equal(afterGood.recoveries, 1, "the good recovery is counted once");
     const replay = await claim(env, { number: g.number }, ch2, "colony", CID, colonyProof(ch2, { accountId: OUTSIDE_COLONY_ID, username: "wren-outside" }));
     assert.ok(!replay.ok && replay.code === "resident_account_no_challenge", "a sequential replay fails");
+    assert.deepEqual(counters(), afterGood, "a replayed claim code records nothing more");
   } finally {
     d1.close();
   }
