@@ -429,6 +429,12 @@ function Test-V6PinRun($out, $code) {
   $skipM = [regex]::Matches($out, '(?m)^(?:\S+[ \t]+)?skipped (\d+)[ \t]*\r?$')
   if ($skipM.Count -lt 1) { return "the v6 pin test run carries no skipped count" }
   if ($skipM[$skipM.Count - 1].Groups[1].Value -ne "0") { return "the v6 pin test run skipped a test, so the named test's result is not proved" }
+  # A TODO or a cancelled test is printed by name without its body having passed, the same hole as a skip.
+  foreach ($kind in "todo", "cancelled") {
+    $kindM = [regex]::Matches($out, ('(?m)^(?:\S+[ \t]+)?' + $kind + ' (\d+)[ \t]*\r?$'))
+    if ($kindM.Count -lt 1) { return "the v6 pin test run carries no $kind count" }
+    if ($kindM[$kindM.Count - 1].Groups[1].Value -ne "0") { return "the v6 pin test run has a $kind test, so the named test's result is not proved" }
+  }
   return ""
 }
 # END-V6-PIN-FN
@@ -759,8 +765,8 @@ for ($n = 1; $n -le 4; $n++) {
   $doorsWhy = Test-DoorsServed $doorsBody
   if ($doorsWhy -eq "") { $doorsWhy = Test-CommitListed $doorsBody $headSha ((Get-Date).ToUniversalTime()) }
   if ($doorsWhy -eq "") { break }
-  # A retry repeats a counted door first: /api/doors is not a counted door, so if the earlier counts never landed, polling it alone could not produce the stamp.
-  if ($n -lt 4) { Start-Sleep -Seconds 3; $null = Get-Text "$BASE/skill.md" 30 $null }
+  # A retry repeats a counted door first: /api/doors is not a counted door, so if the earlier counts never landed, polling it alone could not produce the stamp. Counted GET, then the wait, then the doors read.
+  if ($n -lt 4) { $null = Get-Text "$BASE/skill.md" 30 $null; Start-Sleep -Seconds 3 }
 }
 if ($doorsWhy -ne "") { Stop-Here "GET /api/doors: $doorsWhy. $ROLLBACK_LINE" }
 Say "[ride] GET /api/doors -> commits_by_day present, the note, and this deploy's commit listed for today"
