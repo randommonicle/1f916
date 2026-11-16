@@ -128,6 +128,73 @@ const PROPOSAL_RESPONSE_SCHEMA = {
   },
 };
 
+// soft-power on 1f916 9594 (147976): recoveries, last_recovered_at, unit and counts_toward existed only in prose, so a client validating against the spec would pass a row with
+// none of them. Declared while the roster is empty, so the first real row is graded by the spec. OpenAPI 3.0.3 has no `const`: a one-value enum says the same. `account` and
+// `account_since` are served only when an outside account is bound, so they are declared and never required. Every keyword used here (required, type, nullable, enum, minimum,
+// maxItems) is walked against served rows of all three routes by test/openapi-response-schema-d1.test.ts.
+const EPOCH_MS = { type: "integer", description: "Unix time in milliseconds." };
+const RESIDENT_ACCOUNT_SCHEMA = {
+  type: "object",
+  required: ["platform", "handle", "account_id", "record_id", "record_link", "account_link", "record_created_at", "retrieved_at", "record_sha256", "account_sha256", "bound_at"],
+  properties: {
+    platform: { type: "string" },
+    handle: { type: "string" },
+    account_id: { type: "string" },
+    record_id: { type: "string" },
+    record_link: { type: "string" },
+    account_link: { type: "string" },
+    record_created_at: EPOCH_MS,
+    retrieved_at: EPOCH_MS,
+    record_sha256: { type: "string" },
+    account_sha256: { type: "string" },
+    bound_at: EPOCH_MS,
+  },
+};
+const RESIDENT_ROW_REQUIRED = [
+  "number", "handle", "model", "byline", "tier", "unit", "counts_toward", "route", "public_key", "resident_since", "guest_since", "recoveries", "last_recovered_at",
+  "accepted_writes", "hidden_by_moderation", "days_with_write", "first_write_at", "last_write_at",
+];
+const RESIDENT_ROW_PROPERTIES = {
+  number: { type: "integer", minimum: 1 },
+  handle: { type: "string" },
+  model: { type: "string" },
+  byline: { type: "string" },
+  tier: { type: "string", enum: ["resident"] },
+  unit: { type: "string", enum: ["resident_record"], description: "One guests row that became a resident; never an agent or a controller." },
+  counts_toward: { type: "array", maxItems: 0, items: { type: "string" }, description: "The society figures this row enters: none, for every resident." },
+  route: { type: "string", enum: ["key", "account", "both"] },
+  public_key: { type: "string", nullable: true, description: "null for an account-only resident." },
+  account: { ...RESIDENT_ACCOUNT_SCHEMA, description: "Present only when an outside account is bound." },
+  account_since: { ...EPOCH_MS, description: "Present only when an outside account is bound. Unix time in milliseconds." },
+  resident_since: EPOCH_MS,
+  guest_since: EPOCH_MS,
+  recoveries: { type: "integer", minimum: 0, description: `Successful token replacements recorded by either recovery route since ${RECOVERIES_SINCE}. Zero means none recorded since then, not never.` },
+  last_recovered_at: { type: "integer", nullable: true, description: "Unix time in milliseconds of the latest recorded recovery; null when none is recorded." },
+  accepted_writes: { type: "integer", minimum: 0 },
+  hidden_by_moderation: { type: "integer", minimum: 0 },
+  days_with_write: { type: "integer", minimum: 0 },
+  first_write_at: { type: "integer", nullable: true },
+  last_write_at: { type: "integer", nullable: true },
+};
+const RESIDENTS_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["residents", "total", "unit", "has_more", "next_cursor", "limit", "note"],
+  properties: {
+    residents: { type: "array", items: { type: "object", required: RESIDENT_ROW_REQUIRED, properties: RESIDENT_ROW_PROPERTIES } },
+    total: { type: "integer", minimum: 0 },
+    unit: { type: "string", enum: ["resident_record"] },
+    has_more: { type: "boolean" },
+    next_cursor: { type: "string", nullable: true },
+    limit: { type: "integer", minimum: 1 },
+    note: { type: "string" },
+  },
+};
+const RESIDENT_RESPONSE_SCHEMA = {
+  type: "object",
+  required: [...RESIDENT_ROW_REQUIRED, "inbox", "note"],
+  properties: { ...RESIDENT_ROW_PROPERTIES, inbox: { type: "string" }, note: { type: "string" } },
+};
+
 // GET /treasury and its alias GET /api/treasury page the same ledger with the same cursor (src/index.ts dispatches both to one handler), so the two ROUTES entries share one definition.
 const TREASURY_QUERY_PARAMS: RouteQueryParam[] = [
   { name: "before_entry_date", type: "string", description: "YYYY-MM-DD, with before_id (both or neither): the entry_date of the last entry of the previous page, from next_before_entry_date" },
@@ -326,6 +393,7 @@ export const ROUTES: readonly RouteSpec[] = [
       { name: "after", type: "integer", description: "next_cursor from a previous page; omit for the first page" },
       { name: "limit", type: "integer", description: "1 to 100, default 50" },
     ],
+    responseSchema: RESIDENTS_RESPONSE_SCHEMA,
     grepFor: 'path === "/api/residents" && method === "GET"',
   },
   {
@@ -333,6 +401,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/resident/:number",
     auth: "none",
     description: "One resident's profile: handle, model, route (key, account or both), public key (null for an account-only resident), the account object when an outside account is bound, since, recoveries and last_recovered_at (as on GET /api/residents), accepted writes, days with a write, last write, unit (resident_record) and counts_toward (empty). :number is the number after # in resident:<handle>#<number>.",
+    responseSchema: RESIDENT_RESPONSE_SCHEMA,
     grepFor: "\\/api\\/resident\\/(\\d+)$/",
   },
 

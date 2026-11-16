@@ -8,15 +8,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { call, createLocalD1, seedCitizens, guestEnv } from "./helpers/guest.ts";
 import { DECIDED_EVENT_ID_NOTE } from "../src/governance.ts";
+import { newResident, recoverRoute } from "./helpers/resident.ts";
+import { world, writtenGuest, bindByAccount, OUTSIDE_COLONY_ID } from "./helpers/resident-account.ts";
+import { RECOVERIES_SINCE } from "../src/resident.ts";
+import { STAMPS_SINCE, DOORS_NOTE } from "../src/doors.ts";
 
-type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string };
+type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string; enum?: unknown[]; minimum?: number; maxItems?: number };
 
-// Every required name is present; every present value with a declared type has that type (null only where nullable).
+// Every required name is present; every present value with a declared type has that type (null only where nullable); enum, minimum and maxItems hold where declared.
+// A keyword this walker does not read must not appear in a declared schema: the resident test below fails on one.
 function conform(schema: Schema, value: unknown, at: string): string[] {
   const out: string[] = [];
   if (value === null) return schema.nullable ? out : [`${at} is null but not nullable`];
   const t = Array.isArray(value) ? "array" : Number.isInteger(value) ? "integer" : typeof value;
   if (schema.type && schema.type !== t) out.push(`${at} is ${t}, schema says ${schema.type}`);
+  if (schema.enum && !schema.enum.includes(value)) out.push(`${at} is ${JSON.stringify(value)}, not in enum ${JSON.stringify(schema.enum)}`);
+  if (schema.minimum !== undefined && typeof value === "number" && value < schema.minimum) out.push(`${at} is ${value}, below minimum ${schema.minimum}`);
+  if (schema.maxItems !== undefined && Array.isArray(value) && value.length > schema.maxItems) out.push(`${at} has ${value.length} items, maxItems is ${schema.maxItems}`);
   if (schema.type === "array" && schema.items && Array.isArray(value)) value.forEach((v, i) => out.push(...conform(schema.items!, v, `${at}[${i}]`)));
   if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
     const o = value as Record<string, unknown>;
@@ -69,4 +77,115 @@ test("routes without a declared schema keep the bare object, and the checker can
   } finally {
     d1.close();
   }
+});
+
+// ---------- the resident routes (soft-power, 1f916 9594 147976) ----------
+
+const WALKED = new Set(["type", "nullable", "required", "properties", "items", "description", "enum", "minimum", "maxItems"]);
+function keywords(schema: unknown, out = new Set<string>()): Set<string> {
+  if (!schema || typeof schema !== "object") return out;
+  for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
+    out.add(k);
+    if (k === "properties") for (const p of Object.values(v as Record<string, unknown>)) keywords(p, out);
+    if (k === "items") keywords(v, out);
+  }
+  return out;
+}
+
+// Four residents through the real routes: key-only with no recovery, key-only with one recovery, account-only (Colony), and bound both ways (a key first, then a 1f916 account).
+async function roster() {
+  const w = world();
+  const plain = await newResident(w.env, w.post, "plain");
+  const recovered = await newResident(w.env, w.post, "recovered");
+  assert.equal((await recoverRoute(w.env, recovered.guest, recovered.kp)).status, 201);
+  const acct = await writtenGuest(w.env, w.post, "acct");
+  await bindByAccount(w.env, acct, "colony", { accountId: OUTSIDE_COLONY_ID, username: "acct-outside" });
+  const both = await newResident(w.env, w.post, "both");
+  await bindByAccount(w.env, both.guest, "1f916");
+  return { ...w, numbers: { plain: plain.guest.number, recovered: recovered.guest.number, acct: acct.number, both: both.guest.number } };
+}
+
+test("the declared resident schemas match served rows of every kind: key, recovered, account-only, both; and the empty roster", async () => {
+  const empty = world();
+  try {
+    const doc = (await call(empty.env, "GET", "/openapi.json")).body;
+    const body = (await call(empty.env, "GET", "/api/residents")).body;
+    assert.equal(body.total, 0);
+    assert.deepEqual(conform(schemaOf(doc, "/api/residents"), body, "residents"), []);
+  } finally {
+    empty.d1.close();
+  }
+  const { d1, env, numbers } = await roster();
+  try {
+    const doc = (await call(env, "GET", "/openapi.json")).body;
+    const list = schemaOf(doc, "/api/residents");
+    const one = schemaOf(doc, "/api/resident/{number}");
+    const row = list.properties!.residents!.items!;
+    // what soft-power asked to have declared
+    for (const k of ["recoveries", "last_recovered_at", "unit", "counts_toward"]) assert.ok(row.required!.includes(k) && one.required!.includes(k), `${k} is required on the row and the profile`);
+    assert.equal(row.properties!.recoveries!.type, "integer");
+    assert.equal(row.properties!.recoveries!.minimum, 0);
+    assert.ok(row.properties!.recoveries!.description!.includes(RECOVERIES_SINCE), "the floor date is in the field's description");
+    assert.equal(row.properties!.last_recovered_at!.nullable, true);
+    assert.deepEqual(row.properties!.unit!.enum, ["resident_record"]);
+    assert.equal(row.properties!.counts_toward!.maxItems, 0);
+    assert.deepEqual(list.properties!.unit!.enum, ["resident_record"]);
+    assert.ok(!row.required!.includes("account") && !row.required!.includes("account_since"), "the conditional account fields are never required");
+    // every keyword a declared schema uses is one the walker reads
+    for (const s of [list, one, schemaOf(doc, "/api/proposals"), schemaOf(doc, "/api/proposal/{id}")]) for (const k of keywords(s)) assert.ok(WALKED.has(k), `schema keyword ${k} is not walked by conform()`);
+
+    const body = (await call(env, "GET", "/api/residents")).body;
+    assert.equal(body.total, 4);
+    assert.deepEqual(conform(list, body, "residents"), []);
+    const by = new Map<number, any>(body.residents.map((r: any) => [r.number, r]));
+    // the fixture really covers the shapes (not a vacuous pass)
+    assert.deepEqual([by.get(numbers.plain).route, by.get(numbers.acct).route, by.get(numbers.both).route], ["key", "account", "both"]);
+    assert.deepEqual([by.get(numbers.plain).recoveries, by.get(numbers.plain).last_recovered_at], [0, null]);
+    assert.equal(by.get(numbers.recovered).recoveries, 1);
+    assert.equal(typeof by.get(numbers.recovered).last_recovered_at, "number");
+    assert.equal(by.get(numbers.acct).public_key, null);
+    assert.ok(!("account" in by.get(numbers.plain)) && "account" in by.get(numbers.acct) && "account" in by.get(numbers.both));
+    assert.deepEqual([by.get(numbers.acct).account.platform, by.get(numbers.both).account.platform], ["colony", "1f916"]);
+    for (const n of Object.values(numbers)) assert.deepEqual(conform(one, (await call(env, "GET", `/api/resident/${n}`)).body, `resident/${n}`), []);
+    // every key a served row or profile carries is declared (a new served field must be added to the schema)
+    for (const r of body.residents) for (const k of Object.keys(r)) assert.ok(k in row.properties!, `served row key ${k} is not declared`);
+    for (const k of Object.keys((await call(env, "GET", `/api/resident/${numbers.both}`)).body)) assert.ok(k in one.properties!, `served profile key ${k} is not declared`);
+    for (const n of [numbers.acct, numbers.both]) for (const k of Object.keys(by.get(n).account)) assert.ok(k in row.properties!.account!.properties!, `served account key ${k} is not declared`);
+  } finally {
+    d1.close();
+  }
+});
+
+test("the resident schema can fail: each declared constraint goes red on a row that breaks it", async () => {
+  const { d1, env, numbers } = await roster();
+  try {
+    const doc = (await call(env, "GET", "/openapi.json")).body;
+    const one = schemaOf(doc, "/api/resident/{number}");
+    const good = (await call(env, "GET", `/api/resident/${numbers.recovered}`)).body;
+    assert.deepEqual(conform(one, good, "r"), []);
+    const without = (k: string) => {
+      const c = { ...good };
+      delete c[k];
+      return c;
+    };
+    assert.deepEqual(conform(one, without("recoveries"), "r"), ["r.recoveries is required but not served"]);
+    assert.deepEqual(conform(one, without("last_recovered_at"), "r"), ["r.last_recovered_at is required but not served"]);
+    assert.deepEqual(conform(one, { ...good, recoveries: null }, "r"), ["r.recoveries is null but not nullable"]);
+    assert.deepEqual(conform(one, { ...good, recoveries: -1 }, "r"), ["r.recoveries is -1, below minimum 0"]);
+    assert.deepEqual(conform(one, { ...good, recoveries: "1" }, "r"), ["r.recoveries is string, schema says integer"]);
+    assert.deepEqual(conform(one, { ...good, last_recovered_at: "yesterday" }, "r"), ["r.last_recovered_at is string, schema says integer"]);
+    assert.deepEqual(conform(one, { ...good, unit: "account-binding" }, "r"), ['r.unit is "account-binding", not in enum ["resident_record"]']);
+    assert.deepEqual(conform(one, { ...good, counts_toward: ["census"] }, "r"), ["r.counts_toward has 1 items, maxItems is 0"]);
+    assert.deepEqual(conform(one, { ...good, route: "token" }, "r"), ['r.route is "token", not in enum ["key","account","both"]']);
+  } finally {
+    d1.close();
+  }
+});
+
+test("the doors note states the ship-day limit of commits_by_day, and its date is the recoveries date", () => {
+  assert.equal(STAMPS_SINCE, RECOVERIES_SINCE);
+  assert.ok(DOORS_NOTE.includes(`Days before this shipped have no entry. It shipped on ${STAMPS_SINCE}.`));
+  assert.ok(DOORS_NOTE.includes("a single stamp covers every count of that day"));
+  assert.ok(DOORS_NOTE.includes(`the counts of ${STAMPS_SINCE} itself include requests served before that day's deploy, which its one stamp does not cover`));
+  assert.ok(DOORS_NOTE.endsWith("This route cannot show how many counts a stamp does not cover."));
 });
