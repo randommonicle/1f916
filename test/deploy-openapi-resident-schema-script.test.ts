@@ -73,7 +73,7 @@ test("the pins: the v6 hash, the live base f6e3af26, the reviewed pin is the pla
   // Setting the pin (the hub's later edit) must not red the suite: the line may hold the placeholder or a full sha.
   assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m);
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
-  assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-openapi-resident-schema\.ps1", "test\/deploy-openapi-resident-schema-script\.test\.ts", "docs\/"\)$/m);
+  assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-openapi-resident-schema\.ps1", "scripts\/check-resident-schema-served\.mjs", "test\/deploy-openapi-resident-schema-script\.test\.ts", "docs\/"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
   assert.match(script, /\[switch\]\$DryRun/);
 });
@@ -114,7 +114,7 @@ test("the pin test accepts the set sha: the shipped script, with its reviewed li
 });
 
 test("the steps are in the load-bearing order, there is no migration or D1 step, wrangler is used once (the stamped deploy), and the ride sends no POST and no request body", () => {
-  const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", 'Read-Attest "before the deploy"', "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", 'Read-Attest "after the deploy"', "Test-ResidentSchemaServed $runsNow", "Test-RosterSchemaServed $runsNow", "Test-DoorsNoteServed $doorsNow", "Test-ResidentsLive $rosterNow"];
+  const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", 'Read-Attest "before the deploy"', "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", 'Read-Attest "after the deploy"', "Test-ResidentSchemaServed $runsNow", "Test-RosterSchemaServed $runsNow", "Test-DoorsNoteServed $doorsNow", "Test-ResidentsLive $rosterNow", "Invoke-ServedCheck $servedOpenapi $servedDoors"];
   let last = -1;
   for (const needle of order) {
     const i = script.indexOf(needle.startsWith("BEGIN-") ? "# " + needle : needle);
@@ -234,8 +234,12 @@ test("the doors note and live roster checks, run for real, pass the good answers
     ["noentry", "Test-DoorsNoteServed", { code: "200", body: note(`x ${SHIP_SENTENCE}`) }, "no-entry sentence"],
     ["doorscase", "Test-DoorsNoteServed", { code: "200", body: note(`${SHIP_SENTENCE.toUpperCase()} ${NOENTRY_SENTENCE}`) }, "ship-day sentence"],
     ["doors500", "Test-DoorsNoteServed", { code: "500", body: "{}" }, "expected 200"],
-    ["rostergood", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "resident_record" }) }, ""],
-    ["rosterunit", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "agent" }) }, "expected resident_record"],
+    ["rostergood", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "resident_record", total: 0, residents: [] }) }, ""],
+    ["rosterunit", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "agent", total: 0, residents: [] }) }, "expected resident_record"],
+    ["rosterfragment", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "resident_record" }) }, "total is not an integer"],
+    ["rostertotalstr", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "resident_record", total: "0", residents: [] }) }, "total is not an integer"],
+    ["rostertotalneg", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "resident_record", total: -1, residents: [] }) }, "total is below 0"],
+    ["rosternoarray", "Test-ResidentsLive", { code: "200", body: JSON.stringify({ unit: "resident_record", total: 0, residents: "x" }) }, "residents is not an array"],
     ["roster404", "Test-ResidentsLive", { code: "404", body: "{}" }, "expected 200"],
   ];
   const run = runPs(["$ErrorActionPreference = 'Stop'", fns, ...cases.map(([name, fn, c]) => `Write-Host ("RESULT ${name} [" + (${fn} ${cap(c)}) + "]")`)]);
@@ -259,7 +263,179 @@ test("the before-read accepts only the two ABSENT reasons, refuses an already-de
   assert.ok(code.includes("Wait-NewWorker $headSha $versionId $POLL_TRIES"));
   assert.ok(code.includes('"/privacy"') && code.includes('"/api/proposal/8"'));
   assert.equal(code.includes("it wrote nothing"), false, "the false 'wrote nothing' note is gone");
-  assert.ok(code.includes("/skill.md and /heartbeat.md are counted doors") && code.includes("commit_days") && code.includes("two stamps for today"));
+  // CODEX r1 finding 4: the note says each GET ATTEMPTS a counting write; it must not say the ride wrote or that each GET adds one.
+  assert.equal(code.includes("It still wrote"), false, "no 'It still wrote'");
+  assert.equal(code.includes("adds one"), false, "no 'adds one'");
+  for (const needle of ["/skill.md and /heartbeat.md are counted doors", "each GET of them ATTEMPTS a counting write", "only while the door is below its daily cap and the batch succeeds", "can be written even at the cap", "commit_days", "two stamps for today"]) {
+    assert.ok(code.includes(needle), `closing note carries '${needle}'`);
+  }
+});
+
+test("CODEX r1 finding 3: the ride saves the live bodies and runs the whole-document checker after the poll, and STOPS with the rollback line unless it exits 0 and printed OK; -DryRun runs the checker local with local and says so", () => {
+  const poll = code.indexOf("Wait-NewWorker $headSha $versionId $POLL_TRIES");
+  const save = code.indexOf("$openapiSaved = Save-Body $RUNS_URL $servedOpenapi");
+  const run = code.indexOf("$served = Invoke-ServedCheck $servedOpenapi $servedDoors");
+  const stop = code.indexOf('if ($served.Code -ne 0 -or $served.Out -cne "OK") { Stop-Here');
+  const sweep = code.lastIndexOf("$bad = @()");
+  assert.ok(poll >= 0 && save > poll && run > save && stop > run && sweep > stop, "poll, save, check, stop, then the public sweep");
+  assert.ok(code.slice(stop, stop + 400).includes("$ROLLBACK_LINE"), "the stop carries the rollback line");
+  assert.ok(code.includes("node --experimental-strip-types scripts/check-resident-schema-served.mjs $openapiFile $doorsFile"));
+  const dry = code.slice(code.indexOf("if ($DryRun) {"), code.indexOf("exit 0", code.indexOf("if ($DryRun) {")));
+  assert.ok(dry.includes("--write-local") && dry.includes("Invoke-ServedCheck $dryOpenapi $dryDoors") && dry.includes("(local with local)"), "the dry run checks local with local and says so");
+  assert.ok(dry.indexOf("Invoke-ServedCheck") < dry.indexOf("[dry-run] would now"));
+});
+
+// The checker, run for real as a child process (plain node, no network).
+const CHECKER = here("../scripts/check-resident-schema-served.mjs");
+function runChecker(args: string[]): { code: number | null; out: string } {
+  const r = spawnSync(process.execPath, ["--experimental-strip-types", CHECKER, ...args], { encoding: "utf8" });
+  return { code: r.status, out: `${r.stdout}`.trim() };
+}
+function withLocalBodies(fn: (openapiFile: string, doorsFile: string, doc: any, doors: { note: string }) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "resident-schema-checker-"));
+  try {
+    const o = join(dir, "openapi.json");
+    const d = join(dir, "doors.json");
+    const w = runChecker(["--write-local", o, d]);
+    assert.equal(w.code, 0, w.out);
+    fn(o, d, JSON.parse(readFileSync(o, "utf8")), JSON.parse(readFileSync(d, "utf8")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const schemaAt = (doc: any, p: string): any => doc.paths[p].get.responses["200"].content["application/json"].schema;
+
+test("the checker, run for real: bodies built from this checkout are OK (exit 0), and the file is ASCII with LF endings", () => {
+  const raw = readFileSync(CHECKER, "utf8");
+  assert.equal(/[^\x00-\x7f]/.test(raw), false, "ASCII only");
+  assert.equal(raw.includes("\r"), false, "LF line endings");
+  assert.equal(/process\.exit\(/.test(raw), false, "never process.exit()");
+  withLocalBodies((o, d) => {
+    const r = runChecker([o, d]);
+    assert.equal(r.out, "OK");
+    assert.equal(r.code, 0);
+  });
+});
+
+test("Invoke-ServedCheck, run for real under PowerShell, returns exit 0 and OK for local bodies and exit 1 for a fragment (the node invocation the ride and the dry run depend on)", (t) => {
+  const fn = slice("function Invoke-ServedCheck", "# Polls (GETs only)");
+  const root = here("..").replace(/[\\/]$/, "");
+  withLocalBodies((o, d) => {
+    const dir = mkdtempSync(join(tmpdir(), "resident-schema-ps-"));
+    try {
+      const frag = join(dir, "frag.json");
+      writeFileSync(frag, JSON.stringify({ openapi: "3.0.3", paths: {} }));
+      const run = runPs([
+        "$ErrorActionPreference = 'Stop'",
+        `Set-Location ${q(root)}`,
+        fn,
+        `$a = Invoke-ServedCheck ${q(o)} ${q(d)}`,
+        'Write-Host ("RESULT good [" + $a.Code + "|" + $a.Out + "]")',
+        `$b = Invoke-ServedCheck ${q(frag)} ${q(d)}`,
+        'Write-Host ("RESULT frag [" + $b.Code + "|" + $b.Out.Substring(0, 8) + "]")',
+      ]);
+      if (!run) return t.skip("no PowerShell available");
+      assert.match(run.out, /RESULT good \[0\|OK\]/, run.out);
+      assert.match(run.out, /RESULT frag \[1\|MISMATCH\]/, run.out);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("the checker, run for real, fails (exit 1) on each fragment shape and names the right one of the three", () => {
+  withLocalBodies((o, d, doc, doors) => {
+    const dir = mkdtempSync(join(tmpdir(), "resident-schema-checker-frag-"));
+    try {
+      const put = (name: string, v: unknown): string => { const f = join(dir, name); writeFileSync(f, JSON.stringify(v)); return f; };
+      const clone = () => JSON.parse(JSON.stringify(doc));
+
+      const profileOnlyRec = clone();
+      schemaAt(profileOnlyRec, "/api/resident/{number}").properties = { recoveries: { type: "integer", minimum: 0 } };
+      let r = runChecker([put("p.json", profileOnlyRec), d]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /^MISMATCH openapi \/api\/resident\/\{number\} schema/);
+
+      const rosterFragment = clone();
+      const rs = schemaAt(rosterFragment, "/api/residents");
+      rs.properties = { residents: { type: "array", items: { type: "object", properties: { unit: { type: "string", enum: ["resident_record"] }, counts_toward: { type: "array", maxItems: 0 } } } } };
+      r = runChecker([put("r.json", rosterFragment), d]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /^MISMATCH openapi \/api\/residents schema/);
+
+      const sentences = doors.note.split(". ");
+      const missingSentence = { note: doors.note.replace("It shipped on 15 November 2026.", "") };
+      assert.notEqual(missingSentence.note, doors.note, "the fixture really removed the ship-day sentence");
+      r = runChecker([o, put("n.json", missingSentence)]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /^MISMATCH \/api\/doors note, first differing character at index \d+/);
+
+      const twoSentences = { note: sentences.slice(0, 2).join(". ") + "." };
+      r = runChecker([o, put("n2.json", twoSentences)]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /^MISMATCH \/api\/doors note/);
+
+      r = runChecker([o, put("n3.json", { unit: "resident_record" })]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /^MISMATCH \/api\/doors note: served body carries no string note/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("the checker, run for real, fails (exit 1) on one changed constraint deep inside, with its JSON path, and ignores key order and origin-dependent fields", () => {
+  withLocalBodies((o, d, doc) => {
+    const dir = mkdtempSync(join(tmpdir(), "resident-schema-checker-deep-"));
+    try {
+      const put = (name: string, v: unknown): string => { const f = join(dir, name); writeFileSync(f, JSON.stringify(v)); return f; };
+      const clone = () => JSON.parse(JSON.stringify(doc));
+
+      const limit = clone();
+      schemaAt(limit, "/api/residents").properties.limit.maximum = 101;
+      let r = runChecker([put("l.json", limit), d]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /openapi \/api\/residents schema, first difference at \$\.properties\.limit\.maximum/);
+
+      const nullable = clone();
+      delete schemaAt(nullable, "/api/resident/{number}").properties.last_recovered_at.nullable;
+      r = runChecker([put("n.json", nullable), d]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /openapi \/api\/resident\/\{number\} schema, first difference at \$\.properties\.last_recovered_at\.nullable/);
+
+      const reordered = clone();
+      const rs = schemaAt(reordered, "/api/residents");
+      rs.properties = Object.fromEntries(Object.entries(rs.properties).reverse());
+      reordered.servers = [{ url: "https://elsewhere.invalid" }];
+      r = runChecker([put("ok.json", reordered), d]);
+      assert.equal(r.out, "OK", "key order and servers do not matter");
+      assert.equal(r.code, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("the checker, run for real, exits 2 on a missing file, a non-JSON file and the wrong argument count", () => {
+  withLocalBodies((o, d) => {
+    const dir = mkdtempSync(join(tmpdir(), "resident-schema-checker-bad-"));
+    try {
+      const bad = join(dir, "bad.json");
+      writeFileSync(bad, "<html>not json</html>");
+      let r = runChecker([bad, d]);
+      assert.equal(r.code, 2, r.out);
+      assert.match(r.out, /is not JSON/);
+      r = runChecker([o, bad]);
+      assert.equal(r.code, 2, r.out);
+      r = runChecker([join(dir, "missing.json"), d]);
+      assert.equal(r.code, 2, r.out);
+      assert.match(r.out, /cannot read/);
+      r = runChecker([o]);
+      assert.equal(r.code, 2, r.out);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 test("CODEX r1: the ride re-checks code identity, HEAD and a clean tree are re-read just before wrangler bundles", (t) => {

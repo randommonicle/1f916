@@ -14,7 +14,8 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-openapi-resident-schema.ps1 -ExpectedCommit <sha> -DryRun   # every check and the live reads, nothing deployed
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-openapi-resident-schema.ps1 -ExpectedCommit <sha>           # the real thing
 # <sha> is the pushed tip of main (git -C society rev-parse HEAD), the full 40 hex.
-# THE RIDE holds no token, key or assertion and sends no request body: public GETs only.
+# THE RIDE holds no token, key or assertion and sends no request body: public GETs only. After the poll it saves the live /openapi.json and /api/doors bodies and runs
+# scripts/check-resident-schema-served.mjs, which compares the two resident schemas and the doors note WHOLE with what this checkout builds; -DryRun runs the same checker local with local.
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference
 # (write "${var}:"); never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips
 # inner double quotes from a native command's argument, so this script sends no request body at all. ASCII only.
@@ -32,7 +33,7 @@ $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
 $REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
-$ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-openapi-resident-schema.ps1", "test/deploy-openapi-resident-schema-script.test.ts", "docs/")
+$ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-openapi-resident-schema.ps1", "scripts/check-resident-schema-served.mjs", "test/deploy-openapi-resident-schema-script.test.ts", "docs/")
 $RUNS_URL = "$BASE/openapi.json"
 $POLL_TRIES = 12
 $POLL_DELAY_SECONDS = 5
@@ -106,7 +107,8 @@ function Test-CodeIdentityServed($code, $commit, $versionId) {
 function Read-JsonBody($r) {
   try { return ([string]$r.Body | ConvertFrom-Json) } catch { return $null }
 }
-# "" when $r is GET /openapi.json answering 200 with JSON whose GET /api/resident/{number} 200 schema declares recoveries as an integer with minimum 0, otherwise the reason it is not.
+# QUICK PROPAGATION CHECK ONLY (it passes a schema holding nothing but recoveries): "" when $r is GET /openapi.json answering 200 with JSON whose GET /api/resident/{number} 200 schema declares recoveries as an integer with minimum 0, otherwise the reason it is not.
+# The whole-schema comparison with the reviewed source is scripts/check-resident-schema-served.mjs, run in step 4.
 # Before this deploy that schema is the bare { "type": "object" }: the reasons that say the schema "has no " property mean ABSENT; every other reason means the read is not usable.
 function Test-ResidentSchemaServed($r) {
   if ([string]$r.Code -cne "200") { return ("GET /openapi.json answered " + $r.Code + ", expected 200") }
@@ -121,7 +123,7 @@ function Test-ResidentSchemaServed($r) {
   if ($null -eq $rec.minimum -or [string]$rec.minimum -cne "0") { return ("the resident schema recoveries minimum is '" + $rec.minimum + "', expected 0") }
   return ""
 }
-# "" when $r is GET /openapi.json whose GET /api/residents 200 schema has residents.items unit enum equal to the one value resident_record and counts_toward maxItems 0, otherwise the reason it is not.
+# "" when $r is GET /openapi.json whose GET /api/residents 200 schema has residents.items unit enum equal to the one value resident_record and counts_toward maxItems 0, otherwise the reason it is not. A QUICK CHECK of those two keys only, not of the roster schema as a whole.
 function Test-RosterSchemaServed($r) {
   if ([string]$r.Code -cne "200") { return ("GET /openapi.json answered " + $r.Code + ", expected 200") }
   $j = Read-JsonBody $r
@@ -135,7 +137,7 @@ function Test-RosterSchemaServed($r) {
   if ($null -eq $ct -or $null -eq $ct.maxItems -or [string]$ct.maxItems -cne "0") { return "the roster schema counts_toward does not carry maxItems 0" }
   return ""
 }
-# "" when $r is GET /api/doors answering 200 with JSON whose note carries both the ship-day sentence and the no-entry sentence, otherwise the reason it is not. Case-sensitive.
+# "" when $r is GET /api/doors answering 200 with JSON whose note carries both the ship-day sentence and the no-entry sentence, otherwise the reason it is not. Case-sensitive. A QUICK CHECK of two sentences, not of the note as a whole.
 function Test-DoorsNoteServed($r) {
   if ([string]$r.Code -cne "200") { return ("GET /api/doors answered " + $r.Code + ", expected 200") }
   $j = Read-JsonBody $r
@@ -145,13 +147,26 @@ function Test-DoorsNoteServed($r) {
   if (-not $note.Contains("Days before this shipped have no entry.")) { return "GET /api/doors note does not contain the no-entry sentence" }
   return ""
 }
-# "" when $r is GET /api/residents answering 200 with JSON whose unit is resident_record, otherwise the reason it is not.
+# "" when $r is GET /api/residents answering 200 with JSON whose unit is resident_record, whose total is an integer >= 0 and whose residents is an array, otherwise the reason it is not. Row contents are not checked.
 function Test-ResidentsLive($r) {
   if ([string]$r.Code -cne "200") { return ("GET /api/residents answered " + $r.Code + ", expected 200") }
   $j = Read-JsonBody $r
   if ($null -eq $j) { return "GET /api/residents did not return JSON" }
   if ([string]$j.unit -cne "resident_record") { return ("GET /api/residents unit is '" + $j.unit + "', expected resident_record") }
+  if ($j.total -isnot [int] -and $j.total -isnot [long]) { return "GET /api/residents total is not an integer" }
+  if ($j.total -lt 0) { return "GET /api/residents total is below 0" }
+  if ($j.residents -isnot [System.Array]) { return "GET /api/residents residents is not an array" }
   return ""
+}
+# Saves the exact bytes of a GET to $file (curl writes the file itself, so no encoding is applied) and returns the status code.
+function Save-Body($url, $file) {
+  $code = (curl.exe -s --max-time 30 -o $file -w "%{http_code}" $url)
+  return [string]$code
+}
+# Runs the whole-document checker over two saved bodies. Returns @{ Code = exit code; Out = its trimmed output }.
+function Invoke-ServedCheck($openapiFile, $doorsFile) {
+  $out = (node --experimental-strip-types scripts/check-resident-schema-served.mjs $openapiFile $doorsFile | Out-String)
+  return @{ Code = $LASTEXITCODE; Out = $out.Trim() }
 }
 # Polls (GETs only) until the served block is this deploy's AND /openapi.json declares recoveries, or STOPS (with $ROLLBACK_LINE) after $tries reads.
 function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
@@ -273,7 +288,21 @@ if ($whyBefore -cne "the resident schema has no properties" -and $whyBefore -cne
 Say "[live] before: GET /openapi.json answers 200 and the resident schema does not yet declare recoveries"
 
 if ($DryRun) {
-  Say "[dry-run] would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until GET /api/attest serves that commit and version id and GET /openapi.json declares recoveries; then check the roster schema, the doors note and GET /api/residents, and ride the public reads. Nothing was deployed."
+  # Prove the checker and the node invocation work on this machine before anything is deployed: local document and note against local document and note (NOT the live worker).
+  $dryDir = Join-Path ([System.IO.Path]::GetTempPath()) ("resident-schema-dry-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $dryDir | Out-Null
+  $dryOpenapi = Join-Path $dryDir "openapi.json"
+  $dryDoors = Join-Path $dryDir "doors.json"
+  $ErrorActionPreference = "Continue"
+  $wroteOut = (node --experimental-strip-types scripts/check-resident-schema-served.mjs --write-local $dryOpenapi $dryDoors | Out-String)
+  $wroteCode = $LASTEXITCODE
+  $ErrorActionPreference = "Stop"
+  if ($wroteCode -ne 0) { Remove-Item $dryDir -Recurse -ErrorAction SilentlyContinue; Stop-Here ("the checker could not build the local document (exit " + $wroteCode + "): " + $wroteOut.Trim()) }
+  $dry = Invoke-ServedCheck $dryOpenapi $dryDoors
+  Remove-Item $dryDir -Recurse -ErrorAction SilentlyContinue
+  if ($dry.Code -ne 0 -or $dry.Out -cne "OK") { Stop-Here ("the checker did not pass local against local (exit " + $dry.Code + "): " + $dry.Out) }
+  Say "[dry-run] checker works: compared a LOCALLY built document and note with the same local build (local with local), OK. The live worker was not compared."
+  Say "[dry-run] would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until GET /api/attest serves that commit and version id and GET /openapi.json declares recoveries; then check the roster schema, the doors note and GET /api/residents, compare the served schemas and doors note whole with the reviewed source, and ride the public reads. Nothing was deployed."
   exit 0
 }
 
@@ -321,7 +350,19 @@ Say "[ride] GET /api/doors note carries the ship-day sentence and the no-entry s
 $rosterNow = Get-Text "$BASE/api/residents" 30
 $why = Test-ResidentsLive $rosterNow
 if ($why -ne "") { Stop-Here "$why. $ROLLBACK_LINE" }
-Say "[ride] GET /api/residents -> 200, unit resident_record"
+Say "[ride] GET /api/residents -> 200, unit resident_record, total an integer, residents an array"
+# The whole-document comparison: the served roster and profile schemas and the served doors note against what this checkout's source builds (the quick checks above pass fragments).
+$checkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("resident-schema-ride-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $checkDir | Out-Null
+$servedOpenapi = Join-Path $checkDir "openapi.json"
+$servedDoors = Join-Path $checkDir "doors.json"
+$openapiSaved = Save-Body $RUNS_URL $servedOpenapi
+$doorsSaved = Save-Body "$BASE/api/doors" $servedDoors
+if ($openapiSaved -cne "200" -or $doorsSaved -cne "200") { Stop-Here ("could not save the served bodies for the whole-document check (openapi " + $openapiSaved + ", doors " + $doorsSaved + "). " + $ROLLBACK_LINE) }
+$served = Invoke-ServedCheck $servedOpenapi $servedDoors
+Remove-Item $checkDir -Recurse -ErrorAction SilentlyContinue
+if ($served.Code -ne 0 -or $served.Out -cne "OK") { Stop-Here ("the served schemas and doors note differ from the reviewed source (checker exit " + $served.Code + "): " + $served.Out + ". " + $ROLLBACK_LINE) }
+Say "[ride] whole-document check: the served /api/residents and /api/resident/{number} schemas and the /api/doors note equal what the reviewed source builds (OK)"
 $bad = @()
 foreach ($p in "/", "/api/official", "/openapi.json", "/treasury", "/api/listings", "/api/stats", "/api/topics", "/api/guest/due", "/api/citizens", "/api/doors", "/api/council", "/api/residents", "/heartbeat.md", "/skill.md", "/llms.txt", "/privacy", "/api/proposal/8") {
   $r = Get-Text "$BASE$p" 30
@@ -329,5 +370,5 @@ foreach ($p in "/", "/api/official", "/openapi.json", "/treasury", "/api/listing
 }
 if ($bad.Count -gt 0) { Stop-Here ("non-200 after the deploy (version $versionId): " + ($bad -join ", ") + ". If a read that answered before now fails: $ROLLBACK_LINE") }
 Say "[ride] 17 public reads -> 200"
-Say "[note] This ride sent GET requests only, with no request body, token or key. It still wrote: /skill.md and /heartbeat.md are counted doors, so each GET of them adds one to a door counter and, on the new worker, can write one commit_days row for today's date and the new commit. After this deploy GET /api/doors commits_by_day may therefore show two stamps for today (the old commit and the new one), which is expected."
+Say "[note] This ride sent GET requests only, with no request body, token or key. /skill.md and /heartbeat.md are counted doors, so each GET of them ATTEMPTS a counting write: the count rises by one only while the door is below its daily cap and the batch succeeds, and a commit_days stamp row for today's date and the new commit can be written even at the cap. GET /api/doors commits_by_day may therefore show two stamps for today (the old commit and the new one), which is expected."
 Say "[done] openapi resident schema wave deployed and ridden. Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
