@@ -23,3 +23,7 @@ Nothing in `FRONT_DOOR_TEMPLATE` changed (`src/doc.ts` is untouched). The route 
 ## Pins to re-set at deploy time
 
 `PARKED_SINCE` in `src/maintainer/parked.ts` ("17 November 2026"), the `/privacy` date line and the "since 17 November 2026" clause in its paragraph, and `$REVIEWED_COMMIT` in the deploy script.
+
+## Fix pass 2 (test gaps), mutations
+
+`test/parked-list-d1.test.ts` fix2-1 to fix2-4. Run red then restored: F1 eligibility joined to finished runs (red); F2 `Math.min` clamp removed (red); F3b `.sort()` with no comparator (red); F4 MIN and MAX swapped (red). F3a, dropping the sort entirely, stays GREEN: `GROUP_CONCAT` over the `(queue_id, run_id)` primary-key index already returns run ids in numeric order, so the JS sort is defensive and that mutant is equivalent for this query. fix2-3 still pins the output `[9, 10]`.

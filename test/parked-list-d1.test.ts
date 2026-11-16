@@ -472,3 +472,74 @@ test("the maintainer-runs note corrects the 'offered again' sentence and points 
     d1.close();
   }
 });
+
+// ---------- fix pass 2: gaps the review seats found ----------
+
+test("fix2-1 unfinished runs: an item whose two declines come from UNFINISHED runs is parked for the queue count and the wake, not only on the route (mutant: DECLINES_UNDER_PARK_SQL joined to finished runs)", async () => {
+  await withWake(() => false, async (d1, m) => {
+    const id = addItem(d1, base(d1));
+    declines(d1, id, PARK_AFTER, false);
+    assert.equal((d1.raw.prepare("SELECT COUNT(*) AS c FROM maintainer_runs WHERE kind = 'judgment' AND finished_at IS NULL").get() as { c: number }).c, PARK_AFTER);
+    assert.deepEqual(await countPendingQueue(makeEnv(d1)), { eligible: 0, parked: 1 });
+    await runJudgmentWake(makeEnv(d1), cache());
+    assert.equal(m.calls(), 0, "no model call for a parked item whose declining runs never finished");
+    assert.equal(lastJudgment(d1).skipped_reason, "nothing eligible (1 parked)");
+    assert.equal(statusOf(d1, id), "pending");
+  });
+});
+
+test("fix2-2 the limit cap: ?limit=9999 over 101 declined items returns exactly 100, has_more true, and next_cursor reads the rest (mutant: the Math.min clamp is removed)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const run = base(d1);
+    const ids: number[] = [];
+    for (let i = 0; i < 101; i++) {
+      const id = addItem(d1, run);
+      declines(d1, id, 1);
+      ids.push(id);
+    }
+    const page = await route(d1, "?limit=9999");
+    assert.equal(page.items.length, 100);
+    assert.equal(page.returned, 100);
+    assert.equal(page.has_more, true);
+    assert.equal(page.total, 101);
+    assert.equal(page.next_cursor, ids[99]);
+    const rest = await route(d1, `?limit=9999&after=${page.next_cursor}`);
+    assert.deepEqual(rest.items.map((r: any) => r.id), [ids[100]]);
+    assert.equal(rest.has_more, false);
+  } finally {
+    d1.close();
+  }
+});
+
+test("fix2-3 declining_runs is sorted numerically: runs 10 and 9 inserted 10 first read [9, 10] (mutants: no sort; .sort() with no comparator)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const id = addItem(d1, base(d1));
+    for (const run of [10, 9]) {
+      d1.raw.prepare("INSERT INTO maintainer_runs (id, kind, started_at, finished_at) VALUES (?, 'judgment', ?, ?)").run(run, 5000 + run, 5001 + run);
+      d1.raw.prepare("INSERT INTO maintainer_declines (queue_id, run_id, declined_at) VALUES (?, ?, ?)").run(id, run, 6000 + run);
+    }
+    const body = await route(d1);
+    assert.deepEqual(body.items[0].declining_runs, [9, 10]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("fix2-4 first_declined_at and last_declined_at are the exact min and max of declines inserted out of time order (mutant: MIN and MAX swapped)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const id = addItem(d1, base(d1));
+    for (const at of [300, 100, 200]) {
+      const run = Number(d1.raw.prepare("INSERT INTO maintainer_runs (kind, started_at, finished_at) VALUES ('judgment', ?, ?)").run(at, at + 1).lastInsertRowid);
+      d1.raw.prepare("INSERT INTO maintainer_declines (queue_id, run_id, declined_at) VALUES (?, ?, ?)").run(id, run, at);
+    }
+    const row = (await route(d1)).items[0];
+    assert.equal(row.first_declined_at, 100);
+    assert.equal(row.last_declined_at, 300);
+    assert.equal(row.declines, 3);
+  } finally {
+    d1.close();
+  }
+});
