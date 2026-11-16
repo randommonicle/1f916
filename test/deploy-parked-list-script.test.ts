@@ -286,14 +286,19 @@ test("the whole-document checker: the source against itself is OK, and each muta
     mismatch([jedit(f.parked, (j) => { j.park_after = 3; }), f.openapi, f.privacy, f.runs], /MISMATCH \/api\/maintainer\/parked park_after/, "park_after");
     mismatch([f.parked, jedit(f.openapi, (j) => { j.paths["/api/maintainer/parked"].get.responses["200"].content["application/json"].schema.required.push("nope"); }), f.privacy, f.runs], /MISMATCH openapi \/api\/maintainer\/parked schema/, "the route schema");
     mismatch([f.parked, jedit(f.openapi, (j) => { delete j.paths["/api/maintainer/parked"].get.responses["200"].content["application/json"].schema; }), f.privacy, f.runs], /MISMATCH openapi/, "a missing schema");
-    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("These rows are kept for as long as the society runs.", "These rows are kept.")), f.runs], /MISMATCH \/privacy Counters and logs paragraph/, "the privacy paragraph's last sentence");
-    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace(/^Last updated: .+$/m, "Last updated: 1 January 2020")), f.runs], /MISMATCH \/privacy date line/, "the privacy date");
-    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("**Counters and logs:**", "**Counters:**")), f.runs], /MISMATCH \/privacy: the served text has no Counters and logs paragraph/, "the paragraph's heading");
+    const doc = /MISMATCH \/privacy document, first differing character/;
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("Wake rows and decline records are kept", "Wake rows and decline records may be kept")), f.runs], doc, "a word in the Counters and logs paragraph");
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("and not chosen by anyone it may concern", "and is chosen by anyone it may concern").replace("is not chosen by anyone it may concern", "is chosen by anyone it may concern")), f.runs], doc, "a word in the lawful-basis paragraph (declined-items sentences)");
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("and the maintainer's wake log and its record of declined items are kept", "and the maintainer's wake log are kept")), f.runs], doc, "a word in the retention sentence");
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("no automatic removal exists", "automatic removal exists")), f.runs], doc, "the last clause of the lawful-basis paragraph");
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace(/^Last updated: .+$/m, "Last updated: 1 January 2020")), f.runs], doc, "the privacy date");
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t + "\nExtra line."), f.runs], doc, "text appended to the document (a section outside the paragraph)");
+    mismatch([f.parked, f.openapi, edit(f.privacy, (t) => t.replace("Contact: ben240689@proton.me", "Contact: someone@example.org")), f.runs], doc, "the contact value");
     mismatch([f.parked, f.openapi, f.privacy, jedit(f.runs, (j) => { j.note = j.note.replace("offered", "shown"); })], /MISMATCH \/api\/maintainer-runs note/, "the runs note");
     assert.equal(checker([join(dir, "absent.json"), f.openapi, f.privacy, f.runs]).code, 2, "a missing file");
     assert.equal(checker([edit(f.parked, () => "<html>"), f.openapi, f.privacy, f.runs]).code, 2, "a non-JSON body");
     assert.equal(checker([f.parked]).code, 2, "the wrong argument count");
-    // CRLF in the served privacy text is tolerated (the paragraph is compared after line-ending normalisation).
+    // CRLF in the served privacy text is tolerated (the whole document is compared after line-ending normalisation).
     assert.deepEqual(checker([f.parked, f.openapi, edit(f.privacy, (t) => t.replace(/\n/g, "\r\n")), f.runs]), { code: 0, out: "OK" });
   });
 });

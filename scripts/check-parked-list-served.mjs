@@ -2,14 +2,14 @@
 //   node --experimental-strip-types scripts/check-parked-list-served.mjs <parked-body> <openapi-body> <privacy-body> <runs-body>
 //   node --experimental-strip-types scripts/check-parked-list-served.mjs --write-local <parked-out> <openapi-out> <privacy-out> <runs-out>
 // Requires: GET /api/maintainer/parked carries the note, since and park_after of the source EXACTLY; the 200 JSON schema of /api/maintainer/parked in /openapi.json equals the source's by deep equality (key order ignored);
-// GET /privacy carries the source's whole "Counters and logs" paragraph and its "Last updated" line; GET /api/maintainer-runs carries the source's whole note. Never a fragment or a marker phrase.
+// GET /privacy equals the source's WHOLE rendered privacy document (line endings normalised; the controller and contact values are constants in src/privacy.ts, filled the same way by the worker, so nothing is masked);
+// GET /api/maintainer-runs carries the source's whole note. Never a fragment or a marker phrase.
 // Prints OK and exits 0, or the first difference (which of the four, and the JSON path or the index of the first differing character) and exits 1. A missing or unreadable file is exit 2.
 // Origin-dependent fields of the document (servers and the like) are not compared. The exit code is set on process.exitCode and the process is never forced to stop: on Windows a forced stop can abort after pending I/O.
 import { readFileSync, writeFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
 const ORIGIN = "https://example.invalid";
-const PARA_START = "**Counters and logs:**";
 
 function schemaOf(doc, path) {
   return doc?.paths?.[path]?.get?.responses?.["200"]?.content?.["application/json"]?.schema;
@@ -32,16 +32,6 @@ function firstCharDiff(a, b) {
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
   return n;
-}
-
-// The whole paragraph that starts at PARA_START, to the end of its line, and the "Last updated" line, from a privacy text (CRLF tolerated).
-function privacyParts(text) {
-  const t = String(text).replace(/\r\n/g, "\n");
-  const i = t.indexOf(PARA_START);
-  if (i < 0) return { para: null, date: null };
-  const j = t.indexOf("\n", i);
-  const m = /^Last updated: .+$/m.exec(t);
-  return { para: t.slice(i, j < 0 ? t.length : j), date: m ? m[0] : null };
 }
 
 async function main(argv) {
@@ -82,12 +72,9 @@ async function main(argv) {
   const d = firstDiff(schemaOf(doc, "/api/maintainer/parked"), want, "$");
   if (d !== null) { console.log(`MISMATCH openapi /api/maintainer/parked schema, first difference at ${d}`); return 1; }
 
-  const served = privacyParts(privacy);
-  const expected = privacyParts(expectedPrivacy);
-  if (expected.para === null) { console.log("MISMATCH /privacy: this checkout's privacy text has no Counters and logs paragraph"); return 1; }
-  if (served.para === null) { console.log("MISMATCH /privacy: the served text has no Counters and logs paragraph"); return 1; }
-  if (served.para !== expected.para) { console.log(`MISMATCH /privacy Counters and logs paragraph, first differing character at index ${firstCharDiff(served.para, expected.para)} (served length ${served.para.length}, expected ${expected.para.length})`); return 1; }
-  if (served.date !== expected.date) { console.log(`MISMATCH /privacy date line: expected ${JSON.stringify(expected.date)}, served ${JSON.stringify(served.date)}`); return 1; }
+  const servedPrivacy = String(privacy).replace(/\r\n/g, "\n");
+  const expectedNorm = expectedPrivacy.replace(/\r\n/g, "\n");
+  if (servedPrivacy !== expectedNorm) { console.log(`MISMATCH /privacy document, first differing character at index ${firstCharDiff(servedPrivacy, expectedNorm)} (served length ${servedPrivacy.length}, expected ${expectedNorm.length})`); return 1; }
 
   if (typeof runs?.note !== "string") { console.log("MISMATCH /api/maintainer-runs note: served body carries no string note"); return 1; }
   if (runs.note !== MAINTAINER_RUNS_NOTE) { console.log(`MISMATCH /api/maintainer-runs note, first differing character at index ${firstCharDiff(runs.note, MAINTAINER_RUNS_NOTE)} (served length ${runs.note.length}, expected ${MAINTAINER_RUNS_NOTE.length})`); return 1; }

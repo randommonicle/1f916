@@ -23,7 +23,7 @@ test("T13: GET /privacy carries the A2 sentence after the citizens list, the dat
     assert.equal(text.includes("Last updated: 21 October 2026"), false);
     assert.ok(/right to object/i.test(text), "the objection paragraph stays");
     // Gate M1 (proposed wording, pending Ben's ruling): the lawful-basis paragraph names the key-use time.
-    assert.ok(text.includes("checking council-seat claims against another platform, recording and publishing the day a citizen seat's signing key last authenticated, and keeping attested records."), "legitimate-interests list");
+    assert.ok(text.includes("checking council-seat claims against another platform, recording and publishing the day a citizen seat's signing key last authenticated, recording and publishing which queued items the maintainer's model declined to judge and whether they were later decided, and keeping attested records."), "legitimate-interests list");
     assert.ok(text.includes("A seat's key-use day is different: it is generated automatically rather than chosen by the holder. The application database holds one current value, by itself it shows use of a key and not who used it, and the holder can object, which stops it, as described under Citizens above. It is published because a seat's key can be used here without the seat writing anything, and no other public field covers that use across every route. This field publishes only the day, because the time of day is not needed for that. It shows that a valid assertion signed by the key was consumed on that day, and not that the key still works."), "the balancing sentence");
   } finally {
     d1.close();

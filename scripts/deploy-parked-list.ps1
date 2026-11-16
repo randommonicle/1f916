@@ -6,7 +6,7 @@
 # fail every refusal's decline write (named in the wake's error, never failing the wake) and every parked-list read and queue scan, so the migration goes first.
 # NO MINT: Step 1 extracts the FRONT_DOOR_TEMPLATE literal from src/doc.ts at the live base and at HEAD and STOPS if they differ by a byte; step 1b re-runs test/constitution-v6-d1.test.ts on its own and STOPS unless it passes with
 # its pinned v6 hash and its template_hash test named in the run; after the deploy it STOPS if the constitution is not still v6 with its template hash. The only migration added since the live base must be migrations/0028_maintainer_declines.sql.
-# THE PRIVACY DATE: src/privacy.ts says "Last updated: <date>" and its Counters and logs paragraph names the public run log and the parked list (DRAFT TEXT: it needs Ben's approval and both seats before any deploy). Step 0b STOPS, before any git,
+# THE PRIVACY DATE: src/privacy.ts says "Last updated: <date>" and its Counters and logs paragraph, lawful-basis text and retention sentence name the public run log, the parked list and the record of declined items (DRAFT TEXT: it needs Ben's approval and both seats before any deploy). Step 0b STOPS, before any git,
 # npm, wrangler or network command, unless the date in that file equals the UTC date of the run: if Ben deploys on another day, re-date src/privacy.ts, PARKED_SINCE in src/maintainer/parked.ts and the date in the privacy paragraph's
 # "since" clause first, a docs-and-text commit the architect re-reviews and re-pins. -DryRun is stopped by it too.
 # THE PRODUCTION TARGET IS PROVED, NOT ASSUMED (review E1): every D1 command here names the database 'commonhold'; before the first production read the script resolves the account's own UUID for 'commonhold' (npx wrangler d1 info
@@ -17,7 +17,7 @@
 # sqlite_master row), which STARTS the clock: migration, worker activation and the post-activation verification must all finish within ONE HOUR of it; 5 apply 0028 ONLY if the table is absent; 6 verify on prod: the catalogue is exactly the
 # 7 expected rows and every other object is unchanged; 7 deploy the worker (stamped) and poll for GET /api/maintainer/parked; 8 verify again after activation; 9 the ride, public GETs only: /api/attest (v6 unchanged, the four chains ok, sealed_entries
 # and head identical before and after, code.commit and code.version_id the new deploy's), then scripts/check-parked-list-served.mjs over the served /api/maintainer/parked, /openapi.json, /privacy and /api/maintainer-runs, each compared WHOLE
-# with this checkout's source (the parked note, since and park_after; the route's response schema; the whole Counters and logs paragraph and the date line; the whole maintainer-runs note), and sixteen public reads.
+# with this checkout's source (the parked note, since and park_after; the route's response schema; the WHOLE /privacy document; the whole maintainer-runs note), and sixteen public reads.
 # LIVE MARKER: GET /api/maintainer/parked answers 404 before this deploy and 200 after. Step 3 STOPS if it already answers 200 (already deployed).
 # WHAT THE RIDE CANNOT DO: a decline needs a model refusal in a judgment wake, so nothing here records one; the first real refusal after deploy is the ride of the record (read the wake's row in GET /api/maintainer-runs, then the item on the parked list).
 # ROLLBACK (written before the deploy): a worker rollback (npx wrangler rollback, to the version GET /api/attest served BEFORE the deploy, read live) leaves migration 0028 applied. That is schema-compatible, not free: while the old worker runs,
@@ -668,7 +668,7 @@ if ($DryRun) {
   Remove-Item $dryDir -Recurse -ErrorAction SilentlyContinue
   if ($dry.Code -ne 0 -or $dry.Out -cne "OK") { Stop-Here ("the checker did not pass local against local (exit " + $dry.Code + "): " + $dry.Out) }
   Say "[dry-run] checker works: compared LOCALLY built documents with the same local build (local with local), OK. The live worker was not compared."
-  Say "[dry-run] would now: apply $MIGRATION_PATH to the REMOTE D1 (only if absent; skipped if complete); verify the catalogue (exactly the 7 rows of $VERIFY_SQL_PATH) and that every other object is unchanged; run npx wrangler deploy --var CODE_COMMIT:<the full sha> (bounded) and capture its Current Version ID; poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart; verify again; then ride the public reads and compare the served parked note, the route schema, the privacy paragraph and the maintainer-runs note WHOLE with the source. Nothing was written to the remote and nothing was deployed. The script signs nothing."
+  Say "[dry-run] would now: apply $MIGRATION_PATH to the REMOTE D1 (only if absent; skipped if complete); verify the catalogue (exactly the 7 rows of $VERIFY_SQL_PATH) and that every other object is unchanged; run npx wrangler deploy --var CODE_COMMIT:<the full sha> (bounded) and capture its Current Version ID; poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart; verify again; then ride the public reads and compare the served parked note, the route schema, the whole privacy document and the maintainer-runs note WHOLE with the source. Nothing was written to the remote and nothing was deployed. The script signs nothing."
   exit 0
 }
 
@@ -734,7 +734,7 @@ if ($why -ne "") { Stop-Here "GET /api/maintainer/parked: $why. $ROLLBACK_LINE" 
 Say "[ride] GET /api/maintainer/parked -> 200, total, parked_now, park_after 2 and an items array"
 $why = Test-ServedWhole
 if ($why -ne "") { Stop-Here "$why. $ROLLBACK_LINE" }
-Say "[ride] served WHOLE against the reviewed source: the parked note, since and park_after; the /api/maintainer/parked schema in /openapi.json; the whole Counters and logs paragraph and the date line of /privacy; the whole /api/maintainer-runs note"
+Say "[ride] served WHOLE against the reviewed source: the parked note, since and park_after; the /api/maintainer/parked schema in /openapi.json; the WHOLE /privacy document; the whole /api/maintainer-runs note"
 $bad = @()
 foreach ($p in "/", "/api/official", "/openapi.json", "/treasury", "/api/listings", "/api/stats", "/api/topics", "/api/guest/due", "/api/proposals", "/api/doors", "/api/council", "/api/residents", "/api/maintainer/parked", "/heartbeat.md", "/skill.md", "/llms.txt", "/privacy") {
   $r = Get-Text "$BASE$p" 30 $null
