@@ -13,9 +13,9 @@ import { world, writtenGuest, bindByAccount, OUTSIDE_COLONY_ID } from "./helpers
 import { RECOVERIES_SINCE } from "../src/resident.ts";
 import { STAMPS_SINCE, DOORS_NOTE } from "../src/doors.ts";
 
-type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string; enum?: unknown[]; minimum?: number; maxItems?: number };
+type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string; enum?: unknown[]; minimum?: number; maximum?: number; maxItems?: number };
 
-// Every required name is present; every present value with a declared type has that type (null only where nullable); enum, minimum and maxItems hold where declared.
+// Every required name is present; every present value with a declared type has that type (null only where nullable); enum, minimum, maximum and maxItems hold where declared.
 // A keyword this walker does not read must not appear in a declared schema: the resident test below fails on one.
 function conform(schema: Schema, value: unknown, at: string): string[] {
   const out: string[] = [];
@@ -24,6 +24,7 @@ function conform(schema: Schema, value: unknown, at: string): string[] {
   if (schema.type && schema.type !== t) out.push(`${at} is ${t}, schema says ${schema.type}`);
   if (schema.enum && !schema.enum.includes(value)) out.push(`${at} is ${JSON.stringify(value)}, not in enum ${JSON.stringify(schema.enum)}`);
   if (schema.minimum !== undefined && typeof value === "number" && value < schema.minimum) out.push(`${at} is ${value}, below minimum ${schema.minimum}`);
+  if (schema.maximum !== undefined && typeof value === "number" && value > schema.maximum) out.push(`${at} is ${value}, above maximum ${schema.maximum}`);
   if (schema.maxItems !== undefined && Array.isArray(value) && value.length > schema.maxItems) out.push(`${at} has ${value.length} items, maxItems is ${schema.maxItems}`);
   if (schema.type === "array" && schema.items && Array.isArray(value)) value.forEach((v, i) => out.push(...conform(schema.items!, v, `${at}[${i}]`)));
   if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
@@ -81,7 +82,7 @@ test("routes without a declared schema keep the bare object, and the checker can
 
 // ---------- the resident routes (soft-power, 1f916 9594 147976) ----------
 
-const WALKED = new Set(["type", "nullable", "required", "properties", "items", "description", "enum", "minimum", "maxItems"]);
+const WALKED = new Set(["type", "nullable", "required", "properties", "items", "description", "enum", "minimum", "maximum", "maxItems"]);
 function keywords(schema: unknown, out = new Set<string>()): Set<string> {
   if (!schema || typeof schema !== "object") return out;
   for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
@@ -130,6 +131,14 @@ test("the declared resident schemas match served rows of every kind: key, recove
     assert.deepEqual(row.properties!.unit!.enum, ["resident_record"]);
     assert.equal(row.properties!.counts_toward!.maxItems, 0);
     assert.deepEqual(list.properties!.unit!.enum, ["resident_record"]);
+    // the page bound the route enforces (limit 1 to 100) is in the schema, on the echo and on the array
+    assert.deepEqual([list.properties!.limit!.minimum, list.properties!.limit!.maximum, list.properties!.residents!.maxItems], [1, 100, 100]);
+    assert.equal((await call(env, "GET", "/api/residents?limit=101")).status, 400);
+    const page = (await call(env, "GET", "/api/residents?limit=100")).body;
+    assert.equal(page.limit, 100);
+    assert.deepEqual(conform(list, page, "residents"), []);
+    assert.deepEqual(conform(list, { ...page, limit: 101 }, "residents"), ["residents.limit is 101, above maximum 100"]);
+    assert.deepEqual(conform(list, { ...page, residents: Array.from({ length: 101 }, () => page.residents[0]) }, "residents"), ["residents.residents has 101 items, maxItems is 100"]);
     assert.ok(!row.required!.includes("account") && !row.required!.includes("account_since"), "the conditional account fields are never required");
     // every keyword a declared schema uses is one the walker reads
     for (const s of [list, one, schemaOf(doc, "/api/proposals"), schemaOf(doc, "/api/proposal/{id}")]) for (const k of keywords(s)) assert.ok(WALKED.has(k), `schema keyword ${k} is not walked by conform()`);
@@ -186,6 +195,7 @@ test("the doors note states the ship-day limit of commits_by_day, and its date i
   assert.equal(STAMPS_SINCE, RECOVERIES_SINCE);
   assert.ok(DOORS_NOTE.includes(`Days before this shipped have no entry. It shipped on ${STAMPS_SINCE}.`));
   assert.ok(DOORS_NOTE.includes("a single stamp covers every count of that day"));
-  assert.ok(DOORS_NOTE.includes(`the counts of ${STAMPS_SINCE} itself include requests served before that day's deploy, which its one stamp does not cover`));
+  assert.ok(DOORS_NOTE.includes(`any count written on ${STAMPS_SINCE} before that day's deploy is in that day's figures and is not covered by its stamp`));
+  assert.ok(!DOORS_NOTE.includes("itself include requests served before"), "the note states the rule, not an unmeasured count");
   assert.ok(DOORS_NOTE.endsWith("This route cannot show how many counts a stamp does not cover."));
 });

@@ -39,7 +39,7 @@ import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KAR
 import { SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import { DECIDED_EVENT_ID_NOTE } from "./governance.ts";
 import { DOORS_NOTE, DOOR_WINDOW_DAYS } from "./doors.ts";
-import { RECOVERIES_SINCE } from "./resident.ts";
+import { RECOVERIES_SINCE, RESIDENT_ROSTER_MAX_PAGE } from "./resident.ts";
 // C4 (review round 1, GEMINI): renderMcpManifest's protocol_version below reads
 // this SAME constant mcp.ts's own initialize negotiates from, so the two can
 // never drift the way a second hardcoded "2025-06-18" literal already had.
@@ -131,7 +131,7 @@ const PROPOSAL_RESPONSE_SCHEMA = {
 // soft-power on 1f916 9594 (147976): recoveries, last_recovered_at, unit and counts_toward existed only in prose, so a client validating against the spec would pass a row with
 // none of them. Declared while the roster is empty, so the first real row is graded by the spec. OpenAPI 3.0.3 has no `const`: a one-value enum says the same. `account` and
 // `account_since` are served only when an outside account is bound, so they are declared and never required. Every keyword used here (required, type, nullable, enum, minimum,
-// maxItems) is walked against served rows of all three routes by test/openapi-response-schema-d1.test.ts.
+// maximum, maxItems) is walked against served rows of all three routes by test/openapi-response-schema-d1.test.ts.
 const EPOCH_MS = { type: "integer", description: "Unix time in milliseconds." };
 const RESIDENT_ACCOUNT_SCHEMA = {
   type: "object",
@@ -180,12 +180,12 @@ const RESIDENTS_RESPONSE_SCHEMA = {
   type: "object",
   required: ["residents", "total", "unit", "has_more", "next_cursor", "limit", "note"],
   properties: {
-    residents: { type: "array", items: { type: "object", required: RESIDENT_ROW_REQUIRED, properties: RESIDENT_ROW_PROPERTIES } },
+    residents: { type: "array", maxItems: RESIDENT_ROSTER_MAX_PAGE, items: { type: "object", required: RESIDENT_ROW_REQUIRED, properties: RESIDENT_ROW_PROPERTIES } },
     total: { type: "integer", minimum: 0 },
     unit: { type: "string", enum: ["resident_record"] },
     has_more: { type: "boolean" },
     next_cursor: { type: "string", nullable: true },
-    limit: { type: "integer", minimum: 1 },
+    limit: { type: "integer", minimum: 1, maximum: RESIDENT_ROSTER_MAX_PAGE },
     note: { type: "string" },
   },
 };
