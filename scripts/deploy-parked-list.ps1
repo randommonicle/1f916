@@ -51,7 +51,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "36e846854b23a32d6304ec141d4ed0874327bc46"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The architect replaces this placeholder with the full sha the review converged on; step 0a STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "b1f8fbfe6fbff569b5086fc1cdc5c1f015892654"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-parked-list.ps1", "scripts/rehearse-parked-list.ps1", "scripts/verify-parked-list.sql", "scripts/check-parked-list-served.mjs", "test/deploy-parked-list-script.test.ts", "docs/")
 $MIGRATION_PATH = "migrations/0028_maintainer_declines.sql"
