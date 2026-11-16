@@ -1,0 +1,39 @@
+# Deploy gate (D-018, Sonnet gate): the parked list (D-083), 16 Nov 2026
+
+Scope: `git diff 36e84685..b1f8fbfe` in the worktree `scratch/wt-parked-list` (branch `parked-list-2026-11-16`). Gate reader did not write the code.
+
+## Verdict: DEPLOYABLE WITH CONDITIONS
+
+HIGH 0, MEDIUM 0, LOW 3. The conditions are the known re-pin steps on deploy day plus Ben's approval of the /privacy wording; nothing in the code blocks.
+
+## Findings
+
+### LOW
+
+L1. `src/maintainer/parked.ts:89`: the JS `.sort` of `declining_runs` is reported as an equivalent mutant. In practice it is (GROUP_CONCAT over the `(queue_id, run_id)` primary-key index comes back ascending), but SQL does not define GROUP_CONCAT order, so the sort is the only thing that makes "declining_runs ascending" a guarantee. Agree the mutant is equivalent today; keep the sort and do not "simplify" it away.
+
+L2. `src/maintainer/parked.ts:62-76`: `total`/`parked_now` and the page are two separate statements, so a decline recorded between them can make `total` disagree with the rows by one for that read. Cosmetic (a wake writes once a week); no action.
+
+L3. `src/maintainer/parked.ts:57`: `after` above 2^53 is floored to a float and simply returns an empty last page; harmless, listed for completeness. Bad `after` or `limit` values (NaN, negative, 0, Infinity, text) all fall back to 0 / the default or clamp to 1..100; checked by reading `parseNumberParam` (`src/queryParams.ts:17`) against lines 57-60.
+
+## What I derived (no defect found)
+
+1. Selection. The eligible predicate (`ELIGIBLE_PENDING_SQL`) sits in the WHERE before LIMIT in both cursor variants (`judgment.ts:895-899`), so parked rows never consume `maxScan` or stall a first scan or a cursor wrap. `countPendingQueue` (`judgment.ts:1001`) returns eligible and parked from one statement; eligible feeds `pendingAtStart`, so the overflow baseline, the cursor trigger (`:1801`) and the skip (`:1773`) read the cohort. An item reaching 2 declines inside this wake was in the start count and is in `refusedIds`, so `computeOverflowDropped` (`:1984`) nets it out; it is not rescanned. All-parked gives "nothing eligible (N parked)", zero rows gives "nothing pending". Approved-row reconciliation (`:1225`) filters on `status = 'approved'` only, so a parked-by-count row that is approved still completes. D-080 expiry (`:1617`) is an unfiltered UPDATE on pending bulletins and runs before the count, so a parked stale bulletin is still rejected. No other reader of the pending queue is on the raw count (grepped src: only `governance.ts:2322`, an unrelated fidelity-existence check). The one served skip string changed ("nothing pending" to "nothing eligible (N parked)"); no code or script reads the old string, and the runs note names the new one.
+2. Decline write (`judgment.ts:1917-1925`). Wrapped in try/catch, the refusal line is appended after it either way, with the failure named in the same line; the wake continues. `(queue_id, run_id)` primary key plus `ON CONFLICT DO NOTHING` means no double count. The foreign keys are satisfiable: `runId` is the reserved row from `insertMaintainerRun` (`:1669`, the wake returns if that fails) and the queue row was just read; no code deletes from `maintainer_runs` or `maintainer_queue` (grepped). Budget: a refused batch writes one decline statement instead of up to six decision writes, so it stays inside `JUDGMENT_BATCH_COST = 8` (comment updated at `budget.ts:51`); the end-to-end counter test passes in the suite.
+3. Route. The SELECT names only id, kind, status, decided_at and aggregates of the three decline columns; nothing else can reach the body. `kind` and `status` enums match the CHECK constraints (`schema.sql:197,202`); `declines` is a COUNT over an inner join so at least 1; `decided_at` is null while pending (decided rows set it in the same UPDATE, `judgment.ts:1028`). `has_more` uses limit+1, `next_cursor` is the last returned id, the keyset `q.id > ?` loses and repeats nothing, `total` and `parked_now` are unaffected by `after`.
+4. Served text. `PARKED_NOTE` and the changed runs note are true of the code (park rule, expiry, reconciliation, unfinished runs, no backfill). /privacy: "what it cost, and what it did or skipped" matches the runs row; "never its text or the reason for a decision" matches the route's SELECT (`decided_reason` is not read); "kept for as long as the society runs" is true (no deletion of runs or declines anywhere); the retention sentence reads correctly. No clause needs changing before it goes to the operator. He should note two things he is approving: the text states the linkability risk plainly and offers objection with "no automatic removal", and the date plus `PARKED_SINCE` (17 November) are provisional.
+5. No mint. `src/doc.ts` is not in the diff. I ran `test/constitution-v6-d1.test.ts` (9/9 pass, v6 pinned hash `dc5f4821...`); the deploy script additionally compares the template literal at the live base and HEAD.
+6. Migration and tooling. 0028 is one plain CREATE TABLE, additive, with no rebuild; the `schema.sql` block is the same text. `verify-parked-list.sql` has four terms (inside D1's five), no sqlite_master joined to a pragma under an OR, and returns type|notnull|pk, foreign keys and the primary-key index, so a table of the wrong shape cannot produce the seven pinned rows. `deploy-parked-list.ps1`: migration is step 5, worker step 7, with a catalogue verification between them; a re-run after a partial failure reads COMPLETE and skips the migration, an unreadable state STOPs; `$REVIEWED_COMMIT` ships as a placeholder and step 0a stops on it; HEAD must equal main, origin/main and `-ExpectedCommit`, and changes after the reviewed commit are confined to an allowlist of scripts, test and docs; the privacy date must equal the UTC date of the run. Edits to old tests: the four deploy-script tests skip exactly one literal (`DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS`, whose marker this wave resolves); the recovery-unit and recovery-count edits re-bound the 0027 block and the privacy date but keep asserting the recoveries start date and the byte-equal block; none weakened a check that still matters.
+7. Tests. I mutated `parked.ts` by hand four times and ran `parked-list-d1`, `maintainer-runs` and `openapi-response-schema-d1`: eligibility `<` to `<=` (9 failures), `parked` `>=` to `>` (3), keyset `>` to `>=` (2), dropping the decline predicate from `ELIGIBLE_PENDING_SQL` (4). All went red; each file was restored and `git status` is clean.
+8. Counts. `npm test`: 3306 tests, 3305 pass, 0 fail, 1 skipped. `npm run typecheck`: clean.
+
+## Conditions (each checkable)
+
+C1. Before the deploy, `PARKED_SINCE` (`parked.ts:17`) and "Last updated" in `src/privacy.ts` equal the UTC deploy day; the privacy sha pin in `test/secret-literal-guard.test.ts` is re-set, the suite re-run, and the commit re-pinned (the deploy script's step 0b enforces the date).
+C2. Ben approves the /privacy wording as written (it is not yet approved by the operator).
+C3. `$REVIEWED_COMMIT` and `-ExpectedCommit` are set to the final commit and the script's `-DryRun` is run before the real run; the rehearsal on scratch D1 has passed (`-RehearsalPassed`).
+C4. After deploy, ride the record on the first real refusal: the wake's row in `GET /api/maintainer-runs` names the item, and `GET /api/maintainer/parked` shows one decline for it.
+
+## What I ran and did not check
+
+Ran: `npm test`, `npm run typecheck`, `constitution-v6-d1.test.ts`, four hand mutations. Read in full: `parked.ts`, the judgment.ts, runs.ts, discovery.ts, index.ts, privacy.ts and schema diffs, `verify-parked-list.sql`, the deploy script's header, steps 1 and 4 to 7. Did not run any `.ps1`, wrangler, real D1 or live URL; did not read the rehearsal script, `check-parked-list-served.mjs` or the 393-line deploy-script test beyond their presence in the passing suite; did not read the exchange record before forming this view.
