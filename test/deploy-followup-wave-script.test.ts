@@ -140,6 +140,8 @@ test("the source checks name literals the checkout carries: the carried schema a
     const file = m[1];
     if (file === "wrangler.jsonc") continue;
     const lit = m[2].slice(1, -1);
+    // DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS was resolved on 17 November 2026 (D-083, the parked list): the marker is gone from judgment.ts by design, and this earlier wave is not re-deployed.
+    if (lit === "DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS") continue;
     assert.ok(readFileSync(here(`../${file}`), "utf8").includes(lit), `${file} carries '${lit}'`);
     n++;
   }

@@ -280,8 +280,8 @@ test("the markers the script checks are the strings the code serves: the recover
   assert.equal(markers.length, 2);
   for (const m of markers) assert.ok(priv.includes(m), `privacy.ts carries '${m}'`);
   assert.ok(script.includes('$RESIDENT_UNIT = "resident_record"') && guest.includes('RESIDENT_UNIT = "resident_record"'));
-  const privDate = /Last updated: (\d{1,2} \w+ \d{4})/.exec(priv)![1]!;
-  assert.ok(res.includes(`RECOVERIES_SINCE = "${privDate}"`), "the privacy page date and the recoveries start date are the same day (re-date both together)");
+  // The page's own date moves with every later privacy change (17 November 2026: the parked list); the recoveries sentence keeps its own start date.
+  assert.ok(res.includes('RECOVERIES_SINCE = "15 November 2026"') && priv.includes("recorded since 15 November 2026"), "the privacy page states the recoveries start date, the same day as RECOVERIES_SINCE");
 });
 
 test("every Select-String literal in the deploy script is in the file it names (a checkout guard cannot name text the source lacks)", () => {

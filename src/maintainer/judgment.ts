@@ -15,6 +15,7 @@ import { MAINTAINER_MODELS, callAnthropic, estimateCostCents, buildRequestBody, 
 import { insertMaintainerRun, finalizeMaintainerRun } from "./runs.ts";
 import { canAffordJudgmentRetry, canOpenJudgmentBatch, classifyChunkBudget, classifyChunkCost, D1_MAX_BIND_PARAMS } from "./budget.ts";
 import { truncateBody } from "./clerk.ts";
+import { DECLINES_UNDER_PARK_SQL, ELIGIBLE_PENDING_SQL, recordDecline } from "./parked.ts";
 // Type ownership split (commission notes flag 3, docs/BRIEF-FIRST-LAWS.md
 // commit 4's "CLERK CAGE UNCHANGED" section): QueueRow.kind reads rows
 // from the DB's own five-kind closed list, not the clerk's narrower
@@ -880,7 +881,8 @@ const EVIDENCE_EXCEEDS_BUDGET_REASON = "evidence exceeds request budget";
 // The one D1 query per call: up to `maxScan` pending rows starting after
 // `cursor`, in the same (created_at, id) ASC total order listProposals/
 // listConstitutionVersions already use. A page shorter than `maxScan`
-// proves the table is drained beyond this point (nothing more to find on
+// proves the table is drained of eligible pending rows beyond this point
+// (pending and under PARK_AFTER recorded declines; nothing more to find on
 // a later call); a full-length page proves nothing either way -- there
 // may be more, or there may not, and finding out costs another D1 round
 // trip a later call will make if warranted.
@@ -890,7 +892,8 @@ async function fetchQueueScanPage(
   maxScan: number,
 ): Promise<Array<{ id: number; kind: DbQueueKind; target_type: "post" | "comment" | "citizen" | null; target_id: number | null; source_ref: string | null; note: string; created_at: number }>> {
   const hasCursor = cursor !== null;
-  const where = hasCursor ? "WHERE status = 'pending' AND (created_at > ? OR (created_at = ? AND id > ?))" : "WHERE status = 'pending'";
+  // The eligible pending cohort (parked.ts): the predicate sits in the WHERE, before LIMIT, in both variants, so parked rows never consume maxScan.
+  const where = hasCursor ? `WHERE ${ELIGIBLE_PENDING_SQL} AND (created_at > ? OR (created_at = ? AND id > ?))` : `WHERE ${ELIGIBLE_PENDING_SQL}`;
   const bindArgs = hasCursor ? [cursor.createdAt, cursor.createdAt, cursor.id] : [];
   const { results } = await env.DB.prepare(
     `SELECT id, kind, target_type, target_id, source_ref, note, created_at FROM maintainer_queue ${where} ORDER BY created_at ASC, id ASC LIMIT ?`,
@@ -991,11 +994,17 @@ export async function scanPendingQueueBatch(env: Env, cursor: QueueScanCursor | 
   return { admissible, withheld, scannedCount, scanLimitHit, drained, nextCursor: drained ? null : cur, classifyBudgetExhausted, chunksIssued };
 }
 
-// M4: the true pending backlog, read once before this wake's batch loop
-// touches anything -- the honest baseline computeOverflowDropped needs.
-async function countPendingQueue(env: Env): Promise<number> {
-  const row = await env.DB.prepare("SELECT COUNT(*) AS c FROM maintainer_queue WHERE status = 'pending'").first<{ c: number }>();
-  return row?.c ?? 0;
+// M4: the true backlog of the ELIGIBLE pending cohort (pending, under PARK_AFTER recorded declines), read once before this wake's batch loop
+// touches anything -- the honest baseline computeOverflowDropped needs, and the number the cursor trigger and the "nothing pending" skip read.
+// `parked` is the pending rows the cohort leaves out. One statement, so the parked count costs no extra subrequest.
+// Exported for direct testing.
+export async function countPendingQueue(env: Env): Promise<{ eligible: number; parked: number }> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN ${DECLINES_UNDER_PARK_SQL} THEN 1 ELSE 0 END), 0) AS eligible FROM maintainer_queue WHERE status = 'pending'`,
+  ).first<{ total: number; eligible: number }>();
+  const total = Number(row?.total ?? 0);
+  const eligible = Number(row?.eligible ?? 0);
+  return { eligible, parked: total - eligible };
 }
 
 // This is the ONLY place in src/ that transitions a maintainer_queue row's
@@ -1747,8 +1756,9 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   }
 
   let pendingAtStart: number;
+  let parkedAtStart: number;
   try {
-    pendingAtStart = await countPendingQueue(env);
+    ({ eligible: pendingAtStart, parked: parkedAtStart } = await countPendingQueue(env));
   } catch (e) {
     runError = appendError(runError, `failed while counting the pending queue: ${e instanceof Error ? e.message : String(e)}`);
     await finalizeMaintainerRun(env, runId, {
@@ -1763,7 +1773,7 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
   if (pendingAtStart === 0) {
     await finalizeMaintainerRun(env, runId, {
       finishedAt: Date.now(),
-      skippedReason: "nothing pending",
+      skippedReason: parkedAtStart > 0 ? `nothing eligible (${parkedAtStart} parked)` : "nothing pending",
       tokensIn: 0,
       tokensOut: 0,
       costEstimateCents: 0,
@@ -1895,15 +1905,23 @@ export async function runJudgmentWake(env: Env, constitutionCache?: Constitution
       // pending (a refusal is not a verdict; the status CHECK allows only pending/approved/rejected), run no parse/execute
       // (the text is empty), and fall through to the bottom shouldContinueBatchLoop. NEVER a bare `continue`: a drained scan
       // returns nextCursor null, which means "start at the top", so it would reselect the refused item (test T2).
-      // DEFERRED-JUDGMENT-REFUSAL-HELD-STATUS: residual. Four always-refused items at the head of the queue still stall every
-      // later item (each wake spends its four batches on them); a persistent held-for-a-person status needs a table rebuild
-      // and waits for the next schema wave. Meanwhile the remedy is the operator's hand (read the item, reject it).
+      // The parked list (D-083, migration 0028): each refusal is also RECORDED in maintainer_declines (one row per item and wake), and an item that is still pending with
+      // PARK_AFTER recorded declines is PARKED: the scan, the overflow baseline, the cursor trigger and the "nothing eligible" skip all read the eligible cohort
+      // (parked.ts ELIGIBLE_PENDING_SQL), so a parked item is no longer offered and no longer takes one of the four batches. It waits for a person (raw SQL under the live-data-surgery
+      // protocol; DEFERRED-PARKED-HAND-DECISION-ROUTE in parked.ts), or, for a bulletin draft, for the seven-day expiry. A failed insert never fails the wake: it is named in the same error line.
       // A refusal answers the whole batch; naming admissible[0] is only right while a batch is one item (JUDGMENT_QUEUE_CAP = 1).
       // A multi-item batch refused falls to the generic break below rather than blaming one row.
       if (!result.ok && result.stopReason === "refusal" && scanOutcome.admissible.length === 1) {
         const refusedItem = scanOutcome.admissible[0];
         refusedIds.push(refusedItem.id);
-        runError = appendError(runError, `batch ${batchesRun}: ${refusedItem.kind} item ${refusedItem.id} not judged (the model declined); skipped this wake`);
+        let declineNote = "";
+        try {
+          await recordDecline(env, refusedItem.id, runId, Date.now());
+        } catch (e) {
+          declineNote = `; the decline could not be recorded (${e instanceof Error ? e.message : String(e)})`;
+          console.log(JSON.stringify({ level: "warn", event: "judgment_decline_record_failed", queue_id: refusedItem.id, run_id: runId, message: String(e) }));
+        }
+        runError = appendError(runError, `batch ${batchesRun}: ${refusedItem.kind} item ${refusedItem.id} not judged (the model declined); skipped this wake${declineNote}`);
       } else {
       if (!result.ok) {
         runError = appendError(runError, `model call failed on batch ${batchesRun} (stop_reason: ${result.stopReason}): ${result.error}`);

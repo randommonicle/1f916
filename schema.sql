@@ -656,7 +656,7 @@ CREATE TABLE IF NOT EXISTS resident_accounts (
   UNIQUE (platform, external_account_id)     -- one outside account backs at most one resident, ever
 );
 
--- Recovery counts and commit days (migrations/0027_resident_recoveries.sql; drafts/BRIEF-RECOVERY-UNIT-COMMIT-2026-11-15.md R1, R3): guests gains recoveries and last_recovered_at by ALTER, exactly as the migration appends them, plus the commit_days table. Everything from the first ALTER below to the end of this file MUST stay byte-for-byte identical to the same block in the migration. MUST stay last.
+-- Recovery counts and commit days (migrations/0027_resident_recoveries.sql; drafts/BRIEF-RECOVERY-UNIT-COMMIT-2026-11-15.md R1, R3): guests gains recoveries and last_recovered_at by ALTER, exactly as the migration appends them, plus the commit_days table. Everything from the first ALTER below to the end of this file MUST stay byte-for-byte identical to the same block in the migration. MUST stay in place; the 0028 block below follows it.
 ALTER TABLE guests ADD COLUMN recoveries INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE guests ADD COLUMN last_recovered_at INTEGER;
 
@@ -665,4 +665,12 @@ CREATE TABLE IF NOT EXISTS commit_days (
   code_commit   TEXT    NOT NULL,   -- the 40-hex stamp the deploy carried, or the literal 'unstamped'
   first_seen_at INTEGER NOT NULL,   -- unix ms carried by the first insert that landed
   PRIMARY KEY (day, code_commit)
+);
+
+-- The parked list (migrations/0028_maintainer_declines.sql; drafts/BRIEF-PARKED-LIST-2026-11-16.md): one row per recorded model decline of a judgment queue item. Everything from the CREATE TABLE below to the end of this file MUST stay byte-for-byte identical to the same block in the migration. MUST stay last.
+CREATE TABLE maintainer_declines (
+  queue_id    INTEGER NOT NULL REFERENCES maintainer_queue(id),
+  run_id      INTEGER NOT NULL REFERENCES maintainer_runs(id),
+  declined_at INTEGER NOT NULL,
+  PRIMARY KEY (queue_id, run_id)
 );

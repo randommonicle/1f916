@@ -115,11 +115,12 @@ test("T3: five pending, all refused: four model calls (batch cap), nothing execu
   }
 });
 
-test("T4: the /api/maintainer-runs note carries the refusal sentence", async () => {
+test("T4: the /api/maintainer-runs note carries the refusal sentence (17 Nov 2026, D-083: 'offered again at the next wake' is replaced by the park rule and a pointer to the parked list)", async () => {
   const d1 = createLocalD1();
   try {
     const page = await maintainerRunsPage(makeEnv(d1));
-    assert.match(page.note, /a judgment item the model declined to judge is named in error by kind and id, left pending, skipped for that wake and not counted in overflow_dropped, and offered again at the next wake/);
+    assert.match(page.note, /a judgment item the model declined to judge is named in error by kind and id, left pending, skipped for that wake and not counted in overflow_dropped, and recorded: an item still pending with 2 recorded declines is parked and is not offered to the model again, and a parked item waits for the operator \(GET \/api\/maintainer\/parked lists them/);
+    assert.doesNotMatch(page.note, /offered again at the next wake/);
   } finally {
     d1.close();
   }

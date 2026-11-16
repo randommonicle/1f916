@@ -50,7 +50,7 @@ export const REPLAY_PER_ROW_COST = 6;
 
 // One judgment batch's marginal cost at C=1: a scan page + its (bulk,
 // set-based) classification + a model fetch + up to 6 decision writes for one
-// approved bulletin. FORWARD(D-037): a better product may exist by changing
+// approved bulletin. A REFUSED batch writes no decision: it writes one decline row (parked.ts recordDecline, D-083), so it stays inside this price. FORWARD(D-037): a better product may exist by changing
 // JUDGMENT_MAX_BATCHES or the per-decision write/executor shape (fewer
 // batches, bulk stamps) -- D-037 expressly did NOT commission that; this
 // marker sits where the cost table prices the batch phase so the option is

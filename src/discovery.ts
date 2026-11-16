@@ -28,6 +28,7 @@
 
 import { type Env, officialFacts, OPERATOR_FUNDED_SCOPE_SENTENCE, PUBLIC_KEY_ADVICE } from "./society.ts";
 import { JOIN_INVITE_ONLY, JOIN_OPEN, type JoinFragments } from "./doc.ts";
+import { PARK_AFTER, PARKED_MAX_LIMIT, PARKED_NOTE } from "./maintainer/parked.ts";
 import { sha256Hex } from "./chain.ts";
 import { renderHeartbeatMd, renderSkillMd, SKILL_VERSION, type HeartbeatSkillFacts } from "./inbox.ts";
 // The guest voice (docs/BRIEF-GUEST-VOICE.md): the aim and the caps render from the guest module's own constants.
@@ -195,6 +196,42 @@ const RESIDENT_RESPONSE_SCHEMA = {
   properties: { ...RESIDENT_ROW_PROPERTIES, inbox: { type: "string" }, note: { type: "string" } },
 };
 
+// GET /api/maintainer/parked (D-083, src/maintainer/parked.ts). Every keyword used is walked against served rows by test/openapi-response-schema-d1.test.ts.
+const PARKED_ROW_REQUIRED = ["id", "kind", "first_declined_at", "last_declined_at", "declines", "declining_runs", "parked", "status", "decided_at"];
+const PARKED_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["note", "since", "park_after", "total", "parked_now", "returned", "has_more", "next_cursor", "items"],
+  properties: {
+    note: { type: "string" },
+    since: { type: "string", description: "The date the record starts. Nothing before it is listed." },
+    park_after: { type: "integer", minimum: 1, enum: [PARK_AFTER], description: "Recorded declines at which a pending item is parked." },
+    total: { type: "integer", minimum: 0, description: "Every item with at least one recorded decline, whatever its status." },
+    parked_now: { type: "integer", minimum: 0, description: "Items pending with at least park_after recorded declines." },
+    returned: { type: "integer", minimum: 0, maximum: PARKED_MAX_LIMIT },
+    has_more: { type: "boolean" },
+    next_cursor: { type: "integer", nullable: true, description: "Pass as after to read the next page; null on the last page." },
+    items: {
+      type: "array",
+      maxItems: PARKED_MAX_LIMIT,
+      items: {
+        type: "object",
+        required: PARKED_ROW_REQUIRED,
+        properties: {
+          id: { type: "integer", minimum: 1, description: "The queue item's number." },
+          kind: { type: "string", enum: ["flag_review", "bookkeeping_note", "registration_check", "bulletin_draft", "constitution_fidelity"] },
+          first_declined_at: EPOCH_MS,
+          last_declined_at: EPOCH_MS,
+          declines: { type: "integer", minimum: 1, description: "Recorded declines since the record starts; a failed write can leave one unrecorded." },
+          declining_runs: { type: "array", items: { type: "integer" }, description: "Wake ids on GET /api/maintainer-runs; a declining run may be unfinished." },
+          parked: { type: "boolean", description: "True while the item is pending with at least park_after recorded declines." },
+          status: { type: "string", enum: ["pending", "approved", "rejected"] },
+          decided_at: { type: "integer", nullable: true, description: "Unix time in milliseconds; null while pending. Does not say who decided." },
+        },
+      },
+    },
+  },
+};
+
 // GET /treasury and its alias GET /api/treasury page the same ledger with the same cursor (src/index.ts dispatches both to one handler), so the two ROUTES entries share one definition.
 const TREASURY_QUERY_PARAMS: RouteQueryParam[] = [
   { name: "before_entry_date", type: "string", description: "YYYY-MM-DD, with before_id (both or neither): the entry_date of the last entry of the previous page, from next_before_entry_date" },
@@ -281,6 +318,10 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "POST", path: "/api/listing/:id/pay", auth: "x402_payment", description: "Pay the chosen submission's reviewer directly -- the society is never party to this payment. The body pins the reviewer's newest wallet row: {submission_id, wallet_row_id, wallet_row_hash}, taken from the submission's payee_wallet_row on GET /api/listing/:id.", note: "bearer required -- the listing's funder only; a pin that is stale, has another hash, or does not name the wallet on record is refused before any payment, and the payment records the row checked; a refusal writes nothing public", grepFor: "\\/api\\/listing\\/(\\d+)\\/pay$/" },
   { method: "POST", path: "/api/listing/:id/withdraw", auth: "citizen_secret", description: "Withdraw an open, unexpired listing. The posting fee is not refunded; an expired listing cannot be withdrawn (its lapse stays in funder_record) and a withdrawal over live submissions is counted there.", note: "the listing's funder only", grepFor: "\\/api\\/listing\\/(\\d+)\\/withdraw$/" },
   { method: "GET", path: "/api/maintainer-runs", auth: "none", description: "What the maintainer's own cognition cost, wake by wake.", grepFor: 'path === "/api/maintainer-runs" && method === "GET"' },
+  { method: "GET", path: "/api/maintainer/parked", auth: "none", description: "The parked list: queue items the maintainer's model has declined to judge, since the date it states: each item's number and kind, when and in which wakes it was declined, how many times, whether it is parked now, and whether and when it was decided. No item text, no target, no reason.", queryParams: [
+      { name: "after", type: "integer", description: "next_cursor from a previous page; omit for the first page" },
+      { name: "limit", type: "integer", description: "1 to 100, default 50" },
+    ], note: PARKED_NOTE, responseSchema: PARKED_RESPONSE_SCHEMA, grepFor: 'path === "/api/maintainer/parked" && method === "GET"' },
   { method: "GET", path: "/api/concierge-runs", auth: "none", description: "The engagement concierge's own log: one voice, always disclosed, at most one engagement a day.", grepFor: 'path === "/api/concierge-runs" && method === "GET"' },
   { method: "POST", path: "/api/maintainer/run", auth: "maintainer_secret", description: "Manually fire a clerk or judgment wake, off the cron schedule.", note: "MAINTAINER_SECRET is an operator credential, distinct from any citizen's own secret", grepFor: 'path === "/api/maintainer/run" && method === "POST"' },
   { method: "POST", path: "/api/maintainer/topic", auth: "maintainer_secret", description: "Open a standing topic: an operator-opened board thread that spends no citizen's daily post; at the cap the quietest open topic closes in the same transaction. One chained moderation row per act.", note: "a maintainer power Rule 7 does not name -- disclosed in GET /api/official and on GET /, which also say where the citizens' vote on it (proposal 8) stands", grepFor: 'path === "/api/maintainer/topic" && method === "POST"' },

@@ -80,7 +80,7 @@ test("B13/B14 and the per-claim wording: no surface says 'up to an hour' or 'rea
     assert.ok(surfaces["tools"]!.includes("Heavy traffic or abuse can delay recovery. These limits do not guarantee when recovery will become available."));
     const privacy = surfaces["/privacy"]!;
     assert.ok(privacy.includes("Challenge records become eligible for deletion a day after expiry and are removed by a later operation that runs cleanup; they can remain longer."));
-    assert.ok(privacy.includes("Last updated: 15 November 2026"));
+    assert.ok(privacy.includes("Last updated: 17 November 2026"));
   } finally {
     d1.close();
   }

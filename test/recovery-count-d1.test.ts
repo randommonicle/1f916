@@ -40,7 +40,10 @@ test("R1 migration: 0027 on the pre-0027 schema adds exactly two guests columns 
   assert.ok(cut > 0, "schema.sql carries the 0027 header");
   const mig = migrationSql();
   const block = mig.slice(mig.indexOf("ALTER TABLE guests ADD COLUMN recoveries"));
-  const tail = full.slice(full.indexOf("ALTER TABLE guests ADD COLUMN recoveries", cut));
+  // The 0028 block follows the 0027 block (migrations/0028_maintainer_declines.sql); the 0027 block ends where the 0028 header begins.
+  const end0028 = full.indexOf("-- The parked list (migrations/0028_maintainer_declines.sql");
+  assert.ok(end0028 > cut, "schema.sql carries the 0028 header after the 0027 block");
+  const tail = full.slice(full.indexOf("ALTER TABLE guests ADD COLUMN recoveries", cut), end0028).trimEnd() + "\n";
   assert.equal(tail, block, "schema.sql carries the migration's statements byte for byte, from the first ALTER to the end of the file");
   assert.notEqual(tail.replace("last_recovered_at INTEGER", "last_recovered_at  INTEGER"), block, "a one-character drift fails the comparison");
 

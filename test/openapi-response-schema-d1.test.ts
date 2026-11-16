@@ -201,3 +201,78 @@ test("the doors note states the ship-day limit of commits_by_day, and its date i
   assert.ok(!DOORS_NOTE.includes("itself include requests served before"), "the note states the rule, not an unmeasured count");
   assert.ok(DOORS_NOTE.endsWith("This route cannot show how many counts a stamp does not cover."));
 });
+
+// ---------- the parked list (D-083) ----------
+
+// Rows of every state through the real route: parked, still pending under the threshold, approved, rejected. The empty list is walked too.
+function parkedRows(d1: ReturnType<typeof createLocalD1>) {
+  seedCitizens(d1);
+  const clerk = Number(d1.raw.prepare("INSERT INTO maintainer_runs (kind, started_at) VALUES ('clerk', 1)").run().lastInsertRowid);
+  const states: Array<[string, string, number, number | null]> = [
+    ["registration_check", "pending", 2, null],
+    ["bulletin_draft", "pending", 1, null],
+    ["flag_review", "approved", 3, 50],
+    ["constitution_fidelity", "rejected", 2, 60],
+  ];
+  for (const [kind, status, n, decided] of states) {
+    const q = Number(d1.raw.prepare("INSERT INTO maintainer_queue (run_id, created_at, kind, target_type, target_id, note, status, decided_at) VALUES (?, 10, ?, ?, ?, 'private note', ?, ?)").run(clerk, kind, kind === "flag_review" ? "post" : null, kind === "flag_review" ? 1 : null, status, decided).lastInsertRowid);
+    for (let i = 0; i < n; i++) {
+      const run = Number(d1.raw.prepare("INSERT INTO maintainer_runs (kind, started_at) VALUES ('judgment', ?)").run(100 + q * 10 + i).lastInsertRowid);
+      d1.raw.prepare("INSERT INTO maintainer_declines (queue_id, run_id, declined_at) VALUES (?, ?, ?)").run(q, run, 200 + i);
+    }
+  }
+}
+
+test("the declared parked-list schema matches the served body: the empty list and rows of every state, and it declares no key the route does not serve and the route serves no key it does not declare", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = guestEnv(d1);
+    const doc = (await call(env, "GET", "/openapi.json")).body;
+    const schema = schemaOf(doc, "/api/maintainer/parked");
+    assert.ok(![...keywords(schema)].some((k) => !WALKED.has(k) && k !== "type"), `only walked keywords: ${[...keywords(schema)].join(",")}`);
+    const empty = (await call(env, "GET", "/api/maintainer/parked")).body;
+    assert.deepEqual(conform(schema, empty, "parked"), []);
+    parkedRows(d1);
+    const body = (await call(env, "GET", "/api/maintainer/parked")).body;
+    assert.equal(body.items.length, 4);
+    assert.deepEqual(conform(schema, body, "parked"), []);
+    assert.deepEqual(Object.keys(schema.properties!).sort(), Object.keys(body).sort(), "top-level keys: declared equals served");
+    const rowSchema = schema.properties!.items.items!;
+    for (const row of body.items) assert.deepEqual(Object.keys(rowSchema.properties!).sort(), Object.keys(row).sort(), "row keys: declared equals served");
+    assert.deepEqual(body.items.map((r: any) => [r.parked, r.status]), [[true, "pending"], [false, "pending"], [false, "approved"], [false, "rejected"]]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("the parked-list schema can fail: each declared constraint goes red on a body that breaks it", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = guestEnv(d1);
+    const schema = schemaOf((await call(env, "GET", "/openapi.json")).body, "/api/maintainer/parked");
+    parkedRows(d1);
+    const good = (await call(env, "GET", "/api/maintainer/parked")).body;
+    assert.deepEqual(conform(schema, good, "p"), []);
+    const without = (k: string) => {
+      const c = { ...good };
+      delete c[k];
+      return c;
+    };
+    assert.deepEqual(conform(schema, without("parked_now"), "p"), ["p.parked_now is required but not served"]);
+    assert.deepEqual(conform(schema, { ...good, total: -1 }, "p"), ["p.total is -1, below minimum 0"]);
+    assert.deepEqual(conform(schema, { ...good, park_after: 3 }, "p"), ["p.park_after is 3, not in enum [2]"]);
+    assert.deepEqual(conform(schema, { ...good, next_cursor: "7" }, "p"), ["p.next_cursor is string, schema says integer"]);
+    const row = good.items[0];
+    assert.deepEqual(conform(schema, { ...good, items: [{ ...row, status: "held" }] }, "p"), ['p.items[0].status is "held", not in enum ["pending","approved","rejected"]']);
+    assert.deepEqual(conform(schema, { ...good, items: [{ ...row, kind: "note" }] }, "p").length, 1);
+    assert.deepEqual(conform(schema, { ...good, items: [{ ...row, decided_at: "x" }] }, "p"), ["p.items[0].decided_at is string, schema says integer"]);
+    assert.deepEqual(conform(schema, { ...good, items: [{ ...row, declines: 0 }] }, "p"), ["p.items[0].declines is 0, below minimum 1"]);
+    const nokey = { ...row };
+    delete nokey.decided_at;
+    assert.deepEqual(conform(schema, { ...good, items: [nokey] }, "p"), ["p.items[0].decided_at is required but not served"]);
+    // An undeclared key is caught by the equality of declared and served key sets (the walker itself does not forbid extras).
+    assert.notDeepEqual(Object.keys(schema.properties!).sort(), Object.keys({ ...good, extra: 1 }).sort());
+  } finally {
+    d1.close();
+  }
+});

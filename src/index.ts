@@ -52,6 +52,7 @@ import { runConciergeWake, conciergeRunsPage } from "./maintainer/concierge.ts";
 import { estimateSweepCost, CLERK_WAKE_FIXED_COST } from "./maintainer/budget.ts";
 import { runReconciler, RECONCILE_SUBREQUEST_CEILING } from "./settlement-reconcile.ts";
 import { maintainerRunsPage, parseBeforeCursor } from "./maintainer/runs.ts";
+import { parkedPage } from "./maintainer/parked.ts";
 import { handleManualTrigger } from "./maintainer/trigger.ts";
 import { handleOpenTopic, listTopics, rule7Clause, rule7VoteState, topicsDoorNote } from "./topics.ts";
 import { parseNumberParam } from "./queryParams.ts";
@@ -592,6 +593,9 @@ export default {
 
       if (path === "/api/maintainer-runs" && method === "GET")
         return json(await maintainerRunsPage(env, parseBeforeCursor(url.searchParams.get("before"))));
+      // The parked list (D-083, src/maintainer/parked.ts): queue items the judgment model declined, public, read-only.
+      if (path === "/api/maintainer/parked" && method === "GET")
+        return json(await parkedPage(env, url.searchParams.get("after"), url.searchParams.get("limit")));
       // The engagement concierge's own operational run log (src/maintainer/concierge.ts),
       // a separate table from maintainer_runs (design doc §13/§14) with its
       // own simpler paginated reader, same books-are-public shape as the
