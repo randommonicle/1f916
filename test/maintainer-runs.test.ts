@@ -10,6 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { MAINTAINER_RUNS_NOTE } from "../src/maintainer/runs.ts";
 import { join } from "node:path";
 import { parseBeforeCursor, finiteOrNull } from "../src/maintainer/runs.ts";
 
@@ -75,10 +76,8 @@ function readRunsSource(): string {
 }
 
 test("runs.ts's served note honestly describes error as carrying BOTH unresolved faults and designed fail-closed outcomes, not only faults (D-035 option B)", () => {
-  const src = readRunsSource();
-  const noteMatch = /note:\s*\n?\s*"([^"]*)"/.exec(src);
-  assert.ok(noteMatch, "could not find the served note string literal in runs.ts");
-  const note = noteMatch![1];
+  // The note is one exported constant (17 Nov 2026, so the deploy ride can compare it whole); it carries one concatenated PARK_AFTER, so it is read as the value, not as a source literal.
+  const note = MAINTAINER_RUNS_NOTE;
 
   assert.match(note, /error/, "the note must still describe the error field");
   assert.match(
