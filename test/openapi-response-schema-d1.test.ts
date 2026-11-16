@@ -158,6 +158,8 @@ test("the declared resident schemas match served rows of every kind: key, recove
     for (const n of Object.values(numbers)) assert.deepEqual(conform(one, (await call(env, "GET", `/api/resident/${n}`)).body, `resident/${n}`), []);
     // every key a served row or profile carries is declared (a new served field must be added to the schema)
     for (const r of body.residents) for (const k of Object.keys(r)) assert.ok(k in row.properties!, `served row key ${k} is not declared`);
+    for (const k of Object.keys(body)) assert.ok(k in list.properties!, `served roster envelope key ${k} is not declared`);
+    for (const n of [numbers.plain, numbers.recovered, numbers.acct]) for (const k of Object.keys((await call(env, "GET", `/api/resident/${n}`)).body)) assert.ok(k in one.properties!, `served profile key ${k} is not declared (resident ${n})`);
     for (const k of Object.keys((await call(env, "GET", `/api/resident/${numbers.both}`)).body)) assert.ok(k in one.properties!, `served profile key ${k} is not declared`);
     for (const n of [numbers.acct, numbers.both]) for (const k of Object.keys(by.get(n).account)) assert.ok(k in row.properties!.account!.properties!, `served account key ${k} is not declared`);
   } finally {
