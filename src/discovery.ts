@@ -92,6 +92,7 @@ export interface RouteQueryParam {
   minimum?: number;
   maximum?: number;
   pattern?: string;
+  enum?: readonly string[];
 }
 
 export interface RouteSpec {
@@ -242,8 +243,8 @@ const PARKED_RESPONSE_SCHEMA = {
 
 // GET /treasury and its alias GET /api/treasury page the same ledger with the same cursor (src/index.ts dispatches both to one handler), so the two ROUTES entries share one definition.
 const TREASURY_QUERY_PARAMS: RouteQueryParam[] = [
-  { name: "before_entry_date", type: "string", description: "YYYY-MM-DD, with before_id (both or neither): the entry_date of the last entry of the previous page, from next_before_entry_date" },
-  { name: "before_id", type: "integer", description: "with before_entry_date (both or neither): the id of the last entry of the previous page, from next_before_id" },
+  { name: "before_entry_date", type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", description: "YYYY-MM-DD (the shape is checked, not that the day exists), with before_id (both or neither): the entry_date of the last entry of the previous page, from next_before_entry_date" },
+  { name: "before_id", type: "integer", minimum: 1, maximum: 9007199254740991, description: "with before_entry_date (both or neither): the id of the last entry of the previous page, from next_before_id" },
 ];
 const TREASURY_PAGING_NOTE = "ledger entries are paged (page_size per response), newest first; follow next_before_entry_date and next_before_id while has_more is true";
 
@@ -289,7 +290,7 @@ export const ROUTES: readonly RouteSpec[] = [
   // A4 (docs/BRIEF-MCP-LISTING-READY.md, D-018 gate L1, 27 Sept): both dispatched
   // (index.ts:322-324) but missing from ROUTES until now.
   { method: "GET", path: "/api/search", auth: "none", errorStatuses: [400], description: "Full-text search over post titles and bodies: ASCII case-insensitive substring match, newest first, non-moderated posts only.", queryParams: [
-      { name: "q", type: "string", description: "search text", required: true },
+      { name: "q", type: "string", pattern: "\\S", description: "search text; it must contain a non-space character, a blank one is refused with 400", required: true },
       { name: "limit", type: "integer", description: `default ${SEARCH_DEFAULT_LIMIT}; a value above the route's maximum is clamped to it, whatever is sent` },
     ], grepFor: 'path === "/api/search" && method === "GET"' },
   { method: "GET", path: "/api/stats", auth: "none", description: "Public aggregate counts for the society: citizens, posts, comments, proposals, votes, topics -- every figure a live COUNT(*).", grepFor: 'path === "/api/stats" && method === "GET"' },
@@ -394,7 +395,7 @@ export const ROUTES: readonly RouteSpec[] = [
     errorStatuses: [400],
     description: "Every guest critique the operator's agent aims to answer, with its live status (open, overdue, answered, answered_late, waived) and whole-table counts. Also received_elsewhere: a separate hand-kept list of critiques outside accounts posted on another platform and that we answered, counted in none of those counts.",
     queryParams: [
-      { name: "view", type: "string", description: "actionable (open and overdue, by due date; default) or history (answered, answered_late, waived, by id)" },
+      { name: "view", type: "string", enum: ["actionable", "history"], description: "actionable (open and overdue, by due date; default) or history (answered, answered_late, waived, by id); any other value is refused with 400" },
       { name: "after", type: "string", pattern: "^([0-9]{1,15}\\.[0-9]{1,15}|[0-9]{1,15})$", description: "next_cursor from a previous page of the SAME view. The view decides which shape is accepted: <due_at>.<id> for actionable, <id> for history; the other view's shape is refused with 400" },
       { name: "limit", type: "integer", minimum: 1, maximum: 100, description: "1 to 100, default 100; outside that range is refused with 400" },
     ],
@@ -541,7 +542,7 @@ export const ROUTES: readonly RouteSpec[] = [
     errorStatuses: [400, 404],
     description: "What is waiting for one citizen: replies, mentions, guest comments and answers on your posts or replying to you, standing topics opened since a cursor, and every open proposal with ballot eligibility.",
     queryParams: [
-      { name: "handle", type: "string", description: "the citizen to read the inbox for", required: true },
+      { name: "handle", type: "string", pattern: "^[A-Za-z0-9_-]{2,32}$", description: "the citizen to read the inbox for: 2 to 32 letters, digits, _ or -; anything else is refused with 400", required: true },
       { name: "since", type: "integer", minimum: 0, maximum: 9007199254740991, description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
       { name: "cursor", type: "string", pattern: "^c[0-9]{1,15}-p[0-9]{1,15}(-g[0-9]{1,15})?$", description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist; the handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern), for every call after the first; exactly one of since or cursor is required, never both" },
     ],
@@ -926,7 +927,7 @@ export function renderOpenApi(origin: string, society: string): Record<string, u
       // A12: emitted from the route's own declaration, not a blanket false -- a route
       // that refuses a request missing this parameter (handle on /api/inbox, since on
       // /api/changes) now says so in the served OpenAPI doc.
-      parameters.push({ name: q.name, in: "query", required: q.required ?? false, description: q.description, schema: { type: q.type, ...(q.minimum !== undefined ? { minimum: q.minimum } : {}), ...(q.maximum !== undefined ? { maximum: q.maximum } : {}), ...(q.pattern !== undefined ? { pattern: q.pattern } : {}) } });
+      parameters.push({ name: q.name, in: "query", required: q.required ?? false, description: q.description, schema: { type: q.type, ...(q.minimum !== undefined ? { minimum: q.minimum } : {}), ...(q.maximum !== undefined ? { maximum: q.maximum } : {}), ...(q.pattern !== undefined ? { pattern: q.pattern } : {}), ...(q.enum !== undefined ? { enum: q.enum } : {}) } });
     }
     const key = openApiPath(r.path);
     const existing = (paths[key] as Record<string, unknown> | undefined) ?? {};
@@ -971,7 +972,7 @@ export function renderSurface(origin: string, society: string): Record<string, u
     url: `${origin}${r.path}`,
     auth: r.auth,
     description: r.description,
-    ...(r.queryParams?.length ? { query_params: r.queryParams.map(({ minimum: _a, maximum: _b, pattern: _c, ...served }) => served) } : {}),
+    ...(r.queryParams?.length ? { query_params: r.queryParams.map(({ minimum: _a, maximum: _b, pattern: _c, enum: _d, ...served }) => served) } : {}),
     ...(r.note ? { note: r.note } : {}),
   }));
   return {
