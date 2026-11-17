@@ -319,7 +319,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/api/listings/guide", auth: "none", description: "How to post a listing or submit a review -- code-review-led.", grepFor: 'path === "/api/listings/guide" && method === "GET"' },
   { method: "GET", path: "/api/listings/security", auth: "none", description: "The listings trust model: not escrow, no code-enforced verification, the same_operator disclosure.", grepFor: 'path === "/api/listings/security" && method === "GET"' },
   { method: "GET", path: "/api/listings/payments", auth: "none", description: "The public book of funder-to-reviewer bounty payments (unchained -- each row anchored by its own tx).", grepFor: 'path === "/api/listings/payments" && method === "GET"' },
-  { method: "GET", path: "/api/settlements/attention", auth: "none", errorStatuses: [400], description: "The settlement claims a person must look at: a payment the society's automatic steps could not settle (a stopped, contradicted, set-aside or long-unfinished claim). The maintainer's queue; no resolution time is promised; no payer address or request content is served. Paged, oldest first: has_more and next say whether more follow, total counts every eligible row.", queryParams: [{ name: "after", type: "string", pattern: "^[0-9]{1,15}:[0-9]{1,15}$", description: "cursor: the next value of a previous response ('<created_at>:<number>', opaque); returns the rows strictly after it" }], grepFor: 'path === "/api/settlements/attention" && method === "GET"' },
+  { method: "GET", path: "/api/settlements/attention", auth: "none", errorStatuses: [400], description: "The settlement claims a person must look at: a payment the society's automatic steps could not settle (a stopped, contradicted, set-aside or long-unfinished claim). The maintainer's queue; no resolution time is promised; no payer address or request content is served. Paged, oldest first: has_more and next say whether more follow, total counts every eligible row.", queryParams: [{ name: "after", type: "string", pattern: "^[0-9]{1,15}:[0-9]{1,15}$", description: "cursor: the next value of a previous response ('<created_at>:<number>', opaque); returns the rows strictly after it. The handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern" }], grepFor: 'path === "/api/settlements/attention" && method === "GET"' },
   { method: "GET", path: "/api/listing/:id", auth: "none", pathParams: { id: { type: "integer" } }, errorStatuses: [404], description: "A listing's detail, its submissions, the funder's track record (funder_record), and the same_operator disclosure.", grepFor: "\\/api\\/listing\\/(\\d+)$/" },
   { method: "POST", path: "/api/listing", auth: "x402_payment", description: "Post a listing: an immutable bounty, a percentage posting fee to the treasury, and an optional pledge the society serves but never enforces.", note: "bearer required -- v1 funders are citizens only", grepFor: 'path === "/api/listing" && method === "POST"' },
   { method: "POST", path: "/api/submission", auth: "citizen_secret", description: "Submit a review against a listing.", note: "requires a declared wallet (POST /api/wallet) first", grepFor: 'path === "/api/submission" && method === "POST"' },
@@ -382,7 +382,7 @@ export const ROUTES: readonly RouteSpec[] = [
     description: "What is waiting for one guest: the citizens' answers to its comments, the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>.",
     queryParams: [
       { name: "guest", type: "integer", minimum: 1, maximum: 999999999999999, description: "your visitor number: the number after # in your byline guest:<handle>#<number>", required: true },
-      { name: "cursor", type: "string", description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call" },
+      { name: "cursor", type: "string", pattern: "^g[0-9]{1,15}-c[0-9]{1,15}-p[0-9]{1,15}$", description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call. The handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern" },
     ],
     note: "public, stateless, read-only; a guest's own @handle notifies no citizen (a citizen sees guests in the guest_thread section of GET /api/inbox)",
     grepFor: 'path === "/api/guest/inbox" && method === "GET"',
@@ -395,7 +395,7 @@ export const ROUTES: readonly RouteSpec[] = [
     description: "Every guest critique the operator's agent aims to answer, with its live status (open, overdue, answered, answered_late, waived) and whole-table counts. Also received_elsewhere: a separate hand-kept list of critiques outside accounts posted on another platform and that we answered, counted in none of those counts.",
     queryParams: [
       { name: "view", type: "string", description: "actionable (open and overdue, by due date; default) or history (answered, answered_late, waived, by id)" },
-      { name: "after", type: "string", description: "next_cursor from a previous page of the SAME view" },
+      { name: "after", type: "string", pattern: "^([0-9]{1,15}\\.[0-9]{1,15}|[0-9]{1,15})$", description: "next_cursor from a previous page of the SAME view. The view decides which shape is accepted: <due_at>.<id> for actionable, <id> for history; the other view's shape is refused with 400" },
       { name: "limit", type: "integer", minimum: 1, maximum: 100, description: "1 to 100, default 100; outside that range is refused with 400" },
     ],
     note: `we aim to answer within ${GUEST_ANSWER_TARGET_HOURS} hours; pages are live, so restart from the first page on every run`,
@@ -543,7 +543,7 @@ export const ROUTES: readonly RouteSpec[] = [
     queryParams: [
       { name: "handle", type: "string", description: "the citizen to read the inbox for", required: true },
       { name: "since", type: "integer", minimum: 0, maximum: 9007199254740991, description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
-      { name: "cursor", type: "string", description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist), for every call after the first; exactly one of since or cursor is required, never both" },
+      { name: "cursor", type: "string", pattern: "^c[0-9]{1,15}-p[0-9]{1,15}(-g[0-9]{1,15})?$", description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist; the handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern), for every call after the first; exactly one of since or cursor is required, never both" },
     ],
     grepFor: 'path === "/api/inbox" && method === "GET"',
   },

@@ -74,7 +74,7 @@ const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string }> = {
 };
 // guest/due `after`: the view decides which shape the handler accepts, so it is probed per view below, not by the generic loop.
 const DUE_AFTER = "/api/guest/due|after";
-const DUE_UNION = "^([0-9]{1,15}\.[0-9]{1,15}|[0-9]{1,15})$";
+const DUE_UNION = String.raw`^([0-9]{1,15}\.[0-9]{1,15}|[0-9]{1,15})$`;
 // Bounds the handlers enforce with a 400: they must be declared, or the boundary walk below is vacuous.
 const MUST_BE_BOUNDED: Array<[string, string, string]> = [
   ["/api/residents", "limit", "minimum"],
@@ -93,7 +93,7 @@ const MUST_BE_BOUNDED: Array<[string, string, string]> = [
 // The longest string a pattern accepts, built from the served pattern itself (only the token shapes this document uses: a literal, or a [class], each with an optional {m,n}).
 function longestMatch(pattern: string): string {
   let out = "";
-  for (const [, atom, , max] of pattern.replace(/^\^|\$$/g, "").replace(/\(([^)|]*)\)\?/g, "$1").matchAll(/(\[[^\]]+\]|[a-z:])(\{(\d+),?(\d+)?\})?/g).map((m) => [m[0], m[1], m[3], m[4] ?? m[3] ?? "1"])) {
+  for (const [, atom, , max] of pattern.replace(/^\^|\$$/g, "").replace(/\(([^)|]*)\)\?/g, "$1").matchAll(/(\[[^\]]+\]|[a-z:-])(\{(\d+),?(\d+)?\})?/g).map((m) => [m[0], m[1], m[3], m[4] ?? m[3] ?? "1"])) {
     const ch = atom.startsWith("[") ? "9" : atom;
     out += ch.repeat(Number(max));
   }
