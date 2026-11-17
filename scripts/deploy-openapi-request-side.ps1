@@ -30,7 +30,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "fdcd416c9450f0538d48182447517a118b6a86db"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "e0e7b83943358efc9d2fbc823229377b638adc5f"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-openapi-request-side.ps1", "test/deploy-openapi-request-side-script.test.ts", "docs/")
 $RUNS_URL = "$BASE/openapi.json"
