@@ -82,6 +82,17 @@ const MUST_BE_BOUNDED: Array<[string, string, string]> = [
   ["/api/settlements/attention", "after", "pattern"],
 ];
 
+// The longest string a pattern accepts, built from the served pattern itself (only the token shapes this document uses: a literal, or a [class], each with an optional {m,n}).
+function longestMatch(pattern: string): string {
+  let out = "";
+  for (const [, atom, , max] of pattern.replace(/^\^|\$$/g, "").matchAll(/(\[[^\]]+\]|[a-z:])(\{(\d+),?(\d+)?\})?/g).map((m) => [m[0], m[1], m[3], m[4] ?? m[3] ?? "1"])) {
+    const ch = atom.startsWith("[") ? "9" : atom;
+    out += ch.repeat(Number(max));
+  }
+  assert.ok(new RegExp(pattern).test(out), `the built longest string ${out} matches ${pattern}`);
+  return out;
+}
+
 function urlFor(path: string, base: Record<string, string>, p: Param, value: string): string {
   const q = { ...base };
   delete q[p.name];
@@ -116,7 +127,7 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
           const sample = PATTERN_SAMPLES[`${path}|${p.name}`];
           assert.ok(sample, `a pattern sample exists for ${path} ${p.name}`);
           assert.ok(new RegExp(s.pattern).test(sample.valid) && !new RegExp(s.pattern).test(sample.invalid), `the sample agrees with the served pattern for ${path} ${p.name}`);
-          cases.push([sample.valid, true], [sample.invalid, false]);
+          cases.push([sample.valid, true], [longestMatch(s.pattern), true], [sample.invalid, false]);
         }
         for (const [value, inRange] of cases) {
           const url = urlFor(path, BASE[path] ?? {}, p, value);
@@ -164,6 +175,8 @@ test("a declared error status is one the route produces: each is hit once, and n
       ["/api/search", "/api/search", 400],
       ["/api/changes", "/api/changes", 400],
       ["/api/settlements/attention?after=x", "/api/settlements/attention", 400],
+      ["/api/proposals?since=1&since=2", "/api/proposals", 400],
+      ["/api/proposals?bogus=1", "/api/proposals", 400],
       ["/api/resident/0", "/api/resident/{number}", 400],
       ["/api/resident/987654", "/api/resident/{number}", 404],
       ["/api/post/987654", "/api/post/{id}", 404],
@@ -240,6 +253,26 @@ test("served_cursor_round_trips_by_declared_types: parked list", async () => {
     const page2 = (await call(env, "GET", `/api/maintainer/parked?limit=1&after=${page1.next_cursor}`)).body;
     assert.equal(page2.items.length, 1);
     assert.ok(page2.items[0].id > page1.items[0].id);
+  } finally {
+    d1.close();
+  }
+});
+
+// Routes whose text says "refused" about something that is not a request refusal.
+const EXEMPT_FROM_400_TEXT: Record<string, string> = { "/api/doors": "its counters note says a refused MCP tool call still counts as a received call; the route itself answers no 400" };
+
+test("a route whose served text says 400 or refused declares 400", async () => {
+  const { d1, env } = world();
+  try {
+    const doc = await getDoc(env);
+    const lacking: string[] = [];
+    for (const path of Object.keys(doc.paths)) {
+      const op = doc.paths[path].get;
+      const text = [op.summary, op.description, ...paramsOf(doc, path).map((p) => p.description)].filter(Boolean).join(" ");
+      if (EXEMPT_FROM_400_TEXT[path]) continue;
+      if (/400|refused/i.test(text) && !declaredStatuses(doc, path).includes("400")) lacking.push(path);
+    }
+    assert.deepEqual(lacking, []);
   } finally {
     d1.close();
   }
