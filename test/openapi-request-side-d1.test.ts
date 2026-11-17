@@ -69,7 +69,12 @@ const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string }> = {
   "/api/council/thread|after": { valid: "1", invalid: "1x" },
   "/api/guest/thread|after": { valid: "g1", invalid: "17" },
   "/api/settlements/attention|after": { valid: "1:1", invalid: "1" },
+  "/api/inbox|cursor": { valid: "c0-p0", invalid: "c1" },
+  "/api/guest/inbox|cursor": { valid: "g0-c0-p0", invalid: "g1" },
 };
+// guest/due `after`: the view decides which shape the handler accepts, so it is probed per view below, not by the generic loop.
+const DUE_AFTER = "/api/guest/due|after";
+const DUE_UNION = "^([0-9]{1,15}\.[0-9]{1,15}|[0-9]{1,15})$";
 // Bounds the handlers enforce with a 400: they must be declared, or the boundary walk below is vacuous.
 const MUST_BE_BOUNDED: Array<[string, string, string]> = [
   ["/api/residents", "limit", "minimum"],
@@ -80,12 +85,15 @@ const MUST_BE_BOUNDED: Array<[string, string, string]> = [
   ["/api/guest/due", "limit", "maximum"],
   ["/api/resident/{number}", "number", "minimum"],
   ["/api/settlements/attention", "after", "pattern"],
+  ["/api/inbox", "cursor", "pattern"],
+  ["/api/guest/inbox", "cursor", "pattern"],
+  ["/api/guest/due", "after", "pattern"],
 ];
 
 // The longest string a pattern accepts, built from the served pattern itself (only the token shapes this document uses: a literal, or a [class], each with an optional {m,n}).
 function longestMatch(pattern: string): string {
   let out = "";
-  for (const [, atom, , max] of pattern.replace(/^\^|\$$/g, "").matchAll(/(\[[^\]]+\]|[a-z:])(\{(\d+),?(\d+)?\})?/g).map((m) => [m[0], m[1], m[3], m[4] ?? m[3] ?? "1"])) {
+  for (const [, atom, , max] of pattern.replace(/^\^|\$$/g, "").replace(/\(([^)|]*)\)\?/g, "$1").matchAll(/(\[[^\]]+\]|[a-z:])(\{(\d+),?(\d+)?\})?/g).map((m) => [m[0], m[1], m[3], m[4] ?? m[3] ?? "1"])) {
     const ch = atom.startsWith("[") ? "9" : atom;
     out += ch.repeat(Number(max));
   }
@@ -97,6 +105,7 @@ function urlFor(path: string, base: Record<string, string>, p: Param, value: str
   const q = { ...base };
   delete q[p.name];
   let url = path.replace(/\{([^}]+)\}/g, (_m, n) => (n === p.name ? value : "1"));
+  if (p.name === "cursor") delete q.since; // exactly one of since or cursor
   if (p.in === "query") q[p.name] = value;
   const qs = new URLSearchParams(q).toString();
   return qs ? `${url}?${qs}` : url;
@@ -123,6 +132,7 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
           if (s.minimum !== undefined) cases.push([String(s.minimum), true], [String(s.minimum - 1), false]);
           if (s.maximum !== undefined) cases.push([String(s.maximum), true], [String(s.maximum + 1), false]);
         }
+        if (s.pattern && `${path}|${p.name}` === DUE_AFTER) continue;
         if (s.pattern) {
           const sample = PATTERN_SAMPLES[`${path}|${p.name}`];
           assert.ok(sample, `a pattern sample exists for ${path} ${p.name}`);
@@ -139,8 +149,31 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
         }
       }
     }
+    // guest/due `after`: the served union, and each view probed with its own shape (the other view's shape is a 400).
+    const due = paramsOf(doc, "/api/guest/due").find((x) => x.name === "after")!;
+    assert.equal(due.schema.pattern, DUE_UNION, "the union of the two view shapes");
+    const nines = "9".repeat(15);
+    const shapes = { actionable: { ok: ["1.1", `${nines}.${nines}`], bad: ["1", nines] }, history: { ok: ["1", nines], bad: ["1.1", `${nines}.${nines}`] } } as const;
+    for (const [view, sh] of Object.entries(shapes)) {
+      for (const v of [...sh.ok, ...sh.bad]) assert.ok(new RegExp(DUE_UNION).test(v), `${v} matches the union`);
+      for (const v of sh.ok) {
+        const r = await call(env, "GET", `/api/guest/due?view=${view}&after=${v}`);
+        built++;
+        if (r.status === 400 || !declaredStatuses(doc, "/api/guest/due").includes(String(r.status))) failures.push(`due ${view} after=${v} answered ${r.status}`);
+      }
+      for (const v of sh.bad) {
+        const r = await call(env, "GET", `/api/guest/due?view=${view}&after=${v}`);
+        built++;
+        if (r.status !== 400) failures.push(`due ${view} after=${v} (the other view's shape) answered ${r.status}, expected 400`);
+      }
+    }
     assert.ok(built >= 20, `built ${built} boundary requests`);
     assert.deepEqual(failures, []);
+    // Where a declared bound is knowingly tighter than the handler, the description says so.
+    const attn = paramsOf(doc, "/api/settlements/attention").find((x) => x.name === "after")!;
+    assert.match(attn.description ?? "", /safe-integer/i);
+    for (const [path, name] of [["/api/inbox", "cursor"], ["/api/guest/inbox", "cursor"]]) assert.match(paramsOf(doc, path!).find((x) => x.name === name)!.description ?? "", /safe-integer/i, `${path} ${name}`);
+    assert.match(due.description ?? "", /view decides/i);
     // The profile route: 0 is refused, a number nobody holds is a 404, and both are declared.
     const prof = declaredStatuses(doc, "/api/resident/{number}");
     for (const [url, status] of [["/api/resident/0", 400], ["/api/resident/987654", 404]] as const) {
