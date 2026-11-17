@@ -1,6 +1,7 @@
 // /openapi.json request side (soft-power 148881 and 149382, load-bearing-2 149371 on 1f916 9594; D-084, R1 = A).
-// Real local D1, the real router, nothing mocked. Requests are built from the SERVED parameter schemas, so a bound the document states but the
-// route does not enforce (or enforces but the document omits) goes red here.
+// Real local D1, the real router, nothing mocked. The boundary test walks EVERY query and path parameter of EVERY operation in the served document:
+// each is either bounded (minimum, maximum, pattern or enum) and probed from its own schema, or listed in UNVALIDATED with the handler line that coerces or
+// ignores it. A parameter in neither fails, so a bound a handler enforces but the document omits cannot hide behind a hand-kept list.
 //
 // Run: npm test
 
@@ -10,7 +11,7 @@ import { call, createLocalD1, seedCitizens, guestEnv } from "./helpers/guest.ts"
 import { newResident } from "./helpers/resident.ts";
 import { world } from "./helpers/resident-account.ts";
 
-type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; pattern?: string; minimum?: number; maximum?: number };
+type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; pattern?: string; enum?: string[]; minimum?: number; maximum?: number };
 type Param = { name: string; in: string; required?: boolean; description?: string; schema: Schema };
 
 // A compact copy of the walker in openapi-response-schema-d1.test.ts (that file runs its tests on import, so it cannot be imported).
@@ -60,36 +61,52 @@ test("template_variable_must_be_declared: every {x} in every served path has a r
 // What a request needs besides the parameter under test, and one value each pattern accepts and one it refuses.
 const BASE: Record<string, Record<string, string>> = {
   "/api/inbox": { handle: "alice", since: "0" },
+  "/treasury": { before_entry_date: "2026-01-01", before_id: "1" },
+  "/api/treasury": { before_entry_date: "2026-01-01", before_id: "1" },
   "/api/guest/inbox": { guest: "1" },
   "/api/changes": { since: "0" },
   "/api/search": { q: "x" },
 };
-const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string }> = {
+const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string; edge?: string }> = {
   "/api/residents|after": { valid: "1", invalid: "1x" },
   "/api/council/thread|after": { valid: "1", invalid: "1x" },
   "/api/guest/thread|after": { valid: "g1", invalid: "17" },
   "/api/settlements/attention|after": { valid: "1:1", invalid: "1" },
   "/api/inbox|cursor": { valid: "c0-p0", invalid: "c1" },
   "/api/guest/inbox|cursor": { valid: "g0-c0-p0", invalid: "g1" },
+  "/api/search|q": { valid: "x", invalid: " ", edge: "x".repeat(200) },
+  "/api/inbox|handle": { valid: "ab", invalid: "!" },
+  "/treasury|before_entry_date": { valid: "2026-01-01", invalid: "2026-1-1" },
+  "/api/treasury|before_entry_date": { valid: "2026-01-01", invalid: "2026-1-1" },
+};
+// Parameters the handler coerces, clamps or ignores rather than refusing: the reason names the line that does it. A cursor or bound a handler DOES refuse with 400 is never listed here.
+const UNVALIDATED: Record<string, string> = {
+  "/api/attest|from": "chain.ts:547 norm() turns a missing, non-finite or non-positive value into 0 (index.ts:260-262 passes Number(q.get(k)))",
+  "/api/attest|identity_from": "chain.ts:551 norm(), as above",
+  "/api/attest|ledger_from": "chain.ts:552 norm(), as above",
+  "/api/attest|payouts_from": "chain.ts:553 norm(), as above",
+  "/api/attest|ballots_from": "chain.ts:554 norm(), as above",
+  "/api/constitution/versions|since": "index.ts:297-298 parseNumberParam gives NaN for a bad value and listConstitutionVersions (governance.ts:2339) throws nothing",
+  "/api/constitution/versions|since_id": "index.ts:298, as above",
+  "/api/front|limit": "index.ts:455 parseNumberParam, passed to frontPage (society.ts:1285) with no check",
+  "/api/new|limit": "index.ts:470 parseNumberParam, passed to frontPage (society.ts:1285) with no check",
+  "/api/search|limit": "discovery-data.ts:85 clamps to 1..SEARCH_MAX_LIMIT",
+  "/api/post/{id}|id": "index.ts:476 route regex (\d+); an absent row is a 404 (society.ts:1382), a non-digit never reaches the handler",
+  "/api/listing/{id}|id": "index.ts:572 route regex (\d+); an absent row is a 404 (listings.ts:1303)",
+  "/api/proposal/{id}|id": "index.ts:666 route regex (\d+); an absent row is a 404 (governance.ts:1340)",
+  "/api/citizens|since": "index.ts:513 parseNumberParam, citizenDirectory (society.ts:2301) throws nothing",
+  "/api/citizens|since_id": "index.ts:514, as above",
+  "/api/events|kind": "society.ts:2396 identityLog filters on the string, any value is accepted",
+  "/api/listings|status": "listings.ts:1197 an unknown status falls back to open",
+  "/api/listings|since_id": "listings.ts:1199 Number.isFinite decides whether to filter; nothing is refused",
+  "/api/maintainer/parked|after": "maintainer/parked.ts:57-58 a non-positive or non-numeric value starts from the first page",
+  "/api/maintainer/parked|limit": "maintainer/parked.ts:59-60 clamps to 1..PARKED_MAX_LIMIT",
+  "/api/proposals|since": "index.ts:654 DEFERRED-PROPOSALS-MALFORMED-CURSOR: a malformed value of a known key becomes NaN and serves the first page",
+  "/api/proposals|since_id": "index.ts:654, as above",
 };
 // guest/due `after`: the view decides which shape the handler accepts, so it is probed per view below, not by the generic loop.
 const DUE_AFTER = "/api/guest/due|after";
 const DUE_UNION = String.raw`^([0-9]{1,15}\.[0-9]{1,15}|[0-9]{1,15})$`;
-// Bounds the handlers enforce with a 400: they must be declared, or the boundary walk below is vacuous.
-const MUST_BE_BOUNDED: Array<[string, string, string]> = [
-  ["/api/residents", "limit", "minimum"],
-  ["/api/residents", "limit", "maximum"],
-  ["/api/residents", "after", "pattern"],
-  ["/api/council/thread", "limit", "maximum"],
-  ["/api/council/thread", "after", "pattern"],
-  ["/api/guest/due", "limit", "maximum"],
-  ["/api/resident/{number}", "number", "minimum"],
-  ["/api/settlements/attention", "after", "pattern"],
-  ["/api/inbox", "cursor", "pattern"],
-  ["/api/guest/inbox", "cursor", "pattern"],
-  ["/api/guest/due", "after", "pattern"],
-];
-
 // The longest string a pattern accepts, built from the served pattern itself (only the token shapes this document uses: a literal, or a [class], each with an optional {m,n}).
 function longestMatch(pattern: string): string {
   let out = "";
@@ -115,19 +132,26 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
   const { d1, env, post } = world();
   try {
     const doc = await getDoc(env);
-    for (const [path, name, kw] of MUST_BE_BOUNDED) {
-      const p = paramsOf(doc, path).find((q) => q.name === name);
-      assert.ok(p && (p.schema as any)[kw] !== undefined, `${path} ${name} declares ${kw}`);
-      assert.ok(declaredStatuses(doc, path).includes("400"), `${path} declares 400`);
-    }
     BASE["/api/guest/thread"] = { post_id: String(post) };
     let built = 0;
     const failures: string[] = [];
+    const seen = new Set<string>();
+    const unclassified: string[] = [];
     for (const path of Object.keys(doc.paths)) {
       const declared = declaredStatuses(doc, path);
       for (const p of paramsOf(doc, path)) {
         const s = p.schema;
+        const key = `${path}|${p.name}`;
+        seen.add(key);
+        const bounded = s.minimum !== undefined || s.maximum !== undefined || s.pattern !== undefined || s.enum !== undefined;
+        if (!bounded && !UNVALIDATED[key]) unclassified.push(key);
+        if (bounded && UNVALIDATED[key]) unclassified.push(`${key} is bounded in the document but still listed UNVALIDATED`);
         const cases: Array<[string, boolean]> = [];
+        if (s.enum) {
+          for (const v of s.enum) cases.push([v, true]);
+          cases.push(["not-a-declared-value", false]);
+          assert.ok(!s.enum.includes("not-a-declared-value"));
+        }
         if (s.type === "integer") {
           if (s.minimum !== undefined) cases.push([String(s.minimum), true], [String(s.minimum - 1), false]);
           if (s.maximum !== undefined) cases.push([String(s.maximum), true], [String(s.maximum + 1), false]);
@@ -137,7 +161,7 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
           const sample = PATTERN_SAMPLES[`${path}|${p.name}`];
           assert.ok(sample, `a pattern sample exists for ${path} ${p.name}`);
           assert.ok(new RegExp(s.pattern).test(sample.valid) && !new RegExp(s.pattern).test(sample.invalid), `the sample agrees with the served pattern for ${path} ${p.name}`);
-          cases.push([sample.valid, true], [longestMatch(s.pattern), true], [sample.invalid, false]);
+          cases.push([sample.valid, true], [s.pattern.includes("\\") ? (sample.edge ?? sample.valid) : longestMatch(s.pattern), true], [sample.invalid, false]);
         }
         for (const [value, inRange] of cases) {
           const url = urlFor(path, BASE[path] ?? {}, p, value);
@@ -149,6 +173,8 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
         }
       }
     }
+    assert.deepEqual(unclassified, [], "every parameter is bounded and probed, or listed UNVALIDATED with a reason");
+    assert.deepEqual(Object.keys(UNVALIDATED).filter((k) => !seen.has(k)), [], "no UNVALIDATED entry names a parameter the document no longer has");
     // guest/due `after`: the served union, and each view probed with its own shape (the other view's shape is a 400).
     const due = paramsOf(doc, "/api/guest/due").find((x) => x.name === "after")!;
     assert.equal(due.schema.pattern, DUE_UNION, "the union of the two view shapes");
