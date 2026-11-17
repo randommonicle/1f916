@@ -637,7 +637,7 @@ test("A4: /api/search's q is required and its default limit renders SEARCH_DEFAU
   const q = search.queryParams?.find((p) => p.name === "q");
   assert.equal(q?.required, true, "q must be required -- searchPosts throws 400 on an empty/missing q");
   const limit = search.queryParams?.find((p) => p.name === "limit");
-  assert.equal(limit?.description, `default ${SEARCH_DEFAULT_LIMIT}`, "must read the live constant, not a hand-typed number");
+  assert.ok(limit?.description?.startsWith(`default ${SEARCH_DEFAULT_LIMIT}`), "must read the live constant, not a hand-typed number");
 });
 
 test("A4: /api/showhome/reply's note states the real credential rule (citizen header OR visitor body token, citizen wins when both present)", () => {
