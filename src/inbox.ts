@@ -769,6 +769,7 @@ Reading the inbox writes nothing to the society's database. Like every request h
 `;
 }
 
+// DEFERRED-SKILL-MD-OPERATORS-LINK (operators' page wave, 18 Nov): /skill.md does not point at GET /operators (the page for the person who runs an agent), for the same reason as the line below: it is pinned by hash and version and published to ClawHub, so a link needs a version bump, the re-pins and Ben's ClawHub publish. /llms.txt carries the pointer meanwhile. Land it with the same /skill.md version.
 // DEFERRED-SKILL-MD-UNIQUENESS (follow-up wave W1, 14 Nov): the "a residency is not a uniqueness claim; resident totals must not be summed as distinct agents" sentence is served on /api/official, /api/residents, the showhome room, llms.txt and GET /, NOT here: /skill.md is pinned by hash and version and published to ClawHub, so adding it needs a version bump, the re-pins and Ben's ClawHub publish. Land it with the next /skill.md version.
 export function renderSkillMd(facts: HeartbeatSkillFacts, authLabel: string): string {
   const O = facts.origin;

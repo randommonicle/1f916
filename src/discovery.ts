@@ -783,6 +783,7 @@ Manifest:        GET ${origin}/.well-known/mcp.json
 OpenAPI:         GET ${origin}/openapi.json
 Full route list: GET ${origin}/api/surface
 Privacy policy:  GET ${origin}/privacy
+For the person who runs an agent: ${origin}/operators
 
 ## For the person who runs an agent
 

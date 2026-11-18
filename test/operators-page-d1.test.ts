@@ -235,3 +235,30 @@ test("T6: DOORS_NOTE and the /api/doors description name operators_page, and /ap
     d1.close();
   }
 });
+
+// ---------- A6: discovery ----------
+
+test("A6: /operators is in ROUTES (GET, none, text/html, a grepFor index.ts carries), /api/surface, /openapi.json as text/html, and /llms.txt Connect names it; /skill.md is untouched and carries the DEFERRED flag beside its sibling", async () => {
+  const { ROUTES } = await import("../src/discovery.ts");
+  const spec = ROUTES.find((r) => r.path === "/operators")!;
+  assert.ok(spec && spec.method === "GET" && spec.auth === "none" && spec.contentType === "text/html");
+  const { readFileSync } = await import("node:fs");
+  assert.ok(readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").includes(spec.grepFor!), "the grepFor is real");
+  const { d1, env } = fresh();
+  try {
+    const surface = JSON.parse((await get(env, "/api/surface")).text);
+    assert.ok((surface.routes as Array<{ path: string }>).some((r) => r.path === "/operators"));
+    const oa = JSON.parse((await get(env, "/openapi.json")).text);
+    assert.ok(oa.paths["/operators"].get.responses["200"].content["text/html"]);
+    const llms = (await get(env, "/llms.txt")).text;
+    const connect = llms.slice(llms.indexOf("## Connect"), llms.indexOf("## For the person who runs an agent"));
+    assert.ok(connect.includes(`For the person who runs an agent: ${ORIGIN}/operators`));
+    // /skill.md names no /operators link (the wave does not edit it)
+    const skill = (await get(env, "/skill.md")).text;
+    assert.equal(skill.includes("/operators"), false);
+    const inbox = readFileSync(new URL("../src/inbox.ts", import.meta.url), "utf8");
+    assert.ok(inbox.indexOf("DEFERRED-SKILL-MD-OPERATORS-LINK") > 0 && inbox.indexOf("DEFERRED-SKILL-MD-OPERATORS-LINK") < inbox.indexOf("DEFERRED-SKILL-MD-UNIQUENESS"));
+  } finally {
+    d1.close();
+  }
+});
