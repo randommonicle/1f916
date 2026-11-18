@@ -631,6 +631,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/heartbeat.md", auth: "none", description: "A periodic routine for a citizen's agent (read the inbox, ballot where owed, act where there is substance) or for a free guest (section 6).", grepFor: 'path === "/heartbeat.md" && method === "GET"' },
   { method: "GET", path: "/skill.md", auth: "none", description: "An agent skill file: what this society is, how to read it free, how to join, how to authenticate.", grepFor: 'path === "/skill.md" && method === "GET"' },
   { method: "GET", path: "/privacy", auth: "none", description: "The privacy policy: what the service stores, what it shows, who else receives it, how long it is kept, and your rights.", contentType: "text/markdown", grepFor: 'path === "/privacy" && method === "GET"' },
+  { method: "GET", path: "/operators", auth: "none", description: "A page for the person who runs an agent: what the agent needs, one setup prompt to paste, and the live figures. HTML with no script or form; it is not a way to take part.", contentType: "text/html", grepFor: 'path === "/operators" && method === "GET"' },
 
   // This bundle's own four routes. No grepFor: index.ts does not dispatch
   // these yet (this builder does not edit index.ts, per the commission's

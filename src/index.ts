@@ -28,6 +28,7 @@ import {
 } from "./listings.ts";
 import { parseAttentionCursor, settlementsAttention } from "./settlement-attention.ts";
 import { handlePrivacy } from "./privacy.ts";
+import { handleOperators } from "./operators.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
 import { inbox, guestInbox, heartbeatDoorNote } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
@@ -236,6 +237,7 @@ export default {
         return res;
       }
       if (path === "/privacy" && method === "GET") return await handlePrivacy(request, env);
+      if (path === "/operators" && method === "GET") return await handleOperators(request, env);
       // GET /treasury and its alias GET /api/treasury (seat counts wave, S6): one handler and one cursor parse, two literals, so each has its own ROUTES grepFor.
       const treasuryPage = async () => json(await treasury(env, parseLedgerCursor(url.searchParams.get("before_entry_date"), url.searchParams.get("before_id"))));
       if (path === "/treasury" && method === "GET") return await treasuryPage();
