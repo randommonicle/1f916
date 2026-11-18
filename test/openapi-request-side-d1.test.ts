@@ -184,7 +184,7 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
     }
     // The parked list clamps, so it declares no bound and no 400, says so, and the clamp is the answer.
     const parked = paramsOf(doc, "/api/maintainer/parked");
-    for (const p of parked) assert.deepEqual(Object.keys(p.schema).sort(), ["type"], `parked ${p.name} declares no bound`);
+    for (const p of parked) assert.deepEqual(Object.keys(p.schema).filter((k) => !k.startsWith("x-")).sort(), ["type"], `parked ${p.name} declares no bound (only an x- extension saying what the handler does)`);
     assert.deepEqual(declaredStatuses(doc, "/api/maintainer/parked"), ["200"]);
     for (const limit of ["0", "101", "-5", "abc"]) assert.equal((await call(env, "GET", `/api/maintainer/parked?limit=${limit}`)).status, 200);
     assert.match(parked.find((p) => p.name === "limit")!.description ?? "", /clamp/i);

@@ -937,6 +937,13 @@ export const UNVALIDATED: Record<string, UnvalidatedBehaviour> = {
   "/api/proposals|since_id": { kind: "ignored-when-invalid", reason: "index.ts:654, as above" },
 };
 
+// The table's entry for one parameter, as the extension its schema carries.
+function behaviourExtension(key: string): Record<string, unknown> {
+  const u = UNVALIDATED[key];
+  if (!u) return {};
+  return u.kind === "clamped" ? { "x-clamped": { minimum: u.min, maximum: u.max, reason: u.reason } } : { "x-ignored-when-invalid": { reason: u.reason } };
+}
+
 function openApiPath(path: string): string {
   return path.replace(/:([a-zA-Z_]+)/g, "{$1}");
 }
@@ -952,13 +959,14 @@ export function renderOpenApi(origin: string, society: string): Record<string, u
     for (const [, name] of r.path.matchAll(/:([a-zA-Z_]+)/g)) {
       const decl = r.pathParams?.[name!];
       if (!decl) throw new Error(`route ${r.path}: path variable :${name} has no pathParams declaration`);
-      parameters.push({ name, in: "path", required: true, schema: { type: decl.type, ...(decl.minimum !== undefined ? { minimum: decl.minimum } : {}), ...(decl.maximum !== undefined ? { maximum: decl.maximum } : {}) } });
+      parameters.push({ name, in: "path", required: true, schema: { type: decl.type, ...(decl.minimum !== undefined ? { minimum: decl.minimum } : {}), ...(decl.maximum !== undefined ? { maximum: decl.maximum } : {}), ...behaviourExtension(`${openApiPath(r.path)}|${name}`) } });
     }
+    const opPath = openApiPath(r.path);
     for (const q of r.queryParams ?? []) {
       // A12: emitted from the route's own declaration, not a blanket false -- a route
       // that refuses a request missing this parameter (handle on /api/inbox, since on
       // /api/changes) now says so in the served OpenAPI doc.
-      parameters.push({ name: q.name, in: "query", required: q.required ?? false, description: q.description, schema: { type: q.type, ...(q.minimum !== undefined ? { minimum: q.minimum } : {}), ...(q.maximum !== undefined ? { maximum: q.maximum } : {}), ...(q.pattern !== undefined ? { pattern: q.pattern } : {}), ...(q.enum !== undefined ? { enum: q.enum } : {}) } });
+      parameters.push({ name: q.name, in: "query", required: q.required ?? false, description: q.description, schema: { type: q.type, ...(q.minimum !== undefined ? { minimum: q.minimum } : {}), ...(q.maximum !== undefined ? { maximum: q.maximum } : {}), ...(q.pattern !== undefined ? { pattern: q.pattern } : {}), ...(q.enum !== undefined ? { enum: q.enum } : {}), ...behaviourExtension(`${opPath}|${q.name}`) } });
     }
     const key = openApiPath(r.path);
     const existing = (paths[key] as Record<string, unknown> | undefined) ?? {};
