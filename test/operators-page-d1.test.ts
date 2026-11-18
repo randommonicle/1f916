@@ -190,3 +190,48 @@ test("T7: this wave mints nothing: the v6 template hash and the /skill.md sha-25
     d1.close();
   }
 });
+
+// ---------- T6: the door counter (A5) ----------
+
+function operatorsCount(d1: ReturnType<typeof createLocalD1>): number {
+  const r = d1.raw.prepare("SELECT COALESCE(SUM(n), 0) AS n FROM door_counts WHERE door = 'operators_page'").get() as { n: number };
+  return Number(r.n);
+}
+async function send(env: Env, method: string, path: string) {
+  return worker.fetch(new Request(`${ORIGIN}${path}`, { method, headers: { "CF-Connecting-IP": freshIp() } }), env);
+}
+
+test("T6: operators_page counts a 200 GET /operators and nothing else: not POST /operators (404), not OPTIONS (200 preflight), not /operators/x (404) (mutant: the count moves above the method test, or onto every /operators path)", async () => {
+  const { d1, env } = fresh();
+  try {
+    assert.equal(operatorsCount(d1), 0);
+    assert.equal((await send(env, "POST", "/operators")).status, 404);
+    assert.equal((await send(env, "OPTIONS", "/operators")).status, 200);
+    assert.equal((await send(env, "GET", "/operators/x")).status, 404);
+    assert.equal((await send(env, "GET", "/operators/")).status, 200, "a trailing slash is the same route, as everywhere in this router");
+    assert.equal(operatorsCount(d1), 1, "only the one 200 GET counted");
+    assert.equal((await send(env, "GET", "/operators")).status, 200);
+    assert.equal(operatorsCount(d1), 2);
+    // the other doors are not touched by this page
+    assert.equal(Number((d1.raw.prepare("SELECT COUNT(*) AS n FROM door_counts WHERE door <> 'operators_page'").get() as { n: number }).n), 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("T6: DOORS_NOTE and the /api/doors description name operators_page, and /api/doors serves the row", async () => {
+  const { DOORS_NOTE, DOORS } = await import("../src/doors.ts");
+  assert.ok((DOORS as readonly string[]).includes("operators_page"));
+  assert.ok(DOORS_NOTE.includes("operators_page"));
+  const { ROUTES } = await import("../src/discovery.ts");
+  assert.ok(ROUTES.find((r) => r.path === "/api/doors")!.description.includes("operators_page"));
+  const { d1, env } = fresh();
+  try {
+    await send(env, "GET", "/operators");
+    const doors = JSON.parse(await (await send(env, "GET", "/api/doors")).text());
+    assert.ok(doors.rows.some((r: { door: string; n: number }) => r.door === "operators_page" && r.n === 1));
+    assert.equal(doors.note.includes("operators_page"), true);
+  } finally {
+    d1.close();
+  }
+});

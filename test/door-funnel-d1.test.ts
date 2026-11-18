@@ -51,7 +51,7 @@ function throwing(env: Env): Env {
 
 test("C1: DOORS carries the four new doors after the six old ones", () => {
   for (const d of NEW_DOORS) assert.ok((DOORS as readonly string[]).includes(d), d);
-  assert.equal(DOORS.length, 10);
+  assert.equal(DOORS.length, 11);
 });
 
 test("C1: tools/list counts mcp_tools_list on /mcp and mcp_read_tools_list on /mcp/read, once each, never on the other door", async () => {

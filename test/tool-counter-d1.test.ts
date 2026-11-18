@@ -93,7 +93,7 @@ test("T2b: toolDoor is the membership test: it names a listed tool and returns n
   for (const d of DOORS) assert.equal(d.includes(":"), false, `${d}: a fixed door has no colon, so it can never take the per-tool cap`);
 });
 
-test("T3: the per-tool cap is 100, bound in the SQL (not just the read): the row stops rising at 100 and /api/doors says at_cap; the fixed ten still cap at 2000", async () => {
+test("T3: the per-tool cap is 100, bound in the SQL (not just the read): the row stops rising at 100 and /api/doors says at_cap; the fixed eleven still cap at 2000", async () => {
   const { d1, env } = fresh();
   try {
     const day = utcDay(Date.now());
@@ -223,7 +223,7 @@ test("T5: the write budget: (every listed tool x the per-tool cap + every fixed 
     const MAX_STAMPS_PER_DAY = 20;
     const withStamps = increments * 2 + 2 * MAX_STAMPS_PER_DAY;
     assert.ok(withStamps < 60_000, `${increments} increments x2 + 2 x ${MAX_STAMPS_PER_DAY} stamps = ${withStamps} must stay under 60000`);
-    assert.equal(increments * 2, 50_400, "the formula's fixed part is the 50,400 the brief names for today's lists (update the brief, not the threshold, if the lists grow)");
+    assert.equal(increments * 2, 54_400, "the formula's fixed part is the 54,400 the brief names for today's lists (update the brief, not the threshold, if the lists grow)");
     assert.equal(TOOL_DOOR_DAILY_CAP, 100);
   } finally {
     d1.close();

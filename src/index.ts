@@ -237,7 +237,11 @@ export default {
         return res;
       }
       if (path === "/privacy" && method === "GET") return await handlePrivacy(request, env);
-      if (path === "/operators" && method === "GET") return await handleOperators(request, env);
+      if (path === "/operators" && method === "GET") {
+        const res = await handleOperators(request, env);
+        if (res.status === 200) await recordDoor(env, ctx, "operators_page");
+        return res;
+      }
       // GET /treasury and its alias GET /api/treasury (seat counts wave, S6): one handler and one cursor parse, two literals, so each has its own ROUTES grepFor.
       const treasuryPage = async () => json(await treasury(env, parseLedgerCursor(url.searchParams.get("before_entry_date"), url.searchParams.get("before_id"))));
       if (path === "/treasury" && method === "GET") return await treasuryPage();

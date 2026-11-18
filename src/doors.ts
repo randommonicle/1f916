@@ -10,8 +10,8 @@
 // success, never before it: a refused write counts nothing. The one exception is the tools/call pair (mcp_tool_call, mcp_read_tool_call): they
 // count a RECEIVED call of a listed tool before dispatch, whatever its outcome, so a refusal or an exception still counts (the door funnel).
 //
-// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. The fixed doors (DOORS, ten today) at DOOR_DAILY_CAP can never take more than
-// 20,000 of them at ten, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
+// THE CAP. D1's free plan allows 100,000 rows written a day for the whole society. The fixed doors (DOORS, eleven today) at DOOR_DAILY_CAP can never take more than
+// 22,000 of them at eleven, so a flood of GETs cannot starve the society's own writes. The cap is a predicate inside the one statement, so
 // concurrent requests cannot pass it together. A figure at the cap is a FLOOR, and the read says so (at_cap).
 //
 // THE PER-TOOL DOORS (drafts/BRIEF-TOOL-CALL-COUNTER-2026-10-19.md in the project folder outside this repo B1-B5, A1-A10). A counted tools/call also adds one to mcp_tool:<name> (on /mcp) or
@@ -36,6 +36,7 @@ export const DOORS = [
   "mcp_read_tools_list",
   "mcp_tool_call",
   "mcp_read_tool_call",
+  "operators_page",
 ] as const;
 export type Door = (typeof DOORS)[number];
 
@@ -76,7 +77,7 @@ const COMMIT_DAY_SQL = "INSERT OR IGNORE INTO commit_days (day, code_commit, fir
 export const UNSTAMPED = "unstamped";
 
 // Rows written per day by the commit_days statement: one new row (plus its primary-key index write) per distinct stamp that day, S, so 2S; the existing conservative budget of the door
-// counters (test/tool-counter-d1.test.ts T5) is therefore 50,400 + 2S. A duplicate insert writes nothing.
+// counters (test/tool-counter-d1.test.ts T5) is therefore 54,400 + 2S. A duplicate insert writes nothing.
 export async function countDoor(env: Env, door: Door | ToolDoor, now = Date.now()): Promise<void> {
   try {
     const day = utcDay(now);
@@ -113,7 +114,7 @@ export const DOOR_WINDOW_DAYS = 30;
 export const STAMPS_SINCE = "15 November 2026";
 
 export const DOORS_NOTE =
-  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at ${DOOR_DAILY_CAP} a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at ${TOOL_DOOR_DAILY_CAP}, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request. commits_by_day lists, for each UTC day in the window, the deploy stamps (a 40-hex commit, or unstamped) that accompanied at least one completed door-counting attempt that day, including attempts after that door's count had capped; first_seen_at is the time carried by the first insert that landed, not necessarily the earliest such request. It is the operator's stamp (a commonhold_statement, as /api/attest's provenance says), not proof of the running bytes. A day may show several stamps, and a deployment without a completed door-counting attempt contributes no stamp observation, so this is not a complete deployment timeline and it does not say which /privacy response anyone received (/privacy is not a counted door). Days before this shipped have no entry. It shipped on ${STAMPS_SINCE}. A Worker version that runs this code writes each count and its stamp in one transaction, so on a UTC day when every version that counted a request ran this code, a single stamp covers every count of that day. Versions deployed before ${STAMPS_SINCE} counted without writing a stamp: any count written on ${STAMPS_SINCE} before that day's deploy is in that day's figures and is not covered by its stamp, and the same would hold on any later day on which such a version ran again. This route cannot show how many counts a stamp does not cover.`;
+  `Requests, not agents: a crawler or a security scanner fetching /skill.md counts the same as an agent. Each fixed door stops counting at ${DOOR_DAILY_CAP} a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at ${TOOL_DOOR_DAILY_CAP}, so a figure marked at_cap is a floor. showhome_enter and guest_comment count accepted writes through both the HTTP and the MCP door. skill_md, heartbeat_md and operators_page count a 200 GET of /skill.md, /heartbeat.md and /operators (the page for the person who runs an agent). mcp_tools_list and mcp_read_tools_list count a received tools/list on /mcp and on /mcp/read; mcp_tool_call and mcp_read_tool_call count a received tools/call that names a tool that door lists, any outcome (a refused call counts, an unknown tool name does not). mcp_tool:<name> and mcp_read_tool:<name> count the same received call once more, per tool, so you can see which tools are tried; they are separate writes from mcp_tool_call and mcp_read_tool_call, with their own cap, so the per-tool rows and the totals need not reconcile exactly (either write can fail alone). None of them says which listing or which agent sent the request. commits_by_day lists, for each UTC day in the window, the deploy stamps (a 40-hex commit, or unstamped) that accompanied at least one completed door-counting attempt that day, including attempts after that door's count had capped; first_seen_at is the time carried by the first insert that landed, not necessarily the earliest such request. It is the operator's stamp (a commonhold_statement, as /api/attest's provenance says), not proof of the running bytes. A day may show several stamps, and a deployment without a completed door-counting attempt contributes no stamp observation, so this is not a complete deployment timeline and it does not say which /privacy response anyone received (/privacy is not a counted door). Days before this shipped have no entry. It shipped on ${STAMPS_SINCE}. A Worker version that runs this code writes each count and its stamp in one transaction, so on a UTC day when every version that counted a request ran this code, a single stamp covers every count of that day. Versions deployed before ${STAMPS_SINCE} counted without writing a stamp: any count written on ${STAMPS_SINCE} before that day's deploy is in that day's figures and is not covered by its stamp, and the same would hold on any later day on which such a version ran again. This route cannot show how many counts a stamp does not cover.`;
 
 export interface DoorRow {
   day: string;
