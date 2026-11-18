@@ -3,12 +3,16 @@
 //   1. Every GET parameter either declares a bound (minimum, maximum, pattern, enum) or carries the extension that says what the handler does with a bad value.
 //   2. The extensions and the table agree both ways, value for value.
 //   3. Every cursor a route serves carries the pattern of the parameter it feeds (the parked list keeps its integer cursor on both sides).
+//   4. Served truth: a real page of each cursor route, from real local D1 and the real router, conforms to its declared 200 schema, and its cursor is accepted by the parameter it feeds.
 //
 // Run: npm test
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderOpenApi, UNVALIDATED } from "../src/discovery.ts";
+import { call, seedPost, seedTopic, seedVisitor } from "./helpers/guest.ts";
+import { world } from "./helpers/resident-account.ts";
+import { newResident } from "./helpers/resident.ts";
 
 type Schema = Record<string, any>;
 type Param = { name: string; in: string; schema: Schema };
@@ -89,4 +93,141 @@ test("the parked list keeps its integer cursor on both sides", () => {
   assert.equal(next.type, "integer");
   assert.equal(next.nullable, true);
   assert.equal(next.pattern, undefined, "no string pattern: the cursor is an integer");
+});
+
+// ---------- served truth: a real page with a cursor, per route ----------
+
+// A compact copy of the walker in openapi-response-schema-d1.test.ts (that file runs its tests on import, so it cannot be imported).
+function conform(schema: Schema, value: unknown, at: string): string[] {
+  const out: string[] = [];
+  if (value === null) return schema.nullable ? out : [`${at} is null but not nullable`];
+  const t = Array.isArray(value) ? "array" : Number.isInteger(value) ? "integer" : typeof value;
+  if (schema.type && schema.type !== t) out.push(`${at} is ${t}, schema says ${schema.type}`);
+  if (schema.pattern && typeof value === "string" && !new RegExp(schema.pattern).test(value)) out.push(`${at} is ${JSON.stringify(value)}, not matching ${schema.pattern}`);
+  if (schema.minimum !== undefined && typeof value === "number" && value < schema.minimum) out.push(`${at} is below minimum ${schema.minimum}`);
+  if (schema.type === "array" && schema.items && Array.isArray(value)) value.forEach((v, i) => out.push(...conform(schema.items, v, `${at}[${i}]`)));
+  if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
+    const o = value as Record<string, unknown>;
+    for (const k of schema.required ?? []) if (!(k in o)) out.push(`${at}.${k} is required but not served`);
+    for (const [k, sub] of Object.entries<Schema>(schema.properties ?? {})) if (k in o) out.push(...conform(sub, o[k], `${at}.${k}`));
+  }
+  return out;
+}
+
+// One served page: it conforms to the route's 200 schema, its cursor field matches the parameter's pattern, and the parameter accepts it (the next request is a 200).
+async function pageThenFollow(env: any, path: string, firstQuery: string, param: string, field: string, nextQuery: (cursor: string) => string): Promise<{ first: any; second: any }> {
+  const first = await call(env, "GET", `${path}?${firstQuery}`);
+  assert.equal(first.status, 200, `${path} first page`);
+  assert.deepEqual(conform(okSchema(path), first.body, path), [], `${path} body against its declared 200`);
+  const cursor = first.body[field];
+  assert.equal(typeof cursor, "string", `${path} served a cursor in ${field}`);
+  const declared = paramsOf(path).find((p) => p.name === param)!.schema;
+  assert.deepEqual(conform(declared, cursor, `${path} ${param}`), [], `${path} cursor ${cursor} is what ${param} declares`);
+  const second = await call(env, "GET", `${path}?${nextQuery(encodeURIComponent(cursor))}`);
+  assert.equal(second.status, 200, `${path} follows its own cursor`);
+  assert.deepEqual(conform(okSchema(path), second.body, path), [], `${path} second page against its declared 200`);
+  return { first: first.body, second: second.body };
+}
+
+test("served truth: residents", async () => {
+  const { d1, env, post } = world();
+  try {
+    await newResident(env, post, "first");
+    await newResident(env, post, "second");
+    const { first, second } = await pageThenFollow(env, "/api/residents", "limit=1", "after", "next_cursor", (c) => `limit=1&after=${c}`);
+    assert.equal(first.has_more, true);
+    assert.ok(second.residents[0].number > first.residents[0].number);
+  } finally {
+    d1.close();
+  }
+});
+
+test("served truth: council thread", async () => {
+  const { d1, env } = world();
+  try {
+    for (const at of [1, 2]) d1.raw.prepare("INSERT INTO council_thread (author_kind, author_id, handle, body, created_at) VALUES ('citizen', 1, 'h', ?, ?)").run(`m${at}`, at);
+    const { first, second } = await pageThenFollow(env, "/api/council/thread", "limit=1", "after", "next_cursor", (c) => `limit=1&after=${c}`);
+    assert.equal(first.has_more, true);
+    assert.deepEqual(second.messages.map((m: any) => m.body), ["m2"]);
+  } finally {
+    d1.close();
+  }
+});
+
+test("served truth: settlements attention (501 eligible rows, so a first page of 500 has a cursor)", async () => {
+  const { d1, env } = world();
+  try {
+    const ins = d1.raw.prepare("INSERT INTO settlement_claims (network, asset, from_addr, nonce, route, intent_json, intent_hash, rpc_body, rpc_body_hash, valid_before, state, verdict_reason, created_at, updated_at) VALUES ('n', 'a', '0x1', ?, 'patron', '{}', 'h', NULL, 'h', 1, 'pending', 'chain_spent_facilitator_refused:x', ?, ?)");
+    d1.raw.exec("BEGIN");
+    for (let i = 0; i < 501; i++) ins.run(`0x${i.toString(16).padStart(64, "0")}`, 1_000 + i, 1_000 + i);
+    d1.raw.exec("COMMIT");
+    const { first, second } = await pageThenFollow(env, "/api/settlements/attention", "", "after", "next", (c) => `after=${c}`);
+    assert.equal(first.has_more, true);
+    assert.equal(first.entries.length, 500);
+    assert.equal(second.entries.length, 1);
+    assert.equal(second.next, null);
+  } finally {
+    d1.close();
+  }
+});
+
+test("served truth: guest thread (201 rows, one more than a route page)", async () => {
+  const { d1, env, alice } = world();
+  try {
+    const post = seedPost(d1, alice);
+    const ins = d1.raw.prepare("INSERT INTO guest_thread (post_id, author_kind, author_id, handle, model, kind, body, created_at) VALUES (?, 'guest', ?, 'bulk', 'm', 'comment', ?, ?)");
+    d1.raw.exec("BEGIN");
+    for (let i = 0; i < 201; i++) ins.run(post, 5000 + i, `bulk ${i}`, 1_000 + i);
+    d1.raw.exec("COMMIT");
+    const { first, second } = await pageThenFollow(env, "/api/guest/thread", `post_id=${post}`, "after", "guest_thread_next", (c) => `post_id=${post}&after=${c}`);
+    assert.equal(first.guest_thread.length, 200);
+    assert.equal(second.guest_thread.length, 1);
+    assert.equal(second.guest_thread_next, null);
+  } finally {
+    d1.close();
+  }
+});
+
+test("served truth: guest inbox", async () => {
+  const { d1, env } = world();
+  try {
+    const v = await seedVisitor(d1);
+    const { first } = await pageThenFollow(env, "/api/guest/inbox", `guest=${v.id}`, "cursor", "next_cursor", (c) => `guest=${v.id}&cursor=${c}`);
+    assert.equal(first.has_more, false);
+  } finally {
+    d1.close();
+  }
+});
+
+test("served truth: guest due, both views", async () => {
+  const { d1, env } = world();
+  try {
+    const topic = seedTopic(d1);
+    const duty = d1.raw.prepare("INSERT INTO guest_thread (post_id, author_kind, author_id, handle, model, kind, body, duty, due_at, created_at) VALUES (?, 'guest', ?, 'gadfly', 'm', 'critique', 'a critique', 1, ?, ?)");
+    const answer = d1.raw.prepare("INSERT INTO guest_thread (post_id, parent_kind, parent_id, depth, author_kind, author_id, handle, model, kind, body, created_at) VALUES (?, 'thread', ?, 1, 'citizen', 1, 'commonhold-agent', 'm', 'comment', ?, ?)");
+    const now = Date.now();
+    for (let i = 0; i < 2; i++) duty.run(topic, 7000 + i, now + 5_000_000 + i, now - 1_000 + i); // open
+    for (let i = 0; i < 2; i++) {
+      const id = Number(duty.run(topic, 7100 + i, now + 1_000 + i, now - 200_000 + i).lastInsertRowid);
+      answer.run(topic, id, "an answer that discharges the duty ".repeat(20), now - 100_000 + i); // answered
+    }
+    const act = await pageThenFollow(env, "/api/guest/due", "limit=1", "after", "next_cursor", (c) => `limit=1&after=${c}`);
+    assert.equal(act.first.has_more, true);
+    assert.match(act.first.next_cursor, /^[0-9]+\.[0-9]+$/, "the actionable view serves <due_at>.<id>");
+    const hist = await pageThenFollow(env, "/api/guest/due", "view=history&limit=1", "after", "next_cursor", (c) => `view=history&limit=1&after=${c}`);
+    assert.equal(hist.first.has_more, true);
+    assert.match(hist.first.next_cursor, /^[0-9]+$/, "the history view serves <id>");
+  } finally {
+    d1.close();
+  }
+});
+
+test("served truth: citizen inbox", async () => {
+  const { d1, env } = world();
+  try {
+    const { first } = await pageThenFollow(env, "/api/inbox", "handle=alice&since=0", "cursor", "next_cursor", (c) => `handle=alice&cursor=${c}`);
+    assert.match(first.next_cursor, /^c[0-9]+-p[0-9]+(-g[0-9]+)?$/);
+  } finally {
+    d1.close();
+  }
 });

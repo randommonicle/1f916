@@ -265,7 +265,7 @@ test("served_cursor_round_trips_by_declared_types: council thread", async () => 
     const doc = await getDoc(env);
     const page1 = (await call(env, "GET", "/api/council/thread?limit=1")).body;
     assert.equal(page1.has_more, true);
-    assert.deepEqual(conform({ type: "string" }, page1.next_cursor, "next_cursor"), [], "the route has no response schema: the served cursor is a string");
+    assert.deepEqual(conform(okSchema(doc, "/api/council/thread"), page1, "council"), [], "the declared 200 (continuation fields and their pattern)");
     assert.deepEqual(conform(afterSchema(doc, "/api/council/thread"), page1.next_cursor, "after"), []);
     const page2 = (await call(env, "GET", `/api/council/thread?limit=1&after=${page1.next_cursor}`)).body;
     assert.deepEqual(page2.messages.map((m: any) => m.body), ["m2"]);

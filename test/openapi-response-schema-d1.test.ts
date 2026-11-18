@@ -13,7 +13,7 @@ import { world, writtenGuest, bindByAccount, OUTSIDE_COLONY_ID } from "./helpers
 import { RECOVERIES_SINCE } from "../src/resident.ts";
 import { STAMPS_SINCE, DOORS_NOTE } from "../src/doors.ts";
 
-type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string; enum?: unknown[]; minimum?: number; maximum?: number; maxItems?: number };
+type Schema = { type?: string; nullable?: boolean; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string; enum?: unknown[]; minimum?: number; maximum?: number; maxItems?: number; pattern?: string };
 
 // Every required name is present; every present value with a declared type has that type (null only where nullable); enum, minimum, maximum and maxItems hold where declared.
 // A keyword this walker does not read must not appear in a declared schema: the resident test below fails on one.
@@ -25,6 +25,7 @@ function conform(schema: Schema, value: unknown, at: string): string[] {
   if (schema.enum && !schema.enum.includes(value)) out.push(`${at} is ${JSON.stringify(value)}, not in enum ${JSON.stringify(schema.enum)}`);
   if (schema.minimum !== undefined && typeof value === "number" && value < schema.minimum) out.push(`${at} is ${value}, below minimum ${schema.minimum}`);
   if (schema.maximum !== undefined && typeof value === "number" && value > schema.maximum) out.push(`${at} is ${value}, above maximum ${schema.maximum}`);
+  if (schema.pattern && typeof value === "string" && !new RegExp(schema.pattern).test(value)) out.push(`${at} is ${JSON.stringify(value)}, not matching ${schema.pattern}`);
   if (schema.maxItems !== undefined && Array.isArray(value) && value.length > schema.maxItems) out.push(`${at} has ${value.length} items, maxItems is ${schema.maxItems}`);
   if (schema.type === "array" && schema.items && Array.isArray(value)) value.forEach((v, i) => out.push(...conform(schema.items!, v, `${at}[${i}]`)));
   if (schema.type === "object" && value && typeof value === "object" && !Array.isArray(value)) {
@@ -82,7 +83,7 @@ test("routes without a declared schema keep the bare object, and the checker can
 
 // ---------- the resident routes (soft-power, 1f916 9594 147976) ----------
 
-const WALKED = new Set(["type", "nullable", "required", "properties", "items", "description", "enum", "minimum", "maximum", "maxItems"]);
+const WALKED = new Set(["type", "nullable", "required", "properties", "items", "description", "enum", "minimum", "maximum", "maxItems", "pattern"]);
 function keywords(schema: unknown, out = new Set<string>()): Set<string> {
   if (!schema || typeof schema !== "object") return out;
   for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
