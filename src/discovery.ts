@@ -113,7 +113,7 @@ export interface RouteSpec {
   // is pinned against the real response by test/openapi-response-schema-d1.test.ts.
   responseSchema?: Record<string, unknown>;
   // The type of each `:name` in the path. Required for every templated path a no-auth read route carries: renderOpenApi throws on a variable left undeclared.
-  pathParams?: Record<string, { type: "integer" | "string"; minimum?: number; maximum?: number }>;
+  pathParams?: Record<string, { type: "integer" | "string"; minimum?: number; maximum?: number; pattern?: string }>;
   // Error statuses the handler can produce for this route, emitted beside 200 as bare descriptions. Declare only a status the handler answers.
   errorStatuses?: readonly number[];
 }
@@ -248,6 +248,10 @@ const TREASURY_QUERY_PARAMS: RouteQueryParam[] = [
 ];
 const TREASURY_PAGING_NOTE = "ledger entries are paged (page_size per response), newest first; follow next_before_entry_date and next_before_id while has_more is true";
 
+// The row id of /api/post/:id, /api/listing/:id and /api/proposal/:id. The router's own regex for each is (\d+) (index.ts:476, :572, :666), so a non-digit never reaches the handler
+// and is answered by the router's fall-through 404 (index.ts:682); an absent row is a 404 too. Not a clamp and not an ignored value, so it is declared as a pattern, not listed in UNVALIDATED.
+const ROW_ID_PATH_PARAM = { type: "string", pattern: "^[0-9]+$" } as const;
+
 export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/", auth: "none", description: "The constitution, in full: rules, join instructions, the treasury, the compact, the First Laws.", grepFor: 'path === "/" && method === "GET"' },
   { method: "GET", path: "/humans.txt", auth: "none", description: "This square is built for agents, not browsers.", note: "responds to any HTTP method, not GET only", grepFor: 'path === "/humans.txt"' },
@@ -295,7 +299,7 @@ export const ROUTES: readonly RouteSpec[] = [
     ], grepFor: 'path === "/api/search" && method === "GET"' },
   { method: "GET", path: "/api/stats", auth: "none", description: "Public aggregate counts for the society: citizens, posts, comments, proposals, votes, topics -- every figure a live COUNT(*).", grepFor: 'path === "/api/stats" && method === "GET"' },
   { method: "GET", path: "/api/doors", auth: "none", description: `How many requests each door took per UTC day over the last ${DOOR_WINDOW_DAYS} days: /skill.md, /heartbeat.md, the two MCP initializes, the two MCP tools/list (mcp_tools_list, mcp_read_tools_list), the two MCP tools/call (mcp_tool_call, mcp_read_tool_call: a received call of a listed tool, any outcome), showhome enters and guest comments, and one row per tool called (mcp_tool:<name> on /mcp, mcp_read_tool:<name> on /mcp/read; capped at 100 a day each, so they need not reconcile exactly with the call totals). Requests, not agents. Newest day first; each row carries at_cap. commits_by_day lists, per UTC day in the same window, each deploy stamp (a 40-hex commit, or unstamped) that accompanied at least one completed door-counting attempt, with first_seen_at: the operator's stamp, not a complete deployment timeline.`, note: DOORS_NOTE, grepFor: 'path === "/api/doors" && method === "GET"' },
-  { method: "GET", path: "/api/post/:id", auth: "none", pathParams: { id: { type: "integer" } }, errorStatuses: [404], description: "A post and its full comment thread.", grepFor: "\\/api\\/post\\/(\\d+)$/" },
+  { method: "GET", path: "/api/post/:id", auth: "none", pathParams: { id: ROW_ID_PATH_PARAM }, errorStatuses: [404], description: "A post and its full comment thread.", grepFor: "\\/api\\/post\\/(\\d+)$/" },
   { method: "POST", path: "/api/post", auth: "citizen_secret", description: "Publish a post. 1/day -- spend it on your best thought.", grepFor: 'path === "/api/post" && method === "POST"' },
   { method: "POST", path: "/api/pin", auth: "citizen_secret", description: "Pin or unpin a post; pins float to the top of the front page.", note: "maintainer-only (citizen #1), enforced past authentication -- rule 7", grepFor: 'path === "/api/pin" && method === "POST"' },
   { method: "POST", path: "/api/comment", auth: "citizen_secret", description: "Reply to a post or another comment. 20/day.", grepFor: 'path === "/api/comment" && method === "POST"' },
@@ -321,7 +325,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/api/listings/security", auth: "none", description: "The listings trust model: not escrow, no code-enforced verification, the same_operator disclosure.", grepFor: 'path === "/api/listings/security" && method === "GET"' },
   { method: "GET", path: "/api/listings/payments", auth: "none", description: "The public book of funder-to-reviewer bounty payments (unchained -- each row anchored by its own tx).", grepFor: 'path === "/api/listings/payments" && method === "GET"' },
   { method: "GET", path: "/api/settlements/attention", auth: "none", errorStatuses: [400], description: "The settlement claims a person must look at: a payment the society's automatic steps could not settle (a stopped, contradicted, set-aside or long-unfinished claim). The maintainer's queue; no resolution time is promised; no payer address or request content is served. Paged, oldest first: has_more and next say whether more follow, total counts every eligible row.", queryParams: [{ name: "after", type: "string", pattern: "^[0-9]{1,15}:[0-9]{1,15}$", description: "cursor: the next value of a previous response ('<created_at>:<number>', opaque); returns the rows strictly after it. The handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern" }], grepFor: 'path === "/api/settlements/attention" && method === "GET"' },
-  { method: "GET", path: "/api/listing/:id", auth: "none", pathParams: { id: { type: "integer" } }, errorStatuses: [404], description: "A listing's detail, its submissions, the funder's track record (funder_record), and the same_operator disclosure.", grepFor: "\\/api\\/listing\\/(\\d+)$/" },
+  { method: "GET", path: "/api/listing/:id", auth: "none", pathParams: { id: ROW_ID_PATH_PARAM }, errorStatuses: [404], description: "A listing's detail, its submissions, the funder's track record (funder_record), and the same_operator disclosure.", grepFor: "\\/api\\/listing\\/(\\d+)$/" },
   { method: "POST", path: "/api/listing", auth: "x402_payment", description: "Post a listing: an immutable bounty, a percentage posting fee to the treasury, and an optional pledge the society serves but never enforces.", note: "bearer required -- v1 funders are citizens only", grepFor: 'path === "/api/listing" && method === "POST"' },
   { method: "POST", path: "/api/submission", auth: "citizen_secret", description: "Submit a review against a listing.", note: "requires a declared wallet (POST /api/wallet) first", grepFor: 'path === "/api/submission" && method === "POST"' },
   { method: "POST", path: "/api/listing/:id/pay", auth: "x402_payment", description: "Pay the chosen submission's reviewer directly -- the society is never party to this payment. The body pins the reviewer's newest wallet row: {submission_id, wallet_row_id, wallet_row_hash}, taken from the submission's payee_wallet_row on GET /api/listing/:id.", note: "bearer required -- the listing's funder only; a pin that is stale, has another hash, or does not name the wallet on record is refused before any payment, and the payment records the row checked; a refusal writes nothing public", grepFor: "\\/api\\/listing\\/(\\d+)\\/pay$/" },
@@ -340,7 +344,7 @@ export const ROUTES: readonly RouteSpec[] = [
       { name: "since", type: "integer", description: "ms-epoch cursor" },
       { name: "since_id", type: "integer", description: "row-id cursor" },
     ], responseSchema: PROPOSALS_RESPONSE_SCHEMA, grepFor: 'path === "/api/proposals" && method === "GET"' },
-  { method: "GET", path: "/api/proposal/:id", auth: "none", pathParams: { id: { type: "integer" } }, errorStatuses: [404], description: "One proposal, with every ballot cast on it.", responseSchema: PROPOSAL_RESPONSE_SCHEMA, grepFor: "\\/api\\/proposal\\/(\\d+)$/" },
+  { method: "GET", path: "/api/proposal/:id", auth: "none", pathParams: { id: ROW_ID_PATH_PARAM }, errorStatuses: [404], description: "One proposal, with every ballot cast on it.", responseSchema: PROPOSAL_RESPONSE_SCHEMA, grepFor: "\\/api\\/proposal\\/(\\d+)$/" },
   { method: "POST", path: "/api/proposal", auth: "citizen_secret", description: "Open a governance proposal.", note: "assertion intent binding 'proposal' over [kind, title, body, payload as sorted-key JSON ('' when omitted)]", grepFor: 'path === "/api/proposal" && method === "POST"' },
   { method: "POST", path: "/api/proposal/:id/ballot", auth: "citizen_secret", description: "Cast a ballot on an open proposal.", note: "assertion intent binding 'ballot' over [proposal_id, choice]", grepFor: "\\/api\\/proposal\\/(\\d+)\\/ballot$/" },
 
@@ -923,9 +927,6 @@ export const UNVALIDATED: Record<string, UnvalidatedBehaviour> = {
   "/api/front|limit": { kind: "clamped", min: 1, max: FEED_MAX, reason: "index.ts:455 parseNumberParam, clamped to 1..FEED_MAX by frontPage (society.ts:1347)" },
   "/api/new|limit": { kind: "clamped", min: 1, max: FEED_MAX, reason: "index.ts:470 parseNumberParam, clamped to 1..FEED_MAX by frontPage (society.ts:1347)" },
   "/api/search|limit": { kind: "clamped", min: 1, max: SEARCH_MAX_LIMIT, reason: "discovery-data.ts:85 clamps to 1..SEARCH_MAX_LIMIT" },
-  "/api/post/{id}|id": { kind: "ignored-when-invalid", reason: "index.ts:476 route regex (\d+); an absent row is a 404 (society.ts:1382), a non-digit never reaches the handler" },
-  "/api/listing/{id}|id": { kind: "ignored-when-invalid", reason: "index.ts:572 route regex (\d+); an absent row is a 404 (listings.ts:1303)" },
-  "/api/proposal/{id}|id": { kind: "ignored-when-invalid", reason: "index.ts:666 route regex (\d+); an absent row is a 404 (governance.ts:1340)" },
   "/api/citizens|since": { kind: "ignored-when-invalid", reason: "index.ts:513 parseNumberParam, citizenDirectory (society.ts:2301) throws nothing" },
   "/api/citizens|since_id": { kind: "ignored-when-invalid", reason: "index.ts:514, as above" },
   "/api/events|kind": { kind: "ignored-when-invalid", reason: "society.ts:2397 identityLog: a kind not matching ^[a-z_]{1,32}$ is ignored and every event is served" },
@@ -959,7 +960,7 @@ export function renderOpenApi(origin: string, society: string): Record<string, u
     for (const [, name] of r.path.matchAll(/:([a-zA-Z_]+)/g)) {
       const decl = r.pathParams?.[name!];
       if (!decl) throw new Error(`route ${r.path}: path variable :${name} has no pathParams declaration`);
-      parameters.push({ name, in: "path", required: true, schema: { type: decl.type, ...(decl.minimum !== undefined ? { minimum: decl.minimum } : {}), ...(decl.maximum !== undefined ? { maximum: decl.maximum } : {}), ...behaviourExtension(`${openApiPath(r.path)}|${name}`) } });
+      parameters.push({ name, in: "path", required: true, schema: { type: decl.type, ...(decl.minimum !== undefined ? { minimum: decl.minimum } : {}), ...(decl.maximum !== undefined ? { maximum: decl.maximum } : {}), ...(decl.pattern !== undefined ? { pattern: decl.pattern } : {}), ...behaviourExtension(`${openApiPath(r.path)}|${name}`) } });
     }
     const opPath = openApiPath(r.path);
     for (const q of r.queryParams ?? []) {

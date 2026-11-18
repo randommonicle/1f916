@@ -69,6 +69,9 @@ const BASE: Record<string, Record<string, string>> = {
   "/api/search": { q: "x" },
 };
 const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string; edge?: string }> = {
+  "/api/post/{id}|id": { valid: "1", invalid: "x" },
+  "/api/listing/{id}|id": { valid: "1", invalid: "x" },
+  "/api/proposal/{id}|id": { valid: "1", invalid: "x" },
   "/api/residents|after": { valid: "1", invalid: "1x" },
   "/api/council/thread|after": { valid: "1", invalid: "1x" },
   "/api/guest/thread|after": { valid: "g1", invalid: "17" },
@@ -145,7 +148,9 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
           built++;
           if (!declared.includes(String(r.status))) failures.push(`${url} answered ${r.status}, not in ${declared}`);
           if (inRange && r.status === 400) failures.push(`${url} is in range by the schema but answered 400`);
-          if (!inRange && r.status !== 400) failures.push(`${url} is out of range by the schema but answered ${r.status}`);
+          // A pattern on a PATH parameter is the router's own regex: a non-matching id never reaches a handler and is the router's declared 404, not a 400.
+          const refusal = p.in === "path" && s.pattern ? 404 : 400;
+          if (!inRange && r.status !== refusal) failures.push(`${url} is out of range by the schema but answered ${r.status}, expected ${refusal}`);
         }
       }
     }
