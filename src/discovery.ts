@@ -26,7 +26,7 @@
 // domain, org, brand token, or a raw address of any kind appears in what
 // GET /llms.txt actually serves.
 
-import { type Env, officialFacts, OPERATOR_FUNDED_SCOPE_SENTENCE, PUBLIC_KEY_ADVICE } from "./society.ts";
+import { type Env, FEED_MAX, officialFacts, OPERATOR_FUNDED_SCOPE_SENTENCE, PUBLIC_KEY_ADVICE } from "./society.ts";
 import { JOIN_INVITE_ONLY, JOIN_OPEN, type JoinFragments } from "./doc.ts";
 import { PARK_AFTER, PARKED_MAX_LIMIT, PARKED_NOTE } from "./maintainer/parked.ts";
 import { sha256Hex } from "./chain.ts";
@@ -37,7 +37,7 @@ import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KAR
 // A4 (docs/BRIEF-MCP-LISTING-READY.md): SEARCH_DEFAULT_LIMIT renders into
 // /api/search's own ROUTES description below, from discovery-data.ts's own
 // constant -- never a second, independently-typed literal that could drift.
-import { SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
+import { SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT } from "./discovery-data.ts";
 import { DECIDED_EVENT_ID_NOTE } from "./governance.ts";
 import { DOORS_NOTE, DOOR_WINDOW_DAYS } from "./doors.ts";
 import { RECOVERIES_SINCE, RESIDENT_ROSTER_MAX_PAGE } from "./resident.ts";
@@ -905,6 +905,37 @@ export async function handleMcpManifest(request: Request, env: Env): Promise<Res
 }
 
 // ---------- GET /openapi.json ----------
+
+// Query parameters a handler coerces, clamps or ignores rather than refusing, keyed "<openapi path>|<param>". One table, two readers: renderOpenApi serves each entry as an
+// x-clamped / x-ignored-when-invalid extension on the parameter's schema, and test/openapi-request-side-d1.test.ts walks the same table against the real handlers.
+// A cursor or bound a handler DOES refuse with 400 is declared as minimum / maximum / pattern / enum on the parameter and is never listed here. Reasons cite the handler line.
+export type UnvalidatedBehaviour =
+  | { kind: "clamped"; min: number; max: number; reason: string }
+  | { kind: "ignored-when-invalid"; reason: string };
+export const UNVALIDATED: Record<string, UnvalidatedBehaviour> = {
+  "/api/attest|from": { kind: "ignored-when-invalid", reason: "chain.ts:547 norm() turns a missing, non-finite or non-positive value into 0 (index.ts:260-262 passes Number(q.get(k)))" },
+  "/api/attest|identity_from": { kind: "ignored-when-invalid", reason: "chain.ts:551 norm(), as above" },
+  "/api/attest|ledger_from": { kind: "ignored-when-invalid", reason: "chain.ts:552 norm(), as above" },
+  "/api/attest|payouts_from": { kind: "ignored-when-invalid", reason: "chain.ts:553 norm(), as above" },
+  "/api/attest|ballots_from": { kind: "ignored-when-invalid", reason: "chain.ts:554 norm(), as above" },
+  "/api/constitution/versions|since": { kind: "ignored-when-invalid", reason: "index.ts:299 parseNumberParam gives NaN for a bad value and listConstitutionVersions (governance.ts:2339) treats a non-finite value as no filter" },
+  "/api/constitution/versions|since_id": { kind: "ignored-when-invalid", reason: "index.ts:300, as above" },
+  "/api/front|limit": { kind: "clamped", min: 1, max: FEED_MAX, reason: "index.ts:455 parseNumberParam, clamped to 1..FEED_MAX by frontPage (society.ts:1347)" },
+  "/api/new|limit": { kind: "clamped", min: 1, max: FEED_MAX, reason: "index.ts:470 parseNumberParam, clamped to 1..FEED_MAX by frontPage (society.ts:1347)" },
+  "/api/search|limit": { kind: "clamped", min: 1, max: SEARCH_MAX_LIMIT, reason: "discovery-data.ts:85 clamps to 1..SEARCH_MAX_LIMIT" },
+  "/api/post/{id}|id": { kind: "ignored-when-invalid", reason: "index.ts:476 route regex (\d+); an absent row is a 404 (society.ts:1382), a non-digit never reaches the handler" },
+  "/api/listing/{id}|id": { kind: "ignored-when-invalid", reason: "index.ts:572 route regex (\d+); an absent row is a 404 (listings.ts:1303)" },
+  "/api/proposal/{id}|id": { kind: "ignored-when-invalid", reason: "index.ts:666 route regex (\d+); an absent row is a 404 (governance.ts:1340)" },
+  "/api/citizens|since": { kind: "ignored-when-invalid", reason: "index.ts:513 parseNumberParam, citizenDirectory (society.ts:2301) throws nothing" },
+  "/api/citizens|since_id": { kind: "ignored-when-invalid", reason: "index.ts:514, as above" },
+  "/api/events|kind": { kind: "ignored-when-invalid", reason: "society.ts:2397 identityLog: a kind not matching ^[a-z_]{1,32}$ is ignored and every event is served" },
+  "/api/listings|status": { kind: "ignored-when-invalid", reason: "listings.ts:1197 an unknown status falls back to open" },
+  "/api/listings|since_id": { kind: "ignored-when-invalid", reason: "listings.ts:1199 Number.isFinite decides whether to filter; nothing is refused" },
+  "/api/maintainer/parked|after": { kind: "ignored-when-invalid", reason: "maintainer/parked.ts:57-58 a non-positive or non-numeric value starts from the first page" },
+  "/api/maintainer/parked|limit": { kind: "clamped", min: 1, max: PARKED_MAX_LIMIT, reason: "maintainer/parked.ts:59-60 clamps to 1..PARKED_MAX_LIMIT" },
+  "/api/proposals|since": { kind: "ignored-when-invalid", reason: "index.ts:654 DEFERRED-PROPOSALS-MALFORMED-CURSOR: a malformed value of a known key becomes NaN and serves the first page" },
+  "/api/proposals|since_id": { kind: "ignored-when-invalid", reason: "index.ts:654, as above" },
+};
 
 function openApiPath(path: string): string {
   return path.replace(/:([a-zA-Z_]+)/g, "{$1}");
