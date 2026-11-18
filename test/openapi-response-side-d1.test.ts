@@ -52,3 +52,41 @@ test("the extensions and the UNVALIDATED table agree both ways", () => {
   const clamps = Object.values(UNVALIDATED).filter((u) => u.kind === "clamped");
   assert.ok(clamps.length >= 4 && clamps.every((u) => u.kind === "clamped" && u.min >= 1 && u.max > u.min), "the clamp bounds are real numbers taken from the code");
 });
+
+// [route, the parameter that takes the cursor, the 200 field that carries it, whether the field is null at the end]
+const CURSOR_ROUTES: Array<[string, string, string, boolean]> = [
+  ["/api/residents", "after", "next_cursor", true],
+  ["/api/council/thread", "after", "next_cursor", true],
+  ["/api/guest/thread", "after", "guest_thread_next", true],
+  ["/api/settlements/attention", "after", "next", true],
+  ["/api/guest/inbox", "cursor", "next_cursor", false],
+  ["/api/guest/due", "after", "next_cursor", true],
+  ["/api/inbox", "cursor", "next_cursor", false],
+];
+
+test("every cursor a route serves carries the pattern of the parameter it feeds", () => {
+  const wrong: string[] = [];
+  for (const [path, param, field, nullable] of CURSOR_ROUTES) {
+    const want = paramsOf(path).find((p) => p.name === param)?.schema.pattern;
+    const got = okSchema(path).properties?.[field];
+    if (typeof want !== "string") wrong.push(`${path} ${param} declares no pattern`);
+    else if (!got) wrong.push(`${path} 200 declares no ${field}`);
+    else {
+      if (got.pattern !== want) wrong.push(`${path} ${field} pattern ${got.pattern} is not the ${param} pattern ${want}`);
+      if (got.type !== "string") wrong.push(`${path} ${field} is not a string`);
+      if (Boolean(got.nullable) !== nullable) wrong.push(`${path} ${field} nullable should be ${nullable}`);
+      if (!(okSchema(path).required ?? []).includes(field)) wrong.push(`${path} ${field} is not required`);
+    }
+  }
+  assert.equal(CURSOR_ROUTES.length, 7, "residents plus the six bare cursor routes (the brief says eight; its own list names seven)");
+  assert.deepEqual(wrong, []);
+});
+
+test("the parked list keeps its integer cursor on both sides", () => {
+  const after = paramsOf("/api/maintainer/parked").find((p) => p.name === "after")!.schema;
+  const next = okSchema("/api/maintainer/parked").properties!.next_cursor;
+  assert.equal(after.type, "integer");
+  assert.equal(next.type, "integer");
+  assert.equal(next.nullable, true);
+  assert.equal(next.pattern, undefined, "no string pattern: the cursor is an integer");
+});
