@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parsePowerShellFile } from "./helpers/ps-parse.ts";
+import { renderOpenApi } from "../src/discovery.ts";
 
 const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
 const SCRIPT_PATH = here("../scripts/deploy-openapi-response-side.ps1");
@@ -103,8 +104,8 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   const ok = runPs(harness(LIVE, FULL))!;
   assert.equal(ok.code, 0);
   assert.match(ok.out, /\[PASSED-PINS\]/);
-  // As committed, the script's own pin is the placeholder, so the real script stops at step 0a today.
-  assert.match(script, /^\$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"$/m, "the hub has not yet set the reviewed pin: the committed script must stop at 0a");
+  // The script's own pin is the placeholder (step 0a stops on it) or the hub's full lower-case sha: setting the pin must not red this suite, because the script's own npm test step would then stop the deploy.
+  assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m, "the reviewed pin is the placeholder or a full lower-case sha");
 });
 
 test("the steps are in the load-bearing order, there is no migration or D1 step, wrangler is used once (the stamped deploy), and the ride sends no POST and no request body", () => {
@@ -146,9 +147,10 @@ const cap = (c: Cap): string => `@{ Code = ${q(c.code)}; Type = 'application/jso
 const slice = (from: string, to: string): string => defs.slice(defs.indexOf(from), defs.indexOf(to));
 
 const DIGITS = "^[0-9]{1,15}$";
-const cursorRoute = (pattern: string | undefined, nextCursor: unknown) => ({
+const INBOX_PATTERN: string = ((renderOpenApi("https://example.test", "Commonhold") as any).paths["/api/inbox"].get.parameters as any[]).find((p) => p.name === "cursor").schema.pattern; // the real served pattern, so the good document is the real one
+const cursorRoute = (pattern: string | undefined, nextCursor: unknown, param = "after") => ({
   get: {
-    parameters: [{ name: "after", in: "query", schema: { type: "string", ...(pattern === undefined ? {} : { pattern }) } }],
+    parameters: [{ name: param, in: "query", schema: { type: "string", ...(pattern === undefined ? {} : { pattern }) } }],
     responses: { "200": { content: { "application/json": { schema: { properties: nextCursor === undefined ? {} : { next_cursor: nextCursor } } } } } },
   },
 });
@@ -160,6 +162,7 @@ const goodDoc = (): any => ({
     "/api/post/{id}": { get: { parameters: [{ name: "id", in: "path", schema: { type: "string", pattern: "^[0-9]+$" } }] } },
     "/api/residents": cursorRoute(DIGITS, { type: "string", nullable: true, pattern: DIGITS }),
     "/api/council/thread": cursorRoute(DIGITS, { type: "string", nullable: true, pattern: DIGITS }),
+    "/api/inbox": cursorRoute(INBOX_PATTERN, { type: "string", pattern: INBOX_PATTERN }, "cursor"),
   },
 });
 const edit = (f: (d: any) => void): string => {
@@ -186,6 +189,11 @@ test("the response-side check, run for real, passes the good document and fails 
     ["councilnonext", { code: "200", body: edit((d) => (d.paths["/api/council/thread"] = cursorRoute(DIGITS, undefined))) }, "/api/council/thread 200 declares no next_cursor"],
     ["councilnextnopattern", { code: "200", body: edit((d) => (d.paths["/api/council/thread"] = cursorRoute(DIGITS, { type: "string", nullable: true }))) }, "/api/council/thread 200 next_cursor pattern is ''"],
     ["councilnoafter", { code: "200", body: edit((d) => (d.paths["/api/council/thread"].get.parameters = [])) }, "/api/council/thread route declares no after"],
+    ["noinboxparam", { code: "200", body: edit((d) => (d.paths["/api/inbox"].get.parameters = [])) }, "no cursor parameter on /api/inbox"],
+    ["inboxnonext", { code: "200", body: edit((d) => (d.paths["/api/inbox"] = cursorRoute(INBOX_PATTERN, undefined, "cursor"))) }, "/api/inbox 200 declares no next_cursor"],
+    ["inboxnextdiffers", { code: "200", body: edit((d) => (d.paths["/api/inbox"].get.responses["200"].content["application/json"].schema.properties.next_cursor.pattern = DIGITS)) }, "/api/inbox 200 next_cursor pattern is"],
+    ["inboxold15", { code: "200", body: edit((d) => { const old = "^c[0-9]{1,15}-p[0-9]{1,15}(-g[0-9]{1,15})?$"; d.paths["/api/inbox"] = cursorRoute(old, { type: "string", pattern: old }, "cursor"); }) }, "refuses the largest cursor the route serves"],
+    ["inboxloose", { code: "200", body: edit((d) => { const loose = "^c[0-9]+-p[0-9]+(-g[0-9]+)?$"; d.paths["/api/inbox"] = cursorRoute(loose, { type: "string", pattern: loose }, "cursor"); }) }, "accepts c9007199254740992-p0"],
     ["500", { code: "500", body: JSON.stringify(goodDoc()) }, "expected 200"],
     ["html", { code: "200", body: "<html>x</html>" }, "did not return JSON"],
     ["empty", { code: "200", body: "" }, "did not return JSON"],

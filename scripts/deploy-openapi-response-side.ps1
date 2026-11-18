@@ -8,7 +8,7 @@
 # $REVIEWED_COMMIT is the commit the review converged on, a placeholder until the hub sets it. Step 0a STOPS, before any git or network command, while EITHER still holds its placeholder or is not 40 lower-case hex.
 # THE DEPLOY STAMPS THE COMMIT: `npx wrangler deploy --var CODE_COMMIT:<sha>`. The poll waits until GET /api/attest serves code.commit equal to the pinned sha AND code.version_id equal to the
 # Current Version ID wrangler printed AND GET /openapi.json declares what THIS wave serves (Test-ResponseSideServed: x-clamped on /api/search limit, x-ignored-when-invalid on /api/attest from, the digits
-# pattern on /api/post/{id} id, and the cursor pattern on the 200 next_cursor of /api/residents and /api/council/thread; all absent before this deploy, checked in step 2).
+# pattern on /api/post/{id} id, and the cursor pattern on the 200 next_cursor of /api/residents and /api/council/thread, and the /api/inbox cursor pattern holding the largest safe cursor; all absent before this deploy, checked in step 2).
 # L-167: EVERY READ AFTER THE DEPLOY IS RETRIED. A single read straight after a write is "not yet seen", never "failed". The poll and every ride check need $GOOD_READS_NEEDED consecutive good reads,
 # within a bounded number of tries, before they judge; no stop message names a rollback until those retries have run out, and even then it says to read the deployments list first.
 # The ROLLBACK TARGET is the version id GET /api/attest served BEFORE the deploy (read live, never typed in). The wave is rollback-safe: no schema change.
@@ -158,6 +158,13 @@ function Test-ResponseSideServed($r) {
     if ($null -eq $nextField) { return ("the " + $cursorRoute + " 200 declares no next_cursor") }
     if ([string]$nextField.pattern -cne [string]$afterParam.schema.pattern) { return ("the " + $cursorRoute + " 200 next_cursor pattern is '" + $nextField.pattern + "', expected the after pattern " + $afterParam.schema.pattern) }
   }
+  $inboxParam = Get-DocParam $j "/api/inbox" "cursor"
+  if ($null -eq $inboxParam) { return "GET /openapi.json declares no cursor parameter on /api/inbox" }
+  $inboxNext = $j.paths.'/api/inbox'.get.responses.'200'.content.'application/json'.schema.properties.next_cursor
+  if ($null -eq $inboxNext) { return "the /api/inbox 200 declares no next_cursor" }
+  if ([string]$inboxNext.pattern -cne [string]$inboxParam.schema.pattern) { return ("the /api/inbox 200 next_cursor pattern is '" + $inboxNext.pattern + "', expected the cursor parameter pattern " + $inboxParam.schema.pattern) }
+  if (-not ("c9007199254740991-p9007199254740991-g9007199254740991" -cmatch [string]$inboxParam.schema.pattern)) { return "the /api/inbox cursor pattern refuses the largest cursor the route serves (c9007199254740991-p9007199254740991-g9007199254740991)" }
+  if ("c9007199254740992-p0" -cmatch [string]$inboxParam.schema.pattern) { return "the /api/inbox cursor pattern accepts c9007199254740992-p0, a part above the safe-integer limit the route refuses with 400" }
   return ""
 }
 # L-167. Runs the check $check (a script block returning "" when the read is good, otherwise the reason it is not) until $need CONSECUTIVE good reads, at most $tries times, $delaySeconds apart.
