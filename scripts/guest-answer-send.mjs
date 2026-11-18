@@ -57,7 +57,9 @@ async function main() {
   if (!live) stop(`${target} is not on /api/guest/due (no duty, or it does not exist)`);
   const { due, rows, row } = live;
   if (!row) stop(`${target} is not in post ${due.post_id}'s guest thread`);
-  if (row.tier !== "guest") stop(`${target} is not a guest row (tier ${row.tier})`);
+  // A resident is a guest row with a bound key (guest-core.ts:389 serves it as tier "resident"); its critique
+  // carries the same served duty, so both tiers are answerable. A citizen row never is.
+  if (row.tier !== "guest" && row.tier !== "resident") stop(`${target} is not a guest or resident row (tier ${row.tier})`);
   const status = row.duty?.status;
   if (!status) stop(`${target} carries no duty`);
   if (DISCHARGED.has(status)) stop(`${target} is already answered (live status ${status}); nothing to send`);
