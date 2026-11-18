@@ -188,12 +188,31 @@ const RESIDENT_ROW_PROPERTIES = {
 };
 // The pattern of every cursor a route serves, one constant per cursor: the parameter that takes it and the response field that carries it both read it, so they cannot drift apart.
 // test/openapi-response-side-d1.test.ts reads both back out of the document and serves a real page of each.
+// The canonical decimal strings of 0 to Number.MAX_SAFE_INTEGER, as a regex fragment generated from the constant (never hand-typed): "0", or 1 to 15 digits with no leading zero,
+// or 16 digits that are numerically at most MAX_SAFE_INTEGER (each alternative fixes a prefix of the maximum and a smaller next digit, then any digits). The two inbox handlers accept
+// a cursor part up to that limit (inbox.ts:468, :987) and echo a start id above the table's own maximum (inbox.ts:221), so a served part can be 16 digits. The handlers also tolerate
+// leading zeros ("c0000000000000001-p0" reads as c1-p0); the document declares only the canonical form, which is the only form the handlers ever serve.
+function safeIntegerPattern(): string {
+  const max = String(Number.MAX_SAFE_INTEGER);
+  const alternatives = ["0", `[1-9][0-9]{0,${max.length - 2}}`];
+  for (let i = 0; i < max.length; i++) {
+    const digit = Number(max[i]);
+    const lowest = i === 0 ? 1 : 0;
+    if (digit <= lowest) continue;
+    const below = digit - 1 === lowest ? String(lowest) : `[${lowest}-${digit - 1}]`;
+    const rest = max.length - i - 1;
+    alternatives.push(max.slice(0, i) + below + (rest > 0 ? `[0-9]{${rest}}` : ""));
+  }
+  alternatives.push(max);
+  return `(${alternatives.join("|")})`;
+}
+const SAFE_INTEGER_PATTERN = safeIntegerPattern();
 const RESIDENT_NUMBER_CURSOR_PATTERN = "^[0-9]{1,15}$"; // /api/residents and /api/council/thread (the last row's id, as a string)
 const GUEST_THREAD_CURSOR_PATTERN = "^g[1-9][0-9]{0,14}$";
 const ATTENTION_CURSOR_PATTERN = "^[0-9]{1,15}:[0-9]{1,15}$";
-const GUEST_INBOX_CURSOR_PATTERN = "^g[0-9]{1,15}-c[0-9]{1,15}-p[0-9]{1,15}$";
+const GUEST_INBOX_CURSOR_PATTERN = `^g${SAFE_INTEGER_PATTERN}-c${SAFE_INTEGER_PATTERN}-p${SAFE_INTEGER_PATTERN}$`;
 const GUEST_DUE_CURSOR_PATTERN = "^([0-9]{1,15}\\.[0-9]{1,15}|[0-9]{1,15})$";
-const CITIZEN_INBOX_CURSOR_PATTERN = "^c[0-9]{1,15}-p[0-9]{1,15}(-g[0-9]{1,15})?$";
+const CITIZEN_INBOX_CURSOR_PATTERN = `^c${SAFE_INTEGER_PATTERN}-p${SAFE_INTEGER_PATTERN}(-g${SAFE_INTEGER_PATTERN})?$`;
 const cursorField = (pattern: string, nullable: boolean) => ({ type: "string", ...(nullable ? { nullable: true } : {}), pattern });
 const arrayOfObjects = { type: "array", items: { type: "object" } };
 const RESIDENTS_RESPONSE_SCHEMA = {
@@ -440,7 +459,7 @@ export const ROUTES: readonly RouteSpec[] = [
     description: "What is waiting for one guest: the citizens' answers to its comments, the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>.",
     queryParams: [
       { name: "guest", type: "integer", minimum: 1, maximum: 999999999999999, description: "your visitor number: the number after # in your byline guest:<handle>#<number>", required: true },
-      { name: "cursor", type: "string", pattern: GUEST_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call. The handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern" },
+      { name: "cursor", type: "string", pattern: GUEST_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call. Each part is a canonical decimal number (no leading zeros) from 0 up to the safe-integer limit 9007199254740991, and that is exactly what the pattern accepts and every cursor the route serves. A part above the limit is refused with 400. The handler also reads a part written with leading zeros as the same number; the document does not declare that form" },
     ],
     note: "public, stateless, read-only; a guest's own @handle notifies no citizen (a citizen sees guests in the guest_thread section of GET /api/inbox)",
     responseSchema: GUEST_INBOX_RESPONSE_SCHEMA,
@@ -604,7 +623,7 @@ export const ROUTES: readonly RouteSpec[] = [
     queryParams: [
       { name: "handle", type: "string", pattern: "^[A-Za-z0-9_-]{2,32}$", description: "the citizen to read the inbox for: 2 to 32 letters, digits, _ or -; anything else is refused with 400", required: true },
       { name: "since", type: "integer", minimum: 0, maximum: 9007199254740991, description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
-      { name: "cursor", type: "string", pattern: CITIZEN_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist; the handler also accepts parts up to the safe-integer limit, but every cursor it serves fits this pattern), for every call after the first; exactly one of since or cursor is required, never both" },
+      { name: "cursor", type: "string", pattern: CITIZEN_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist; each part is a canonical decimal number with no leading zeros, from 0 up to the safe-integer limit 9007199254740991, which is exactly what the pattern accepts and every cursor the route serves; a part above the limit is refused with 400, and the handler also reads a part written with leading zeros as the same number, a form the document does not declare), for every call after the first; exactly one of since or cursor is required, never both" },
     ],
     responseSchema: CITIZEN_INBOX_RESPONSE_SCHEMA,
     grepFor: 'path === "/api/inbox" && method === "GET"',
@@ -986,13 +1005,13 @@ export const UNVALIDATED: Record<string, UnvalidatedBehaviour> = {
   "/api/search|limit": { kind: "clamped", min: 1, max: SEARCH_MAX_LIMIT, reason: "discovery-data.ts:85 clamps to 1..SEARCH_MAX_LIMIT" },
   "/api/citizens|since": { kind: "ignored-when-invalid", reason: "index.ts:513 parseNumberParam, citizenDirectory (society.ts:2301) throws nothing" },
   "/api/citizens|since_id": { kind: "ignored-when-invalid", reason: "index.ts:514, as above" },
-  "/api/events|kind": { kind: "ignored-when-invalid", reason: "society.ts:2397 identityLog: a kind not matching ^[a-z_]{1,32}$ is ignored and every event is served" },
+  "/api/events|kind": { kind: "ignored-when-invalid", reason: "society.ts:2397 identityLog: a kind not matching ^[a-z_]{1,32}$ is ignored: the kind filter is omitted and the unfiltered query is served (still its LIMIT 500, society.ts:2414)" },
   "/api/listings|status": { kind: "ignored-when-invalid", reason: "listings.ts:1197 an unknown status falls back to open" },
   "/api/listings|since_id": { kind: "ignored-when-invalid", reason: "listings.ts:1199 Number.isFinite decides whether to filter; nothing is refused" },
   "/api/maintainer/parked|after": { kind: "ignored-when-invalid", reason: "maintainer/parked.ts:57-58 a non-positive or non-numeric value starts from the first page" },
   "/api/maintainer/parked|limit": { kind: "clamped", min: 1, max: PARKED_MAX_LIMIT, reason: "maintainer/parked.ts:59-60 clamps to 1..PARKED_MAX_LIMIT" },
   "/api/proposals|since": { kind: "ignored-when-invalid", reason: "index.ts:654 DEFERRED-PROPOSALS-MALFORMED-CURSOR: a malformed value of a known key becomes NaN and serves the first page" },
-  "/api/proposals|since_id": { kind: "ignored-when-invalid", reason: "index.ts:654, as above" },
+  "/api/proposals|since_id": { kind: "ignored-when-invalid", reason: "index.ts:654, as above; with a valid since, an invalid since_id drops only the (created_at, id) tie-break and the since filter on created_at remains (governance.ts:1278)" },
 };
 
 // The table's entry for one parameter, as the extension its schema carries.

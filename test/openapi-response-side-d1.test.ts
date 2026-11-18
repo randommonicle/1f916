@@ -231,3 +231,79 @@ test("served truth: citizen inbox", async () => {
     d1.close();
   }
 });
+
+// ---------- the two inbox cursors: a part up to Number.MAX_SAFE_INTEGER is served back, so the pattern must hold it ----------
+
+const SAFE = "9007199254740991";
+const SAFE_MAX_16 = SAFE;
+const FIFTEEN = "999999999999999";
+
+test("the inbox cursor patterns accept exactly the canonical decimals 0 to 9007199254740991 per part", () => {
+  for (const [path, build] of [
+    ["/api/inbox", (v: string) => `c${v}-p${v}-g${v}`],
+    ["/api/guest/inbox", (v: string) => `g${v}-c${v}-p${v}`],
+  ] as const) {
+    const re = new RegExp(paramsOf(path).find((p) => p.name === "cursor")!.schema.pattern);
+    for (const ok of ["0", "7", FIFTEEN, SAFE, "9007199254740990", "1000000000000000", "8999999999999999"]) assert.ok(re.test(build(ok)), `${path} accepts ${ok}`);
+    for (const bad of ["9007199254740992", "9999999999999999", "9007199254741000", "10000000000000000", "01", "0000000000000001", ""]) assert.equal(re.test(build(bad)), false, `${path} refuses '${bad}'`);
+  }
+  assert.equal(SAFE, String(Number.MAX_SAFE_INTEGER));
+});
+
+test("served truth at the limit: a 15-digit and a 16-digit safe part, per component, is served back inside the declared pattern and followed once with 200; an unsafe part is a 400 the pattern also refuses", async () => {
+  const { d1, env } = world();
+  try {
+    const v = await seedVisitor(d1);
+    const routes = [
+      { path: "/api/inbox", base: "handle=alice", parts: ["c", "p", "g"], opt: [false, false, true], extra: "" },
+      { path: "/api/guest/inbox", base: `guest=${v.id}`, parts: ["g", "c", "p"], opt: [false, false, false], extra: "" },
+    ];
+    let served = 0;
+    for (const r of routes) {
+      const declared = paramsOf(r.path).find((p) => p.name === "cursor")!.schema;
+      const re = new RegExp(declared.pattern);
+      for (let at = 0; at < r.parts.length; at++) {
+        for (const value of [FIFTEEN, SAFE_MAX_16]) {
+          const cursor = r.parts.map((k, i) => (i === at ? `${k}${value}` : `${k}0`)).filter((_, i) => !(r.opt[i] && i !== at)).join("-");
+          assert.ok(re.test(cursor), `${cursor} is inside the declared pattern`);
+          const first = await call(env, "GET", `${r.path}?${r.base}&cursor=${cursor}`);
+          assert.equal(first.status, 200, `${r.path} ${cursor}`);
+          assert.deepEqual(conform(okSchema(r.path), first.body, r.path), [], `${r.path} ${cursor} body against its declared 200`);
+          assert.ok(re.test(first.body.next_cursor), `${r.path} served ${first.body.next_cursor} for ${cursor}: it fits the declared pattern`);
+          const second = await call(env, "GET", `${r.path}?${r.base}&cursor=${first.body.next_cursor}`);
+          assert.equal(second.status, 200, `${r.path} follows ${first.body.next_cursor}`);
+          served++;
+        }
+        const unsafe = r.parts.map((k, i) => (i === at ? `${k}9007199254740992` : `${k}0`)).filter((_, i) => !(r.opt[i] && i !== at)).join("-");
+        assert.equal(re.test(unsafe), false, `the pattern refuses ${unsafe}`);
+        assert.equal((await call(env, "GET", `${r.path}?${r.base}&cursor=${unsafe}`)).status, 400, `${r.path} refuses ${unsafe} with 400`);
+      }
+    }
+    assert.ok(served >= 12, `served ${served} limit cursors`);
+  } finally {
+    d1.close();
+  }
+});
+
+test("finding: the handlers also read a part written with leading zeros as the same number; the document declares only the canonical form and says so", async () => {
+  const { d1, env } = world();
+  try {
+    const v = await seedVisitor(d1);
+    for (const [path, base, cursors] of [
+      ["/api/inbox", "handle=alice", ["c0000000000000001-p0", "c00000000000000001-p0"]],
+      ["/api/guest/inbox", `guest=${v.id}`, ["g0000000000000001-c0-p0", "g00000000000000001-c0-p0"]],
+    ] as const) {
+      const declared = paramsOf(path).find((p) => p.name === "cursor")!;
+      for (const c of cursors) {
+        assert.equal(new RegExp(declared.schema.pattern).test(c), false, `the pattern does not declare ${c}`);
+        assert.equal((await call(env, "GET", `${path}?${base}&cursor=${c}`)).status, 200, `${path} still reads ${c} (not changed here)`);
+      }
+      const text = String((declared as any).description);
+      assert.match(text, /no leading zeros/);
+      assert.match(text, /leading zeros as the same number/);
+      assert.match(text, /safe-integer limit 9007199254740991/);
+    }
+  } finally {
+    d1.close();
+  }
+});

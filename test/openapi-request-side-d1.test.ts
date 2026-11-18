@@ -76,8 +76,8 @@ const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string; edge?: s
   "/api/council/thread|after": { valid: "1", invalid: "1x" },
   "/api/guest/thread|after": { valid: "g1", invalid: "17" },
   "/api/settlements/attention|after": { valid: "1:1", invalid: "1" },
-  "/api/inbox|cursor": { valid: "c0-p0", invalid: "c1" },
-  "/api/guest/inbox|cursor": { valid: "g0-c0-p0", invalid: "g1" },
+  "/api/inbox|cursor": { valid: "c0-p0", invalid: "c1", edge: "c9007199254740991-p9007199254740991-g9007199254740991" }, // alternation: longestMatch cannot build it, the handler's own limit is the edge
+  "/api/guest/inbox|cursor": { valid: "g0-c0-p0", invalid: "g1", edge: "g9007199254740991-c9007199254740991-p9007199254740991" },
   "/api/search|q": { valid: "x", invalid: " ", edge: "x".repeat(200) },
   "/api/inbox|handle": { valid: "ab", invalid: "!" },
   "/treasury|before_entry_date": { valid: "2026-01-01", invalid: "2026-1-1" },
@@ -140,7 +140,7 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
           const sample = PATTERN_SAMPLES[`${path}|${p.name}`];
           assert.ok(sample, `a pattern sample exists for ${path} ${p.name}`);
           assert.ok(new RegExp(s.pattern).test(sample.valid) && !new RegExp(s.pattern).test(sample.invalid), `the sample agrees with the served pattern for ${path} ${p.name}`);
-          cases.push([sample.valid, true], [s.pattern.includes("\\") ? (sample.edge ?? sample.valid) : longestMatch(s.pattern), true], [sample.invalid, false]);
+          cases.push([sample.valid, true], [sample.edge !== undefined && !s.pattern.includes("\\") ? sample.edge : s.pattern.includes("\\") ? (sample.edge ?? sample.valid) : longestMatch(s.pattern), true], [sample.invalid, false]);
         }
         for (const [value, inRange] of cases) {
           const url = urlFor(path, BASE[path] ?? {}, p, value);
