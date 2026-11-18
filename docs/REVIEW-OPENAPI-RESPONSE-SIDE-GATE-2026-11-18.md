@@ -1,0 +1,34 @@
+# Gate record: OpenAPI response side (D-086), Sonnet tier, 18 Nov 2026
+
+Branch `openapi-response-side-2026-11-18`, head `54c80faa`, base `616213c6` (production serves `3a5dd18d`, one script-only commit below the base). Reviewer independent of the builder and both exchange seats.
+
+## Verdict: DEPLOYABLE
+Findings: HIGH 0, MEDIUM 0, LOW 2. No conditions beyond the deploy script's own pins (set `$REVIEWED_COMMIT` on the deploy day to the converged sha; the live base must still be `3a5dd18d`).
+
+## Checks
+1. `npm test`: 3346 tests, 3345 pass, 0 fail, 1 skipped. `npm run typecheck`: clean.
+2. Behaviour unchanged: `git diff --stat 616213c6..54c80faa` lists, in `src/`, only `src/discovery.ts` (+132/-16); the rest is the deploy script, its test and three test files. No handler, migration, `schema.sql`, `src/doc.ts`, llms.txt source, skill.md or heartbeat.md moved. `/llms.txt` renders only `q.name` for query parameters (`discovery.ts:688`), so it is unchanged. Two served texts besides `/openapi.json` do move, neither sha256-pinned: `/api/surface` (`renderSurface`, `discovery.ts:1085-1092`) serves each route's `queryParams` description and the guest-inbox and citizen-inbox cursor descriptions were reworded; and the pattern and `responseSchema` additions are stripped or absent there. No attested constitution text is involved (`src/doc.ts` unmoved).
+3. The document tells the truth.
+   - Sampled 12 `UNVALIDATED` entries against their handlers: `/api/attest` from (`chain.ts:547` norm), `/api/front` and `/api/new` limit (`index.ts:455`, `:470`, clamp `society.ts:1347`, `FEED_MAX = 100` at `society.ts:1283`), `/api/search` limit (`discovery-data.ts:85`), `/api/events` kind (`society.ts:2397`), `/api/listings` status and since_id (`listings.ts:1197-1199`), `/api/maintainer/parked` after and limit (`maintainer/parked.ts:57-60`), `/api/constitution/versions` since and since_id (`index.ts:297-300`, `governance.ts:2339`), `/api/proposals` since (`index.ts:654`, `governance.ts:1278`). All match the declared kind, bounds and reason text.
+   - The three `{id}` routes: router regexes `(\d+)` at `index.ts:476`, `:572`, `:666`; a non-digit falls through to the 404 at `index.ts:682`. The served document declares `{type: string, pattern: ^[0-9]+$}` with `200` and `404` on each (rendered and read back).
+   - The seven cursor routes: the continuation fields declared match the handlers (`council.ts:684`, `settlement-attention.ts:128-132`, `guest.ts:514-515` and `:604-614`, `inbox.ts:675-685` and `:1063-1068`); nullability matches (null at the end for five, never null for the two inboxes). Each is walked against a real served page in `test/openapi-response-side-d1.test.ts`.
+   - `safeIntegerPattern()`: extracted the served guest-inbox cursor group and compared it to `^(0|[1-9][0-9]*)$` and `BigInt <= 9007199254740991` over 300k+ random strings of 1 to 17 digits, MAX-50..MAX+50, and a million-wide window around MAX, plus 0, 00, 01, empty, negative, decimal and 17-digit cases: 0 mismatches.
+   - Leading-zero cursor (handler accepts `c0000000000000001-p0`, pattern refuses): acceptable. The document declares the canonical form, which is the only form a handler ever serves, so a client following the document is never refused; the stricter pattern only mislabels a form nobody is given. It is disclosed in the source comment (`discovery.ts:194`) and in the two parameter descriptions (the descriptions say each part is canonical with no leading zeros).
+4. Prove-it-can-fail (scratch edits in `src/discovery.ts`, restored with `git checkout -- src/discovery.ts`, `git status --short` empty after each; run against the three openapi D1 test files):
+   - M1: `ATTENTION_CURSOR_PATTERN` separator `:` to `-` -> RED: the boundary-request test and "served truth: settlements attention".
+   - M2: delete the `/api/front|limit` entry from `UNVALIDATED` -> RED: the boundary test, "every GET parameter is bounded or carries x-clamped / x-ignored-when-invalid", and "the extensions and the UNVALIDATED table agree both ways".
+   - M3: `safeIntegerPattern()` first alternative `{0,max.length-2}` to `-3` -> RED: the canonical-decimals test and the 15/16-digit served-truth test.
+   - M5: `GUEST_DUE_RESPONSE_SCHEMA.next_cursor` nullable true to false -> RED: "every cursor a route serves carries the pattern..." and "served truth: guest due, both views".
+   - M4 (survived, see Findings): `/api/search|limit` clamp max `SEARCH_MAX_LIMIT` to `+1` -> GREEN.
+   - Deploy script: `$LIVE_BASE_COMMIT` last hex digit changed -> RED ("the pins" test), restored.
+5. Deploy script `scripts/deploy-openapi-response-side.ps1` (read, not run; parses clean under the PowerShell parser, ASCII only): step 0a (lines for both pins) runs before any `git`, `npm`, `wrangler` or network command and stops on either placeholder or a non-40-hex value; `$LIVE_BASE_COMMIT = 3a5dd18df9a623325bfb1d569b956747700b11f2` and step 2 proves it against the live `code.commit`; step 0 stops if `src/doc.ts`, `migrations` or `schema.sql` moved since the live base, and applies the reviewed-source allowlist (this script, its test, `docs/`) after `$REVIEWED_COMMIT`. Post-deploy: `Confirm-Reads` needs 3 consecutive good reads within 12 tries for the attest, document, roster and sweep checks; `Wait-NewWorker` needs 3 in 24; no stop message prescribes rollback before retries are exhausted and each says to read `wrangler deployments list` first (L-167). `Test-ResponseSideServed` covers this wave (x-clamped, x-ignored-when-invalid, the digits pattern on `/api/post/{id}`, cursor patterns on residents, council thread and inbox, including the largest safe cursor accepted and `c9007199254740992-p0` refused), and the pre-deploy step requires the first reason to be the x-clamped one so a half-served document stops it.
+
+## Findings
+- LOW 1: the `x-clamped` minimum and maximum are not served-truth-tested against a handler. The table's maxima come from the handler's own constants (`FEED_MAX`, `SEARCH_MAX_LIMIT`, `PARKED_MAX_LIMIT`), so drift is unlikely, but the minimum `1` is a typed literal and mutation M4 (max plus one) passed every test. The test that reads the table checks only that the document equals the table and that `min >= 1 && max > min`.
+- LOW 2: `/api/surface` query_param descriptions for the two inbox cursors change (see Check 2). Not pinned, not attested, no handler involved; noted so the deploy log is complete.
+
+## Not checked
+- No live request of any kind; the deploy script was not run and `wrangler` was not touched.
+- Edge propagation of the new document and the post-deploy ride (its first run is the deploy).
+- The full 18-entry `UNVALIDATED` table: 12 sampled against handlers, the other entries (the remaining `/api/attest` per-chain parameters and `/api/citizens` since and since_id) were read as the same code path, not separately executed.
+- The exchange seats' own findings beyond their effect on the diff.
