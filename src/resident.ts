@@ -416,6 +416,13 @@ function serveResident(r: RosterRow) {
   };
 }
 
+// The resident-record count (a guests row with resident_at set: the same definition residentFacts in guest-core.ts keeps for official.residents.count). One place, so the roster's
+// `total` and the operators' page (src/operators.ts) read the same number, and the page can count residents without residentFacts' other two sums.
+export async function countResidents(db: D1Database): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM guests WHERE resident_at IS NOT NULL").first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 // DEFERRED-RESIDENT-ROSTER-COST (gate L3, 11 Oct): five correlated subqueries per resident on a public read; fine at this
 // scale, revisit (one aggregate join) before the roster passes a few hundred rows.
 export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unknown) {
@@ -432,13 +439,13 @@ export async function residentRoster(env: Env, afterRaw: unknown, limitRaw: unkn
   }
   const [page, total] = await Promise.all([
     env.DB.prepare(`${RESIDENT_SELECT} WHERE gs.resident_at IS NOT NULL AND gs.visitor_id > ?1 ORDER BY gs.visitor_id ASC LIMIT ?2`).bind(after, limit + 1).all<RosterRow>(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM guests WHERE resident_at IS NOT NULL").first<{ n: number }>(),
+    countResidents(env.DB),
   ]);
   const more = page.results.length > limit;
   const rows = more ? page.results.slice(0, limit) : page.results;
   return {
     residents: rows.map(serveResident),
-    total: total?.n ?? 0,
+    total,
     unit: RESIDENT_UNIT,
     has_more: more,
     next_cursor: more ? String(rows[rows.length - 1]!.number) : null,
