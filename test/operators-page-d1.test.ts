@@ -32,6 +32,9 @@ function fresh() {
   return { d1, env: guestEnv(d1), post };
 }
 
+// An absolute URL on the page is the request origin or the public repository, on a path boundary (so a look-alike host or repository name does not pass).
+const isAllowedUrl = (u: string) => u === ORIGIN || u.startsWith(`${ORIGIN}/`) || u === REPO_URL || u.startsWith(`${REPO_URL}/`);
+
 // The page's visible text: tags dropped, the five escapes undone.
 const plain = (html: string) => html.replace(/<style>[\s\S]*?<\/style>/g, "").replace(/<[^>]+>/g, "").replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
@@ -49,7 +52,7 @@ test("T1: 200, text/html, the two headers exactly; no script, src, form, link, i
     }
     const urls = text.match(/https?:\/\/[^\s"'<>)]+/g) ?? [];
     assert.ok(urls.length > 5, "the page does link out");
-    for (const u of urls) assert.ok(u.startsWith(ORIGIN) || u === REPO_URL || u.startsWith(`${REPO_URL}`), `absolute URL ${u} is neither the origin nor the repository`);
+    for (const u of urls) assert.ok(isAllowedUrl(u), `absolute URL ${u} is neither the origin nor the repository`);
     assert.ok(text.includes(REPO_URL));
     // the first lines say what the page is not
     assert.ok(plain(text).includes("This page is not a way to take part: there is still no human interface. It is how to set up an agent that takes part."));
@@ -163,10 +166,9 @@ test("T4: every interpolated value is escaped: a figure and an origin carrying <
   assert.ok(html.includes("&lt;script&gt;1&lt;/script&gt; citizens"));
 });
 
-test("T4 over the wire: a Host carrying markup cannot put a tag into the page", async () => {
+test("T4 served page: the paste inside <pre> carries no raw angle bracket (a plain request; hostile-origin escaping is proved by the pure test above)", async () => {
   const { d1, env } = fresh();
   try {
-    // a URL's host cannot hold '<', so the realistic carrier is a path-free origin with a port-like tail; the escape is proved above, and the served page never contains an unescaped angle bracket inside the paste
     const { text } = await get(env);
     const pre = text.slice(text.indexOf("<pre>") + 5, text.indexOf("</pre>"));
     assert.equal(/[<>]/.test(pre), false, "the paste is escaped text");
@@ -258,6 +260,26 @@ test("A6: /operators is in ROUTES (GET, none, text/html, a grepFor index.ts carr
     assert.equal(skill.includes("/operators"), false);
     const inbox = readFileSync(new URL("../src/inbox.ts", import.meta.url), "utf8");
     assert.ok(inbox.indexOf("DEFERRED-SKILL-MD-OPERATORS-LINK") > 0 && inbox.indexOf("DEFERRED-SKILL-MD-OPERATORS-LINK") < inbox.indexOf("DEFERRED-SKILL-MD-UNIQUENESS"));
+  } finally {
+    d1.close();
+  }
+});
+
+test("T1 the URL boundary check is a real boundary: a look-alike host or repository path does not pass it", () => {
+  const ok = isAllowedUrl;
+  assert.equal(ok(`${ORIGIN}/mcp`), true);
+  assert.equal(ok(ORIGIN), true);
+  assert.equal(ok(`${ORIGIN}.evil/x`), false);
+  assert.equal(ok(`${REPO_URL}-evil`), false);
+  assert.equal(ok(`${REPO_URL}/issues`), true);
+});
+
+test("the Ed25519 prerequisite is qualified: a signature is needed to become a resident by key, and the page does not say a signing tool is needed to become a resident at all", async () => {
+  const { d1, env } = fresh();
+  try {
+    const t = plain((await get(env)).text);
+    assert.ok(t.includes("Ed25519 signatures, to become a resident by key."));
+    assert.equal(t.includes("Ed25519 signatures, to become a resident."), false);
   } finally {
     d1.close();
   }

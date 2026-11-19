@@ -196,12 +196,17 @@ test("the page check, run for real against pages the real renderer produced, pas
     ["noopening", { code: "200", body: goodBody().replace("This page is not a way to take part", "Welcome") }, official(), "lacks 'This page is not a way to take part'"],
     ["nopaste", { code: "200", body: goodBody().replace("<pre>", "<p>") }, official(), "lacks '<pre>'"],
     ["officialnull", { code: "200", body: goodBody() }, "null", "GET /api/official was unreadable"],
-    ["citizensdiffer", { code: "200", body: goodBody({ citizens: 12 }) }, official(), "does not say '13 citizens.'"],
-    ["pluraldiffer", { code: "200", body: goodBody({ citizens: 1 }) }, official({ citizens: 2 }), "does not say '2 citizens.'"],
-    ["controlsdiffer", { code: "200", body: goodBody({ operator_controlled: 4 }) }, official(), "it controls 5 of them and paid for 12."],
-    ["actednullbutpage0", { code: "200", body: goodBody({ acted_30d: 0 }) }, official({ acted_30d: null }), "official acted_30d is null but the page does not say unavailable"],
-    ["actedzerovsunavailable", { code: "200", body: goodBody({ acted_30d: null }) }, official({ acted_30d: 0 }), "does not say '0 citizen seats wrote in the last 30 days'"],
-    ["residentsdiffer", { code: "200", body: goodBody({ residents: 51 }) }, official(), "Resident records: 52."],
+    ["citizensdiffer", { code: "200", body: goodBody({ citizens: 12 }) }, official(), "figures sentence"],
+    ["pluraldiffer", { code: "200", body: goodBody({ citizens: 1 }) }, official({ citizens: 2 }), "figures sentence"],
+    ["controlsdiffer", { code: "200", body: goodBody({ operator_controlled: 4 }) }, official(), "figures sentence"],
+    ["actednullbutpage0", { code: "200", body: goodBody({ acted_30d: 0 }) }, official({ acted_30d: null }), "figures sentence"],
+    ["actedzerovsunavailable", { code: "200", body: goodBody({ acted_30d: null }) }, official({ acted_30d: 0 }), "figures sentence"],
+    ["residentsdiffer", { code: "200", body: goodBody({ residents: 51 }) }, official(), "figures sentence"],
+    // a bare number would also match inside a longer one: the page says 113 and the route 13, the page says 12 seats and the route 2
+    ["113vs13", { code: "200", body: goodBody({ citizens: 113 }) }, official({ citizens: 13 }), "figures sentence"],
+    ["12seatsvs2", { code: "200", body: goodBody({ acted_30d: 12 }) }, official({ acted_30d: 2 }), "figures sentence"],
+    ["152vs52", { code: "200", body: goodBody({ residents: 152 }) }, official({ residents: 52 }), "figures sentence"],
+    ["1vs11", { code: "200", body: goodBody({ operator_paid: 11 }) }, official({ operator_paid: 1 }), "figures sentence"],
   ];
   const run = runPs(["$ErrorActionPreference = 'Stop'", cspLine, fns, ...cases.map(([name, c, off]) => `Write-Host ("RESULT ${name} [" + (Test-OperatorsServed ${capPage(c)} (${q(off)} | ConvertFrom-Json)) + "]")`)]);
   if (!run) return t.skip("no PowerShell available");

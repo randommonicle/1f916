@@ -176,23 +176,20 @@ function Test-OperatorsServed($r, $official) {
   }
   if ($null -eq $official -or $null -eq $official.composition -or $null -eq $official.residents) { return "GET /api/official was unreadable in this iteration, so the page's figures cannot be compared" }
   $comp = $official.composition
+  # The WHOLE figures sentence, rebuilt from /api/official, must be in the page, starting at the paragraph tag. A bare number would also match inside a longer one (13 inside 113, 2 inside 12), so every
+  # figure sits between fixed words and the sentence begins at "<p>": a different number or a different plural breaks the match.
   $nCit = [string]$comp.citizens
   $citWord = "citizens"
   if ($nCit -ceq "1") { $citWord = "citizen" }
-  if (-not $body.Contains($nCit + " " + $citWord + ". ")) { return ("the page does not say '" + $nCit + " " + $citWord + ".' (GET /api/official composition.citizens)") }
-  $nCtl = [string]$comp.operator_controlled
-  $nPaid = [string]$comp.operator_paid
-  if (-not $body.Contains("it controls " + $nCtl + " of them and paid for " + $nPaid + ".")) { return ("the page does not say 'it controls " + $nCtl + " of them and paid for " + $nPaid + ".'") }
-  if ($null -eq $comp.acted_30d) {
-    if (-not $body.Contains("Citizen seats that wrote in the last 30 days: unavailable.")) { return "official acted_30d is null but the page does not say unavailable" }
-  } else {
+  $actedClause = "Citizen seats that wrote in the last 30 days: unavailable."
+  if ($null -ne $comp.acted_30d) {
     $nActed = [string]$comp.acted_30d
     $seatWord = "seats"
     if ($nActed -ceq "1") { $seatWord = "seat" }
-    if (-not $body.Contains($nActed + " citizen " + $seatWord + " wrote in the last 30 days")) { return ("the page does not say '" + $nActed + " citizen " + $seatWord + " wrote in the last 30 days'") }
+    $actedClause = $nActed + " citizen " + $seatWord + " wrote in the last 30 days, the operator&apos;s included."
   }
-  $nRes = [string]$official.residents.count
-  if (-not $body.Contains("Resident records: " + $nRes + ".")) { return ("the page does not say 'Resident records: " + $nRes + ".'") }
+  $figuresSentence = "<p>" + $nCit + " " + $citWord + ". By the operator&apos;s own statement it controls " + [string]$comp.operator_controlled + " of them and paid for " + [string]$comp.operator_paid + ". " + $actedClause + " Resident records: " + [string]$official.residents.count + "."
+  if (-not $body.Contains($figuresSentence)) { return ("the page does not carry the figures sentence GET /api/official gives: '" + $figuresSentence + "'") }
   return ""
 }
 # L-167. Runs the check $check (a script block returning "" when the read is good, otherwise the reason it is not) until $need CONSECUTIVE good reads, at most $tries times, $delaySeconds apart.
@@ -374,7 +371,7 @@ $ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version be
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 # 4. the ride (L-167: every check below is retried until $GOOD_READS_NEEDED good reads in a row, up to $RIDE_TRIES reads, before it judges; a stop here means the retries ran out, so the
-# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the served document, the roster's declared 200 and 400, then a sweep of public reads.
+# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the operators page against GET /api/official, the /api/doors note naming operators_page, then a sweep of public reads.
 $whyAttest = Confirm-Reads {
   $a = Get-ServedAttest
   $m = Get-AttestReason $a
