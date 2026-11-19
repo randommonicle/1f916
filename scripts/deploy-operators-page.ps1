@@ -34,7 +34,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "d52ad72599d7300539f0dac1643a0bea2c57a702"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "d3adba3d6f23aaec359079b1c8aeb4a45c9683d0"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-operators-page.ps1", "test/deploy-operators-page-script.test.ts", "docs/")
 $PAGE_URL = "$BASE/operators"
