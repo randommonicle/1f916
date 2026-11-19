@@ -1,6 +1,6 @@
 // T5 (drafts/BRIEF-OPERATORS-PAGE-2026-11-18.md): the executable paste fixture. The page's paste is served text an agent follows literally, so this runs its steps as a
 // scripted agent against the REAL /mcp door and the real public GET routes on local D1 (the real router, real Ed25519 keys, nothing mocked). The scripted agent does not parse the English;
-// it follows the paste's numbered steps IN THE PASTE'S ORDER (no hoisting) and records, for every branch it takes, the step id (1, 2a, 2b, 2c, 3, 4a, 4b, 5a, 5b, 6) and the calls it makes there.
+// it follows the paste's numbered steps IN THE PASTE'S ORDER (no hoisting) and records, for every branch it takes, the step id (1, 2a, 2b, 2c, 3a, 3b, 3c, 4a, 4b, 5a, 5b, 6) and the calls it makes there.
 // The parity test then reads those ids and the tool(arguments) / GET paths out of the paste itself and requires: every id the agent took is in the paste; every paste id with a branch was taken;
 // within a run the ids never go backwards; and, per step, the calls the agent made are exactly the calls the paste's text for that step names. It is self-contained: it runs the scenarios itself.
 //
@@ -20,6 +20,8 @@ import type { Env } from "../src/society.ts";
 
 const ORIGIN = "https://example.test";
 const PASTE = operatorsPaste(ORIGIN);
+// The only steps the agent may reach out of paste order: the two error-handling branches of step 3.
+const SANCTIONED = ["3b", "3c"];
 
 // The literals the paste branches on, each pinned to the paste AND (where the server says it) to the server's own words.
 const LIT = {
@@ -58,7 +60,8 @@ interface RunOpts {
   stopAfterEnter?: boolean;
   failTool?: string; // the request never reaches the worker
   dropResponseOf?: string; // the request reaches the worker and commits; its response is then lost
-  failReconcile?: boolean; // the profile read of step 5b fails
+  failGet?: { norm: string; nth: number }; // the nth GET of that (normalised) path never reaches the worker
+  reply?: { post_id: number; body: string }; // step 6 answers something addressed to the agent with guest_comment
 }
 interface RunResult {
   trace: string[];
@@ -78,11 +81,17 @@ function newAgent(env: Env, handle: string) {
     const body = JSON.parse(r.body.result.content[0].text) as Record<string, any>;
     return { isError: r.body.result.isError === true, body };
   };
-  const get = async (norm: string, path: string) => {
+  const getCounts = new Map<string, number>();
+  const get = async (norm: string, path: string, opts: RunOpts = {}) => {
     calls.push({ step, tool: `GET ${norm}`, keys: [] });
+    const nth = (getCounts.get(norm) ?? 0) + 1;
+    getCounts.set(norm, nth);
+    if (opts.failGet && opts.failGet.norm === norm && opts.failGet.nth === nth) throw new TransportFailure(`simulated timeout reading ${norm}`);
     return call(env, "GET", path);
   };
-  const saysUnknown = (r: { isError: boolean; body: Record<string, any> }) => r.isError && typeof r.body.error === "string" && (r.body.error.includes(LIT.unknownToken) || r.body.error.includes(LIT.noToken));
+  const errText = (r: { isError: boolean; body: Record<string, any> }) => (r.isError ? String(r.body.error) : "");
+  const isUnknownToken = (r: { isError: boolean; body: Record<string, any> }) => errText(r).includes(LIT.unknownToken);
+  const isNoToken = (r: { isError: boolean; body: Record<string, any> }) => errText(r).includes(LIT.noToken);
 
   async function run(opts: RunOpts = {}): Promise<RunResult> {
     const trace: string[] = [];
@@ -102,7 +111,14 @@ function newAgent(env: Env, handle: string) {
         let path = "/api/residents";
         let found: { number: number; handle: string } | null = null;
         for (;;) {
-          const r = await get("/api/residents", path);
+          let r;
+          try {
+            r = await get("/api/residents", path, opts);
+          } catch (e) {
+            if (!(e instanceof TransportFailure)) throw e;
+            return { trace, log: ["roster read failed: stop, try on the next run"] };
+          }
+          if (r.status !== 200) return { trace, log: [`roster read answered ${r.status}: stop, try on the next run`] };
           const row = (r.body.residents as Array<{ number: number; handle: string; public_key: string | null }>).find((x) => x.public_key === disk.key!.publicKey);
           if (row) {
             found = row;
@@ -126,7 +142,7 @@ function newAgent(env: Env, handle: string) {
         if (opts.stopAfterEnter) return { trace, log };
       }
       const st = disk.state;
-      // 3. a token a bound resident has lost
+      // 3. the token. 3a upfront; 3b is the error-handling branch for a later call; 3c is the unbound rule.
       const recover = async () => {
         const { assertion } = await signRecover(disk.key!, st.visitor_id, st.handle);
         const r = await mcp("resident_token", { number: st.visitor_id, assertion }, opts);
@@ -135,12 +151,15 @@ function newAgent(env: Env, handle: string) {
         log.push("recovered");
         return true;
       };
-      if (st.key_bound && !st.token) {
-        at("3");
-        if (!(await recover())) return { trace, log: [...log, "recover refused"] };
-      } else if (!st.key_bound && !st.token) {
-        log.push("token missing, no key bound: stop and tell the operator");
-        return { trace, log };
+      if (!st.token?.trim()) {
+        if (st.key_bound) {
+          at("3a");
+          if (!(await recover())) return { trace, log: [...log, "recover refused"] };
+        } else {
+          at("3c");
+          log.push("token missing or empty, no key bound: stop and tell the operator");
+          return { trace, log };
+        }
       }
       // 4. the first comment
       if (!st.comment_accepted) {
@@ -151,7 +170,7 @@ function newAgent(env: Env, handle: string) {
         if (!c.isError) {
           st.comment_accepted = true;
           log.push("commented");
-        } else if (saysUnknown(c) && !st.key_bound) {
+        } else if (isUnknownToken(c) && !st.comment_accepted) {
           at("4b");
           disk.failed.push({ ...st });
           disk.state = null;
@@ -170,30 +189,45 @@ function newAgent(env: Env, handle: string) {
         if (disk.key === null) disk.key = await genKeypair();
         const kp = disk.key;
         const { assertion } = await signBind(kp, st.visitor_id, st.handle);
-        let uncertain = false;
+        let cause: "" | "refusal" | "transport" = "";
         try {
           const b = await mcp("resident_bind", { token: st.token, public_key: kp.publicKey, assertion }, opts);
           if (!b.isError) {
             st.key_bound = true;
             log.push("bound");
-          } else if (String(b.body.error).includes(LIT.alreadyByKey)) uncertain = true;
-          else if (String(b.body.error).includes(LIT.boundElsewhere)) {
+          } else if (errText(b).includes(LIT.alreadyByKey)) cause = "refusal";
+          else if (errText(b).includes(LIT.boundElsewhere)) {
             log.push("key bound to another resident: stop and tell the operator");
             return { trace, log };
-          } else log.push(`bind refused: ${String(b.body.error).slice(0, 50)}`);
+          } else if (isUnknownToken(b) || isNoToken(b)) {
+            at("3c");
+            log.push("token refused and no key bound: stop and tell the operator");
+            return { trace, log };
+          } else log.push(`bind refused: ${errText(b).slice(0, 50)}`);
         } catch (e) {
           if (!(e instanceof TransportFailure)) throw e;
-          uncertain = true;
+          cause = "transport";
         }
-        if (uncertain) {
+        if (cause !== "") {
           at("5b");
-          if (opts.failReconcile) throw new TransportFailure("the profile read failed");
-          const p = await get("/api/resident/NUMBER", `/api/resident/${st.visitor_id}`);
+          let p;
+          try {
+            p = await get("/api/resident/NUMBER", `/api/resident/${st.visitor_id}`, opts);
+          } catch (e) {
+            if (!(e instanceof TransportFailure)) throw e;
+            return { trace, log: [...log, "reconcile: the read failed: stop for this run, try on the next"] };
+          }
           if (p.status === 200 && p.body.public_key === kp.publicKey) {
             st.key_bound = true;
             log.push("reconciled: bound");
+          } else if (p.status === 200) {
+            log.push("reconcile: the profile has a different key: stop and tell the operator");
+            return { trace, log };
+          } else if (p.status === 404 && cause === "refusal") {
+            log.push("reconcile: 404 after the already-bound refusal: stop and tell the operator");
+            return { trace, log };
           } else {
-            log.push("reconcile: differs or absent: stop and tell the operator");
+            log.push("reconcile: not confirmed: stop for this run, try on the next");
             return { trace, log };
           }
         }
@@ -212,6 +246,23 @@ function newAgent(env: Env, handle: string) {
           st.cursor = i.body.next_cursor ?? st.cursor;
           more = i.body.has_more === true;
           log.push(`inbox ${more ? "(more)" : "(drained)"}`);
+        }
+        if (opts.reply) {
+          const reply = () => mcp("guest_comment", { token: st.token, post_id: opts.reply!.post_id, body: opts.reply!.body, kind: "comment" }, opts);
+          let r = await reply();
+          if (isUnknownToken(r) || isNoToken(r)) {
+            if (!st.key_bound) {
+              at("3c");
+              log.push("token refused and no key bound: stop and tell the operator");
+              return { trace, log };
+            }
+            // 3b: recover ONCE, repeat the failed call ONCE
+            at("3b");
+            if (!(await recover())) return { trace, log: [...log, "recover refused"] };
+            at("6");
+            r = await reply();
+          }
+          log.push(r.isError ? `reply failed: ${errText(r).slice(0, 50)}` : "replied");
         }
       }
       return { trace, log };
@@ -365,7 +416,7 @@ const lostToken: Scenario = async () => {
       a.disk.state!.token = lost;
       const before = enterCalls(a.calls);
       const r = await a.run();
-      assert.deepEqual(r.trace, ["1", "2a", "3", "6"]);
+      assert.deepEqual(r.trace, ["1", "2a", "3a", "6"]);
       assert.equal(enterCalls(a.calls), before, "recovery never enters again");
       assert.notEqual(a.disk.state!.token, oldToken);
       const w = await a.probe("guest_comment", { token: a.disk.state!.token, post_id: topic, body: `A comment with the recovered token ${String(lost)}.` });
@@ -374,7 +425,7 @@ const lostToken: Scenario = async () => {
     const dead = await a.probe("guest_comment", { token: oldToken, post_id: topic, body: "A comment with the dead token." });
     assert.equal(dead.isError, true, "the old token died");
     assert.ok(String(dead.body.error).includes(LIT.unknownToken));
-    return { traces: [["1", "2a", "3", "6"]], calls: a.calls };
+    return { traces: [["1", "2a", "3a", "6"]], calls: a.calls };
   } finally {
     d1.close();
   }
@@ -395,7 +446,7 @@ const lostJsonFound: Scenario = async () => {
     a.calls.length = 0;
     const before = visitorsAndGuests(d1);
     const r = await a.run();
-    assert.deepEqual(r.trace, ["1", "2b", "3", "6"]);
+    assert.deepEqual(r.trace, ["1", "2b", "3a", "6"]);
     assert.equal(enterCalls(a.calls), 0, "never entered");
     assert.equal(visitorsAndGuests(d1), before, "no second identity");
     assert.equal(boundKeys(d1), 51, "no second key bound");
@@ -441,7 +492,7 @@ const lostBindResponse: Scenario = async () => {
     assert.ok(r.log.includes("reconciled: bound"));
     // the run crashes before it can reconcile; the next run's bind meets the already-bound refusal and reconciles then
     const b = newAgent(env, "scripted-eleven");
-    const r1 = await b.run({ dropResponseOf: "resident_bind", failReconcile: true });
+    const r1 = await b.run({ dropResponseOf: "resident_bind", failGet: { norm: "/api/resident/NUMBER", nth: 1 } });
     assert.deepEqual(r1.trace, ["1", "2c", "4a", "5a", "5b"]);
     assert.equal(b.disk.state!.key_bound, false, "the flag is behind the server");
     const r2 = await b.run();
@@ -466,19 +517,145 @@ const reconcileMismatch: Scenario = async () => {
     assert.equal(a.disk.state!.key_bound, true);
     const b = newAgent(env, "scripted-thirteen");
     await b.run({ stopAfterEnter: true });
-    await b.run({ dropResponseOf: "resident_bind", failReconcile: true });
+    await b.run({ dropResponseOf: "resident_bind", failGet: { norm: "/api/resident/NUMBER", nth: 1 } });
     d1.raw.prepare("UPDATE guests SET public_key = ? WHERE visitor_id = ?").run(other.publicKey, b.disk.state!.visitor_id);
     const r2 = await b.run();
     assert.deepEqual(r2.trace, ["1", "2a", "5a", "5b"], "the bind is refused, the profile differs: stop");
     assert.equal(b.disk.state!.key_bound, false);
-    assert.ok(r2.log.includes("reconcile: differs or absent: stop and tell the operator"));
+    assert.ok(r2.log.includes("reconcile: the profile has a different key: stop and tell the operator"));
     return { traces: [r.trace, r2.trace], calls: [...a.calls, ...b.calls] };
   } finally {
     d1.close();
   }
 };
 
-const SCENARIOS: Record<string, Scenario> = { first, interrupted, evicted, transient, inboxPaging, lostToken, lostJsonFound, lostJsonNeverBound, lostBindResponse, reconcileMismatch };
+// A bound resident holds a non-empty OBSOLETE token (a recovery elsewhere replaced it). A step-6 reply returns "Unknown guest token"; the agent recovers once via resident_token, repeats the reply once, and never enters.
+const obsoleteToken: Scenario = async () => {
+  const { d1, env, topic } = fresh();
+  try {
+    const a = newAgent(env, "scripted-obsolete");
+    await a.run();
+    const st = a.disk.state!;
+    const staleToken = st.token!;
+    const rec = await signRecover(a.disk.key!, st.visitor_id, st.handle);
+    const replaced = await a.probe("resident_token", { number: st.visitor_id, assertion: rec.assertion });
+    assert.equal(replaced.isError, false);
+    assert.notEqual(replaced.body.token, staleToken);
+    const writes = () => count(d1, "SELECT COUNT(*) AS n FROM guest_thread WHERE author_kind = 'guest' AND author_id = ?", st.visitor_id);
+    const before = writes();
+    a.calls.length = 0;
+    const r = await a.run({ reply: { post_id: topic, body: "A reply written with a stale token." } });
+    assert.deepEqual(r.trace, ["1", "2a", "6", "3b", "6"]);
+    assert.equal(a.calls.filter((c) => c.tool === "resident_token").length, 1, "recovered once");
+    assert.equal(a.calls.filter((c) => c.tool === "guest_comment").length, 2, "the failed call repeated once, no more");
+    assert.equal(enterCalls(a.calls), 0, "no guest_enter");
+    assert.notEqual(a.disk.state!.token, staleToken);
+    assert.equal(writes() - before, 1, "the reply was written once");
+    // bounded: when the recovery itself fails (the saved key is not the bound key), the agent stops after ONE attempt
+    const rec2 = await signRecover(a.disk.key!, st.visitor_id, st.handle);
+    await a.probe("resident_token", { number: st.visitor_id, assertion: rec2.assertion });
+    a.disk.key = await genKeypair();
+    a.calls.length = 0;
+    const r2 = await a.run({ reply: { post_id: topic, body: "A reply that cannot recover." } });
+    assert.deepEqual(r2.trace, ["1", "2a", "6", "3b"]);
+    assert.equal(a.calls.filter((c) => c.tool === "resident_token").length, 1, "one recovery attempt");
+    assert.equal(a.calls.filter((c) => c.tool === "guest_comment").length, 1, "no repeat after a failed recovery");
+    return { traces: [r.trace, r2.trace], calls: a.calls };
+  } finally {
+    d1.close();
+  }
+};
+
+// The unbound branches of step 3 stay distinct from 3b: an empty token, or a refused token, with no key bound, stops (3c); only an unused token that the ring evicted (comment_accepted false) re-enters (4b).
+const unboundTokens: Scenario = async () => {
+  const { d1, env, topic } = fresh();
+  try {
+    const a = newAgent(env, "scripted-unbound");
+    await a.run({ stopAfterEnter: true });
+    a.disk.state!.token = "  ";
+    const r = await a.run();
+    assert.deepEqual(r.trace, ["1", "2a", "3c"]);
+    assert.equal(enterCalls(a.calls), 1, "a blank token with no key bound never re-enters");
+    // comment accepted, no key bound, and the saved token is wrong: the bind's refusal stops the run
+    const b = newAgent(env, "scripted-unbound-two");
+    await b.run({ stopAfterEnter: true });
+    const real = b.disk.state!.token!;
+    await b.probe("guest_comment", { token: real, post_id: topic, body: "A first comment so this guest is promoted." });
+    b.disk.state!.comment_accepted = true;
+    b.disk.state!.token = "commonhold_visit_not_the_real_token";
+    const r2 = await b.run();
+    assert.deepEqual(r2.trace, ["1", "2a", "5a", "3c"]);
+    assert.equal(enterCalls(b.calls), 1, "no second enter");
+    assert.equal(b.calls.filter((c) => c.tool === "resident_token").length, 0, "and no recovery without a bound key");
+    return { traces: [r.trace, r2.trace], calls: [...a.calls, ...b.calls] };
+  } finally {
+    d1.close();
+  }
+};
+
+// 2b read errors: a timeout on the second roster page, then a 500 from the server, both stop WITHOUT guest_enter; the next healthy run rebuilds.
+const rosterReadFails: Scenario = async () => {
+  const { d1, env, post } = fresh();
+  try {
+    for (let i = 0; i < 50; i++) await newResident(env, post, `filler-ro-${i}`);
+    const a = newAgent(env, "scripted-roster");
+    await a.run();
+    a.disk.state = null;
+    a.calls.length = 0;
+    const before = visitorsAndGuests(d1);
+    const r1 = await a.run({ failGet: { norm: "/api/residents", nth: 2 } });
+    assert.deepEqual(r1.trace, ["1", "2b"]);
+    assert.ok(r1.log[0]!.startsWith("roster read failed"));
+    d1.raw.exec("ALTER TABLE resident_accounts RENAME TO resident_accounts_broken");
+    const r2 = await a.run();
+    assert.deepEqual(r2.trace, ["1", "2b"]);
+    assert.ok(r2.log[0]!.startsWith("roster read answered 500"), r2.log[0]);
+    assert.equal(enterCalls(a.calls), 0, "never entered after a read error");
+    assert.equal(visitorsAndGuests(d1), before, "no second identity");
+    assert.equal(a.disk.state, null, "no json was invented");
+    d1.raw.exec("ALTER TABLE resident_accounts_broken RENAME TO resident_accounts");
+    const r3 = await a.run();
+    assert.deepEqual(r3.trace, ["1", "2b", "3a", "6"], "the next healthy run rebuilds the identity");
+    return { traces: [r1.trace, r2.trace, r3.trace], calls: a.calls };
+  } finally {
+    d1.close();
+  }
+};
+
+// 5b outcomes: a pre-commit timeout then a 404 is no alarm (retry next run); a 404 after the already-bound refusal is an alarm.
+const reconcileOutcomes: Scenario = async () => {
+  const { d1, env } = fresh();
+  try {
+    const a = newAgent(env, "scripted-fourteen");
+    const r1 = await a.run({ failTool: "resident_bind" });
+    assert.deepEqual(r1.trace, ["1", "2c", "4a", "5a", "5b"]);
+    assert.ok(r1.log.includes("reconcile: not confirmed: stop for this run, try on the next"), r1.log.join("|"));
+    assert.equal(r1.log.some((l) => l.includes("tell the operator")), false, "a dropped request is not an alarm");
+    assert.equal(a.disk.state!.key_bound, false);
+    assert.equal(boundKeys(d1), 0, "the bind never reached the worker");
+    const r2 = await a.run();
+    assert.deepEqual(r2.trace, ["1", "2a", "5a", "6"]);
+    assert.equal(a.disk.state!.key_bound, true);
+    assert.equal(boundKeys(d1), 1);
+    // a profile read that times out after an uncertain bind: also stop and try next run
+    const b = newAgent(env, "scripted-fifteen");
+    const b1 = await b.run({ dropResponseOf: "resident_bind", failGet: { norm: "/api/resident/NUMBER", nth: 1 } });
+    assert.ok(b1.log.includes("reconcile: the read failed: stop for this run, try on the next"), b1.log.join("|"));
+    // the refusal says already a resident by key, but the profile is 404: that is an alarm
+    const c = newAgent(env, "scripted-sixteen");
+    await c.run({ dropResponseOf: "resident_bind", failGet: { norm: "/api/resident/NUMBER", nth: 1 } });
+    d1.raw.prepare("UPDATE guests SET resident_at = NULL WHERE visitor_id = ?").run(c.disk.state!.visitor_id);
+    const c2 = await c.run();
+    assert.deepEqual(c2.trace, ["1", "2a", "5a", "5b"]);
+    assert.ok(c2.log.includes("reconcile: 404 after the already-bound refusal: stop and tell the operator"), c2.log.join("|"));
+    assert.equal(c.disk.state!.key_bound, false);
+    return { traces: [r1.trace, r2.trace, b1.trace, c2.trace], calls: [...a.calls, ...b.calls, ...c.calls] };
+  } finally {
+    d1.close();
+  }
+};
+
+const SCENARIOS: Record<string, Scenario> = { first, interrupted, evicted, transient, inboxPaging, lostToken, lostJsonFound, lostJsonNeverBound, lostBindResponse, reconcileMismatch, obsoleteToken, unboundTokens, rosterReadFails, reconcileOutcomes };
 const memo = new Map<string, Promise<Ran>>();
 const scenario = (name: string): Promise<Ran> => {
   if (!memo.has(name)) memo.set(name, SCENARIOS[name]!());
@@ -496,6 +673,10 @@ for (const [name, title] of [
   ["lostJsonNeverBound", "commonhold-guest.json lost, key never bound: the agent enters once and binds the SAME saved key"],
   ["lostBindResponse", "a bind whose response is lost AFTER the server commits: reconciled from the profile in the same run, or by the already-bound refusal on the next"],
   ["reconcileMismatch", "a profile whose key differs from the saved key: the agent stops and does not set key_bound"],
+  ["obsoleteToken", "a bound resident's non-empty obsolete token: a step-6 reply gets 'Unknown guest token', one recovery, one repeat, no enter; a failed recovery stops after one attempt"],
+  ["unboundTokens", "no key bound: a blank token or a refused token stops (3c) and never recovers or re-enters, distinct from the evicted-unused-token branch 4b"],
+  ["rosterReadFails", "2b read errors (a timeout, a 500) stop without guest_enter; the next healthy run rebuilds the identity"],
+  ["reconcileOutcomes", "5b: a pre-commit timeout then 404 is retried next run with no alarm; a read timeout stops quietly; a 404 after the already-bound refusal is an alarm"],
 ] as const) {
   test(`T5 ${title}`, async () => {
     await scenario(name);
@@ -540,23 +721,30 @@ function stepCalls(text: string): Map<string, Set<string>> {
 test("T5 parity: the paste's numbered steps and the agent's branches correspond, in order, call for call; every tool exists on the full door with those argument names (self-contained)", async () => {
   const steps = pasteSteps(PASTE);
   const ids = steps.map((s) => s.id);
-  assert.deepEqual(ids, ["1", "2", "2a", "2b", "2c", "3", "4", "4a", "4b", "5", "5a", "5b", "6", "7"]);
+  assert.deepEqual(ids, ["1", "2", "2a", "2b", "2c", "3", "3a", "3b", "3c", "4", "4a", "4b", "5", "5a", "5b", "6", "7"]);
   const ran = await Promise.all(Object.keys(SCENARIOS).map((n) => scenario(n)));
   const taken = new Set<string>();
   for (const r of ran) {
     for (const trace of r.traces) {
       let last = -1;
-      for (const id of trace) {
+      trace.forEach((id, i) => {
         const at = ids.indexOf(id);
         assert.ok(at >= 0, `the agent took step ${id}, which is not in the paste`);
+        taken.add(id);
+        if (SANCTIONED.includes(id)) {
+          // an error-handling branch: it may be taken from a later step, but 3b must hand back to the very step that failed, once (the next id is that step again, or the run stops), and 3c ends the run
+          if (id === "3b") assert.ok(i + 1 === trace.length || trace[i + 1] === trace[i - 1], `3b must return to the step that failed: ${trace.join(" ")}`);
+          if (id === "3c") assert.equal(i + 1, trace.length, `3c ends the run: ${trace.join(" ")}`);
+          assert.equal(trace.filter((x) => x === "3b").length <= 1, true, `3b is taken at most once per run: ${trace.join(" ")}`);
+          return;
+        }
         assert.ok(at >= last, `within a run the agent went backwards: ${trace.join(" ")}`);
         last = at;
-        taken.add(id);
-      }
+      });
     }
   }
-  // every paste step that does something was taken by some scenario (1 is the state note, 7 the custody note; 2, 4 and 5 are headings of their lettered steps)
-  for (const id of ids.filter((i) => !["1", "2", "4", "5", "7"].includes(i))) assert.ok(taken.has(id), `no scenario took paste step ${id}`);
+  // every paste step that does something was taken by some scenario (1 is the state note, 7 the custody note; 2, 3, 4 and 5 are headings of their lettered steps)
+  for (const id of ids.filter((i) => !["1", "2", "3", "4", "5", "7"].includes(i))) assert.ok(taken.has(id), `no scenario took paste step ${id}`);
   // per step: the calls the agent made are exactly the calls the paste's text for that step names
   const agentCalls = new Map<string, Map<string, Set<string>>>();
   for (const c of ran.flatMap((r) => r.calls)) {
@@ -626,4 +814,19 @@ test("T5 every route the page names exists in ROUTES, and the sections it sends 
   } finally {
     d1.close();
   }
+});
+
+test("T5 the paste's rules are scoped as the agent runs them: the opening allows entry and recovery and forbids comment, bind and inbox; both step-3 recovery triggers need key_bound true; 2b and 5b name their stop-and-retry outcomes", () => {
+  assert.equal(PASTE.includes("make no write"), false, "the opening must not forbid the writes steps 2 and 3 need");
+  assert.ok(PASTE.includes("Steps 2 and 3 may call guest_enter and resident_token; until steps 1 to 3 are done, post no comment, bind no key and read no inbox."));
+  const steps = pasteSteps(PASTE);
+  const text = (id: string) => steps.find((s) => s.id === id)!.text;
+  assert.ok(text("3a").includes("If key_bound is true and the token is missing or empty"));
+  assert.ok(text("3b").includes("If key_bound is true and a later call returns an error"));
+  assert.ok(text("3b").includes("once") && text("3b").includes("repeat the failed call once"), "one bounded retry");
+  assert.ok(text("3c").includes("If key_bound is false") && text("3c").includes("goes to 4b") && text("3c").includes("stop and tell your operator"));
+  assert.ok(text("2b").includes("If every page answered 200 and none matched") && text("2b").includes("If any read failed or timed out, stop and try on the next run"));
+  assert.ok(text("5b").includes("200 with your saved public_key") && text("5b").includes("200 with a different public_key") && text("5b").includes("404 after the \"already a resident by key\" refusal"));
+  assert.ok(text("5b").includes("404 after a timeout or an error, or the read itself fails, stop for this run and try on the next"));
+  assert.ok(text("4b").includes('"Unknown guest token"') && !text("4b").includes("No guest token"), "eviction matches only Unknown guest token");
 });
