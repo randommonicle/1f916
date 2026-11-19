@@ -1,6 +1,6 @@
 // scripts/deploy-operators-pointer.ps1 is WRITTEN AND NEVER RUN by the builder (no deploy, no wrangler, not even -DryRun, which reads the live worker over HTTP). It is proven here by what can be
 // proven without running it: it parses under PowerShell's own parser, is ASCII with LF endings, has none of the repo's PowerShell traps, has the load-bearing step order, no migration or D1 step,
-// a single wrangler use, a ride of public GETs with no request body, step 0a stops on the placeholder before any git or network command (the pin block is run for real), every Select-String literal is
+// a single wrangler use, a ride of public GETs plus two credential-free initialize POSTs (curl.exe --data-binary from a temp file), step 0a stops on the placeholder before any git or network command (the pin block is run for real), every Select-String literal is
 // in its file, the served check (Test-OperatorsServed) is run for real against good and bad captured pages built from the real renderer, the header reader (Get-Page) is run for real against a local
 // HTTP server serving the real handler's headers, and L-167 is proven by running the real poll (Wait-NewWorker) and the real retry (Confirm-Reads) against fakes: a stale read is "not yet seen", and
 // no stop names a rollback before the retries have run out. Derived from the OpenAPI response-side deploy script test.
@@ -17,7 +17,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { parsePowerShellFile } from "./helpers/ps-parse.ts";
 import { renderOperators, OPERATORS_CSP, type OperatorsFigures } from "../src/operators.ts";
-import { OPERATORS_POINTER, GUEST_OPERATOR_NOTE } from "../src/guest-core.ts";
+import { OPERATORS_POINTER, OPERATORS_NOTE_SENTENCE, GUEST_OPERATOR_NOTE } from "../src/guest-core.ts";
 
 const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
 const SCRIPT_PATH = here("../scripts/deploy-operators-pointer.ps1");
@@ -143,9 +143,9 @@ test("the steps are in the load-bearing order, there is no migration or D1 step,
   assert.equal(/\bd1\b|migrations apply|execute --remote/i.test(code.replace(/migrations\b/g, "").replace(/schema\.sql/g, "")), false, "no D1 command");
   assert.equal((code.match(/= \(npx wrangler /g) ?? []).length, 1, "exactly one executed wrangler command (the other mentions are text in messages)");
   assert.match(code, /npx wrangler deploy --var "CODE_COMMIT:\$headSha"/);
-  assert.equal((code.match(/Invoke-WebRequest/g) ?? []).length, 1, "one web cmdlet use, in Get-InitInstructions");
-  assert.equal(/Invoke-RestMethod|-X\s+POST|--data/.test(code), false, "no other POST route and no curl body");
-  assert.ok(code.includes("-ContentType \"application/json\" -Body $INIT_BODY"), "the initialize body is in-script");
+  assert.equal(/Invoke-WebRequest|Invoke-RestMethod|-Method\s+Post|-X\s+POST/i.test(code), false, "no PowerShell web cmdlets; every HTTP call is curl.exe");
+  assert.equal((code.match(/--data-binary/g) ?? []).length, 1, "exactly one request body, in Get-InitInstructions");
+  assert.ok(code.includes('--data-binary "@$req"'), "the initialize body is sent from a temp file");
   assert.equal(/Authorization|Bearer|ch1\.|tools\/call|guest_enter|guest_comment|showhome_note|resident_(bind|token)|api\/resident\/(bind|token)|api\/council\/(challenge|claim|ballot)/.test(code), false, "no credential, no tool call, no write tool");
   assert.ok(script.includes("initialize POSTs"), "the closing note says the ride POSTs initialize");
   assert.ok(code.includes("src/doc.ts") && code.includes("migrations schema.sql"), "the no-mint and no-migration check names src/doc.ts, migrations and schema.sql");
@@ -265,7 +265,8 @@ test("Get-Page, run for real against a local HTTP server serving the handler's o
 test("the script's two literals are the served constants, byte for byte, and the pre-deploy checks require 200 for the page and no pointer on either door", () => {
   const lit = (name: string): string => new RegExp(`^\\$${name} = "(.*)"$`, "m").exec(script)![1];
   assert.equal(lit("OPERATORS_POINTER"), OPERATORS_POINTER);
-  assert.ok(GUEST_OPERATOR_NOTE.endsWith(lit("NOTE_SENTENCE")));
+  assert.equal(lit("NOTE_SENTENCE"), OPERATORS_NOTE_SENTENCE, "the exact final sentence, not a suffix of it");
+  assert.ok(GUEST_OPERATOR_NOTE.endsWith(" " + OPERATORS_NOTE_SENTENCE));
   assert.ok(code.includes('if ([string]$pageBefore.Code -cne "200") { Stop-Here'));
   assert.ok(code.includes("already carries the pointer: this looks already deployed"));
   assert.ok(code.includes("Test-OperatorsServed (Get-Page $PAGE_URL 30) (Get-ServedOfficial)"));
@@ -273,12 +274,12 @@ test("the script's two literals are the served constants, byte for byte, and the
 });
 
 test("Test-PointerServed, run for real against fakes: passes only when BOTH doors carry the pointer exactly once", (t) => {
-  const fns = slice("# The `instructions` text", "# END-OF-DEFINITIONS");
+  const fns = slice("# A credential-free MCP initialize POST", "# END-OF-DEFINITIONS");
   const lines = (a: string, b: string): string[] => [
     "$ErrorActionPreference = 'Stop'",
     `$OPERATORS_POINTER = ${q(OPERATORS_POINTER)}`,
     fns,
-    `function Get-InitInstructions($path) { if ($path -ceq '/mcp') { return ${q(a)} } else { return ${q(b)} } }`,
+    `function Get-InitInstructions($path) { $t = ${q(b)}; if ($path -ceq '/mcp') { $t = ${q(a)} }; if ($t -ceq 'UNREADABLE') { return @{ Text = ''; Why = 'HTTP 502, expected 200' } }; return @{ Text = $t; Why = '' } }`,
     'Write-Host ("RESULT [" + (Test-PointerServed) + "]")',
   ];
   const good = "intro " + OPERATORS_POINTER + " outro";
@@ -288,7 +289,87 @@ test("Test-PointerServed, run for real against fakes: passes only when BOTH door
   assert.match(runPs(lines("intro outro", good))!.out, /the \/mcp initialize answer carries the pointer 0 time/);
   assert.match(runPs(lines(good, "intro outro"))!.out, /the \/mcp\/read initialize answer carries the pointer 0 time/);
   assert.match(runPs(lines(good, good + " " + OPERATORS_POINTER))!.out, /the \/mcp\/read initialize answer carries the pointer 2 time/);
-  assert.match(runPs(lines("", good))!.out, /the \/mcp initialize answer carries the pointer 0 time/, "an unreadable answer is a failed read, not a pass");
+  assert.match(runPs(lines("UNREADABLE", good))!.out, /the \/mcp initialize answer was unreadable: HTTP 502, expected 200/, "an unreadable answer is a failed read that says why, not a pass");
+});
+
+test("Get-InitInstructions, run for real against a local HTTP server: it POSTs the initialize body as JSON from a file and reads result.instructions; every failure says why", async (t) => {
+  const seen: Array<{ method?: string; type?: string; body: string }> = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      seen.push({ method: req.method, type: req.headers["content-type"], body });
+      if (req.url === "/good") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { instructions: "hello " + OPERATORS_POINTER } }));
+      } else if (req.url === "/five") {
+        res.writeHead(500);
+        res.end("boom");
+      } else if (req.url === "/notjson") {
+        res.writeHead(200);
+        res.end("<html>");
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ result: {} }));
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const fns = slice("# A credential-free MCP initialize POST", "# How many times $needle occurs");
+    const initBodyLine = script.split("\n").find((l) => l.startsWith("$INIT_BODY = "))!;
+    const run = await runPsAsync([
+      "$ErrorActionPreference = 'Stop'",
+      initBodyLine,
+      `$BASE = "http://127.0.0.1:${port}"`,
+      fns,
+      'foreach ($p in "/good", "/five", "/notjson", "/empty") { $r = Get-InitInstructions $p; Write-Host ("RES " + $p + " [" + $r.Text + "] why [" + $r.Why + "]") }',
+      '$BASE = "http://127.0.0.1:1"',
+      '$r = Get-InitInstructions "/good"; Write-Host ("RES down [" + $r.Text + "] why [" + $r.Why + "]")',
+    ]);
+    if (!run) return t.skip("no PowerShell available");
+    assert.ok(run.out.includes(`RES /good [hello ${OPERATORS_POINTER}] why []`), run.out);
+    assert.match(run.out, /RES \/five \[\] why \[HTTP 500, expected 200\]/);
+    assert.match(run.out, /RES \/notjson \[\] why \[the answer was not JSON\]/);
+    assert.match(run.out, /RES \/empty \[\] why \[the answer carried no result.instructions\]/);
+    assert.match(run.out, /RES down \[\] why \[curl exited \d+/, "a connection failure says curl failed, not a silent empty");
+    assert.equal(seen.length, 4);
+    for (const s of seen) {
+      assert.equal(s.method, "POST");
+      assert.match(String(s.type), /^application\/json/);
+      const j = JSON.parse(s.body);
+      assert.equal(j.method, "initialize");
+      assert.equal(j.params.protocolVersion, "2025-11-25");
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("Test-NoteServed, run for real against captured /llms.txt answers: passes only a 200 that carries the sentence", (t) => {
+  const fns = slice('# "" when GET /llms.txt carries', "# END-OF-DEFINITIONS");
+  const cases: Array<[string, string, string, string]> = [
+    ["good", "200", "intro " + OPERATORS_NOTE_SENTENCE + " outro", ""],
+    ["missing", "200", "intro without it", "does not yet carry the operator-note sentence"],
+    ["truncated", "200", OPERATORS_NOTE_SENTENCE.slice(0, 30), "does not yet carry the operator-note sentence"],
+    ["notfound", "404", OPERATORS_NOTE_SENTENCE, "GET /llms.txt answered 404"],
+    ["server", "500", "", "GET /llms.txt answered 500"],
+  ];
+  const run = runPs([
+    "$ErrorActionPreference = 'Stop'",
+    '$BASE = "https://example.invalid"',
+    `$NOTE_SENTENCE = ${q(OPERATORS_NOTE_SENTENCE)}`,
+    fns,
+    ...cases.flatMap(([name, code2, body]) => [`function Get-Text($url, $maxTime) { return @{ Code = ${q(code2)}; Type = 'text/plain'; Body = ${q(body)} } }`, `Write-Host ("RESULT ${name} [" + (Test-NoteServed) + "]")`]),
+  ]);
+  if (!run) return t.skip("no PowerShell available");
+  for (const [name, , , expect] of cases) {
+    const m = new RegExp(`RESULT ${name} \\[(.*)\\]`).exec(run.out);
+    assert.ok(m, `${name}: ${run.out.slice(0, 400)}`);
+    if (expect === "") assert.equal(m![1], "", name);
+    else assert.ok(m![1].includes(expect), `${name}: '${m![1]}'`);
+  }
 });
 
 // ---------- L-167: a read straight after a write is not the state ----------
@@ -307,7 +388,7 @@ const fakes = (sequence: string[]): string[] => [
   `function Get-Page($url, $maxTime) { return ${capPage({ code: "200", body: goodBody() })} }`,
   `function Get-ServedOfficial { return (${q(official())} | ConvertFrom-Json) }`,
   `$OPERATORS_POINTER = ${q(OPERATORS_POINTER)}`,
-  `function Get-InitInstructions($path) { return ${q("x " + OPERATORS_POINTER + " y")} }`,
+  `function Get-InitInstructions($path) { return @{ Text = ${q("x " + OPERATORS_POINTER + " y")}; Why = '' } }`,
 ];
 
 test("L-167, the poll run for real: one stale read in the middle does not decide it, three good reads in a row do, and the rollback is named only by the exhausted poll", (t) => {
@@ -333,6 +414,15 @@ test("L-167, the poll judges the page too: a worker serving the right code ident
   assert.equal(r.code, 1, r.out);
   assert.equal(/\[WAITED\]/.test(r.out), false);
   assert.match(r.out, /not yet: GET \/operators answered 404/);
+});
+
+test("L-167, the poll judges the initialise answers too: attest and /operators good but the answer still lacks the pointer is 'not yet', never good", (t) => {
+  const stale = fakes(["good", "good", "good"]).map((l) => (l.startsWith("function Get-InitInstructions") ? "function Get-InitInstructions($path) { return @{ Text = 'the old answer, no pointer'; Why = '' } }" : l));
+  const r = runPs([...stale, `Wait-NewWorker '${COMMIT}' '${VERSION}' 3 0`, 'Write-Host "[WAITED]"']);
+  if (!r) return t.skip("no PowerShell available");
+  assert.equal(r.code, 1, r.out);
+  assert.equal(/\[WAITED\]/.test(r.out), false);
+  assert.match(r.out, /not yet: the \/mcp initialize answer carries the pointer 0 time/);
 });
 
 test("L-167, the retry run for real: a stale read resets the run, a bounded run of good reads passes, a run that never forms returns the last reason, and it never stops or names a remedy", (t) => {

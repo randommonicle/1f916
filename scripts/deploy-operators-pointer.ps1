@@ -21,7 +21,7 @@
 # THE RIDE holds no token, key or assertion: public GETs, plus one credential-free MCP `initialize` POST to each of /mcp and /mcp/read (a read here; it writes only a door count). GET /operators is a COUNTED door (operators_page): the ride itself adds to that count (see the [note] at the end).
 # PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference
 # (write "${var}:"); never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips
-# inner double quotes from a native command's argument, so the initialise POSTs go through Invoke-WebRequest with an in-script body, never through curl.exe. ASCII only.
+# inner double quotes from a native command's argument, so the initialise POSTs send their body from a temp file (curl.exe --data-binary "@file"). ASCII only.
 param(
   [Parameter(Mandatory = $true)][string]$ExpectedCommit,
   [switch]$DryRun
@@ -236,13 +236,27 @@ function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
   }
   Stop-Here ("the new worker was not shown live in " + $tries + " reads (last: " + $last + "). Read 'npx wrangler deployments list' and GET /api/attest by hand first: stale reads right after a deploy are common, and the deploy may be live. Only if the new version is not at 100% or fresh reads still disagree: " + $ROLLBACK_LINE)
 }
-# The `instructions` text a credential-free MCP initialize POST to $path returns, or "" when the call fails or carries none. A read here: initialize writes only a door count. Never stops.
+# A credential-free MCP initialize POST to $path, by curl.exe --data-binary "@<temp file>" like every other HTTP call here (no .NET TLS defaults, no PS 5.1 quote stripping). Returns @{ Text; Why }:
+# Text is the answer's `instructions`, Why is "" when it was read and otherwise says why it could not be (curl's exit code, the HTTP status, not JSON, no instructions). A read here: initialize writes only a door count. Never stops.
 function Get-InitInstructions($path) {
+  $out = [System.IO.Path]::GetTempFileName()
+  $req = [System.IO.Path]::GetTempFileName()
   try {
-    $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri ($BASE + $path) -ContentType "application/json" -Body $INIT_BODY -TimeoutSec 30
-    $j = ([string]$r.Content | ConvertFrom-Json)
-    return [string]$j.result.instructions
-  } catch { return "" }
+    [System.IO.File]::WriteAllText($req, $INIT_BODY, (New-Object System.Text.UTF8Encoding($false)))
+    $code = (curl.exe -s --max-time 30 -o $out -w "%{http_code}" -H "Content-Type: application/json" --data-binary "@$req" ($BASE + $path))
+    $exit = $LASTEXITCODE
+    if ($exit -ne 0) { return @{ Text = ""; Why = ("curl exited " + $exit + " (no answer; a TLS or network failure)") } }
+    if ([string]$code -cne "200") { return @{ Text = ""; Why = ("HTTP " + $code + ", expected 200") } }
+    $body = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $body) { $body = "" }
+    try { $j = ([string]$body | ConvertFrom-Json) } catch { return @{ Text = ""; Why = "the answer was not JSON" } }
+    $t = [string]$j.result.instructions
+    if ($t -ceq "") { return @{ Text = ""; Why = "the answer carried no result.instructions" } }
+    return @{ Text = $t; Why = "" }
+  } finally {
+    Remove-Item $out -ErrorAction SilentlyContinue
+    Remove-Item $req -ErrorAction SilentlyContinue
+  }
 }
 # How many times $needle occurs in $hay (ordinal).
 function Get-Occurrences($hay, $needle) {
@@ -251,7 +265,9 @@ function Get-Occurrences($hay, $needle) {
 # "" when both initialise answers carry the pointer exactly once, otherwise the reason one does not.
 function Test-PointerServed {
   foreach ($path in "/mcp", "/mcp/read") {
-    $n = Get-Occurrences (Get-InitInstructions $path) $OPERATORS_POINTER
+    $init = Get-InitInstructions $path
+    if ([string]$init.Why -ne "") { return ("the " + $path + " initialize answer was unreadable: " + $init.Why) }
+    $n = Get-Occurrences $init.Text $OPERATORS_POINTER
     if ($n -ne 1) { return ("the " + $path + " initialize answer carries the pointer " + $n + " time(s), expected exactly 1") }
   }
   return ""
@@ -360,7 +376,7 @@ if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
 Say ("[tests] pass " + $passN + ", fail 0; typecheck clean")
 # END-GATES
 
-# 2. live, before: non-minting baseline, the live worker is the base this wave was checked against, and GET /operators does not yet exist (so the propagation poll proves something).
+# 2. live, before: non-minting baseline, the live worker is the base this wave was checked against, and GET /operators already answers 200 and neither initialise answer carries the pointer yet (so the propagation poll proves something).
 # These reads are before any write, so one read is the state and may stop.
 $attBefore = Read-Attest "before the deploy"
 Assert-Attest $attBefore "before the deploy"
@@ -377,13 +393,13 @@ Say "[live] before: GET /operators answers 200, the page this wave points to"
 # Before the deploy NEITHER initialise answer may carry the pointer (so the poll proves something). Credential-free initialize POSTs: a read, writing only a door count.
 foreach ($path in "/mcp", "/mcp/read") {
   $before = Get-InitInstructions $path
-  if ($before -ceq "") { Stop-Here ("the " + $path + " initialize answer was unreadable before the deploy: read it by hand.") }
-  if ((Get-Occurrences $before $OPERATORS_POINTER) -gt 0) { Stop-Here ("the " + $path + " initialize answer already carries the pointer: this looks already deployed, verify by hand.") }
+  if ([string]$before.Why -ne "") { Stop-Here ("the " + $path + " initialize answer was unreadable before the deploy (" + $before.Why + "): read it by hand.") }
+  if ((Get-Occurrences $before.Text $OPERATORS_POINTER) -gt 0) { Stop-Here ("the " + $path + " initialize answer already carries the pointer: this looks already deployed, verify by hand.") }
 }
 Say "[live] before: neither initialise answer carries the pointer yet"
 
 if ($DryRun) {
-  Say "[dry-run] every pin, git, source, test and live check passed. would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id and GET /operators being the page with figures equal to GET /api/official and both initialise answers carrying the pointer; then ride the public reads, each retried (up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row) before it judges. Nothing was deployed."
+  Say "[dry-run] every pin, git, source, test and live check passed. Step 2 itself already sent one GET /operators and two credential-free initialize POSTs (the door counts operators_page, mcp_initialize and mcp_read_initialize rose by those). would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id and GET /operators being the page with figures equal to GET /api/official and both initialise answers carrying the pointer; then ride the public reads, each retried (up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row) before it judges. Nothing was deployed."
   exit 0
 }
 
@@ -411,7 +427,7 @@ $ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version be
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 # 4. the ride (L-167: every check below is retried until $GOOD_READS_NEEDED good reads in a row, up to $RIDE_TRIES reads, before it judges; a stop here means the retries ran out, so the
-# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the operators page against GET /api/official, the /api/doors note naming operators_page, then a sweep of public reads.
+# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the operators page against GET /api/official, both initialise answers carrying the pointer, /llms.txt carrying the new note sentence, then a sweep of public reads.
 $whyAttest = Confirm-Reads {
   $a = Get-ServedAttest
   $m = Get-AttestReason $a
@@ -442,5 +458,5 @@ $whySweep = Confirm-Reads {
 } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whySweep -ne "") { Stop-Here ("the public reads were not all 200 after the deploy (version " + $versionId + ") in " + $RIDE_TRIES + " sweeps (last: " + $whySweep + "). Read npx wrangler deployments list and the failing paths by hand first. Only if the new version is at 100% and a read that answered before still fails: " + $ROLLBACK_LINE) }
 Say "[ride] 18 public reads -> 200 ($GOOD_READS_NEEDED sweeps in a row)"
-Say "[note] This ride sent GET requests and credential-free MCP initialize POSTs (one to /mcp and one to /mcp/read per read, by the pre-deploy check, the poll and the ride), with no token or key. An initialize POST counts as a read here: it writes only a door count, so mcp_initialize and mcp_read_initialize rise by that many. /skill.md, /heartbeat.md and /operators are counted doors, so each GET of them ATTEMPTS a counting write: the count rises by one only while the door is below its daily cap and the batch succeeds, and a commit_days stamp row for today's date and the new commit can be written even at the cap. THE RIDE ITSELF ADDED TO operators_page: the poll, the page check and the sweeps each fetched GET /operators, so the first day's operators_page count includes these requests and is not all visitors. GET /api/doors commits_by_day may show two stamps for today (the old commit and the new one), which is expected."
+Say "[note] This ride sent GET requests and credential-free MCP initialize POSTs (one to /mcp and one to /mcp/read per read, by the pre-deploy check, the poll and the ride), with no token or key. Step 2, before the deploy, itself sent one GET /operators and two initialize POSTs. An initialize POST counts as a read here: it writes only a door count, so mcp_initialize and mcp_read_initialize rise by that many. /skill.md, /heartbeat.md and /operators are counted doors, so each GET of them ATTEMPTS a counting write: the count rises by one only while the door is below its daily cap and the batch succeeds, and a commit_days stamp row for today's date and the new commit can be written even at the cap. THE RIDE ITSELF ADDED TO operators_page: the poll, the page check and the sweeps each fetched GET /operators, so the first day's operators_page count includes these requests and is not all visitors. GET /api/doors commits_by_day may show two stamps for today (the old commit and the new one), which is expected."
 Say "[done] operators' pointer wave deployed and ridden. Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
