@@ -1,0 +1,610 @@
+# Deploys the 23 NOV WALLET BATCH WAVE: declareWallet (src/wallets.ts) now commits the payout address and its chained identity-log row (wallet_declared / wallet_changed) as ONE D1 batch, the change of an
+# existing address a compare-and-set pinned to the address and added_at the caller read, the chained INSERT gated on changes() = 1 (a racing second declaration writes nothing and is told so). Before it, the two were separate writes and a declaration could go unlogged.
+# DECISIONS D-088. Brief: drafts/BRIEF-WALLET-DECLARE-BATCH-2026-11-23.md (Deploy section). Gate: docs/REVIEW-WALLET-BATCH-GATE-2026-11-23.md (condition C1).
+# ONE worker deploy. Ben's hand only (D-017). One fail-fast script (L-046, L-069). NO MIGRATION, NO D1 WRITE, NO MINT: step 0 STOPS if migrations/, schema.sql or src/doc.ts differ between the live
+# base and HEAD. Wrangler is used for TWO things only: ONE read-only `d1 execute --remote` SELECT (the wallets-versus-identity-log consistency read, step 2) and the stamped deploy. Derived mechanically from deploy-rotate-batch.ps1 (same shape of wave: a worker-only deploy).
+# TWO PINS. $LIVE_BASE_COMMIT is the commit the live worker serves when this runs (696e7dc6: the rotateKey batch wave, worker a887e77d); step 2 PROVES it against the live GET /api/attest code.commit. main and
+# origin may sit on a script-only commit above it, which is fine: the no-mint and no-migration check reads src/doc.ts, migrations/ and schema.sql only.
+# $REVIEWED_COMMIT is the commit the review converged on. Step 0a STOPS, before any git or network command, while EITHER pin still holds its placeholder or is not 40 lower-case hex.
+# THE DEPLOY STAMPS THE COMMIT: `npx wrangler deploy --var CODE_COMMIT:<sha>`. The poll waits until GET /api/attest serves code.commit equal to the pinned sha AND code.version_id equal to the
+# Current Version ID wrangler printed. THE STAMP IS THE ONLY PROOF THE NEW CODE IS LIVE: a real declaration needs a seat's own key, which this ride never holds, so no request here reaches declareWallet. THE FIRST REAL DECLARATION IS THE FIRST PRODUCTION EXECUTION of the batch.
+# THE RIDE: POST /api/wallet with no Authorization header -> 401 "No credentials."; POST /api/wallet with a bearer that is no citizen's secret -> 401 "Unknown secret. It identifies no
+# citizen."; GET /api/wallet -> 404. Each refusal writes nothing (authenticate() throws before any write). The same three answers are read BEFORE the deploy, so the ride shows the route still refuses as it did, not that the batch runs.
+# The rotateKey wave (live) must still refuse its three too: both sets are read before the deploy and in the ride. Then the earlier waves still serve (/operators, both initialise pointers, /llms.txt), non-minting, every chain ok.
+# STEP 2 ALSO READS (read-only, both -DryRun and the real run): how many wallets rows exist and how many disagree with their citizen's newest chained wallet row. Counts only, never addresses. A disagreement does NOT stop the deploy (existing mismatches are out of scope, nothing is repaired here): it is a NOTE, because the pay route refuses those seats until repaired. A failed, timed-out or non-JSON read STOPS the script and is never read as zero.
+# L-167: EVERY READ AFTER THE DEPLOY IS RETRIED. A single read straight after a write is "not yet seen", never "failed". The poll and every ride check need $GOOD_READS_NEEDED consecutive good reads,
+# within a bounded number of tries, before they judge; no stop message names a rollback until those retries have run out, and even then it says to read the deployments list first.
+# The ROLLBACK TARGET is the version id GET /api/attest served BEFORE the deploy (read live, never typed in). The wave is rollback-safe: no schema change.
+# REVIEWED SOURCE ONLY: step 0 also STOPS unless HEAD is $REVIEWED_COMMIT plus changes confined to $ALLOWED_PATHS_AFTER_REVIEW (this script, its test, docs/).
+# Run from society/ on main, after the merge and the push:
+#   cd "C:\Users\bengr\Projects\AI domain and social network\society"
+#   powershell -ExecutionPolicy Bypass -File scripts\deploy-wallet-batch.ps1 -ExpectedCommit <sha> -DryRun   # every check and the live reads, nothing deployed
+#   powershell -ExecutionPolicy Bypass -File scripts\deploy-wallet-batch.ps1 -ExpectedCommit <sha>           # the real thing
+# <sha> is the pushed tip of main (git -C society rev-parse HEAD), the full 40 hex.
+# THE RIDE holds no token, key or assertion: public GETs, credential-free MCP `initialize` POSTs to /mcp and /mcp/read (a read here; it writes only a door count), and the refused POSTs to /api/rotate and /api/wallet above. GET /operators is a COUNTED door (operators_page): the ride itself adds to that count (see the [note] at the end).
+# PowerShell 5.1 traps this file avoids: one spelling per variable name; -notmatch on an array filters instead of testing; a one-element return is wrapped in @(); "$var:" is a drive reference
+# (write "${var}:"); never merge a native command's stderr under ErrorActionPreference Stop; -eq and -ne are case-INSENSITIVE (hashes and shas are compared with -ceq / -cne); PS 5.1 strips
+# inner double quotes from a native command's argument, so the initialise POSTs send their body from a temp file (curl.exe --data-binary "@file"). ASCII only.
+param(
+  [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+  [switch]$DryRun
+)
+$ErrorActionPreference = "Stop"
+$BASE = "https://commonhold.randommonicle.workers.dev"
+# The attested constitution this wave must leave untouched (v6, minted 22 Oct).
+$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
+# The commit the live worker serves when this runs (the rotateKey batch wave, worker a887e77d).
+$LIVE_BASE_COMMIT = "696e7dc68ed0db4d32044de70d98b493333d3ac8"
+$LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
+# THE REVIEWED SOURCE. The hub replaces this placeholder with the full sha the review converged on; step 0 STOPS while it is unchanged, and while it is not 40 lower-case hex.
+$REVIEWED_COMMIT = "8d88a1312737779adc687631397c8431e325f8eb"
+$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
+$ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-wallet-batch.ps1", "test/deploy-wallet-batch-script.test.ts", "docs/")
+$PAGE_URL = "$BASE/operators"
+$ROTATE_URL = "$BASE/api/rotate"
+$WALLET_URL = "$BASE/api/wallet"
+# The prod database, and the bound on the one read-only wrangler d1 execute (the scratch database is never used here).
+$PROD_DB = "commonhold"
+$WRANGLER_D1_SECONDS = 120
+# One row per wallets row: its citizen, its address, and the kind and detail of that citizen's newest chained wallet row (null when there is none). A SELECT; no double quote, so it survives the cmd.exe hop.
+$WALLET_LOG_SQL = "SELECT w.citizen_id, w.address, e.kind, e.detail FROM wallets w LEFT JOIN identity_events e ON e.id = (SELECT MAX(id) FROM identity_events WHERE citizen_id = w.citizen_id AND kind IN ('wallet_declared','wallet_changed'))"
+# The two refusal texts the ride reads, exactly as src/society.ts authenticate() serves them (test/deploy-wallet-batch-script.test.ts pins both against the source). A prefix of each is checked.
+$NO_CREDENTIALS_PREFIX = "No credentials. Register first"
+$UNKNOWN_SECRET_TEXT = "Unknown secret. It identifies no citizen."
+# A bearer string that is no citizen's secret (it does not have newSecret()'s commonhold_sk_ shape) and not an assertion (no ch1. prefix): authenticate() hashes it, finds no row and refuses. It writes nothing.
+$NOT_A_SECRET = "commonhold-ride-not-a-credential"
+# The previous wave's two sentences, exactly as src/guest-core.ts serves them (test/deploy-wallet-batch-script.test.ts pins both against the constants): the ride checks they still serve.
+$OPERATORS_POINTER = "If a person runs you, or could run you on a schedule, GET /operators is the page for them: what you need in order to come back, and one prompt they can paste into a scheduler."
+$NOTE_SENTENCE = "A page for you, with the one prompt to paste into your scheduler: GET /operators."
+$INIT_BODY = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}'
+# The page headers, exactly as src/operators.ts serves them (test/operators-page-d1.test.ts T1 pins the same string).
+$CSP_EXPECTED = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+$POLL_TRIES = 24
+$POLL_DELAY_SECONDS = 5
+# L-167: consecutive good reads before any post-deploy check judges, and the bounded tries it gets to find them.
+$GOOD_READS_NEEDED = 3
+$RIDE_TRIES = 12
+$RIDE_DELAY_SECONDS = 5
+
+function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }
+function Say($msg) { Write-Host $msg }
+# The paths in $paths that are NOT on $ALLOWED_PATHS_AFTER_REVIEW (ordinal, case-sensitive; an empty list in is an empty list out).
+function Get-DisallowedPaths($paths) {
+  $bad = @()
+  foreach ($p in @($paths)) {
+    $ok = $false
+    foreach ($entry in $ALLOWED_PATHS_AFTER_REVIEW) {
+      if ($entry.EndsWith("/")) { if ($p.StartsWith($entry, [System.StringComparison]::Ordinal)) { $ok = $true } }
+      elseif ($p -ceq $entry) { $ok = $true }
+    }
+    if (-not $ok) { $bad += $p }
+  }
+  return $bad
+}
+# The status code, content type and body of a GET. The content type is read from curl's own -w, never guessed.
+function Get-Text($url, $maxTime) {
+  $tmp = [System.IO.Path]::GetTempFileName()
+  try {
+    $meta = (curl.exe -s --max-time $maxTime -o $tmp -w "%{http_code}|%{content_type}" $url)
+    $parts = ([string]$meta).Split("|", 2)
+    $body = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $body) { $body = "" }
+    $type = ""
+    if ($parts.Count -gt 1) { $type = [string]$parts[1] }
+    return @{ Code = [string]$parts[0]; Type = $type; Body = $body }
+  } finally {
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+  }
+}
+function Get-Json($url) {
+  $r = Get-Text $url 20
+  if ($r.Code -ne "200") { Stop-Here "GET $url -> $($r.Code), expected 200." }
+  try { return ($r.Body | ConvertFrom-Json) } catch { Stop-Here "GET $url did not return JSON." }
+}
+function Read-Attest($when) {
+  $att = Get-Json "$BASE/api/attest"
+  if ($null -eq $att -or $null -eq $att.constitution -or -not $att.constitution.template_hash) { Stop-Here "GET /api/attest was unreadable $when; re-read it by hand (this is NOT a minting signal)." }
+  return $att
+}
+# "" when $att is the non-minting, all-chains-ok baseline, otherwise the reason it is not. Never stops: the caller decides (before the deploy it stops, after it retries).
+function Get-AttestReason($att) {
+  if ($null -eq $att -or $null -eq $att.constitution -or -not $att.constitution.template_hash) { return "GET /api/attest was unreadable (this is NOT a minting signal)" }
+  if ([string]$att.constitution.version -ne "6") { return ("constitution is version " + $att.constitution.version + ", expected 6: investigate before anything else") }
+  if ($att.constitution.template_hash -cne $V6_HASH) { return ("template_hash is " + $att.constitution.template_hash + ", expected v6 " + $V6_HASH + ": investigate before anything else (this wave mints nothing)") }
+  if ($att.ok -ne $true) { return ("GET /api/attest ok is '" + $att.ok + "', expected true") }
+  foreach ($chain in "identity_log", "treasury", "payouts", "ballots") {
+    if ($att.$chain.ok -ne $true) { return ("chain " + $chain + " ok is '" + $att.$chain.ok + "', expected true: investigate") }
+  }
+  return ""
+}
+function Assert-Attest($att, $when) {
+  $why = Get-AttestReason $att
+  if ($why -ne "") { Stop-Here "$why ($when)." }
+}
+# The parsed GET /api/attest answer, or $null when the read fails. Never stops.
+function Get-ServedAttest {
+  $r = Get-Text "$BASE/api/attest" 30
+  if ($r.Code -ne "200") { return $null }
+  try { return ($r.Body | ConvertFrom-Json) } catch { return $null }
+}
+# The `code` block GET /api/attest serves now, or $null when the read fails or carries none. Never stops: the poll decides.
+function Get-ServedCode {
+  $served = Get-ServedAttest
+  if ($null -eq $served) { return $null }
+  return $served.code
+}
+# "" when $code is the block THIS deploy should be serving, otherwise the reason it is not. Every comparison is case-sensitive.
+function Test-CodeIdentityServed($code, $commit, $versionId) {
+  if ($null -eq $code) { return "GET /api/attest serves no code block (an unreadable answer)" }
+  if ([string]$code.commit_status -cne "stamped") { return ("code.commit_status is '" + $code.commit_status + "', expected stamped") }
+  if ([string]$code.commit -cne $commit) { return ("code.commit is '" + $code.commit + "', expected the pinned sha " + $commit) }
+  if ([string]$code.version_status -cne "available") { return ("code.version_status is '" + $code.version_status + "', expected available") }
+  if (([string]$code.version_id).ToLowerInvariant() -cne ([string]$versionId).ToLowerInvariant()) { return ("code.version_id is '" + $code.version_id + "', expected the Current Version ID wrangler printed (" + $versionId + ")") }
+  return ""
+}
+# The JSON body of a captured GET answer, or $null when it is not JSON.
+function Read-JsonBody($r) {
+  try { return ([string]$r.Body | ConvertFrom-Json) } catch { return $null }
+}
+# The parsed GET /api/official answer, or $null when the read fails or is not JSON. Never stops: the caller decides.
+function Get-ServedOfficial {
+  $r = Get-Text "$BASE/api/official" 30
+  if ([string]$r.Code -cne "200") { return $null }
+  return (Read-JsonBody $r)
+}
+# A GET that keeps the response headers: the status, the content type, the Content-Security-Policy and X-Content-Type-Options values and the body. The headers come from curl's own dump file, never guessed.
+function Get-Page($url, $maxTime) {
+  $tmp = [System.IO.Path]::GetTempFileName()
+  $hdr = [System.IO.Path]::GetTempFileName()
+  try {
+    $meta = (curl.exe -s --max-time $maxTime -D $hdr -o $tmp -w "%{http_code}|%{content_type}" $url)
+    $parts = ([string]$meta).Split("|", 2)
+    $body = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $body) { $body = "" }
+    $headText = (Get-Content $hdr -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $headText) { $headText = "" }
+    $csp = ""
+    $nosniff = ""
+    foreach ($line in ($headText -split "`n")) {
+      $one = $line.Trim()
+      if ($one -imatch "^content-security-policy:\s*(.*)$") { $csp = $Matches[1].Trim() }
+      if ($one -imatch "^x-content-type-options:\s*(.*)$") { $nosniff = $Matches[1].Trim() }
+    }
+    $type = ""
+    if ($parts.Count -gt 1) { $type = [string]$parts[1] }
+    return @{ Code = [string]$parts[0]; Type = $type; Csp = $csp; Nosniff = $nosniff; Body = $body }
+  } finally {
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Remove-Item $hdr -ErrorAction SilentlyContinue
+  }
+}
+# "" when $r is GET /operators answering the operators page (live since 19 Nov), otherwise the reason it is not. $official is the parsed GET /api/official read in the same iteration (or $null): the page's four figures
+# must equal it, because the page and the route read the same rows. Case-sensitive. A quick propagation check, not a whole-page comparison (the whole page is proven by test/operators-page-d1.test.ts, step 1).
+function Test-OperatorsServed($r, $official) {
+  if ([string]$r.Code -cne "200") { return ("GET /operators answered " + $r.Code + ", expected 200") }
+  if (-not ([string]$r.Type).StartsWith("text/html")) { return ("GET /operators content type is '" + $r.Type + "', expected text/html") }
+  if ([string]$r.Csp -cne $CSP_EXPECTED) { return ("the Content-Security-Policy is '" + $r.Csp + "', expected exactly " + $CSP_EXPECTED) }
+  if ([string]$r.Nosniff -cne "nosniff") { return ("X-Content-Type-Options is '" + $r.Nosniff + "', expected nosniff") }
+  $body = [string]$r.Body
+  foreach ($bad in @("<script", "src=", "<form", "<link", "<img", "<iframe")) {
+    if ($body.ToLowerInvariant().Contains($bad)) { return ("the page contains " + $bad + ", which it must never carry") }
+  }
+  foreach ($need in @("This page is not a way to take part", "<pre>", "/mcp")) {
+    if (-not $body.Contains($need)) { return ("the page lacks '" + $need + "'") }
+  }
+  if ($null -eq $official -or $null -eq $official.composition -or $null -eq $official.residents) { return "GET /api/official was unreadable in this iteration, so the page's figures cannot be compared" }
+  $comp = $official.composition
+  # The WHOLE figures sentence, rebuilt from /api/official, must be in the page, starting at the paragraph tag. A bare number would also match inside a longer one (13 inside 113, 2 inside 12), so every
+  # figure sits between fixed words and the sentence begins at "<p>": a different number or a different plural breaks the match.
+  $nCit = [string]$comp.citizens
+  $citWord = "citizens"
+  if ($nCit -ceq "1") { $citWord = "citizen" }
+  $actedClause = "Citizen seats that wrote in the last 30 days: unavailable."
+  if ($null -ne $comp.acted_30d) {
+    $nActed = [string]$comp.acted_30d
+    $seatWord = "seats"
+    if ($nActed -ceq "1") { $seatWord = "seat" }
+    $actedClause = $nActed + " citizen " + $seatWord + " wrote in the last 30 days, the operator&apos;s included."
+  }
+  $figuresSentence = "<p>" + $nCit + " " + $citWord + ". By the operator&apos;s own statement it controls " + [string]$comp.operator_controlled + " of them and paid for " + [string]$comp.operator_paid + ". " + $actedClause + " Resident records: " + [string]$official.residents.count + "."
+  if (-not $body.Contains($figuresSentence)) { return ("the page does not carry the figures sentence GET /api/official gives: '" + $figuresSentence + "'") }
+  return ""
+}
+# L-167. Runs the check $check (a script block returning "" when the read is good, otherwise the reason it is not) until $need CONSECUTIVE good reads, at most $tries times, $delaySeconds apart.
+# A bad read resets the run: it means "not yet seen", never "failed". Returns "" when the run is found, otherwise the last reason (or how short the run fell). Never stops and never names a remedy.
+function Confirm-Reads($check, $need, $tries, $delaySeconds) {
+  $run = 0
+  $last = "never read"
+  for ($n = 1; $n -le $tries; $n++) {
+    $why = [string](& $check)
+    if ($why -eq "") {
+      $run = $run + 1
+      if ($run -ge $need) { return "" }
+      $last = "only " + $run + " good read(s) in a row of the " + $need + " needed"
+    } else {
+      $run = 0
+      $last = $why
+    }
+    if ($n -lt $tries) { Start-Sleep -Seconds $delaySeconds }
+  }
+  return $last
+}
+# Polls (GETs, and the two credential-free initialize POSTs) until the served block is this deploy's AND GET /operators is the page AND both initialise answers carry the pointer, $GOOD_READS_NEEDED reads in a row, or STOPS after $tries reads. Only the exhausted poll may name a rollback.
+function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
+  $last = "never read"
+  $run = 0
+  for ($n = 1; $n -le $tries; $n++) {
+    $why = Test-CodeIdentityServed (Get-ServedCode) $commit $versionId
+    if ($why -eq "") { $why = Test-OperatorsServed (Get-Page $PAGE_URL 30) (Get-ServedOfficial) }
+    if ($why -eq "") { $why = Test-PointerServed }
+    if ($why -eq "") {
+      $run = $run + 1
+      Say "[poll] try $n of ${tries}: good read $run of ${GOOD_READS_NEEDED}: GET /api/attest serves code.commit $($commit.Substring(0, 8)) and code.version_id $versionId; GET /operators is the operators page; both initialise answers carry the pointer"
+      if ($run -ge $GOOD_READS_NEEDED) { return }
+      $last = "only " + $run + " good read(s) in a row of the " + $GOOD_READS_NEEDED + " needed"
+    } else {
+      $run = 0
+      $last = $why
+      Say "[poll] try $n of ${tries}: not yet: $why"
+    }
+    if ($n -lt $tries) { Start-Sleep -Seconds $delaySeconds }
+  }
+  Stop-Here ("the new worker was not shown live in " + $tries + " reads (last: " + $last + "). Read 'npx wrangler deployments list' and GET /api/attest by hand first: stale reads right after a deploy are common, and the deploy may be live. Only if the new version is not at 100% or fresh reads still disagree: " + $ROLLBACK_LINE)
+}
+# A credential-free MCP initialize POST to $path, by curl.exe --data-binary "@<temp file>" like every other HTTP call here (no .NET TLS defaults, no PS 5.1 quote stripping). Returns @{ Text; Why }:
+# Text is the answer's `instructions`, Why is "" when it was read and otherwise says why it could not be (curl's exit code, the HTTP status, not JSON, no instructions). A read here: initialize writes only a door count. Never stops.
+function Get-InitInstructions($path) {
+  $out = [System.IO.Path]::GetTempFileName()
+  $req = [System.IO.Path]::GetTempFileName()
+  try {
+    [System.IO.File]::WriteAllText($req, $INIT_BODY, (New-Object System.Text.UTF8Encoding($false)))
+    $code = (curl.exe -s --max-time 30 -o $out -w "%{http_code}" -H "Content-Type: application/json" --data-binary "@$req" ($BASE + $path))
+    $exit = $LASTEXITCODE
+    if ($exit -ne 0) { return @{ Text = ""; Why = ("curl exited " + $exit + " (no answer; a TLS or network failure)") } }
+    if ([string]$code -cne "200") { return @{ Text = ""; Why = ("HTTP " + $code + ", expected 200") } }
+    $body = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $body) { $body = "" }
+    try { $j = ([string]$body | ConvertFrom-Json) } catch { return @{ Text = ""; Why = "the answer was not JSON" } }
+    $t = [string]$j.result.instructions
+    if ($t -ceq "") { return @{ Text = ""; Why = "the answer carried no result.instructions" } }
+    return @{ Text = $t; Why = "" }
+  } finally {
+    Remove-Item $out -ErrorAction SilentlyContinue
+    Remove-Item $req -ErrorAction SilentlyContinue
+  }
+}
+# How many times $needle occurs in $hay (ordinal).
+function Get-Occurrences($hay, $needle) {
+  return (([string]$hay).Split([string[]]@($needle), [System.StringSplitOptions]::None).Count - 1)
+}
+# "" when both initialise answers carry the pointer exactly once, otherwise the reason one does not.
+function Test-PointerServed {
+  foreach ($path in "/mcp", "/mcp/read") {
+    $init = Get-InitInstructions $path
+    if ([string]$init.Why -ne "") { return ("the " + $path + " initialize answer was unreadable: " + $init.Why) }
+    $n = Get-Occurrences $init.Text $OPERATORS_POINTER
+    if ($n -ne 1) { return ("the " + $path + " initialize answer carries the pointer " + $n + " time(s), expected exactly 1") }
+  }
+  return ""
+}
+# "" when GET /llms.txt carries the GUEST_OPERATOR_NOTE sentence (live since 19 Nov), otherwise the reason it does not.
+function Test-NoteServed {
+  $r = Get-Text "$BASE/llms.txt" 30
+  if ([string]$r.Code -cne "200") { return ("GET /llms.txt answered " + $r.Code + ", expected 200") }
+  if (-not ([string]$r.Body).Contains($NOTE_SENTENCE)) { return "GET /llms.txt does not yet carry the operator-note sentence" }
+  return ""
+}
+# The status and body of a POST to $url with no body, by curl.exe like every other HTTP call here. $auth is the whole Authorization header value, or "" to send none. Never stops.
+function Get-PostAnswer($url, $auth) {
+  $out = [System.IO.Path]::GetTempFileName()
+  try {
+    if ([string]$auth -ceq "") {
+      $code = (curl.exe -s --max-time 30 -o $out -w "%{http_code}" -X POST $url)
+    } else {
+      $code = (curl.exe -s --max-time 30 -o $out -w "%{http_code}" -X POST -H ("Authorization: " + $auth) $url)
+    }
+    $exit = $LASTEXITCODE
+    $body = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $body) { $body = "" }
+    return @{ Code = [string]$code; Exit = $exit; Body = [string]$body }
+  } finally {
+    Remove-Item $out -ErrorAction SilentlyContinue
+  }
+}
+# "" when the captured answer $r is a 401 whose JSON `error` starts with $prefix, otherwise the reason it is not. Case-sensitive.
+function Test-Refusal401($r, $label, $prefix) {
+  if ($r.Exit -ne 0) { return ($label + ": curl exited " + $r.Exit + " (no answer; a TLS or network failure)") }
+  if ([string]$r.Code -cne "401") { return ($label + " answered " + $r.Code + ", expected 401") }
+  $j = Read-JsonBody $r
+  if ($null -eq $j) { return ($label + ": the 401 was not JSON") }
+  if (-not ([string]$j.error).StartsWith($prefix, [System.StringComparison]::Ordinal)) { return ($label + ": the 401 error is '" + $j.error + "', expected it to start '" + $prefix + "'") }
+  return ""
+}
+# "" when the rotate route refuses all three credential-free requests as the gate's ride facts say, otherwise the first reason one does not. None of the three writes anything.
+function Test-RotateRefusals {
+  $why = Test-Refusal401 (Get-PostAnswer $ROTATE_URL "") "POST /api/rotate with no credential" $NO_CREDENTIALS_PREFIX
+  if ($why -ne "") { return $why }
+  $why = Test-Refusal401 (Get-PostAnswer $ROTATE_URL ("Bearer " + $NOT_A_SECRET)) "POST /api/rotate with a bearer that is no citizen's secret" $UNKNOWN_SECRET_TEXT
+  if ($why -ne "") { return $why }
+  $g = Get-Text $ROTATE_URL 30
+  if ([string]$g.Code -cne "404") { return ("GET /api/rotate answered " + $g.Code + ", expected 404 (the route is POST only)") }
+  return ""
+}
+# "" when the wallet route refuses all three credential-free requests as the gate's ride facts say, otherwise the first reason one does not. None of the three writes anything (authenticate() throws before declareWallet).
+function Test-WalletRefusals {
+  $why = Test-Refusal401 (Get-PostAnswer $WALLET_URL "") "POST /api/wallet with no credential" $NO_CREDENTIALS_PREFIX
+  if ($why -ne "") { return $why }
+  $why = Test-Refusal401 (Get-PostAnswer $WALLET_URL ("Bearer " + $NOT_A_SECRET)) "POST /api/wallet with a bearer that is no citizen's secret" $UNKNOWN_SECRET_TEXT
+  if ($why -ne "") { return $why }
+  $g = Get-Text $WALLET_URL 30
+  if ([string]$g.Code -cne "404") { return ("GET /api/wallet answered " + $g.Code + ", expected 404 (the route is POST only)") }
+  return ""
+}
+# Runs a command line through cmd.exe with stdout captured to a file, killing the process tree if it outlives $seconds. Returns @{ Code; Out; TimedOut }.
+function Invoke-Bounded($commandLine, $seconds) {
+  $outFile = [System.IO.Path]::GetTempFileName()
+  try {
+    $p = Start-Process -FilePath "cmd.exe" -ArgumentList ("/c " + $commandLine + " > `"" + $outFile + "`"") -NoNewWindow -PassThru
+    $null = $p.Handle
+    if (-not $p.WaitForExit($seconds * 1000)) {
+      taskkill.exe /PID $p.Id /T /F | Out-Null
+      return @{ Code = -1; Out = ""; TimedOut = $true }
+    }
+    $text = (Get-Content $outFile -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $text) { $text = "" }
+    return @{ Code = $p.ExitCode; Out = $text; TimedOut = $false }
+  } finally {
+    Remove-Item $outFile -ErrorAction SilentlyContinue
+  }
+}
+# The statement travels in an environment variable that cmd.exe expands inside the quotes, so no character of it is parsed as cmd syntax.
+function Invoke-BoundedSql($prefix, $sql, $seconds) {
+  $env:D1_SQL_ARG = $sql
+  try {
+    return (Invoke-Bounded ($prefix + ' "%D1_SQL_ARG%"') $seconds)
+  } finally {
+    Remove-Item Env:D1_SQL_ARG -ErrorAction SilentlyContinue
+  }
+}
+# `wrangler d1 execute --json` output as an array of result rows, or $null when the output is not the expected JSON. $null is a FAILED read, never zero rows (an empty array is zero rows).
+function Read-D1Rows($text) {
+  $i = ([string]$text).IndexOf("[")
+  if ($i -lt 0) { return $null }
+  try { $parsed = (([string]$text).Substring($i) | ConvertFrom-Json) } catch { return $null }
+  if ($null -eq $parsed -or @($parsed).Count -lt 1 -or $null -eq @($parsed)[0].results) { return $null }
+  # the comma keeps an EMPTY result list an empty array: a bare return would unroll it to $null, which is a failed read
+  return ,@(@($parsed)[0].results)
+}
+# "" when the wallets row $row agrees with its citizen's newest chained wallet row, otherwise a short reason. The two detail shapes and their case-sensitive address pattern are src/wallets.ts walletAddressFromRow's own.
+function Get-WalletRowReason($row) {
+  if ($null -eq $row.kind) { return "no chained wallet row" }
+  $detail = [string]$row.detail
+  $addr = ""
+  if ([string]$row.kind -ceq "wallet_declared") {
+    if ($detail -cmatch '^wallet declared: (0x[0-9a-f]{40})\z') { $addr = $Matches[1] }
+  } elseif ([string]$row.kind -ceq "wallet_changed") {
+    if ($detail -cmatch '^wallet changed: 0x[0-9a-f]{40} -> (0x[0-9a-f]{40})\z') { $addr = $Matches[1] }
+  }
+  if ($addr -ceq "") { return "the chained row's detail does not parse" }
+  if ($addr -cne [string]$row.address) { return "the chained row's address differs from the table's" }
+  return ""
+}
+# The counts for a read of the wallets rows: @{ Total; Inconsistent }. Counts only.
+function Get-WalletLogCounts($rows) {
+  $bad = 0
+  foreach ($row in @($rows)) {
+    if ((Get-WalletRowReason $row) -ne "") { $bad = $bad + 1 }
+  }
+  return @{ Total = @($rows).Count; Inconsistent = $bad }
+}
+# The one read-only D1 read of this script. A failed, timed-out or non-JSON read STOPS: it is never read as zero. Returns @{ Total; Inconsistent }.
+function Test-WalletLogConsistency {
+  $r = Invoke-BoundedSql ("npx wrangler d1 execute " + $PROD_DB + " --remote --json --command") $WALLET_LOG_SQL $WRANGLER_D1_SECONDS
+  if ($r.TimedOut) { Stop-Here ("the wallets-versus-identity-log read timed out after " + $WRANGLER_D1_SECONDS + " s. Nothing was written; read it by hand before any retry.") }
+  if ($r.Code -ne 0) { Stop-Here ("the wallets-versus-identity-log read failed (wrangler d1 execute exit " + $r.Code + "). Nothing was written.") }
+  $rows = Read-D1Rows $r.Out
+  if ($null -eq $rows) { Stop-Here "the wallets-versus-identity-log read answered something that is not the expected JSON: it is not read as zero rows. Nothing was written." }
+  return (Get-WalletLogCounts $rows)
+}
+# END-OF-DEFINITIONS (nothing above runs git, npm, wrangler or the network)
+
+# 0a. the two pins, BEFORE any git, npm, wrangler or network command: a placeholder is never a commit, and a malformed pin must not reach `git merge-base`
+# BEGIN-PIN-CHECK
+if ($LIVE_BASE_COMMIT -ceq $LIVE_BASE_PLACEHOLDER) { Stop-Here "`$LIVE_BASE_COMMIT still holds the placeholder '$LIVE_BASE_PLACEHOLDER': the hub sets it to the commit the live worker serves." }
+if ($LIVE_BASE_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$LIVE_BASE_COMMIT '$LIVE_BASE_COMMIT' is not 40 lower-case hex. Nothing was read or written." }
+if ($REVIEWED_COMMIT -ceq $REVIEWED_COMMIT_PLACEHOLDER) { Stop-Here "`$REVIEWED_COMMIT still holds the placeholder '$REVIEWED_COMMIT_PLACEHOLDER': the hub sets it to the commit the review converged on." }
+if ($REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$REVIEWED_COMMIT '$REVIEWED_COMMIT' is not 40 lower-case hex. Nothing was read or written." }
+# END-PIN-CHECK
+
+# 0. the commit: fetch, then main, origin/main and the expected sha must be ONE commit, on a clean tree
+Say "[git] git fetch origin"
+git fetch origin --quiet
+if ($LASTEXITCODE -ne 0) { Stop-Here "git fetch failed; the level check below would read a stale origin/main." }
+$branch = (git rev-parse --abbrev-ref HEAD).Trim()
+if ($branch -cne "main") { Stop-Here "the current branch is '$branch', not main: deploy from main only." }
+$headSha = (git rev-parse HEAD).Trim()
+$originSha = (git rev-parse origin/main).Trim()
+$mainSha = (git rev-parse main).Trim()
+$ErrorActionPreference = "Continue"
+$expectedSha = (git rev-parse --verify ($ExpectedCommit + "^{commit}"))
+$expectedCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($expectedCode -ne 0 -or -not $expectedSha) { Stop-Here "-ExpectedCommit '$ExpectedCommit' is not a commit in this repository." }
+$expectedSha = ([string]$expectedSha).Trim()
+if ($mainSha -cne $originSha -or $mainSha -cne $expectedSha -or $headSha -cne $expectedSha) {
+  Stop-Here ("main, origin/main and -ExpectedCommit are not one commit: HEAD " + $headSha.Substring(0, 8) + ", main " + $mainSha.Substring(0, 8) + ", origin/main " + $originSha.Substring(0, 8) + ", expected " + $expectedSha.Substring(0, 8) + ".")
+}
+if ($headSha -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "HEAD '$headSha' is not 40 lower-case hex: it could not be stamped (the Worker would serve malformed_stamp)." }
+$dirty = @(git status --porcelain)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE): the clean-tree check cannot be read." }
+if ($dirty.Count -gt 0) { Stop-Here ("working tree not clean (" + $dirty.Count + " paths): the deploy must ship exactly the committed tree.") }
+git merge-base --is-ancestor $LIVE_BASE_COMMIT HEAD
+if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.Substring(0, 8)) (the live worker's code): this deploy would drop the waves before it." }
+# Non-minting, no migration: src/doc.ts (which holds FRONT_DOOR_TEMPLATE), migrations/ and schema.sql must not have moved since the live code.
+$moves = @(git diff --name-status --no-renames $LIVE_BASE_COMMIT HEAD -- src/doc.ts migrations schema.sql)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-mint and no-migration check cannot be read." }
+if ($moves.Count -gt 0) { Stop-Here ("src/doc.ts, migrations/ or schema.sql changed since " + $LIVE_BASE_COMMIT.Substring(0, 8) + " (" + ($moves -join " | ") + "): this wave mints nothing and has no migration. Not this script's deploy.") }
+# BEGIN-REVIEWED-SOURCE-CHECK
+git merge-base --is-ancestor $REVIEWED_COMMIT HEAD
+if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain the reviewed commit $($REVIEWED_COMMIT.Substring(0, 8)): this is not the code that was reviewed." }
+$afterReview = @(git diff --name-only --no-renames $REVIEWED_COMMIT HEAD)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the changes since the reviewed commit cannot be read." }
+$unreviewed = @(Get-DisallowedPaths $afterReview)
+if ($unreviewed.Count -gt 0) { Stop-Here ("these paths changed since the reviewed commit " + $REVIEWED_COMMIT.Substring(0, 8) + " and are not on the allowlist (" + ($ALLOWED_PATHS_AFTER_REVIEW -join ", ") + "), so what would ship is not what was reviewed: " + ($unreviewed -join ", ")) }
+Say ("[git] reviewed source: HEAD differs from " + $REVIEWED_COMMIT.Substring(0, 8) + " in " + $afterReview.Count + " path(s), all on the allowlist")
+# END-REVIEWED-SOURCE-CHECK
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "export const UNVALIDATED: Record<string, UnvalidatedBehaviour>" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts has no UNVALIDATED behaviour table: this checkout is not the response-side wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "function behaviourExtension(" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not render the x-clamped / x-ignored-when-invalid extensions: this checkout is not the response-side wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "const ROW_ID_PATH_PARAM" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not declare the row-id path pattern: this checkout is not the response-side wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "responseSchema: COUNCIL_THREAD_RESPONSE_SCHEMA" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not declare the /api/council/thread schema: this checkout is not the response-side wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "has no pathParams declaration" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not refuse an undeclared path variable: this checkout would drop the request-side wave." }
+if (-not (Select-String -Path "src/maintainer/parked.ts" -Pattern "export async function parkedPage" -SimpleMatch -Quiet)) { Stop-Here "src/maintainer/parked.ts has no parkedPage: this checkout would drop the parked-list wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "schema: r.responseSchema ??" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not use responseSchema in renderOpenApi: this checkout is not the openapi schema wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "responseSchema: PROPOSAL_RESPONSE_SCHEMA" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not declare the /api/proposal/:id schema: this checkout would drop the openapi proposal schema wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "responseSchema: RESIDENTS_RESPONSE_SCHEMA" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not declare the /api/residents schema: this checkout is not the resident schema wave." }
+if (-not (Select-String -Path "src/discovery.ts" -Pattern "responseSchema: RESIDENT_RESPONSE_SCHEMA" -SimpleMatch -Quiet)) { Stop-Here "src/discovery.ts does not declare the /api/resident/:number schema: this checkout is not the resident schema wave." }
+if (-not (Select-String -Path "src/doors.ts" -Pattern 'export const STAMPS_SINCE = "15 November 2026";' -SimpleMatch -Quiet)) { Stop-Here "src/doors.ts does not carry STAMPS_SINCE: this checkout is not the resident schema wave." }
+if (-not (Select-String -Path "src/doors.ts" -Pattern "INSERT OR IGNORE INTO commit_days" -SimpleMatch -Quiet)) { Stop-Here "src/doors.ts does not write commit_days: this checkout would drop the 15 Nov recovery-unit wave." }
+if (-not (Select-String -Path "src/maintainer/judgment.ts" -Pattern "not judged (the model declined); skipped this wake" -SimpleMatch -Quiet)) { Stop-Here "src/maintainer/judgment.ts does not name a refused item: this checkout would drop the refusal-skip wave." }
+if (-not (Select-String -Path "src/maintainer/runs.ts" -Pattern "a judgment item the model declined to judge" -SimpleMatch -Quiet)) { Stop-Here "src/maintainer/runs.ts note lacks the refusal sentence: this checkout would drop the refusal-skip wave." }
+if (-not (Select-String -Path "src/governance.ts" -Pattern "export function assertProposalsQuery(" -SimpleMatch -Quiet)) { Stop-Here "src/governance.ts has no assertProposalsQuery: this checkout would drop the proposals unknown-params wave." }
+if (-not (Select-String -Path "src/modstate.ts" -Pattern "export function modPlaceholder(" -SimpleMatch -Quiet)) { Stop-Here "src/modstate.ts has no modPlaceholder: this checkout would drop the moderation-gaps wave." }
+if (-not (Select-String -Path "src/governance.ts" -Pattern "SELECT seq FROM sqlite_sequence WHERE name = 'proposals'" -SimpleMatch -Quiet)) { Stop-Here "src/governance.ts does not read sqlite_sequence for proposals: this checkout is not the high-water wave." }
+if (-not (Select-String -Path "src/governance.ts" -Pattern 'PROPOSALS_SEQUENCE_BASELINE = { migration: "0007_first_laws", applied: "2026-08-18" }' -SimpleMatch -Quiet)) { Stop-Here "src/governance.ts does not carry the 0007 baseline: this checkout is not the note-epoch wave." }
+if (-not (Select-String -Path "src/governance.ts" -Pattern "MAX(id) AS max_id," -SimpleMatch -Quiet)) { Stop-Here "src/governance.ts does not read MAX(id) AS max_id: this checkout would drop the max_id wave." }
+if (-not (Select-String -Path "src/mcp.ts" -Pattern "Register as a citizen" -SimpleMatch -Quiet)) { Stop-Here "src/mcp.ts has no register free-path title: this checkout would drop the register free-path wave." }
+if (-not (Select-String -Path "src/operators.ts" -Pattern "export async function handleOperators" -SimpleMatch -Quiet)) { Stop-Here "src/operators.ts has no handleOperators: this checkout is not the operators' page wave." }
+if (-not (Select-String -Path "src/doors.ts" -Pattern '"operators_page",' -SimpleMatch -Quiet)) { Stop-Here "src/doors.ts has no operators_page door: this checkout is not the operators' page wave." }
+if (-not (Select-String -Path "src/index.ts" -Pattern 'path === "/operators" && method === "GET"' -SimpleMatch -Quiet)) { Stop-Here "src/index.ts does not route GET /operators: this checkout is not the operators' page wave." }
+if (-not (Select-String -Path "src/guest-core.ts" -Pattern "export const OPERATORS_POINTER" -SimpleMatch -Quiet)) { Stop-Here "src/guest-core.ts has no OPERATORS_POINTER: this checkout is not the operators' pointer wave." }
+if (-not (Select-String -Path "src/mcp.ts" -Pattern "OPERATORS_POINTER + " -SimpleMatch -Quiet)) { Stop-Here "src/mcp.ts does not serve OPERATORS_POINTER: this checkout is not the operators' pointer wave." }
+if (-not (Select-String -Path "src/mcp-read.ts" -Pattern "OPERATORS_POINTER + " -SimpleMatch -Quiet)) { Stop-Here "src/mcp-read.ts does not serve OPERATORS_POINTER: this checkout is not the operators' pointer wave." }
+if (-not (Select-String -Path "src/society.ts" -Pattern "async function commitRotation(" -SimpleMatch -Quiet)) { Stop-Here "src/society.ts has no commitRotation: this checkout is not the rotateKey batch wave." }
+if (-not (Select-String -Path "src/society.ts" -Pattern "const ROTATION_RACED_MESSAGE = " -SimpleMatch -Quiet)) { Stop-Here "src/society.ts has no ROTATION_RACED_MESSAGE: this checkout is not the rotateKey batch wave." }
+if (-not (Select-String -Path "src/society.ts" -Pattern 'UPDATE citizens SET secret_hash = ? WHERE id = ? AND secret_hash = ?' -SimpleMatch -Quiet)) { Stop-Here "src/society.ts does not compare-and-set the secret: this checkout is not the rotateKey batch wave." }
+if (-not (Select-String -Path "src/wallets.ts" -Pattern "const WALLET_RACED_MESSAGE =" -SimpleMatch -Quiet)) { Stop-Here "src/wallets.ts has no WALLET_RACED_MESSAGE: this checkout is not the wallet batch wave." }
+if (-not (Select-String -Path "src/wallets.ts" -Pattern "UPDATE wallets SET address = ?, added_at = MAX(?, added_at + 1) WHERE citizen_id = ? AND address = ? AND added_at = ?" -SimpleMatch -Quiet)) { Stop-Here "src/wallets.ts does not compare-and-set the wallet row: this checkout is not the wallet batch wave." }
+if (-not (Select-String -Path "src/chain.ts" -Pattern "export function parseUniqueColumns(" -SimpleMatch -Quiet)) { Stop-Here "src/chain.ts has no parseUniqueColumns: this checkout is not the wallet batch wave." }
+if (-not (Select-String -Path "src/privacy.ts" -Pattern "export async function handlePrivacy" -Quiet)) { Stop-Here "src/privacy.ts has no handlePrivacy: this checkout would drop the privacy page." }
+if (-not (Select-String -Path "src/code-identity.ts" -Pattern "export function codeBlock" -Quiet)) { Stop-Here "src/code-identity.ts has no codeBlock: this checkout would drop served code identity." }
+if (-not (Select-String -Path "wrangler.jsonc" -Pattern '"version_metadata"' -Quiet)) { Stop-Here "wrangler.jsonc has no version_metadata binding: the Worker could not serve Cloudflare's version id." }
+if (Select-String -Path "wrangler.jsonc" -Pattern '"CODE_COMMIT"' -Quiet) { Stop-Here "wrangler.jsonc configures a CODE_COMMIT var: a deploy that forgot the flag would serve a stale stamp. The stamp comes from this script's --var flag only." }
+Say ("[git] HEAD " + $headSha.Substring(0, 8) + " = main = origin/main = -ExpectedCommit; tree clean; contains " + $LIVE_BASE_COMMIT.Substring(0, 8) + "; src/doc.ts, migrations and schema.sql unmoved")
+
+# 1. the wave's own gates, re-run here so a stale checkout cannot deploy
+# BEGIN-GATES
+$ErrorActionPreference = "Continue"
+$testOut = (npm test 2>&1 | Out-String)
+$testCode = $LASTEXITCODE
+$tscOut = (npm run typecheck 2>&1 | Out-String)
+$tscCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$failLine = [regex]::Matches($testOut, '(?m)^(?:\S+[ \t]+)?fail (\d+)[ \t]*\r?$')
+$passLine = [regex]::Matches($testOut, '(?m)^(?:\S+[ \t]+)?pass (\d+)[ \t]*\r?$')
+if ($failLine.Count -lt 1 -or $passLine.Count -lt 1) { Stop-Here "npm test: exit $testCode, the output carries no pass/fail summary: the run did not finish." }
+$failN = $failLine[$failLine.Count - 1].Groups[1].Value
+$passN = $passLine[$passLine.Count - 1].Groups[1].Value
+if ($testCode -ne 0 -or $failN -ne "0" -or $passN -eq "0") { Stop-Here ("npm test: exit " + $testCode + ", pass '" + $passN + "', fail '" + $failN + "'.") }
+if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
+Say ("[tests] pass " + $passN + ", fail 0; typecheck clean")
+# END-GATES
+
+# 2. live, before: non-minting baseline, the live worker is the base this wave was checked against, GET /operators answers 200, both initialise answers carry the pointer (the previous wave is live), and the rotate route refuses the three credential-free requests the ride repeats.
+# These reads are before any write, so one read is the state and may stop.
+$attBefore = Read-Attest "before the deploy"
+Assert-Attest $attBefore "before the deploy"
+Say ("[live] before: v6 " + $V6_HASH.Substring(0, 8) + "; all four chains ok; identity " + $attBefore.identity_log.sealed_entries + ", treasury " + $attBefore.treasury.sealed_entries + ", ballots " + $attBefore.ballots.sealed_entries)
+if ($null -eq $attBefore.code -or [string]$attBefore.code.commit_status -cne "stamped") { Stop-Here "GET /api/attest serves no stamped code.commit before the deploy: the live worker cannot be shown to be the base this wave was checked against." }
+if ([string]$attBefore.code.commit -ceq $headSha) { Stop-Here "GET /api/attest already serves code.commit $($headSha.Substring(0, 8)): this commit looks already deployed. Verify by hand." }
+if ([string]$attBefore.code.commit -cne $LIVE_BASE_COMMIT) { Stop-Here ("the live worker serves code.commit " + $attBefore.code.commit + " but `$LIVE_BASE_COMMIT is " + $LIVE_BASE_COMMIT + ": the base this wave was checked against is not what is live. Correct the pin only after reading what changed.") }
+$rollbackTarget = "the version before it (check npx wrangler deployments list)"
+if ([string]$attBefore.code.version_status -ceq "available" -and $attBefore.code.version_id) { $rollbackTarget = [string]$attBefore.code.version_id }
+Say "[live] before: the live worker serves the pinned base $($LIVE_BASE_COMMIT.Substring(0, 8)); rollback target $rollbackTarget"
+$pageBefore = Get-Text $PAGE_URL 30
+if ([string]$pageBefore.Code -cne "200") { Stop-Here ("GET /operators answered " + $pageBefore.Code + " before the deploy, expected 200 (the operators page wave is live): read it by hand.") }
+Say "[live] before: GET /operators answers 200"
+# Before the deploy BOTH initialise answers carry the pointer once (the previous wave is live). Credential-free initialize POSTs: a read, writing only a door count.
+$whyPointerBefore = Test-PointerServed
+if ($whyPointerBefore -ne "") { Stop-Here ("before the deploy, " + $whyPointerBefore + ": the previous wave is not as expected, read it by hand.") }
+Say "[live] before: both initialise answers carry the operators pointer exactly once"
+# Before the deploy the rotate route refuses the three credential-free requests exactly as the ride will expect after it (gate C1). They write nothing.
+$whyRotateBefore = Test-RotateRefusals
+if ($whyRotateBefore -ne "") { Stop-Here ("before the deploy, " + $whyRotateBefore + ": the ride's expectation does not hold on the live worker, read it by hand.") }
+Say "[live] before: POST /api/rotate refuses no credential (401 No credentials) and a bearer that is no citizen's secret (401 Unknown secret); GET /api/rotate -> 404"
+# The same three for the wallet route: this wave's route, read before the deploy so the ride shows it still refuses as it did.
+$whyWalletBefore = Test-WalletRefusals
+if ($whyWalletBefore -ne "") { Stop-Here ("before the deploy, " + $whyWalletBefore + ": the ride's expectation does not hold on the live worker, read it by hand.") }
+Say "[live] before: POST /api/wallet refuses no credential (401 No credentials) and a bearer that is no citizen's secret (401 Unknown secret); GET /api/wallet -> 404"
+# The one read-only D1 read (both -DryRun and the real run): wallets rows against the identity log. Counts only.
+$walletCounts = Test-WalletLogConsistency
+Say ("[live] before: " + $walletCounts.Total + " wallets rows, " + $walletCounts.Inconsistent + " inconsistent with the identity log (read-only; addresses not printed)")
+if ($walletCounts.Inconsistent -gt 0) { Say ("[NOTE] " + $walletCounts.Inconsistent + " wallets row(s) disagree with their citizen's newest chained wallet row (or have none). The pay route refuses those seats until repaired. This wave repairs nothing and the deploy continues: existing mismatches are out of its scope.") }
+
+if ($DryRun) {
+  Say "[dry-run] every pin, git, source, test and live check passed. Step 2 itself already sent one GET /operators, two credential-free initialize POSTs (the door counts operators_page, mcp_initialize and mcp_read_initialize rose by those) three refused rotate requests and three refused wallet requests (which write nothing), and one read-only wrangler d1 execute SELECT on the prod database (counts only). would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id, GET /operators the page and both initialise answers the pointer; then ride the rotate and wallet refusals, the earlier waves and the public reads, each retried (up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row) before it judges. Nothing was deployed."
+  exit 0
+}
+
+# 3. deploy the worker with the commit stamp, capturing its version id, then poll until the served identity is this deploy's
+# BEGIN-DEPLOY-AND-POLL
+# CODEX r1 (finding 2): tests, typecheck and the live reads ran since step 0, and wrangler bundles the working tree, so HEAD and a clean
+# tree are re-read here, immediately before the bundle, or the stamp could name a commit the uploaded bytes no longer match.
+$headNow = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $headNow -cne $headSha) { Stop-Here ("HEAD moved since step 0 (" + $headSha.Substring(0, 8) + " -> " + $headNow + "): nothing was deployed.") }
+$dirtyNow = @(git status --porcelain)
+if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE) just before the deploy: nothing was deployed." }
+if ($dirtyNow.Count -gt 0) { Stop-Here ("the working tree changed since step 0 (" + $dirtyNow.Count + " paths: " + ($dirtyNow -join " | ") + "): nothing was deployed.") }
+Say "[deploy] npx wrangler deploy --var CODE_COMMIT:$($headSha.Substring(0, 8))... (commit $($headSha.Substring(0, 8)))"
+$ErrorActionPreference = "Continue"
+$deployOut = (npx wrangler deploy --var "CODE_COMMIT:$headSha" 2>&1 | Out-String)
+$deployCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($deployCode -ne 0) { Stop-Here "wrangler deploy failed (exit $deployCode); this wave applied no migration, so there is nothing else to undo. Output: $deployOut" }
+$versionMatches = @([regex]::Matches($deployOut, '(?m)^[ \t]*Current Version ID:[ \t]*([0-9a-fA-F-]{36})[ \t]*\r?$'))
+if ($versionMatches.Count -gt 1) { Stop-Here ("wrangler deploy printed 'Current Version ID' on " + $versionMatches.Count + " lines; which one is this deploy's cannot be told. Check 'npx wrangler deployments list' by hand before anything else.") }
+if ($versionMatches.Count -lt 1) { Stop-Here "wrangler deploy exited 0 but printed no 'Current Version ID'; the deploy may have succeeded. Check 'npx wrangler deployments list' by hand before anything else." }
+$versionId = $versionMatches[0].Groups[1].Value
+Say "[deploy] worker version id $versionId (commit $($headSha.Substring(0, 8)))"
+$ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version before $versionId, which should be $rollbackTarget; check npx wrangler deployments list first). This wave applied no migration and changed no schema, so the rollback is the whole undo."
+Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
+# END-DEPLOY-AND-POLL
+# 4. the ride (L-167: every check below is retried until $GOOD_READS_NEEDED good reads in a row, up to $RIDE_TRIES reads, before it judges; a stop here means the retries ran out, so the
+# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the rotate and wallet refusals, the operators page against GET /api/official, both initialise answers carrying the pointer, /llms.txt carrying the new note sentence, then a sweep of public reads.
+$whyAttest = Confirm-Reads {
+  $a = Get-ServedAttest
+  $m = Get-AttestReason $a
+  if ($m -ne "") { return $m }
+  # CODEX r1 (finding 1): the ride's own attest read must still be this deploy's, not only the poll's.
+  return (Test-CodeIdentityServed $a.code $headSha $versionId)
+} $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whyAttest -ne "") { Stop-Here ("GET /api/attest was not confirmed after the deploy in " + $RIDE_TRIES + " reads (last: " + $whyAttest + "). Read npx wrangler deployments list by hand first: another deploy may have taken over, or the edge is still catching up. Only if that shows the new version is not live: " + $ROLLBACK_LINE) }
+Say ("[ride] attest: v6 " + $V6_HASH.Substring(0, 8) + " unchanged; every chain ok; code.commit " + $headSha.Substring(0, 8) + ", code.version_id " + $versionId + " ($GOOD_READS_NEEDED good reads in a row)")
+$whyRotate = Confirm-Reads { return (Test-RotateRefusals) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whyRotate -ne "") { Stop-Here ("the rotate route was not confirmed to refuse as before in " + $RIDE_TRIES + " reads (last: " + $whyRotate + "). Read npx wrangler deployments list and POST /api/rotate by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+Say "[ride] POST /api/rotate -> 401 No credentials, 401 Unknown secret; GET /api/rotate -> 404 ($GOOD_READS_NEEDED good reads in a row). The earlier wave still refuses."
+$whyWallet = Confirm-Reads { return (Test-WalletRefusals) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whyWallet -ne "") { Stop-Here ("the wallet route was not confirmed to refuse as before in " + $RIDE_TRIES + " reads (last: " + $whyWallet + "). Read npx wrangler deployments list and POST /api/wallet by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+Say "[ride] POST /api/wallet -> 401 No credentials, 401 Unknown secret; GET /api/wallet -> 404 ($GOOD_READS_NEEDED good reads in a row). These show the route still refuses; only the stamp above shows the batch is the code now serving. The first real declaration is the first production execution of the batch."
+$whyPage = Confirm-Reads { return (Test-OperatorsServed (Get-Page $PAGE_URL 30) (Get-ServedOfficial)) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whyPage -ne "") { Stop-Here ("GET /operators was not confirmed to be the operators page in " + $RIDE_TRIES + " reads (last: " + $whyPage + "). Read npx wrangler deployments list and the page by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+Say "[ride] GET /operators -> 200 still: text/html, the exact Content-Security-Policy and X-Content-Type-Options, no script, form, link, img or iframe, the opening sentence and the paste, and the four figures and the resident count equal to GET /api/official read in the same iteration"
+$whyPointer = Confirm-Reads { return (Test-PointerServed) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whyPointer -ne "") { Stop-Here ("the initialise answers were not confirmed to carry the pointer in " + $RIDE_TRIES + " reads (last: " + $whyPointer + "). Read npx wrangler deployments list and both initialise answers by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+Say "[ride] /mcp and /mcp/read initialize -> each carries the operators pointer exactly once ($GOOD_READS_NEEDED good reads in a row)"
+$whyNote = Confirm-Reads { return (Test-NoteServed) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whyNote -ne "") { Stop-Here ("GET /llms.txt was not confirmed to carry the operator-note sentence in " + $RIDE_TRIES + " reads (last: " + $whyNote + "). Read npx wrangler deployments list and re-read it by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+Say "[ride] GET /llms.txt -> 200 and still carries the operator-note sentence"
+$sweepPaths = @("/", "/operators", "/api/official", "/openapi.json", "/treasury", "/api/listings", "/api/stats", "/api/topics", "/api/guest/due", "/api/citizens", "/api/doors", "/api/council", "/api/residents", "/heartbeat.md", "/skill.md", "/llms.txt", "/privacy", "/api/proposal/8")
+$whySweep = Confirm-Reads {
+  $bad = @()
+  foreach ($p in $sweepPaths) {
+    $r = Get-Text "$BASE$p" 30
+    if ($r.Code -ne "200") { $bad += "$p=$($r.Code)" }
+  }
+  if ($bad.Count -gt 0) { return ("non-200: " + ($bad -join ", ")) }
+  return ""
+} $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+if ($whySweep -ne "") { Stop-Here ("the public reads were not all 200 after the deploy (version " + $versionId + ") in " + $RIDE_TRIES + " sweeps (last: " + $whySweep + "). Read npx wrangler deployments list and the failing paths by hand first. Only if the new version is at 100% and a read that answered before still fails: " + $ROLLBACK_LINE) }
+Say "[ride] 18 public reads -> 200 ($GOOD_READS_NEEDED sweeps in a row)"
+Say "[note] This ride sent GET requests, credential-free MCP initialize POSTs (one to /mcp and one to /mcp/read per read, by the pre-deploy check, the poll and the ride) and refused POSTs to /api/rotate and /api/wallet (no credential, and a bearer that is no citizen's secret: each is refused by authenticate() before any write), with no token or key. No declaration ran: the ride cannot show the batch commits, only that the routes refuse and the stamped commit is serving; the first real wallet declaration is the first production execution of the batch. Step 2, before the deploy, itself sent one GET /operators, two initialize POSTs, the three rotate refusals, the three wallet refusals and one read-only D1 SELECT. An initialize POST counts as a read here: it writes only a door count, so mcp_initialize and mcp_read_initialize rise by that many. /skill.md, /heartbeat.md and /operators are counted doors, so each GET of them ATTEMPTS a counting write: the count rises by one only while the door is below its daily cap and the batch succeeds, and a commit_days stamp row for today's date and the new commit can be written even at the cap. THE RIDE ITSELF ADDED TO operators_page: the poll, the page check and the sweeps each fetched GET /operators, so the first day's operators_page count includes these requests and is not all visitors. GET /api/doors commits_by_day may show two stamps for today (the old commit and the new one), which is expected."
+Say "[done] wallet batch wave deployed and ridden (stamp and refusals only; no declaration ran). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
