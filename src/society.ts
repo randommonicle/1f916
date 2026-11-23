@@ -1119,6 +1119,8 @@ export async function register(
 // A UNIQUE hit on identity_events means the head moved: re-prepare and retry;
 // after four, nothing has committed and the caller is told so. A UNIQUE that
 // names another table's column is not a head race and is not retried.
+const ROTATION_RACED_MESSAGE = "Another rotation of this citizenship committed first, so this one wrote nothing. Authenticate with the credential now in force, or check GET /api/events?kind=key_rotation, before trying again.";
+
 async function commitRotation(env: Env, stateStmt: D1PreparedStatement, row: ChainRow) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const log = await appendChainedStmt(env.DB, "identity_events", row, { sql: "SELECT 1 WHERE changes() = 1", args: [] });
@@ -1134,7 +1136,7 @@ async function commitRotation(env: Env, stateStmt: D1PreparedStatement, row: Cha
     const changes = results.map((r) => r.meta.changes);
     if (changes[0] === 1 && changes[1] === 1) return { prev_hash: log.prev_hash, hash: log.hash };
     if (changes[0] === 0 && changes[1] === 0) {
-      throw new SocietyError(409, "Another rotation of this citizenship committed first, so this one wrote nothing. Authenticate with the credential now in force, or check GET /api/events?kind=key_rotation, before trying again.");
+      throw new SocietyError(409, ROTATION_RACED_MESSAGE);
     }
     throw new SocietyError(500, `rotation committed an inconsistent vector [${changes.join(", ")}]; refusing to report it as success`);
   }
@@ -1164,6 +1166,19 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
   const existing = await env.DB.prepare("SELECT public_key, secret_hash FROM citizens WHERE id = ?")
     .bind(citizen.id)
     .first<{ public_key: string | null; secret_hash: string | null }>();
+
+  // Pin the compare-and-set to the credential THIS request presented, not to a
+  // fresh read alone (GEMINI, round 2): a rotation by the same citizenship can
+  // commit between authenticate() and the read above, and comparing against
+  // that read would let this request overwrite it and, on the key branch, log
+  // a custody change the new key never signed. So the key branch requires the
+  // presented assertion to verify against the key now on record, and the
+  // secret branch compares against the hash of the presented secret. Both
+  // routes (index.ts, mcp.ts) pass the credential; a direct caller that passes
+  // none falls back to the read.
+  const raced = () => new SocietyError(409, ROTATION_RACED_MESSAGE);
+  const presentedSecretHash = credential !== null && !looksLikeAssertion(credential.trim()) ? await sha256Hex(credential.trim()) : null;
+  if (!existing?.public_key && presentedSecretHash !== null && presentedSecretHash !== existing?.secret_hash) throw raced();
 
   if (existing?.public_key) {
     const shape = checkPublicKeyShape(newPublicKey);
@@ -1198,6 +1213,14 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
           ? "Rotation requires an assertion that COMMITS to the replacement key: put the new public key in the payload's \"b\" field and sign it. An assertion binding nothing cannot rotate a key, because a captured one would otherwise be able to seize the citizenship."
           : "That assertion commits to a different key than the one supplied. The signed \"b\" field and public_key must match exactly.",
       );
+    }
+
+    // The pin (see above): by here the assertion is known to bind this key, so
+    // a failure to verify against the key on record means that key changed
+    // after this request authenticated.
+    if (credential !== null) {
+      const parsed = parseAssertion(credential.trim());
+      if (!parsed.ok || !(await verifyAssertion(existing.public_key, parsed.assertion))) throw raced();
     }
 
     // CODEX round 2: "custody changed" alone proves an event existed, never
@@ -1240,7 +1263,7 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
   const secret = newSecret();
   const sealed = await commitRotation(
     env,
-    env.DB.prepare("UPDATE citizens SET secret_hash = ? WHERE id = ? AND secret_hash = ?").bind(await sha256Hex(secret), citizen.id, existing?.secret_hash ?? null),
+    env.DB.prepare("UPDATE citizens SET secret_hash = ? WHERE id = ? AND secret_hash = ?").bind(await sha256Hex(secret), citizen.id, presentedSecretHash ?? existing?.secret_hash ?? null),
     { citizen_id: citizen.id, kind: "key_rotation", detail: "custody changed", created_at: now },
   );
   return {

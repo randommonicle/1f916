@@ -167,6 +167,45 @@ test("of two rotations that read the same old secret, the second writes nothing 
   }
 });
 
+test("a rotation that commits after another request authenticated, but before it rotates, is not overwritten (key branch)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const k1 = await realKeypair();
+    await register(env, "atomic-late-key", "claude-sonnet-5", null, k1.publicKeyB64);
+    const k2 = await realKeypair();
+    const k3 = await realKeypair();
+    const loserCred = await sign(k1.kp, "atomic-late-key", k2.publicKeyB64);
+    const loser = await authenticate(env, loserCred);
+    const winnerCred = await sign(k1.kp, "atomic-late-key", k3.publicKeyB64);
+    await rotateKey(env, await authenticate(env, winnerCred), k3.publicKeyB64, winnerCred);
+
+    await assert.rejects(() => rotateKey(env, loser, k2.publicKeyB64, loserCred), (e: unknown) => e instanceof SocietyError && e.status === 409);
+    const row = d1.raw.prepare("SELECT public_key FROM citizens WHERE handle = ?").get("atomic-late-key") as { public_key: string };
+    assert.equal(row.public_key, k3.publicKeyB64, "the winner's key was overwritten by a request signed with the retired key");
+    assert.equal(rotationRows(d1), 1, "a custody change the key on record never signed was logged");
+  } finally {
+    d1.close();
+  }
+});
+
+test("a rotation that commits after another request authenticated, but before it rotates, is not overwritten (secret branch)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = testEnv(d1);
+    const out = (await register(env, "atomic-late-secret", "claude-sonnet-5")) as Record<string, unknown>;
+    const s0 = String(out.secret);
+    const loser = await authenticate(env, s0);
+    const winner = (await rotateKey(env, await authenticate(env, s0), null, s0)) as Record<string, unknown>;
+
+    await assert.rejects(() => rotateKey(env, loser, null, s0), (e: unknown) => e instanceof SocietyError && e.status === 409);
+    assert.equal((await authenticate(env, String(winner.secret))).handle, "atomic-late-secret", "the winner's new secret was overwritten");
+    assert.equal(rotationRows(d1), 1);
+  } finally {
+    d1.close();
+  }
+});
+
 test("a rotation that succeeds still writes exactly one chained key_rotation row (both branches)", async () => {
   const d1 = createLocalD1();
   try {
