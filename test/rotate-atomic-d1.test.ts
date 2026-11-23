@@ -229,3 +229,68 @@ test("a rotation that succeeds still writes exactly one chained key_rotation row
     d1.close();
   }
 });
+
+// Gate MEDIUM 1 (docs/REVIEW-ROTATE-BATCH-GATE-2026-11-23.md): the key branch's
+// own compare-and-set (`AND public_key = ?`) had no test that goes red without
+// it, because the presented-assertion pin refuses the same race earlier. Here
+// the winner commits AFTER the loser's pin has passed, just before the loser's
+// batch, so only the compare-and-set inside the batch can refuse it.
+test("of two key rotations signed by the same key, the second's batch writes nothing once the first has committed (key branch, in the batch)", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = testEnv(d1);
+    const k1 = await realKeypair();
+    await register(base, "atomic-race-key", "claude-sonnet-5", null, k1.publicKeyB64);
+    const k2 = await realKeypair();
+    const k3 = await realKeypair();
+    const loserCred = await sign(k1.kp, "atomic-race-key", k2.publicKeyB64);
+    const winnerCred = await sign(k1.kp, "atomic-race-key", k3.publicKeyB64);
+    const loser = await authenticate(base, loserCred);
+    const winner = await authenticate(base, winnerCred);
+    let hookRan = false;
+    const loserEnv = racingEnv(d1, 0, async () => { await rotateKey(base, winner, k3.publicKeyB64, winnerCred); hookRan = true; });
+
+    await assert.rejects(() => rotateKey(loserEnv, loser, k2.publicKeyB64, loserCred), (e: unknown) => e instanceof SocietyError && e.status === 409);
+    assert.ok(hookRan, "the winner must commit inside the loser's race window");
+    const row = d1.raw.prepare("SELECT public_key FROM citizens WHERE handle = ?").get("atomic-race-key") as { public_key: string };
+    assert.equal(row.public_key, k3.publicKeyB64, "the winner's key was overwritten by the loser's batch");
+    assert.equal(rotationRows(d1), 1);
+  } finally {
+    d1.close();
+  }
+});
+
+// Gate LOW 1: a UNIQUE that names ANOTHER table is not a chain-head race, so it
+// is rethrown at once, not retried into a 503. Forced for real: a trigger on
+// the credential UPDATE inserts a duplicate into a side table's UNIQUE column.
+test("a UNIQUE on another table during the rotation batch is rethrown at once, not retried, and changes nothing", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = testEnv(d1);
+    const out = (await register(base, "atomic-foreign", "claude-sonnet-5")) as Record<string, unknown>;
+    const oldSecret = String(out.secret);
+    const citizen = await authenticate(base, oldSecret);
+    d1.raw.exec(
+      "CREATE TABLE rotation_side_effect (x TEXT UNIQUE); INSERT INTO rotation_side_effect VALUES ('dup');" +
+        " CREATE TRIGGER force_foreign_unique AFTER UPDATE OF secret_hash ON citizens BEGIN INSERT INTO rotation_side_effect VALUES ('dup'); END;",
+    );
+    let batches = 0;
+    const counting = new Proxy(d1.DB, {
+      get(target, prop) {
+        if (prop === "batch") return async (stmts: D1PreparedStatement[]) => { batches++; return target.batch(stmts); };
+        const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof v === "function" ? (v as Function).bind(target) : v;
+      },
+    });
+
+    await assert.rejects(
+      () => rotateKey({ ...base, DB: counting } as Env, citizen, null, oldSecret),
+      (e: unknown) => !(e instanceof SocietyError) && /UNIQUE constraint failed: rotation_side_effect\.x/.test(String(e)),
+    );
+    assert.equal(batches, 1, "a foreign UNIQUE was retried as if the chain head had moved");
+    assert.equal((await authenticate(base, oldSecret)).handle, "atomic-foreign");
+    assert.equal(rotationRows(d1), 0);
+  } finally {
+    d1.close();
+  }
+});
