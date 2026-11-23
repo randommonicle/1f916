@@ -328,3 +328,47 @@ test("10: the pay route's pin passes after a first declare and after a change, b
     }
   }
 });
+
+// Gate MEDIUM 1 (docs/REVIEW-WALLET-BATCH-GATE-2026-11-23.md): the compare-and-set
+// must be the one built from THIS request's read, held fixed across retries. Here
+// attempt 1 loses a real chain-head race, and before attempt 2 a rival change by
+// the same citizen (A -> C) commits; attempt 2 must still refuse, not re-read C
+// and overwrite it.
+test("11: a rival change that commits between a head-race retry's attempts is not overwritten", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = testEnv(d1);
+    const c1 = insertCitizen(d1);
+    await declareWallet(base, { id: c1 }, A, null);
+    let batches = 0;
+    const db = new Proxy(d1.DB, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (stmts: D1PreparedStatement[]) => {
+            batches++;
+            if (batches !== 1) return target.batch(stmts);
+            await appendChained(d1.DB, "identity_events", { citizen_id: c1, kind: "moderation", detail: "a concurrent append", created_at: Date.now() });
+            try {
+              return await target.batch(stmts);
+            } finally {
+              await declareWallet(base, { id: c1 }, C, null);
+            }
+          };
+        }
+        const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof v === "function" ? (v as Function).bind(target) : v;
+      },
+    });
+
+    await assert.rejects(() => declareWallet({ ...base, DB: db } as Env, { id: c1 }, B, null), isStatus(409, RACE_SENTENCE));
+    assert.equal(batches, 2, "attempt 1 must lose the head race and attempt 2 must run");
+    assert.equal(walletRow(d1, c1)?.address, C, "the rival's change was overwritten on the retry");
+    assert.equal(
+      (d1.raw.prepare("SELECT COUNT(*) AS n FROM identity_events WHERE citizen_id = ? AND kind = 'wallet_changed'").get(c1) as { n: number }).n,
+      1,
+      "only the rival's change is logged",
+    );
+  } finally {
+    d1.close();
+  }
+});
