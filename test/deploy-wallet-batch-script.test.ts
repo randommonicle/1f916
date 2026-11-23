@@ -16,6 +16,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { parsePowerShellFile } from "./helpers/ps-parse.ts";
+import { createLocalD1, insertCitizen, insertIdentityEvent } from "./helpers/local-d1.ts";
 import { renderOperators, OPERATORS_CSP, type OperatorsFigures } from "../src/operators.ts";
 import { OPERATORS_POINTER, OPERATORS_NOTE_SENTENCE, GUEST_OPERATOR_NOTE } from "../src/guest-core.ts";
 
@@ -136,7 +137,7 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m, "the reviewed pin is the placeholder or a full lower-case sha");
 });
 
-test("the steps are in the load-bearing order, there is no migration and no D1 write (one bounded read-only SELECT), the deploy is the only executed wrangler command, and the only POSTs are the credential-free initialize reads and the refused rotate and wallet requests", () => {
+test("the steps are in the load-bearing order, there is no migration and no D1 write (one bounded read-only SELECT), the deploy is the only wrangler command run directly (the one d1 call goes through Invoke-BoundedSql), and the only POSTs are the credential-free initialize reads and the refused rotate and wallet requests", () => {
   const order = ["BEGIN-PIN-CHECK", "git fetch origin", "BEGIN-REVIEWED-SOURCE-CHECK", "BEGIN-GATES", 'Read-Attest "before the deploy"', "$whyRotateBefore = Test-RotateRefusals", "$whyWalletBefore = Test-WalletRefusals", "$walletCounts = Test-WalletLogConsistency", "if ($DryRun)", "BEGIN-DEPLOY-AND-POLL", "$whyAttest = Confirm-Reads", "$whyRotate = Confirm-Reads", "$whyWallet = Confirm-Reads", "$whyPage = Confirm-Reads", "$whyPointer = Confirm-Reads", "$whyNote = Confirm-Reads", "$whySweep = Confirm-Reads"];
   let last = -1;
   for (const needle of order) {
@@ -150,8 +151,8 @@ test("the steps are in the load-bearing order, there is no migration and no D1 w
   assert.equal((code.match(/Invoke-BoundedSql \(/g) ?? []).length, 1, "Invoke-BoundedSql is called once");
   const sql = /^\$WALLET_LOG_SQL = "(.*)"$/m.exec(script)![1];
   assert.match(sql, /^SELECT /, "the D1 statement is a SELECT");
-  assert.equal(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|PRAGMA)\b/i.test(sql), false, "and no write or DDL word");
-  assert.equal(sql.includes("\\\""), false);
+  assert.equal(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|PRAGMA|ATTACH|DETACH|VACUUM)\b/i.test(sql), false, "and no write, DDL or database-switching word");
+  assert.equal(/["`%;]/.test(sql), false, "no double quote in any spelling (a backtick-escaped one included), no %, no ; : the statement must survive cmd.exe inside \"%D1_SQL_ARG%\"");
   assert.match(script, /^\$PROD_DB = "commonhold"$/m, "the prod database, never a scratch one");
   assert.equal(/migtest|scratch/i.test(code), false, "no scratch database anywhere in the executable code");
   assert.equal((code.match(/= \(npx wrangler /g) ?? []).length, 1, "exactly one executed wrangler command (the other mentions are text in messages)");
@@ -606,6 +607,7 @@ test("the wallets-versus-identity-log classifier, run for real on canned wrangle
     ["nullkind", [wrow(A, null, null)], "1 1"],
     ["unparseable", [wrow(A, "wallet_declared", "wallet declared: not-an-address")], "1 1"],
     ["wrongshape", [wrow(A, "wallet_changed", `wallet declared: ${A}`)], "1 1"],
+    ["changedtrailingnewline", [wrow(B, "wallet_changed", `wallet changed: ${A} -> ${B}\n`)], "1 1"],
     ["uppercasedetail", [wrow(A, "wallet_declared", `wallet declared: 0x${"A".repeat(40)}`)], "1 1"],
     ["caseonly", [wrow("0x" + "A".repeat(40), "wallet_declared", `wallet declared: ${A}`)], "1 1"],
     ["differs", [wrow(B, "wallet_declared", `wallet declared: ${A}`)], "1 1"],
@@ -629,6 +631,13 @@ test("a failed, timed-out or non-JSON wallets read STOPS the script (exit 1) and
     ["nonjson", "garbage with no brackets", 0, false, /not the expected JSON: it is not read as zero rows/],
     ["htmlish", "<html>[oops</html>", 0, false, /not the expected JSON/],
     ["emptyarray", "[]", 0, false, /not the expected JSON/],
+    ["failedquery", '[{"success":false,"results":[],"error":"query failed"}]', 0, false, /not the expected JSON/],
+    ["secondenvelope", '[{"success":true,"results":[]},{"success":true,"results":[]}]', 0, false, /not the expected JSON/],
+    ["secondfailed", '[{"success":true,"results":[]},{"success":false,"results":[]}]', 0, false, /not the expected JSON/],
+    ["resultsstring", '[{"success":true,"results":"oops"}]', 0, false, /not the expected JSON/],
+    ["resultsobject", '[{"success":true,"results":{}}]', 0, false, /not the expected JSON/],
+    ["successstring", '[{"success":"true","results":[]}]', 0, false, /not the expected JSON/],
+    ["nosuccess", '[{"results":[]}]', 0, false, /not the expected JSON/],
     ["noresults", '[{"success":false}]', 0, false, /not the expected JSON/],
     ["exitcode", wrangler([]), 1, false, /read failed \(wrangler d1 execute exit 1\)/],
     ["timeout", "", -1, true, /read timed out after 120 s/],
@@ -649,4 +658,76 @@ test("an inconsistent wallets row is a NOTE, not a stop, and no address is print
   assert.ok(blk.includes("[NOTE]") && blk.includes("pay route refuses those seats until repaired"));
   assert.equal(/Stop-Here[^\n]*Inconsistent/.test(blk), false, "a disagreement never stops the deploy");
   assert.equal(/\.address|\.detail|WALLET_LOG/.test(blk), false, "step 2 never touches an address or a detail");
+});
+
+test("the real $WALLET_LOG_SQL, extracted from the script byte for byte, run on the real schema over seeded rows: a wallet with no log row, the newest WALLET row past a newer non-wallet row, a consistent declare and a mismatch, counted through Read-D1Rows and Get-WalletLogCounts", (t) => {
+  const sql = /^\$WALLET_LOG_SQL = "(.*)"$/m.exec(script)![1];
+  const d1 = createLocalD1();
+  try {
+    const hex = (c: string): string => "0x" + c.repeat(40);
+    const wal = (id: number, address: string): void => {
+      d1.raw.prepare("INSERT INTO wallets (citizen_id, address, added_at) VALUES (?, ?, ?)").run(id, address, 1);
+    };
+    const c1 = insertCitizen(d1); // (a) a wallets row with no wallet log row
+    wal(c1, hex("1"));
+    const c2 = insertCitizen(d1); // (b) declared X, changed X -> B, then a newer key_rotation
+    insertIdentityEvent(d1, c2, "wallet_declared", `wallet declared: ${hex("2")}`);
+    insertIdentityEvent(d1, c2, "wallet_changed", `wallet changed: ${hex("2")} -> ${hex("3")}`);
+    insertIdentityEvent(d1, c2, "key_rotation", "rotated");
+    wal(c2, hex("3"));
+    const c3 = insertCitizen(d1); // (c) a consistent single declare
+    insertIdentityEvent(d1, c3, "wallet_declared", `wallet declared: ${hex("4")}`);
+    wal(c3, hex("4"));
+    const c4 = insertCitizen(d1); // (d) a mismatch
+    insertIdentityEvent(d1, c4, "wallet_declared", `wallet declared: ${hex("5")}`);
+    wal(c4, hex("6"));
+    const rows = d1.raw.prepare(sql).all() as Array<{ citizen_id: number; address: string; kind: string | null; detail: string | null }>;
+    assert.equal(rows.length, 4, "one row per wallets row, none dropped (a LEFT JOIN)");
+    const byId = new Map(rows.map((r) => [Number(r.citizen_id), r]));
+    assert.equal(byId.get(c1)!.kind, null, "(a) no wallet log row reads null");
+    assert.equal(byId.get(c2)!.kind, "wallet_changed", "(b) the newest WALLET row, not the newest event");
+    assert.equal(byId.get(c2)!.detail, `wallet changed: ${hex("2")} -> ${hex("3")}`);
+    assert.equal(byId.get(c3)!.kind, "wallet_declared");
+    const out = "Resource location: remote\n" + JSON.stringify([{ success: true, results: rows.map((r) => ({ ...r })) }]);
+    const run = runPs([
+      "$ErrorActionPreference = 'Stop'",
+      script.split("\n").find((l) => l.startsWith("function Stop-Here"))!,
+      consFns,
+      `$rows = Read-D1Rows ${q(out)}`,
+      'if ($null -eq $rows) { Write-Host "READ-FAILED" } else { $c = Get-WalletLogCounts $rows; Write-Host ("COUNTS " + $c.Total + " " + $c.Inconsistent) }',
+    ]);
+    if (!run) return t.skip("no PowerShell available");
+    assert.match(run.out, /COUNTS 4 2\b/, run.out);
+  } finally {
+    d1.close();
+  }
+});
+
+test("the real Invoke-Bounded and Invoke-BoundedSql, run against a tiny node script as the command prefix (no wrangler, no network, no D1): the statement round-trips through cmd.exe byte for byte, the environment variable is gone after, a non-zero exit is returned, and a command that outlives the timeout is killed and reported", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wallet-batch-bounded-"));
+  try {
+    const js = join(dir, "echo.mjs");
+    writeFileSync(js, 'const a = process.argv[2] ?? "";\nif (a === "SLEEP") { setTimeout(() => {}, 60000); } else { process.stdout.write(a); process.exitCode = a === "EXIT7" ? 7 : 0; }\n');
+    const lits = ["WALLET_LOG_SQL"].map((n) => script.split("\n").find((l) => l.startsWith(`$${n} = `))!);
+    const fns = slice("# Runs a command line through cmd.exe", "# `wrangler d1 execute --json` output");
+    const run = runPs([
+      "$ErrorActionPreference = 'Stop'",
+      ...lits,
+      fns,
+      `$prefix = 'node "${js}"'`,
+      '$a = Invoke-BoundedSql $prefix $WALLET_LOG_SQL 60',
+      'Write-Host ("A code [" + $a.Code + "] timedout [" + $a.TimedOut + "] roundtrip [" + ($a.Out -ceq $WALLET_LOG_SQL) + "] envgone [" + ($null -eq $env:D1_SQL_ARG) + "]")',
+      '$b = Invoke-BoundedSql $prefix "EXIT7" 60',
+      'Write-Host ("B code [" + $b.Code + "] timedout [" + $b.TimedOut + "] out [" + $b.Out + "]")',
+      '$sw = [System.Diagnostics.Stopwatch]::StartNew()',
+      '$c = Invoke-BoundedSql $prefix "SLEEP" 2',
+      'Write-Host ("C timedout [" + $c.TimedOut + "] code [" + $c.Code + "] fast [" + ($sw.Elapsed.TotalSeconds -lt 30) + "] envgone [" + ($null -eq $env:D1_SQL_ARG) + "]")',
+    ]);
+    if (!run) return t.skip("no PowerShell available");
+    assert.match(run.out, /A code \[0\] timedout \[False\] roundtrip \[True\] envgone \[True\]/, run.out);
+    assert.match(run.out, /B code \[7\] timedout \[False\] out \[EXIT7\]/, run.out);
+    assert.match(run.out, /C timedout \[True\] code \[-1\] fast \[True\] envgone \[True\]/, run.out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

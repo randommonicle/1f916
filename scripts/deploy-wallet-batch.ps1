@@ -350,7 +350,7 @@ function Invoke-Bounded($commandLine, $seconds) {
       taskkill.exe /PID $p.Id /T /F | Out-Null
       return @{ Code = -1; Out = ""; TimedOut = $true }
     }
-    $text = (Get-Content $outFile -Raw -ErrorAction SilentlyContinue)
+    $text = (Get-Content $outFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     if ($null -eq $text) { $text = "" }
     return @{ Code = $p.ExitCode; Out = $text; TimedOut = $false }
   } finally {
@@ -371,9 +371,15 @@ function Read-D1Rows($text) {
   $i = ([string]$text).IndexOf("[")
   if ($i -lt 0) { return $null }
   try { $parsed = (([string]$text).Substring($i) | ConvertFrom-Json) } catch { return $null }
-  if ($null -eq $parsed -or @($parsed).Count -lt 1 -or $null -eq @($parsed)[0].results) { return $null }
+  # Exactly ONE result envelope, whose success is the boolean true and whose results is an array: a failed query, a second envelope or a results that is not an array is a failed read.
+  $envelopes = @($parsed)
+  if ($envelopes.Count -ne 1) { return $null }
+  $one = $envelopes[0]
+  if ($null -eq $one -or $one.success -isnot [bool] -or $one.success -ne $true) { return $null }
+  $found = $one.results
+  if ($null -eq $found -or $found -isnot [System.Array]) { return $null }
   # the comma keeps an EMPTY result list an empty array: a bare return would unroll it to $null, which is a failed read
-  return ,@(@($parsed)[0].results)
+  return ,@($found)
 }
 # "" when the wallets row $row agrees with its citizen's newest chained wallet row, otherwise a short reason. The two detail shapes and their case-sensitive address pattern are src/wallets.ts walletAddressFromRow's own.
 function Get-WalletRowReason($row) {
@@ -509,7 +515,7 @@ if ($tscCode -ne 0) { Stop-Here "typecheck failed: $tscOut" }
 Say ("[tests] pass " + $passN + ", fail 0; typecheck clean")
 # END-GATES
 
-# 2. live, before: non-minting baseline, the live worker is the base this wave was checked against, GET /operators answers 200, both initialise answers carry the pointer (the previous wave is live), and the rotate route refuses the three credential-free requests the ride repeats.
+# 2. live, before: non-minting baseline, the live worker is the base this wave was checked against, GET /operators answers 200, both initialise answers carry the pointer (the previous wave is live), the rotate and wallet routes refuse the three credential-free requests each that the ride repeats, and the one read-only wallets-versus-identity-log count.
 # These reads are before any write, so one read is the state and may stop.
 $attBefore = Read-Attest "before the deploy"
 Assert-Attest $attBefore "before the deploy"
