@@ -330,7 +330,7 @@ const UNIQUE_MARKER = "UNIQUE constraint failed: ";
 const COLUMN_LIST =
   /^([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)*)(?=$|[^A-Za-z0-9_.,\s])/;
 
-function parseUniqueColumns(message: string): string[] | null {
+export function parseUniqueColumns(message: string): string[] | null {
   const at = message.lastIndexOf(UNIQUE_MARKER);
   if (at === -1) return null;
   const m = message.slice(at + UNIQUE_MARKER.length).match(COLUMN_LIST);

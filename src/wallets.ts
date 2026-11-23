@@ -1,7 +1,7 @@
 // Wallets: one self-declared payout address per citizen. The society never
 // holds keys, only addresses (blueprint section 2).
 
-import { appendChained } from "./chain.ts";
+import { appendChainedStmt, chainHeadMovedError, classifyUniqueViolation, parseUniqueColumns } from "./chain.ts";
 import { type Env, SocietyError, requireSignedIntent } from "./society.ts";
 
 // 0x + 40 lowercase hex chars, after normalisation. Strict on purpose: a
@@ -51,6 +51,11 @@ export function walletAddressFromRow(kind: string, detail: string): string | nul
   return m ? m[1] : null;
 }
 
+const WALLET_RACED_MESSAGE =
+  "Another wallet declaration for this citizenship committed first, so this one wrote nothing. Read GET /api/events?kind=wallet_declared and GET /api/events?kind=wallet_changed for the wallet now on record, then declare again if you still want this address. A public-key citizen signs a fresh assertion for that request: each assertion is spent once.";
+const ADDRESS_TAKEN_MESSAGE =
+  "That address is already declared by another citizen. One address, one citizen: the prize rule (one per wallet per period) depends on it.";
+
 export async function declareWallet(env: Env, citizen: { id: number }, address: unknown, credential: string | null) {
   const normalized = normalizeAddress(address);
   // D-056: the declared wallet is where every future payout goes, so a key
@@ -59,19 +64,20 @@ export async function declareWallet(env: Env, citizen: { id: number }, address: 
   // one address are two different commitments, which is fine, since each
   // request carries its own).
   await requireSignedIntent(credential, "wallet", [String(address)]);
-  const existing = await env.DB.prepare("SELECT address FROM wallets WHERE citizen_id = ?")
+  const now = Date.now();
+  const existing = await env.DB.prepare("SELECT address, added_at FROM wallets WHERE citizen_id = ?")
     .bind(citizen.id)
-    .first<{ address: string }>();
+    .first<{ address: string; added_at: number }>();
 
   if (existing?.address === normalized) {
     // DEFERRED-WALLET-REDECLARE-OUT-OF-STEP (the wallet-pin gate's L3,
-    // 2026-09-24): when the wallets table and the citizen's newest chained
-    // wallet row disagree (the second write below failed, or a direct edit),
-    // re-declaring the table's address lands here and writes no row, so the
-    // pay route's pin check keeps refusing (wallet_row_address). Money-safe,
-    // but the citizen's only way out is to declare another address and change
-    // back. The fix would compare with the newest chained row, not the table,
-    // before answering "unchanged".
+    // 2026-09-24): the batched writer below prevents NEW table/log
+    // mismatches, but one left by the old two-write code, or by a direct
+    // database edit, can still exist. Re-declaring the table's address lands
+    // here and writes no row, so the pay route's pin check keeps refusing
+    // (wallet_row_address). Money-safe, but the citizen's only way out is to
+    // declare another address and change back. The fix would compare with
+    // the newest chained row, not the table, before answering "unchanged".
     return {
       citizen_id: citizen.id,
       address: normalized,
@@ -80,46 +86,53 @@ export async function declareWallet(env: Env, citizen: { id: number }, address: 
     };
   }
 
-  try {
-    await env.DB.prepare(
-      "INSERT INTO wallets (citizen_id, address, added_at) VALUES (?, ?, ?) " +
-        "ON CONFLICT(citizen_id) DO UPDATE SET address = excluded.address, added_at = excluded.added_at",
-    )
-      .bind(citizen.id, normalized, Date.now())
-      .run();
-  } catch (e) {
-    if (String(e).includes("UNIQUE")) {
-      throw new SocietyError(
-        409,
-        "That address is already declared by another citizen. One address, one citizen: the prize rule (one per wallet per period) depends on it.",
-      );
-    }
-    throw e;
-  }
-
-  // The state change and its public log entry are two sequential writes, not
-  // one atomic batch. rotateKey (society.ts) used to share this shape and was
-  // made one batch on 23 Nov 2026; this path has not been, and a log failure
-  // after the write leaves a changed payout destination with no row.
-  // DEFERRED-WALLET-DECLARE-BATCH
-  // The concurrent-declare race (two requests for the same citizen at the
-  // same moment) is accepted at phase-0 scale, same call as the invite-code
-  // race in register-gate.ts: last write wins on both the row and the log.
+  // The payout address and its identity-log row commit as ONE batch (the
+  // rotateKey / commitRotation pattern). stateStmt is a compare-and-set against
+  // the row this request read, fixed across retries; the chained INSERT is
+  // gated on changes() = 1, so a request that lost a race writes nothing.
+  //
+  // added_at is a per-row version: a first declare stores `now`; every change
+  // stores MAX(now, old + 1), strictly above the value it replaced, so a request
+  // holding an old (address, added_at) can never match again, even after
+  // A -> B -> A or when requests sample the same millisecond. It is read and
+  // served nowhere else: its meaning is "declaration time, nudged forward by at
+  // least 1 ms per change".
+  const stateStmt = existing
+    ? env.DB.prepare(
+        "UPDATE wallets SET address = ?, added_at = MAX(?, added_at + 1) WHERE citizen_id = ? AND address = ? AND added_at = ?",
+      ).bind(normalized, now, citizen.id, existing.address, existing.added_at)
+    : env.DB.prepare("INSERT INTO wallets (citizen_id, address, added_at) VALUES (?, ?, ?)").bind(citizen.id, normalized, now);
   const { kind, detail } = walletLogEntry(existing?.address ?? null, normalized);
-  const sealed = await appendChained(env.DB, "identity_events", {
-    citizen_id: citizen.id,
-    kind,
-    detail,
-    created_at: Date.now(),
-  });
+  const row = { citizen_id: citizen.id, kind, detail, created_at: now };
 
-  return {
-    citizen_id: citizen.id,
-    address: normalized,
-    logged: kind,
-    chain_head: sealed.hash,
-    verify: `GET /api/events?kind=${kind}`,
-  };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const log = await appendChainedStmt(env.DB, "identity_events", row, { sql: "SELECT 1 WHERE changes() = 1", args: [] });
+    let results: { meta: { changes: number } }[];
+    try {
+      results = await env.DB.batch<{ meta: { changes: number } }>([stateStmt, log.stmt]);
+    } catch (e) {
+      const message = String(e);
+      if (!message.includes("UNIQUE")) throw e;
+      const cols = parseUniqueColumns(message);
+      if (cols !== null && cols.length === 1 && cols[0] === "wallets.address") throw new SocietyError(409, ADDRESS_TAKEN_MESSAGE);
+      if (cols !== null && cols.length === 1 && cols[0] === "wallets.citizen_id") throw new SocietyError(409, WALLET_RACED_MESSAGE);
+      if (classifyUniqueViolation("identity_events", message) === "chain_head") continue;
+      throw e;
+    }
+    const changes = results.map((r) => r.meta.changes);
+    if (changes[0] === 1 && changes[1] === 1) {
+      return {
+        citizen_id: citizen.id,
+        address: normalized,
+        logged: kind,
+        chain_head: log.hash,
+        verify: `GET /api/events?kind=${kind}`,
+      };
+    }
+    if (changes[0] === 0 && changes[1] === 0) throw new SocietyError(409, WALLET_RACED_MESSAGE);
+    throw new SocietyError(500, `wallet declaration committed an inconsistent vector [${changes.join(", ")}]; refusing to report it as success`);
+  }
+  throw chainHeadMovedError("identity_events");
 }
 
 // Used by payouts.ts to resolve where a citizen's money goes.
