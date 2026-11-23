@@ -264,7 +264,8 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/society.ts", sha: "60a4a6f3f9249a84ef0dce6e294079ddcd7d8b3ad5de276d76b1b9aa031d6342", note: "rotate pubkey citizen: replaces public key, issues no secret" },
   { file: "src/society.ts", sha: "ed6ee486390e1a408c35c7fabda6e9efd1ab252393af3d533635075cfc7d891d", note: "rotate result: public key replaced; app never saw your private key" },
   { file: "src/society.ts", sha: "83c7178ad00d476bca8b952b41897b44321044015e0907ffb2a6af996f11a396", note: "rotate: secret-held citizenship replaces the secret; no convert to pubkey" },
-  { file: "src/society.ts", sha: "1f0c81b878184de8d2581b39dab380eb0c8826bbc820c09a7ae288a77ac30330", note: "SQL: UPDATE citizens SET secret_hash = ? WHERE id = ?" },
+  { file: "src/society.ts", sha: "a7cafa71ea004b8a28e00f99db01845526a65a790ae76790b59fe303df836de7", note: "SQL: UPDATE citizens SET secret_hash = ? WHERE id = ? AND secret_hash = ? (rotateKey compare-and-set, 23 Nov 2026)" },
+  { file: "src/society.ts", sha: "36aec7a99d7b1c5f769acfef005c45daa78d61a2d82295995df9c4acc8ecdb84", note: "SQL: SELECT public_key, secret_hash FROM citizens WHERE id = ? (rotateKey reads the credential it compares)" },
   { file: "src/society.ts", sha: "1ac8a8277b799929a9e4d160e796e35527413b5ad46b97328be367b898234242", note: "new secret shown once is now your entire identity" },
   // Standing topics (D-070): the officialFacts.topics note and the door note both say the route is
   // secret-guarded (the MAINTAINER_SECRET, an operator credential); neither is a citizen-auth instruction.
@@ -352,9 +353,10 @@ test("secret-literal guard: every 'secret' literal in src/ is a reviewed wire to
   // Resident tier (D-075 step b): the guest-core "writes" exception gained the two resident routes, so its entry's sha was replaced; every other new literal (src/resident.ts, the two tool descriptions, the route rows, the skill text) avoids the word. The baseline did not move: 79 / 24 / 55.
   // last_assertion_at (D-078 item 4, 4 Nov 2026): four new prose literals say a null stamp means "a secret-held seat" (discovery.ts x2, mcp.ts, the A1 note in society.ts); the privacy entry only changed sha: 84 / 24 / 60.
   // Follow-up wave (14 Nov 2026, W4): post.secret and model.secret said the same reviewed literal twice; both now read SECRET_ARG_DESCRIPTION (src/mcp.ts), so the one literal is counted once: 83 / 24 / 59.
-  assert.equal(total, 83, "secret-literal total drifted from the committed baseline (83)");
+  // rotateKey compare-and-set (23 Nov 2026): the credential read gained secret_hash (one new SQL literal) and the UPDATE's entry only changed sha: 84 / 24 / 60.
+  assert.equal(total, 84, "secret-literal total drifted from the committed baseline (84)");
   assert.equal(wire, 24, "exact wire-token count drifted from the committed baseline (24)");
-  assert.equal(prose, 59, "prose-literal count drifted from the committed baseline (59)");
+  assert.equal(prose, 60, "prose-literal count drifted from the committed baseline (60)");
 });
 
 test("secret-literal guard red-proof: catches a novel secret-only instruction, decodes escapes, exempts only exact wire tokens, and forces review on a changed literal", () => {
