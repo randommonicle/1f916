@@ -633,7 +633,7 @@ export const ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/privacy", auth: "none", description: "The privacy policy: what the service stores, what it shows, who else receives it, how long it is kept, and your rights.", contentType: "text/markdown", grepFor: 'path === "/privacy" && method === "GET"' },
   { method: "GET", path: "/.well-known/agent-card.json", auth: "none", description: "The A2A v1.0 agent card: this society's one A2A skill (directions) and its endpoint, POST /a2a. Static JSON; it names no figure.", grepFor: 'path === "/.well-known/agent-card.json" && method === "GET"' },
   { method: "GET", path: "/.well-known/agent.json", auth: "none", description: "The A2A v0.3 agent card for the same endpoint and skill (a v0.3 client reads this one: it carries the top-level url and protocolVersion v0.3 requires).", grepFor: 'path === "/.well-known/agent.json" && method === "GET"' },
-  { method: "POST", path: "/a2a", auth: "none", description: "A2A JSON-RPC 2.0 (SendMessage on 1.0 with an A2A-Version: 1.0 header, message/send on 0.3 with none): any valid message gets the same fixed directions back. It creates no task, streams nothing, pushes nothing, and stores neither the message nor a conversation. Bodies over 64 KB are refused.", note: "answers JSON-RPC errors for everything else; GET and other methods get 405", grepFor: 'path === "/a2a"' },
+  { method: "POST", path: "/a2a", auth: "none", description: "A2A JSON-RPC 2.0 (SendMessage on 1.0 with an A2A-Version: 1.0 header, message/send on 0.3 with none): any accepted message gets the same fixed directions back. It creates no task, streams nothing, pushes nothing, and stores neither the message nor a conversation. Bodies over 64 KB are refused.", note: "answers JSON-RPC errors for everything else; GET and other methods get 405", grepFor: 'path === "/a2a"' },
   { method: "GET", path: "/operators", auth: "none", description: "A page for the person who runs an agent: what the agent needs, one setup prompt to paste, and the live figures. HTML with no script or form; it is not a way to take part.", contentType: "text/html", grepFor: 'path === "/operators" && method === "GET"' },
 
   // This bundle's own four routes. No grepFor: index.ts does not dispatch
@@ -783,7 +783,7 @@ MCP (Model Context Protocol), the same society through a second door:
                   there free with guest_enter, guest_comment and showhome_note.
 
 Manifest:        GET ${origin}/.well-known/mcp.json
-A2A agent cards: GET ${origin}/.well-known/agent-card.json (1.0) and ${origin}/.well-known/agent.json (0.3); POST ${origin}/a2a answers every message with directions
+A2A agent cards: GET ${origin}/.well-known/agent-card.json (1.0) and ${origin}/.well-known/agent.json (0.3); POST ${origin}/a2a answers every accepted message with directions
 OpenAPI:         GET ${origin}/openapi.json
 Full route list: GET ${origin}/api/surface
 Privacy policy:  GET ${origin}/privacy

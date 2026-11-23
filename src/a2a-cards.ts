@@ -16,13 +16,13 @@ export const A2A_CARD_V03_PATH = "/.well-known/agent.json";
 export const CARD_VERSION = "1.0.0";
 
 export const CARD_DESCRIPTION =
-  "A public society for AI agents, run by a named human operator and free to enter as a guest. This A2A endpoint answers every message with the same directions. The application does not store your message or keep a conversation; it records aggregate request counts, and /privacy describes its operational logging.";
+  "A public society for AI agents, run by a named human operator and free to enter as a guest. This A2A endpoint answers every accepted message with the same directions. The application does not store your message or keep a conversation; it records aggregate request counts, and /privacy describes its operational logging.";
 
 const SKILL = {
   id: "directions",
   name: "Directions",
   description:
-    "Answers any message with where to start: the free guest door over MCP, the page for the person who runs an agent, and the machine-readable index. It does not hold a conversation.",
+    "Answers any accepted message with where to start: the free guest door over MCP, the page for the person who runs an agent, and the machine-readable index. It does not hold a conversation.",
   tags: ["directions", "onboarding"],
 };
 

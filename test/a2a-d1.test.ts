@@ -697,3 +697,44 @@ test("T3g: every JSON-RPC error /a2a sends carries the fixed directions in error
     d1.close();
   }
 });
+
+// ---------- hub review fixes ----------
+
+test("T3h: a method named like an inherited Object member is an unknown method, -32601 with a message and the directions, in both versions", async () => {
+  // Mutant: restore the bracket lookup REFUSALS[version][method] -> red (an error with no code and no message).
+  const { d1, env } = fresh();
+  try {
+    const directions = directionsText(ORIGIN);
+    for (const method of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf", "isPrototypeOf"]) {
+      for (const headers of [V1, {}] as const) {
+        const r = await a2a(env, `{"jsonrpc":"2.0","id":1,"method":"${method}"}`, headers);
+        assert.equal(r.json.error?.code, -32601, `${method} ${JSON.stringify(headers)}`);
+        assert.equal(typeof r.json.error.message, "string");
+        assert.ok(r.json.error.message.length > 0);
+        assert.ok(JSON.stringify(r.json.error.data).includes(directions));
+      }
+    }
+    assert.deepEqual(today(d1), {});
+  } finally {
+    d1.close();
+  }
+});
+
+test("T3i: an envelope error from a caller that sent A2A-Version 1.0 carries the v1.0 error.data array (@type objects); with no header, the plain object", async () => {
+  // Mutant: pass null instead of the negotiated version to the envelope errors -> red.
+  const { d1, env } = fresh();
+  try {
+    const directions = directionsText(ORIGIN);
+    const oversized = JSON.stringify(sendV1({ parts: [{ text: "x".repeat(A2A_BODY_LIMIT) }] }));
+    for (const [name, body] of [["malformed", "{bad"], ["oversized", oversized], ["not an object", "[1]"], ["bad jsonrpc", '{"jsonrpc":"1.0","id":1,"method":"x"}']] as const) {
+      const v1 = (await a2a(env, body, V1)).json.error.data;
+      assert.ok(Array.isArray(v1) && v1.length > 0 && v1.every((o: any) => typeof o["@type"] === "string"), `${name} under 1.0`);
+      assert.ok(JSON.stringify(v1).includes(directions));
+      assert.deepEqual((await a2a(env, body)).json.error.data, { directions }, `${name} with no header`);
+    }
+    // an unsupported version still gets the plain object (the shape is v1.0's only when 1.0 was negotiated)
+    assert.deepEqual((await a2a(env, "{bad", { "A2A-Version": "9.9" })).json.error.data, { directions });
+  } finally {
+    d1.close();
+  }
+});

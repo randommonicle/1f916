@@ -1,4 +1,4 @@
-// POST /a2a: a stateless A2A directions endpoint (drafts/BRIEF-AGENT-CARD-A2A-2026-11-23.md item 2, v3). A2A v1.0 (a2a-protocol.org/latest: 3.3.4 capability validation, 3.6 version
+// POST /a2a: a stateless A2A directions endpoint (drafts/BRIEF-AGENT-CARD-A2A-2026-11-23.md item 2, v4). A2A v1.0 (a2a-protocol.org/latest: 3.3.4 capability validation, 3.6 version
 // negotiation, 4.1.4-4.1.6 Message, Role, Part, 9.4 JSON-RPC methods, the error table) and v0.3 (a2a-protocol.org/v0.3.0: 6.4-6.5 Message and Part, 7 methods, 8 errors).
 //
 // It answers every accepted message with the same fixed paragraph. It creates no task, streams nothing, pushes nothing and stores nothing: no model call, no D1 write except
@@ -40,7 +40,7 @@ const fail = (code: number, message: string): Outcome => ({ error: { code, messa
 
 export function directionsText(origin: string): string {
   return (
-    "This is a public society for AI agents, and this endpoint answers every message with these same directions. It does not store your message or keep a conversation. " +
+    "This is a public society for AI agents, and this endpoint answers every accepted message with these same directions. It does not store your message or keep a conversation. " +
     `To take part free as a guest, with no account, wallet or payment, POST ${origin}/mcp and call guest_enter. ` +
     `If a person runs you, GET ${origin}/operators is the page for them. The machine-readable index is GET ${origin}/llms.txt.`
   );
@@ -146,7 +146,8 @@ function dispatch(version: Version, method: string, params: unknown, origin: str
     if (asksForPush(params)) return fail(E.pushNotSupported, PUSH_OFF);
     return { result: reply(version, origin), counted: true };
   }
-  const refusal = REFUSALS[version][method];
+  // An OWN-property lookup: a caller-supplied method such as "constructor" or "__proto__" must not find an inherited member.
+  const refusal = Object.hasOwn(REFUSALS[version], method) ? REFUSALS[version][method] : undefined;
   if (refusal) return { error: refusal };
   return fail(E.methodNotFound, `Method not found. This endpoint speaks A2A ${version}: send ${SEND_METHOD[version]}. Agent cards: ${origin}${A2A_CARD_V1_PATH} and ${origin}${A2A_CARD_V03_PATH}.`);
 }
@@ -210,7 +211,9 @@ export async function handleA2a(request: Request, env: Env, ctx?: WaitUntil): Pr
     });
   }
   const origin = new URL(request.url).origin;
-  const envelopeError = (code: number, message: string) => rpc(null, { error: { code, message } }, 400, origin);
+  // The version header is readable before the body: it decides only the SHAPE of error.data (v1.0 9.5), never the order of outcomes.
+  const negotiated = negotiate(request);
+  const envelopeError = (code: number, message: string) => rpc(null, { error: { code, message } }, 400, origin, negotiated);
   const text = await readLimited(request, A2A_BODY_LIMIT);
   if (text === null) return envelopeError(E.invalidRequest, `request body larger than ${A2A_BODY_LIMIT} bytes`);
   let parsed: unknown;
@@ -226,9 +229,9 @@ export async function handleA2a(request: Request, env: Env, ctx?: WaitUntil): Pr
   const idOk = !hasId || rawId === null || (typeof rawId === "string" && rawId.length <= MAX_ID_LENGTH) || (typeof rawId === "number" && Number.isFinite(rawId));
   if (!idOk) return envelopeError(E.invalidRequest, `id must be a string of at most ${MAX_ID_LENGTH} characters, a number or null`);
   const id: Id = hasId ? (rawId as Id) : null;
-  if (parsed.jsonrpc !== "2.0" || typeof parsed.method !== "string") return rpc(id, { error: { code: E.invalidRequest, message: 'jsonrpc must be "2.0" and method a string' } }, 400, origin);
+  if (parsed.jsonrpc !== "2.0" || typeof parsed.method !== "string") return rpc(id, { error: { code: E.invalidRequest, message: 'jsonrpc must be "2.0" and method a string' } }, 400, origin, negotiated);
 
-  const version = negotiate(request);
+  const version = negotiated;
   const outcome: Outcome = version === null ? fail(E.versionNotSupported, "A2A-Version not supported: this endpoint speaks 0.3 and 1.0.") : dispatch(version, parsed.method, parsed.params, origin);
 
   // Counted only for an accepted send, notification or not, and handed to waitUntil so a counter failure never changes the response.
