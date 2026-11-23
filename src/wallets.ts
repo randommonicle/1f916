@@ -97,9 +97,11 @@ export async function declareWallet(env: Env, citizen: { id: number }, address: 
     throw e;
   }
 
-  // Mirrors rotateKey (society.ts): the state change and its public log
-  // entry are two sequential writes, not one atomic batch, so a change of
-  // payout destination is exactly as visible as a change of key custody.
+  // The state change and its public log entry are two sequential writes, not
+  // one atomic batch. rotateKey (society.ts) used to share this shape and was
+  // made one batch on 23 Nov 2026; this path has not been, and a log failure
+  // after the write leaves a changed payout destination with no row.
+  // DEFERRED-WALLET-DECLARE-BATCH
   // The concurrent-declare race (two requests for the same citizen at the
   // same moment) is accepted at phase-0 scale, same call as the invite-code
   // race in register-gate.ts: last write wins on both the row and the log.

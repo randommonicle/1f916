@@ -16,7 +16,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
-import { authenticate, register, rotateKey, type Env } from "../src/society.ts";
+import { authenticate, register, rotateKey, SocietyError, type Env } from "../src/society.ts";
+import { appendChained, attest } from "../src/chain.ts";
 import { ASSERTION_PREFIX, buildPayloadSegment, encodeBase64Url, newNonce } from "../src/keyauth.ts";
 
 function testEnv(d1: LocalD1): Env {
@@ -85,6 +86,82 @@ test("a secret rotation whose log row fails leaves the old secret working", asyn
     const again = await authenticate(env, oldSecret);
     assert.equal(again.handle, "atomic-secret", "the old secret stopped working although no rotation was logged or returned");
     assert.equal(rotationRows(d1), 0);
+  } finally {
+    d1.close();
+  }
+});
+
+// A real concurrent write in the race window: just before each of the first
+// `times` batches, another chained row is appended through the real database,
+// so the batch's prev_hash is stale and SQLite raises a real UNIQUE on
+// identity_events. The hook times the write; nothing in the database is faked.
+function racingEnv(d1: LocalD1, times: number, before?: () => Promise<void>): Env {
+  let left = times;
+  const db = new Proxy(d1.DB, {
+    get(target, prop) {
+      if (prop === "batch") {
+        return async (stmts: D1PreparedStatement[]) => {
+          if (before) { const b = before; before = undefined; await b(); }
+          if (left > 0) {
+            left--;
+            await appendChained(d1.DB, "identity_events", { citizen_id: 1, kind: "moderation", detail: "a concurrent append", created_at: Date.now() });
+          }
+          return target.batch(stmts);
+        };
+      }
+      const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+      return typeof v === "function" ? (v as Function).bind(target) : v;
+    },
+  });
+  return { ...testEnv(d1), DB: db } as Env;
+}
+
+test("a rotation that meets one moved chain head retries, commits once, and reports the committed row's hash", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = testEnv(d1);
+    const out = (await register(base, "atomic-retry", "claude-sonnet-5")) as Record<string, unknown>;
+    const citizen = await authenticate(base, String(out.secret));
+    const rotated = (await rotateKey(racingEnv(d1, 1), citizen)) as Record<string, unknown>;
+
+    assert.equal((await authenticate(base, String(rotated.secret))).handle, "atomic-retry");
+    const rows = d1.raw.prepare("SELECT hash FROM identity_events WHERE kind = 'key_rotation'").all() as { hash: string }[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].hash, rotated.chain_head);
+    const audit = (await attest(d1.DB)) as { identity_log: { ok: boolean } };
+    assert.equal(audit.identity_log.ok, true, "the identity chain must still verify after the retry");
+  } finally {
+    d1.close();
+  }
+});
+
+test("four moved chain heads in a row end in 503 with nothing written", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = testEnv(d1);
+    const out = (await register(base, "atomic-exhaust", "claude-sonnet-5")) as Record<string, unknown>;
+    const oldSecret = String(out.secret);
+    const citizen = await authenticate(base, oldSecret);
+    await assert.rejects(() => rotateKey(racingEnv(d1, 4), citizen), (e: unknown) => e instanceof SocietyError && e.status === 503);
+    assert.equal((await authenticate(base, oldSecret)).handle, "atomic-exhaust");
+    assert.equal(rotationRows(d1), 0);
+  } finally {
+    d1.close();
+  }
+});
+
+test("of two rotations that read the same old secret, the second writes nothing and does not overwrite the first", async () => {
+  const d1 = createLocalD1();
+  try {
+    const base = testEnv(d1);
+    const out = (await register(base, "atomic-race", "claude-sonnet-5")) as Record<string, unknown>;
+    const citizen = await authenticate(base, String(out.secret));
+    let winner: Record<string, unknown> = {};
+    // The loser has already read the old secret_hash when, just before its batch, the winner's whole rotation commits.
+    const loserEnv = racingEnv(d1, 0, async () => { winner = (await rotateKey(base, citizen)) as Record<string, unknown>; });
+    await assert.rejects(() => rotateKey(loserEnv, citizen), (e: unknown) => e instanceof SocietyError && e.status === 409);
+    assert.equal((await authenticate(base, String(winner.secret))).handle, "atomic-race", "the winner's new secret must still work");
+    assert.equal(rotationRows(d1), 1);
   } finally {
     d1.close();
   }

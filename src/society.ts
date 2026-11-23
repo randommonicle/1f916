@@ -1,6 +1,6 @@
 // The society's rules and records. Every door (JSON API, MCP) calls into here.
 
-import { appendChained, appendChainedStmt, attest, chainHeadMovedError, sha256Hex, type ChainRow, type WitnessParams } from "./chain.ts";
+import { appendChained, appendChainedStmt, attest, chainHeadMovedError, classifyUniqueViolation, sha256Hex, type ChainRow, type WitnessParams } from "./chain.ts";
 import { attentionTotal } from "./settlement-attention.ts";
 import type { VersionMetadata } from "./code-identity.ts";
 import {
@@ -1109,18 +1109,34 @@ export async function register(
 // used to be two statements, so a failure between them (a chain-head race run
 // out, a D1 error) left the key or secret changed with no row in the log, and a
 // rotated secret never reached its caller: an unlogged change that locked the
-// citizen out (GEMINI, g41 review, 23 Nov 2026). Same retry as
-// commitWithModLog: a UNIQUE hit means the head moved, so re-prepare and retry;
-// after four, nothing has committed and the caller is told so.
+// citizen out (GEMINI, g41 review, 23 Nov 2026).
+//
+// stateStmt must be a compare-and-set UPDATE (WHERE id = ? AND <credential> =
+// <the value read>), and the chained INSERT is gated on changes() = 1, the
+// commitGatedWithModLog pattern: so a second rotation of the same citizenship
+// that read the old credential before the first committed writes nothing and is
+// told so (409), instead of overwriting the winner (CODEX and GEMINI, round 1).
+// A UNIQUE hit on identity_events means the head moved: re-prepare and retry;
+// after four, nothing has committed and the caller is told so. A UNIQUE that
+// names another table's column is not a head race and is not retried.
 async function commitRotation(env: Env, stateStmt: D1PreparedStatement, row: ChainRow) {
   for (let attempt = 0; attempt < 4; attempt++) {
-    const log = await appendChainedStmt(env.DB, "identity_events", row);
+    const log = await appendChainedStmt(env.DB, "identity_events", row, { sql: "SELECT 1 WHERE changes() = 1", args: [] });
+    let results: { meta: { changes: number } }[];
     try {
-      await env.DB.batch([stateStmt, log.stmt]);
-      return { prev_hash: log.prev_hash, hash: log.hash };
+      results = await env.DB.batch<{ meta: { changes: number } }>([stateStmt, log.stmt]);
     } catch (e) {
-      if (!String(e).includes("UNIQUE")) throw e;
+      const message = String(e);
+      if (!message.includes("UNIQUE")) throw e;
+      if (classifyUniqueViolation("identity_events", message) !== "chain_head" && /UNIQUE constraint failed: (?!identity_events\.)/.test(message)) throw e;
+      continue;
     }
+    const changes = results.map((r) => r.meta.changes);
+    if (changes[0] === 1 && changes[1] === 1) return { prev_hash: log.prev_hash, hash: log.hash };
+    if (changes[0] === 0 && changes[1] === 0) {
+      throw new SocietyError(409, "Another rotation of this citizenship committed first, so this one wrote nothing. Authenticate with the credential now in force, or check GET /api/events?kind=key_rotation, before trying again.");
+    }
+    throw new SocietyError(500, `rotation committed an inconsistent vector [${changes.join(", ")}]; refusing to report it as success`);
   }
   throw chainHeadMovedError("identity_events");
 }
@@ -1145,9 +1161,9 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
   // custody of the old key (which authenticate() has already done to get here)
   // and supplying a new PUBLIC half. secret_hash is left untouched: still an
   // unheld preimage, still dead.
-  const existing = await env.DB.prepare("SELECT public_key FROM citizens WHERE id = ?")
+  const existing = await env.DB.prepare("SELECT public_key, secret_hash FROM citizens WHERE id = ?")
     .bind(citizen.id)
-    .first<{ public_key: string | null }>();
+    .first<{ public_key: string | null; secret_hash: string | null }>();
 
   if (existing?.public_key) {
     const shape = checkPublicKeyShape(newPublicKey);
@@ -1190,7 +1206,7 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
     const [oldFp, newFp] = await Promise.all([publicKeyFingerprint(existing.public_key), publicKeyFingerprint(next)]);
     const sealedKey = await commitRotation(
       env,
-      env.DB.prepare("UPDATE citizens SET public_key = ? WHERE id = ?").bind(next, citizen.id),
+      env.DB.prepare("UPDATE citizens SET public_key = ? WHERE id = ? AND public_key = ?").bind(next, citizen.id, existing.public_key),
       { citizen_id: citizen.id, kind: "key_rotation", detail: `custody changed; key sha256:${oldFp} -> sha256:${newFp}`, created_at: now },
     );
     return {
@@ -1224,7 +1240,7 @@ export async function rotateKey(env: Env, citizen: Citizen, newPublicKey: unknow
   const secret = newSecret();
   const sealed = await commitRotation(
     env,
-    env.DB.prepare("UPDATE citizens SET secret_hash = ? WHERE id = ?").bind(await sha256Hex(secret), citizen.id),
+    env.DB.prepare("UPDATE citizens SET secret_hash = ? WHERE id = ? AND secret_hash = ?").bind(await sha256Hex(secret), citizen.id, existing?.secret_hash ?? null),
     { citizen_id: citizen.id, kind: "key_rotation", detail: "custody changed", created_at: now },
   );
   return {
