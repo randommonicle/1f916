@@ -147,7 +147,8 @@ test("the steps are in the load-bearing order, there is no migration or D1 step,
   assert.equal((code.match(/-X POST/g) ?? []).length, 2, "exactly two bodiless POSTs, both in Get-PostAnswer");
   const postFn = code.slice(code.indexOf("function Get-PostAnswer("), code.indexOf("function Test-Refusal401("));
   assert.equal((postFn.match(/-X POST/g) ?? []).length, 2, "both bodiless POSTs live in Get-PostAnswer");
-  assert.equal((code.match(/Get-PostAnswer \$ROTATE_URL/g) ?? []).length, 2, "Get-PostAnswer is called only against the rotate route, twice");
+  assert.equal((code.match(/Get-PostAnswer \$ROTATE_URL/g) ?? []).length, 2, "Get-PostAnswer is called against the rotate route twice");
+  assert.equal((code.match(/\bGet-PostAnswer\b/g) ?? []).length, 3, "one definition and those two calls: no Get-PostAnswer call to any other URL (GEMINI r1)");
   assert.equal((code.match(/--data-binary/g) ?? []).length, 1, "exactly one request body, in Get-InitInstructions");
   assert.ok(code.includes('--data-binary "@$req"'), "the initialize body is sent from a temp file");
   // The only credential-shaped string is the bearer that is no citizen's secret, sent once, in Test-RotateRefusals.
@@ -507,6 +508,7 @@ test("Test-RotateRefusals, run for real against a local HTTP server: passes only
       if (req.method === "GET") return mode === "getok" ? send(200, {}) : send(404, { error: "Not found. GET / explains everything." });
       if (mode === "rotated") return send(200, { handle: "x" });
       if (!req.headers.authorization) return send(401, { error: mode === "wrongtext" ? "Something else." : NO_CRED });
+      if (mode === "bearerwrong") return send(401, { error: "unknown secret. It identifies no citizen." });
       if (mode === "notjson") {
         res.writeHead(401);
         return res.end("<html>");
@@ -525,13 +527,14 @@ test("Test-RotateRefusals, run for real against a local HTTP server: passes only
       litLine("UNKNOWN_SECRET_TEXT"),
       litLine("NOT_A_SECRET"),
       fns,
-      `foreach ($m in "good", "rotated", "wrongtext", "notjson", "getok") { $BASE = "http://127.0.0.1:${port}/" + $m; $ROTATE_URL = "$BASE/api/rotate"; Write-Host ("RES " + $m + " [" + (Test-RotateRefusals) + "]") }`,
+      `foreach ($m in "good", "rotated", "wrongtext", "bearerwrong", "notjson", "getok") { $BASE = "http://127.0.0.1:${port}/" + $m; $ROTATE_URL = "$BASE/api/rotate"; Write-Host ("RES " + $m + " [" + (Test-RotateRefusals) + "]") }`,
       '$ROTATE_URL = "http://127.0.0.1:1/api/rotate"; Write-Host ("RES down [" + (Test-RotateRefusals) + "]")',
     ]);
     if (!run) return t.skip("no PowerShell available");
     assert.match(run.out, /RES good \[\]/, run.out);
     assert.match(run.out, /RES rotated \[POST \/api\/rotate with no credential answered 200, expected 401\]/);
     assert.match(run.out, /RES wrongtext \[POST \/api\/rotate with no credential: the 401 error is 'Something else\.', expected it to start 'No credentials\. Register first'\]/);
+    assert.match(run.out, /RES bearerwrong \[POST \/api\/rotate with a bearer that is no citizen's secret: the 401 error is 'unknown secret\. It identifies no citizen\.', expected it to start 'Unknown secret\. It identifies no citizen\.'\]/, "the bearer POST's text is checked, case-sensitively (GEMINI r1)");
     assert.match(run.out, /RES notjson \[POST \/api\/rotate with a bearer that is no citizen's secret: the 401 was not JSON\]/);
     assert.match(run.out, /RES getok \[GET \/api\/rotate answered 200, expected 404 \(the route is POST only\)\]/);
     assert.match(run.out, /RES down \[POST \/api\/rotate with no credential: curl exited \d+/, "a connection failure says curl failed, not a pass");

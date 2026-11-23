@@ -171,7 +171,7 @@ function Get-Page($url, $maxTime) {
     Remove-Item $hdr -ErrorAction SilentlyContinue
   }
 }
-# "" when $r is GET /operators answering this wave's page, otherwise the reason it is not. $official is the parsed GET /api/official read in the same iteration (or $null): the page's four figures
+# "" when $r is GET /operators answering the operators page (live since 19 Nov), otherwise the reason it is not. $official is the parsed GET /api/official read in the same iteration (or $null): the page's four figures
 # must equal it, because the page and the route read the same rows. Case-sensitive. A quick propagation check, not a whole-page comparison (the whole page is proven by test/operators-page-d1.test.ts, step 1).
 function Test-OperatorsServed($r, $official) {
   if ([string]$r.Code -cne "200") { return ("GET /operators answered " + $r.Code + ", expected 200") }
@@ -280,7 +280,7 @@ function Test-PointerServed {
   }
   return ""
 }
-# "" when GET /llms.txt carries the new GUEST_OPERATOR_NOTE sentence, otherwise the reason it does not.
+# "" when GET /llms.txt carries the GUEST_OPERATOR_NOTE sentence (live since 19 Nov), otherwise the reason it does not.
 function Test-NoteServed {
   $r = Get-Text "$BASE/llms.txt" 30
   if ([string]$r.Code -cne "200") { return ("GET /llms.txt answered " + $r.Code + ", expected 200") }
@@ -447,7 +447,7 @@ if ($whyRotateBefore -ne "") { Stop-Here ("before the deploy, " + $whyRotateBefo
 Say "[live] before: POST /api/rotate refuses no credential (401 No credentials) and a bearer that is no citizen's secret (401 Unknown secret); GET /api/rotate -> 404"
 
 if ($DryRun) {
-  Say "[dry-run] every pin, git, source, test and live check passed. Step 2 itself already sent one GET /operators, two credential-free initialize POSTs (the door counts operators_page, mcp_initialize and mcp_read_initialize rose by those) and three refused rotate requests (which write nothing). would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id; then ride the rotate refusals, the earlier waves and the public reads, each retried (up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row) before it judges. Nothing was deployed."
+  Say "[dry-run] every pin, git, source, test and live check passed. Step 2 itself already sent one GET /operators, two credential-free initialize POSTs (the door counts operators_page, mcp_initialize and mcp_read_initialize rose by those) and three refused rotate requests (which write nothing). would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id, GET /operators the page and both initialise answers the pointer; then ride the rotate refusals, the earlier waves and the public reads, each retried (up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row) before it judges. Nothing was deployed."
   exit 0
 }
 
@@ -475,7 +475,7 @@ $ROLLBACK_LINE = "ROLL BACK THE WORKER (npx wrangler rollback, to the version be
 Wait-NewWorker $headSha $versionId $POLL_TRIES $POLL_DELAY_SECONDS
 # END-DEPLOY-AND-POLL
 # 4. the ride (L-167: every check below is retried until $GOOD_READS_NEEDED good reads in a row, up to $RIDE_TRIES reads, before it judges; a stop here means the retries ran out, so the
-# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the operators page against GET /api/official, both initialise answers carrying the pointer, /llms.txt carrying the new note sentence, then a sweep of public reads.
+# message says to read the deployments list by hand first, and only then names the rollback): non-minting and the chains, the rotate refusals, the operators page against GET /api/official, both initialise answers carrying the pointer, /llms.txt carrying the new note sentence, then a sweep of public reads.
 $whyAttest = Confirm-Reads {
   $a = Get-ServedAttest
   $m = Get-AttestReason $a
@@ -489,14 +489,14 @@ $whyRotate = Confirm-Reads { return (Test-RotateRefusals) } $GOOD_READS_NEEDED $
 if ($whyRotate -ne "") { Stop-Here ("the rotate route was not confirmed to refuse as before in " + $RIDE_TRIES + " reads (last: " + $whyRotate + "). Read npx wrangler deployments list and POST /api/rotate by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say "[ride] POST /api/rotate -> 401 No credentials, 401 Unknown secret; GET /api/rotate -> 404 ($GOOD_READS_NEEDED good reads in a row). These show the route still refuses; only the stamp above shows the batch is the code now serving."
 $whyPage = Confirm-Reads { return (Test-OperatorsServed (Get-Page $PAGE_URL 30) (Get-ServedOfficial)) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
-if ($whyPage -ne "") { Stop-Here ("GET /operators was not confirmed to be this wave's page in " + $RIDE_TRIES + " reads (last: " + $whyPage + "). Read npx wrangler deployments list and the page by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+if ($whyPage -ne "") { Stop-Here ("GET /operators was not confirmed to be the operators page in " + $RIDE_TRIES + " reads (last: " + $whyPage + "). Read npx wrangler deployments list and the page by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say "[ride] GET /operators -> 200 still: text/html, the exact Content-Security-Policy and X-Content-Type-Options, no script, form, link, img or iframe, the opening sentence and the paste, and the four figures and the resident count equal to GET /api/official read in the same iteration"
 $whyPointer = Confirm-Reads { return (Test-PointerServed) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whyPointer -ne "") { Stop-Here ("the initialise answers were not confirmed to carry the pointer in " + $RIDE_TRIES + " reads (last: " + $whyPointer + "). Read npx wrangler deployments list and both initialise answers by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say "[ride] /mcp and /mcp/read initialize -> each carries the operators pointer exactly once ($GOOD_READS_NEEDED good reads in a row)"
 $whyNote = Confirm-Reads { return (Test-NoteServed) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whyNote -ne "") { Stop-Here ("GET /llms.txt was not confirmed to carry the operator-note sentence in " + $RIDE_TRIES + " reads (last: " + $whyNote + "). Read npx wrangler deployments list and re-read it by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
-Say "[ride] GET /llms.txt -> 200 and carries the new operator-note sentence"
+Say "[ride] GET /llms.txt -> 200 and still carries the operator-note sentence"
 $sweepPaths = @("/", "/operators", "/api/official", "/openapi.json", "/treasury", "/api/listings", "/api/stats", "/api/topics", "/api/guest/due", "/api/citizens", "/api/doors", "/api/council", "/api/residents", "/heartbeat.md", "/skill.md", "/llms.txt", "/privacy", "/api/proposal/8")
 $whySweep = Confirm-Reads {
   $bad = @()
