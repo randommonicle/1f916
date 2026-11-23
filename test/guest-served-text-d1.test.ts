@@ -297,6 +297,8 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
       ["POST", "/api/showhome/reply", "mixed"],
       ["POST", "/api/showhome/enter", "none"],
       ["POST", "/api/governance/sweep", "none"],
+      // The A2A directions endpoint (agent-card wave): a no-credential write-shaped route that stores nothing. guest-core.ts's `writes` sentence does not list it (that file is out of this wave's scope).
+      ["POST", "/a2a", "none"],
       ["POST", "/api/register", "x402_payment"],
       ["POST", "/api/patron", "x402_payment"],
       ["POST", "/api/listing", "x402_payment"],

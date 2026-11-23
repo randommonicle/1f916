@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/index.ts";
 import { createLocalD1, seedCitizens, guestEnv, call, freshIp, type LocalD1 } from "./helpers/guest.ts";
-import { DOORS, DOOR_DAILY_CAP, TOOL_DOOR_DAILY_CAP, DOORS_NOTE, countDoor, doorsReport, toolDoor, utcDay } from "../src/doors.ts";
+import { DOORS, DOOR_DAILY_CAP, TOOL_DOOR_DAILY_CAP, PROBE_DOORS, PROBE_DOOR_DAILY_CAP, DOORS_NOTE, countDoor, doorsReport, toolDoor, utcDay } from "../src/doors.ts";
 import { TOOLS } from "../src/mcp.ts";
 import { ROUTES } from "../src/discovery.ts";
 import type { Env } from "../src/society.ts";
@@ -210,12 +210,16 @@ test("A5: both counter writes of one tools/call go through ctx.waitUntil: the re
   }
 });
 
-test("T5: the write budget: (every listed tool x the per-tool cap + every fixed door x its cap) x2 for index writes stays under 60,000 of the 100,000 daily D1 writes; list sizes are derived, never typed", async () => {
+test("T5: the write budget: (every listed tool x the per-tool cap + every fixed door x its cap + every probe door x its cap) x2 for index writes stays under 60,000 of the 100,000 daily D1 writes; list sizes are derived, never typed", async () => {
   const { d1, env } = fresh();
   try {
     const readTools = await readToolCount(env);
     assert.ok(TOOLS.length >= 37 && readTools >= 13, "the lists are the ones being counted");
-    const increments = (TOOLS.length + readTools) * TOOL_DOOR_DAILY_CAP + DOORS.length * DOOR_DAILY_CAP;
+    // Each class is derived once, from its own list and its own cap; the probe class (agent-card wave) is disjoint from the fixed and per-tool classes.
+    const perTool = (TOOLS.length + readTools) * TOOL_DOOR_DAILY_CAP;
+    const fixed = DOORS.length * DOOR_DAILY_CAP;
+    const probe = PROBE_DOORS.length * PROBE_DOOR_DAILY_CAP;
+    const increments = perTool + fixed + probe;
     assert.ok(increments * 2 < 60_000, `${increments} increments x2 = ${increments * 2} must stay under 60000`);
     // R3 (commit_days): one new row plus its primary-key index write per distinct stamp per day, so the budget is increments x2 + 2S. S, the distinct stamps counted in one UTC day
     // INCLUDING 'unstamped', is bounded by a stated constant, not by raising the threshold: one stamp per deploy and a handful of deploys a day at most (the project has shipped at most
@@ -223,8 +227,11 @@ test("T5: the write budget: (every listed tool x the per-tool cap + every fixed 
     const MAX_STAMPS_PER_DAY = 20;
     const withStamps = increments * 2 + 2 * MAX_STAMPS_PER_DAY;
     assert.ok(withStamps < 60_000, `${increments} increments x2 + 2 x ${MAX_STAMPS_PER_DAY} stamps = ${withStamps} must stay under 60000`);
-    assert.equal(increments * 2, 54_400, "the formula's fixed part is the 54,400 the brief names for today's lists (update the brief, not the threshold, if the lists grow)");
+    assert.equal(increments * 2, 56_000, "the formula's fixed part is the 56,000 the agent-card brief names for today's lists (54,400 before the four probe doors at 200; update the brief, not the threshold, if the lists grow)");
     assert.equal(TOOL_DOOR_DAILY_CAP, 100);
+    assert.equal(PROBE_DOOR_DAILY_CAP, 200);
+    assert.equal(probe * 2, 1_600, "the probe doors add 1,600 to the budget at their own cap, not at the fixed doors' 2000");
+    assert.ok(PROBE_DOOR_DAILY_CAP < DOOR_DAILY_CAP, "a probe door's cap is its own, below the fixed doors'");
   } finally {
     d1.close();
   }
@@ -232,7 +239,9 @@ test("T5: the write budget: (every listed tool x the per-tool cap + every fixed 
 
 test("T6: DOORS_NOTE names the per-tool doors, both caps in one sentence, and that the rows need not reconcile; the route description names them; /api/doors serves the note verbatim", async () => {
   assert.ok(DOORS_NOTE.includes("mcp_tool:<name>") && DOORS_NOTE.includes("mcp_read_tool:<name>"));
-  assert.ok(DOORS_NOTE.includes("Each fixed door stops counting at 2000 a UTC day and each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at 100"));
+  assert.ok(DOORS_NOTE.includes("Each fixed door stops counting at 2000 a UTC day, each per-tool door (mcp_tool:<name>, mcp_read_tool:<name>) at 100 and each probe door (agent_card, a2a_send, mcp_a2a_probe, mcp_unknown_method) at 200"));
+  for (const d of PROBE_DOORS) assert.ok(DOORS_NOTE.includes(d), `the note names ${d}`);
+  assert.ok(DOORS_NOTE.indexOf("a2a_send counts") < DOORS_NOTE.indexOf("commits_by_day lists"), "the probe definitions come before the commits_by_day sentences");
   assert.equal(DOORS_NOTE.includes("Each door stops counting at 2000"), false, "the old single-cap sentence is gone");
   assert.ok(DOORS_NOTE.includes("need not reconcile exactly"));
   const spec = ROUTES.find((r) => r.path === "/api/doors")!;

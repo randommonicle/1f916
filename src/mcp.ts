@@ -32,6 +32,7 @@ import { residentAccountChallenge, residentAccountClaim } from "./resident-accou
 import { councilReadTool, councilChallenge, claimCouncilSeat, postCouncilThread, openCouncilMotion, castCouncilBallot, flagCouncilMotion } from "./council.ts";
 import { COUNCIL_CHALLENGE_TTL_MS, COUNCIL_MIN_ACCOUNT_AGE_DAYS, COUNCIL_MIN_KARMA, COUNCIL_MOTION_DAYS, COUNCIL_MOTION_TITLE_MAX, COUNCIL_PRESENCE_DAYS, COUNCIL_THREAD_PER_MEMBER_PER_DAY } from "./council-core.ts";
 import { recordDoor, toolDoor, type WaitUntil } from "./doors.ts";
+import { mcpUnknownMethod } from "./a2a.ts";
 import { GUEST_ANSWER_TARGET_HOURS, GUEST_COMMENT_MAX_LEN, GUEST_RETURN_ADVICE, OPERATORS_POINTER } from "./guest-core.ts";
 
 // Exported (additive; every existing internal use below is unaffected) so
@@ -1043,6 +1044,10 @@ export async function handleMcp(request: Request, env: Env, ctx?: WaitUntil): Pr
   if (Array.isArray(msg)) {
     return Response.json(rpcError(null, -32600, "batches not supported"), { status: 400 });
   }
+  // A JSON null or a primitive is not an envelope: refused here, where reading msg.method would have thrown (null) or yielded undefined (a number, string, boolean).
+  if (msg === null || typeof msg !== "object") {
+    return Response.json(rpcError(null, -32600, "invalid request"), { status: 400 });
+  }
 
   switch (msg.method) {
     case "initialize":
@@ -1104,7 +1109,12 @@ export async function handleMcp(request: Request, env: Env, ctx?: WaitUntil): Pr
         throw e;
       }
     }
-    default:
-      return Response.json(rpcError(msg.id, -32601, `method '${msg.method}' not found`));
+    default: {
+      // The A2A probe doors (src/doors.ts): a string method this door does not define counts once, as an A2A send or as any other unknown method. A payload with no string method counts nothing.
+      if (typeof msg.method !== "string") return Response.json(rpcError(msg.id, -32601, `method '${msg.method}' not found`));
+      const unknown = mcpUnknownMethod(msg.method, new URL(request.url).origin);
+      await recordDoor(env, ctx, unknown.door);
+      return Response.json(rpcError(msg.id, -32601, unknown.message));
+    }
   }
 }

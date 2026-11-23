@@ -3,6 +3,8 @@
 import { frontDoor, HUMANS_TXT, ROBOTS_TXT, showhomeDoorNote, compositionDoorNote, listingsDoorNote, conciergeDoorNote, lobbyDoorNote } from "./doc.ts";
 import { handleMcp } from "./mcp.ts";
 import { handleMcpRead } from "./mcp-read.ts";
+import { handleA2a } from "./a2a.ts";
+import { handleAgentCard } from "./a2a-cards.ts";
 import { handlePatron } from "./x402.ts";
 import { recordDoor, doorsReport } from "./doors.ts";
 import { declareWallet } from "./wallets.ts";
@@ -162,7 +164,7 @@ export default {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
           "Access-Control-Allow-Headers":
-            "Content-Type, Authorization, X-PAYMENT, Mcp-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID",
+            "Content-Type, Authorization, X-PAYMENT, Mcp-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID, A2A-Version",
           "Access-Control-Expose-Headers": "X-PAYMENT-RESPONSE",
         },
       });
@@ -234,6 +236,17 @@ export default {
       if (path === "/skill.md" && method === "GET") {
         const res = await handleSkillMd(request, env);
         if (res.status === 200) await recordDoor(env, ctx, "skill_md");
+        return res;
+      }
+      // The A2A agent cards (src/a2a-cards.ts): a 200 GET of either is one agent_card count. The v1.0 card and a separate v0.3 card, one endpoint (POST /a2a).
+      if (path === "/.well-known/agent-card.json" && method === "GET") {
+        const res = await handleAgentCard(request, env, "1.0");
+        if (res.status === 200) await recordDoor(env, ctx, "agent_card");
+        return res;
+      }
+      if (path === "/.well-known/agent.json" && method === "GET") {
+        const res = await handleAgentCard(request, env, "0.3");
+        if (res.status === 200) await recordDoor(env, ctx, "agent_card");
         return res;
       }
       if (path === "/privacy" && method === "GET") return await handlePrivacy(request, env);
@@ -309,6 +322,8 @@ export default {
       if (path === "/api/patron" && method === "POST") return await handlePatron(request, env);
       // A1 (docs/BRIEF-MCP-LISTING-READY.md): both lines now `await` their handler and wrap
       // the result in withCors, closing DEFERRED-MCP-DISPATCH-AWAIT and adding CORS.
+      // The A2A directions endpoint: every method reaches handleA2a, which refuses all but POST before it reads a body (OPTIONS is answered above).
+      if (path === "/a2a") return await handleA2a(request, env, ctx);
       if (path === "/mcp") return withCors(await handleMcp(request, env, ctx));
       if (path === "/mcp/read") return withCors(await handleMcpRead(request, env, ctx));
 

@@ -52,6 +52,7 @@ import { TOOLS, negotiateProtocolVersion } from "./mcp.ts";
 import { GUEST_RETURN_ADVICE, OPERATORS_POINTER } from "./guest-core.ts";
 import { councilReadTool } from "./council.ts";
 import { recordDoor, toolDoor, type WaitUntil } from "./doors.ts";
+import { mcpUnknownMethod } from "./a2a.ts";
 
 // The exact thirteen tools mcp.ts's own TOOLS array marks "No auth needed" in
 // their description text today. The others (register, post, pin,
@@ -180,6 +181,10 @@ export async function handleMcpRead(request: Request, env: Env, ctx?: WaitUntil)
   if (Array.isArray(msg)) {
     return Response.json(rpcError(null, -32600, "batches not supported"), { status: 400 });
   }
+  // A JSON null or a primitive is not an envelope: refused here, where reading msg.method would have thrown (null) or yielded undefined (a number, string, boolean).
+  if (msg === null || typeof msg !== "object") {
+    return Response.json(rpcError(null, -32600, "invalid request"), { status: 400 });
+  }
 
   // Deliberately NOT reading request.headers.get("Authorization") here --
   // unlike handleMcp (src/mcp.ts), this door has no credentialed code path
@@ -231,7 +236,12 @@ export async function handleMcpRead(request: Request, env: Env, ctx?: WaitUntil)
         throw e;
       }
     }
-    default:
-      return Response.json(rpcError(msg.id, -32601, `method '${msg.method}' not found`));
+    default: {
+      // The A2A probe doors (src/doors.ts): a string method this door does not define counts once, as an A2A send or as any other unknown method. A payload with no string method counts nothing.
+      if (typeof msg.method !== "string") return Response.json(rpcError(msg.id, -32601, `method '${msg.method}' not found`));
+      const unknown = mcpUnknownMethod(msg.method, new URL(request.url).origin);
+      await recordDoor(env, ctx, unknown.door);
+      return Response.json(rpcError(msg.id, -32601, unknown.message));
+    }
   }
 }
