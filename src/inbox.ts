@@ -224,7 +224,7 @@ async function runTablePage<Row extends { id: number }>(
   const page = truncated ? rows.slice(0, INBOX_SECTION_LIMIT) : rows;
   const head = snapshotResult.results?.[0]?.max_id ?? 0;
   if (startId > head) {
-    throw new SocietyError(400, `cursor's ${CURSOR_PART_NAMES[table]} id is ${startId}, above the newest one here (${head}). A cursor is read only as served in a previous response's next_cursor; ${restart}.`);
+    throw new SocietyError(400, `cursor's ${CURSOR_PART_NAMES[table]} id is ${startId}, above the newest one here (${head}). Pass next_cursor exactly as a previous response served it, or ${restart}.`);
   }
   const nextId = truncated ? Number(page[page.length - 1]!.id) : head;
   return { rows: page, truncated, nextId };

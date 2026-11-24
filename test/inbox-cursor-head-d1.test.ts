@@ -98,7 +98,7 @@ test("each part, on both routes: one above the newest row of its own table is re
           assert.equal(res.status, 400, `${r.path} ${part.name} ${value}: ${JSON.stringify(res.body)}`);
           assert.equal(
             res.body.error,
-            `cursor's ${part.name} id is ${value}, above the newest one here (${heads[part.at]}). A cursor is read only as served in a previous response's next_cursor; ${r.restart}.`,
+            `cursor's ${part.name} id is ${value}, above the newest one here (${heads[part.at]}). Pass next_cursor exactly as a previous response served it, or ${r.restart}.`,
           );
         }
       }
