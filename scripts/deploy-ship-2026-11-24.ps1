@@ -30,7 +30,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-ship-2026-11-24.ps1 -ExpectedCommit <sha> -DryRun   # every check and the live reads, nothing deployed
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy-ship-2026-11-24.ps1 -ExpectedCommit <sha>           # the real thing
 # <sha> is the pushed tip of main (git -C society rev-parse HEAD), the full 40 hex.
-# NOT CHECKED HERE: inbox gate condition C1 (Ben confirms D1 read replication is off for the database in the dashboard; if on, do not deploy). A script cannot read that setting.
+# INBOX GATE C1 (no read may come from a replica behind the one that served a cursor) is met by source: without the Sessions API D1 answers from the primary, and step 0 STOPS if any file under src/ calls withSession.
 # THE UTC DAY. Nothing in this ride compares one UTC day's counts, so the 23:30 refusal the template carried is removed.
 # The ROLLBACK TARGET is the version id GET /api/attest served BEFORE the deploy (read live, never typed in). The ship is rollback-safe: no schema change.
 # THE RIDE holds no token, key or assertion and prints none: public GETs, two credential-free `official` tools/call POSTs (the body is sent from a temp file, curl.exe --data-binary "@file"), and the refused POSTs to /api/rotate and /api/wallet.
@@ -590,6 +590,10 @@ if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain $($LIVE_BASE_COMMIT.
 $moves = @(git diff --name-status --no-renames $LIVE_BASE_COMMIT HEAD -- src/doc.ts migrations schema.sql)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git diff failed (exit $LASTEXITCODE): the no-mint and no-migration check cannot be read." }
 if ($moves.Count -gt 0) { Stop-Here ("src/doc.ts, migrations/ or schema.sql changed since " + $LIVE_BASE_COMMIT.Substring(0, 8) + " (" + ($moves -join " | ") + "): this ship mints nothing and has no migration. Not this script's deploy.") }
+# BEGIN-SESSION-CHECK
+$sessionUses = @(Get-ChildItem -Path "src" -Recurse -Filter "*.ts" | Select-String -Pattern "withSession(" -SimpleMatch)
+if ($sessionUses.Count -gt 0) { Stop-Here ("src/ calls withSession (" + $sessionUses.Count + " place(s), first " + $sessionUses[0].Filename + "): an inbox read could come from a replica behind the one that served a cursor (inbox gate C1).") }
+# END-SESSION-CHECK
 # BEGIN-REVIEWED-SOURCE-CHECK
 git merge-base --is-ancestor $REVIEWED_COMMIT HEAD
 if ($LASTEXITCODE -ne 0) { Stop-Here "HEAD does not contain the reviewed commit $($REVIEWED_COMMIT.Substring(0, 8)): this is not the code that was reviewed." }
@@ -658,7 +662,7 @@ if ($visitorNumber -ceq "") { Stop-Here "before the deploy, no visitor number co
 Say "[live] before: the guest ride will use visitor number $visitorNumber, read from GET /api/guest/due"
 
 if ($DryRun) {
-  Say "[dry-run] every pin, git, source, test and live check passed. Every live read was a GET: /api/attest, /treasury, the two /api/events kinds, /api/treasury, /api/official, /api/inbox (the heads and one cursor above the head) and /api/guest/due. It sent NO POST, no JSON-RPC body, no wrangler command at all (this script runs no D1 command of its own) and wrote nothing. would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id; then ride (each check retried up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row): the rotate and wallet 401 refusals, payments_out on the five surfaces against the two books, the inbox cursor ride, /openapi.json and /api/surface, the two agent cards and the public reads. Gate condition C1 of the inbox review (D1 read replication OFF for the database, in the dashboard) is Ben's and this script cannot read it. Nothing was deployed."
+  Say "[dry-run] every pin, git, source, test and live check passed. Every live read was a GET: /api/attest, /treasury, the two /api/events kinds, /api/treasury, /api/official, /api/inbox (the heads and one cursor above the head) and /api/guest/due. It sent NO POST, no JSON-RPC body, no wrangler command at all (this script runs no D1 command of its own) and wrote nothing. would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id; then ride (each check retried up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row): the rotate and wallet 401 refusals, payments_out on the five surfaces against the two books, the inbox cursor ride, /openapi.json and /api/surface, the two agent cards and the public reads. Nothing was deployed."
   exit 0
 }
 
@@ -671,7 +675,6 @@ if ($LASTEXITCODE -ne 0 -or $headNow -cne $headSha) { Stop-Here ("HEAD moved sin
 $dirtyNow = @(git status --porcelain)
 if ($LASTEXITCODE -ne 0) { Stop-Here "git status failed (exit $LASTEXITCODE) just before the deploy: nothing was deployed." }
 if ($dirtyNow.Count -gt 0) { Stop-Here ("the working tree changed since step 0 (" + $dirtyNow.Count + " paths: " + ($dirtyNow -join " | ") + "): nothing was deployed.") }
-Say "[reminder] inbox gate C1: D1 read replication must be OFF for the database (dashboard). This script cannot check it; stop now with Ctrl+C if it is on."
 Say "[deploy] npx wrangler deploy --var CODE_COMMIT:$($headSha.Substring(0, 8))... (commit $($headSha.Substring(0, 8)))"
 $ErrorActionPreference = "Continue"
 $deployOut = (npx wrangler deploy --var "CODE_COMMIT:$headSha" 2>&1 | Out-String)
@@ -729,7 +732,7 @@ Say ("[ride] " + $sweepPaths.Count + " public reads -> 200 ($GOOD_READS_NEEDED s
 $mcpPostsMin = 2 * $GOOD_READS_NEEDED
 $cardGetsMin = $CARD_PATHS.Count * $GOOD_READS_NEEDED
 Say ("[note] WHAT THIS RIDE PROVED: the stamped commit is serving; payments_out is one identical object on the five surfaces and agrees with GET /payouts and GET /api/listings/payments (the row counts and the operator-wallet recompute only where a page is under its " + $BOOK_PAGE_CAP + "-row cap); code_can_pay is false; the inbox cursor refusal is live on both inbox routes as the inbox gate's ride sets it out; /openapi.json and /api/surface carry the new text; the rotate and wallet routes still refuse a caller with no credential; both agent cards answer. " +
-  "WHAT IT DID NOT PROVE: the refusal of the treasury's own address in POST /api/wallet and POST /api/listing/:id/pay. That needs a citizen's credential, which this ride does not hold; the first real attempt is its ride. Inbox gate C1 (D1 read replication off) is Ben's and was not checked here. " +
+  "WHAT IT DID NOT PROVE: the refusal of the treasury's own address in POST /api/wallet and POST /api/listing/:id/pay. That needs a citizen's credential, which this ride does not hold; the first real attempt is its ride. " +
   "WHAT THIS RIDE ADDED TO THE DOOR FIGURES: the two official tools/call POSTs per good read are POSTs to /mcp and /mcp/read and add to those doors' counts: at least " + $mcpPostsMin + " (" + $GOOD_READS_NEEDED + " good reads, one POST to each door), more for every retried read. The two agent card GETs per good read add to the agent_card door: at least " + $cardGetsMin + ". The pre-deploy GETs added nothing but the plain-read counts every request attempts, and the sweep reads /skill.md, /heartbeat.md and /operators, which are counted doors. " +
   "The rotate and wallet refusals wrote nothing (authenticate() throws before any write). This script ran no wrangler command but the deploy and ran no D1 command of its own (the routes it called read D1 as they always do).")
 Say "[done] treasury disclosure, inbox cursor refusal and treasury-address refusal deployed and ridden over HTTP (the refusal itself not ridden). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."

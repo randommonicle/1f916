@@ -3,14 +3,13 @@
 // a single deploy, step 0a stops on the placeholder before any git or network command, every Select-String literal is in its file, every constant the ride compares against is pinned to the
 // source that serves it, L-167 is proven by running the real poll and retry, and every new PowerShell function is RUN FOR REAL against a local HTTP server that wraps the REAL worker handlers
 // (src/index.ts over a real local D1; the harness rewrites the script's $BASE to 127.0.0.1, and the test asserts it did), then against altered answers, one per judged item.
-// SHIP_SCRIPT_PATH overrides the script under test so a mutated copy can be run against this file (the mutation runner); it is never set in a normal run.
 // Derived from test/deploy-agent-card-script.test.ts.
 //
 // Run: npm test
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -26,7 +25,7 @@ import { PAYMENTS_OUT_NOTE } from "../src/treasury-out.ts";
 import { walletLogEntry } from "../src/wallets.ts";
 
 const here = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
-const SCRIPT_PATH = process.env.SHIP_SCRIPT_PATH ?? here("../scripts/deploy-ship-2026-11-24.ps1");
+const SCRIPT_PATH = here("../scripts/deploy-ship-2026-11-24.ps1");
 const rawScript = readFileSync(SCRIPT_PATH, "utf8");
 const script = rawScript.replace(/\r\n/g, "\n");
 const code = script.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
@@ -186,6 +185,113 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   const ok = runPs(harness(LIVE, FULL))!;
   assert.equal(ok.code, 0);
   assert.match(ok.out, /\[PASSED-PINS\]/);
+});
+
+test("inbox gate C1, run for real: the session check passes this tree (whose comment names withSession) and STOPS on a call anywhere under src/", (t) => {
+  const block = script.slice(script.indexOf("# BEGIN-SESSION-CHECK"), script.indexOf("# END-SESSION-CHECK"));
+  const runIn = (dir: string) => runPs(["$ErrorActionPreference = 'Stop'", 'function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }', `Set-Location "${dir}"`, block, 'Write-Host "[CLEAR]"']);
+  const own = runIn(here(".."));
+  if (!own) return t.skip("no PowerShell available");
+  assert.match(own.out, /\[CLEAR\]/, own.out);
+  const dir = mkdtempSync(join(tmpdir(), "ship-session-"));
+  try {
+    mkdirSync(join(dir, "src", "deep"), { recursive: true });
+    writeFileSync(join(dir, "src", "a.ts"), "// withSession (a comment)\n");
+    assert.match(runIn(dir)!.out, /\[CLEAR\]/);
+    writeFileSync(join(dir, "src", "deep", "b.ts"), 'const s = env.DB.withSession("first-primary");\n');
+    const stopped = runIn(dir)!;
+    assert.equal(stopped.code, 1);
+    assert.match(stopped.out, /\[STOP\] src\/ calls withSession \(1 place\(s\), first b\.ts\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A stop whose condition is weakened or removed still parses and still says its message, so the conditions themselves are pinned, in order.
+test("every stop in the body fires on exactly its reviewed condition", () => {
+  const body = code.slice(code.indexOf("if ($LIVE_BASE_COMMIT -ceq $LIVE_BASE_PLACEHOLDER)"));
+  const one = [...body.matchAll(/^ *if \((.*)\) \{ Stop-Here /gm)].map((m) => m[1]);
+  const block = [...body.matchAll(/^if \((.*)\) \{\n  Stop-Here /gm)].map((m) => m[1]);
+  assert.deepEqual(one, [
+    "$LIVE_BASE_COMMIT -ceq $LIVE_BASE_PLACEHOLDER",
+    "$LIVE_BASE_COMMIT -cnotmatch '^[0-9a-f]{40}$'",
+    "$REVIEWED_COMMIT -ceq $REVIEWED_COMMIT_PLACEHOLDER",
+    "$REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$'",
+    "$LASTEXITCODE -ne 0",
+    "$branch -cne \"main\"",
+    "$expectedCode -ne 0 -or -not $expectedSha",
+    "$headSha -cnotmatch '^[0-9a-f]{40}$'",
+    "$LASTEXITCODE -ne 0",
+    "$dirty.Count -gt 0",
+    "$LASTEXITCODE -ne 0",
+    "$LASTEXITCODE -ne 0",
+    "$moves.Count -gt 0",
+    "$sessionUses.Count -gt 0",
+    "$LASTEXITCODE -ne 0",
+    "$LASTEXITCODE -ne 0",
+    "$unreviewed.Count -gt 0",
+    "-not (Select-String -Path \"src/treasury-out.ts\" -Pattern \"export async function paymentsOut(\" -SimpleMatch -Quiet)",
+    "-not (Select-String -Path \"src/society.ts\" -Pattern \"payments_out: await paymentsOut(env.DB, OPERATOR_WALLET)\" -SimpleMatch -Quiet)",
+    "-not (Select-String -Path \"src/inbox.ts\" -Pattern \"function refuseAboveHead(\" -SimpleMatch -Quiet)",
+    "-not (Select-String -Path \"src/wallets.ts\" -Pattern '\"wallet_is_treasury\"' -SimpleMatch -Quiet)",
+    "-not (Select-String -Path \"src/listings.ts\" -Pattern '\"wallet_is_treasury\",' -SimpleMatch -Quiet)",
+    "-not (Select-String -Path \"src/code-identity.ts\" -Pattern \"export function codeBlock\" -Quiet)",
+    "-not (Select-String -Path \"wrangler.jsonc\" -Pattern '\"version_metadata\"' -Quiet)",
+    "Select-String -Path \"wrangler.jsonc\" -Pattern '\"CODE_COMMIT\"' -Quiet",
+    "$failLine.Count -lt 1 -or $passLine.Count -lt 1",
+    "$testCode -ne 0 -or $failN -ne \"0\" -or $passN -eq \"0\"",
+    "$tscCode -ne 0",
+    "$null -eq $attBefore.code -or [string]$attBefore.code.commit_status -cne \"stamped\"",
+    "[string]$attBefore.code.commit -ceq $headSha",
+    "[string]$attBefore.code.commit -cne $LIVE_BASE_COMMIT",
+    "[string]$treasuryBefore.Code -cne \"200\"",
+    "$treasuryAddress -ceq \"\"",
+    "$walletRead.Why -ne \"\"",
+    "$walletWhy -ne \"\"",
+    "$absentWhy -ne \"\"",
+    "$defectWhy -ne \"\"",
+    "$visitorNumber -ceq \"\"",
+    "$LASTEXITCODE -ne 0 -or $headNow -cne $headSha",
+    "$LASTEXITCODE -ne 0",
+    "$dirtyNow.Count -gt 0",
+    "$deployCode -ne 0",
+    "$versionMatches.Count -gt 1",
+    "$versionMatches.Count -lt 1",
+    "$whyAttest -ne \"\"",
+    "$whyRotate -ne \"\"",
+    "$whyWallet -ne \"\"",
+    "$whyPay -ne \"\"",
+    "$whyCursor -ne \"\"",
+    "$whyDocs -ne \"\"",
+    "$whyCards -ne \"\"",
+    "$whySweep -ne \"\"",
+  ]);
+  assert.deepEqual(block, [
+    "$mainSha -cne $originSha -or $mainSha -cne $expectedSha -or $headSha -cne $expectedSha",
+  ]);
+  assert.equal(body.split("Stop-Here").length - 1, one.length + block.length + 0, "no other stop, and none without a condition");
+});
+
+test("Get-Text, run for real: an answer cut off after its 200 headers is a failed read (000), never a 200, and a whole one is a 200", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  const server = createServer((req, res) => {
+    if (req.url === "/cut") {
+      res.writeHead(200, { "content-type": "application/json", "content-length": "100" });
+      res.write('{"a":1');
+      setTimeout(() => res.destroy(), 50);
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end('{"a":1}');
+  });
+  await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+  try {
+    const port = (server.address() as { port: number }).port;
+    const r = await runPsAsync([defs, `$cut = Get-Text "http://127.0.0.1:${port}/cut" 20`, `$whole = Get-Text "http://127.0.0.1:${port}/whole" 20`, 'Write-Host ("CUT [" + $cut.Code + "] WHOLE [" + $whole.Code + "]")']);
+    assert.match(r!.out, /^CUT \[000\] WHOLE \[200\]\r?$/m, r!.out);
+  } finally {
+    server.close();
+  }
 });
 
 test("the steps are in the load-bearing order, there is no migration, no D1 command and no clock refusal, the deploy is the only wrangler command, the only POSTs are two bodiless refusal POSTs per route and the official tools/call body", () => {
@@ -665,7 +771,7 @@ test("Get-DisallowedPaths and Get-TreasuryAddress, run for real: the allowlist i
 test("the dry run's text is accurate: it names only GETs, says it sends no POST and no wrangler command, and the closing note's door numbers are the reads the ride makes", () => {
   const dry = script.slice(script.indexOf('Say "[dry-run]'), script.indexOf("exit 0", script.indexOf('Say "[dry-run]')));
   assert.ok(dry.includes("Every live read was a GET") && dry.includes("sent NO POST") && dry.includes("no wrangler command at all"));
-  assert.ok(dry.includes("C1") && dry.includes("D1 read replication"), "the dry run reminds Ben of the inbox gate's C1, which a script cannot read");
+  assert.ok(!/replication/.test(dry), "inbox gate C1 is checked in step 0, not handed to a reminder");
   const beforeStep2 = code.slice(code.indexOf("$attBefore = Read-Attest"), code.indexOf("if ($DryRun)"));
   assert.equal(/Get-PostAnswer|Get-JsonPost|-X POST/.test(beforeStep2), false, "no POST before the dry-run exit");
   assert.ok(script.includes("The pre-deploy GETs added nothing"), "the closing note says what the dry run did to the door figures");
