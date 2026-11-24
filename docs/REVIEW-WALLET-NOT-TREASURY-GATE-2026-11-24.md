@@ -4,8 +4,8 @@ Head `70202a1e`, live base `097a4a89`. Verdict: **DEPLOYABLE WITH CONDITIONS**. 
 
 **For Ben:** you ruled the declaration refusal; the pay-route refusal is the hub's addition.
 
-1. **Paths.** `declareWallet` alone writes `wallets`; `handlePayListing` alone sets `payTo`. Direct edit: lowercase meets `wallet_is_treasury`, mixed-case or padded `wallet_row_address` (probed). Moved to the treasury during `/verify`: pays the address checked. Not closed: the treasury as payer (needs its key), an address forwarding there, a claim already made (booked or re-POSTed, rightly). L1: `recordPayout` and `createSubmission` still accept such a row (probed).
-2. **Order.** Before intent and "unchanged"; before pin check, 402, claim, reservation, facilitator. Nothing after settlement calls it: a settled claim booked after the treasury became the payee (probed).
+1. **Paths.** `declareWallet` alone writes `wallets`; `handlePayListing` alone passes a `payTo`. Register, patron and listing create pay the treasury by design, unchanged. Direct edit: lowercase meets `wallet_is_treasury`, mixed-case or padded `wallet_row_address` (probed). Moved to the treasury during `/verify`: pays the address checked. Not closed: the treasury as payer (needs its key), an address forwarding there, a claim already made (booked or re-POSTed, rightly). L1: `recordPayout` and `createSubmission` still accept such a row (probed).
+2. **Order.** Before intent and "unchanged"; before pin check, 402, claim, reservation, facilitator. Nothing after settlement calls it (re-sends: 8): a settled claim booked after the treasury became the payee (probed).
 3. **False refusals.** None: exact equality; absent, blank, padded and cased configuration tested.
 4. **Sentences.** True of these paths. L2: `listings.ts:1456` "never party" turns false if `TREASURY_ADDRESS` ever becomes a past payee's.
 5. **Shape.** `error`, `code`, no `answered_by`, exactly as `wallet_row_superseded` (probed with a payment header). No other answer moves.
@@ -17,6 +17,6 @@ L5: `POST /api/wallet` says "Nothing was written"; a key citizen's nonce is spen
 
 **Live (GET):** two wallet rows, no changes, neither the treasury; 0 open or unresolved listings, attention 0.
 
-**Seats** (read afterwards): both converged; neither raised L2, L4 or the L3 order gap.
+**Seats** (read afterwards): both converged; L4 and the L3 order gap are mine.
 
 **Conditions.** C1: tell Ben. C2: repeat the live reads immediately before deploy. C3: ride 7. C4: this record moves the branch head; pin accordingly.
