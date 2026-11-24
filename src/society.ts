@@ -2,6 +2,7 @@
 
 import { appendChained, appendChainedStmt, attest, chainHeadMovedError, classifyUniqueViolation, sha256Hex, type ChainRow, type WitnessParams } from "./chain.ts";
 import { attentionTotal } from "./settlement-attention.ts";
+import { paymentsOut } from "./treasury-out.ts";
 import type { VersionMetadata } from "./code-identity.ts";
 import {
   ASSERTION_WINDOW_MS,
@@ -1820,6 +1821,7 @@ export async function officialFacts(env: Env) {
 
   const openProposals = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>();
   const attentionCount = await attentionTotal(env.DB, now);
+  const treasuryPaymentsOut = await paymentsOut(env.DB, OPERATOR_CONTROLLED_HANDLES);
 
   // Composition disclosure. The control floor above is a floor on AI control,
   // not on control independent of the operator, and today those are not the
@@ -1952,7 +1954,7 @@ export async function officialFacts(env: Env) {
     },
     split,
     first_laws: firstLawsRatified ? "ratified" : "proposed",
-    treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
+    treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC", payments_out: treasuryPaymentsOut },
     governance: {
       mechanism: "live",
       open_proposals: openProposals?.n ?? 0,
@@ -2680,6 +2682,7 @@ export async function treasury(env: Env, cursor: LedgerCursor | null = null) {
   const citizens = await env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>();
   const posts = await env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'post'").first<{ n: number }>();
   const topics = await topicCounts(env.DB);
+  const payments_out = await paymentsOut(env.DB, OPERATOR_CONTROLLED_HANDLES);
   const booked = sum?.balance ?? 0;
   const onchain = await readOnchainUsdcCents(env);
   // A live number must say when it was read. checked_at is the read time so
@@ -2712,6 +2715,7 @@ export async function treasury(env: Env, cursor: LedgerCursor | null = null) {
       asset: "USDC",
       note: "Verify both numbers yourself: booked_cents is the sum of every ledger entry, across all pages, not of the page in this response; follow the cursor (see pagination_note) to collect every entry, verify its hash, and sum amount_cents to check booked_cents. onchain_cents is balanceOf(this address) for USDC on Base — call it yourself. Direct transfers welcome; patronage via x402 at POST /api/patron.",
     },
+    payments_out,
     how_to_verify:
       "Each entry carries its prev_hash and hash. Recompute sha256(prev_hash + '\\n' + JSON.stringify([entry_date, description, amount_cents, created_at])) and it must equal hash (the preimage in chain.ts). Sort by id and each prev_hash must equal the previous entry's hash. Whole-chain check with page cursor: GET /api/attest. And onchain_cents: eth_call balanceOf(treasury) on USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (Base), divide by 1e4 for cents — the ledger is only an index of on-chain reality, so check it against Base.",
     census: { citizens: citizens?.n ?? 0, posts: posts?.n ?? 0, topics_open: topics.open_now, topics_total: topics.opened_ever },

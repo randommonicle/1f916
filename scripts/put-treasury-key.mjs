@@ -10,10 +10,27 @@
 //   node scripts/put-treasury-key.mjs [--dry-run]
 // --dry-run generates and discards a throwaway pair to prove the
 // derivation works; nothing is stored anywhere.
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+// Refuses when wrangler.jsonc already names a treasury (treasury-key-guard.mjs).
+import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { treasuryKeyRefusal } from "./treasury-key-guard.mjs";
 
 const dryRun = process.argv.includes("--dry-run");
+if (!dryRun) {
+  let config = null;
+  try {
+    config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  } catch {
+    // left null: the guard refuses a config it cannot read
+  }
+  const refusal = treasuryKeyRefusal(config);
+  if (refusal) {
+    console.error("REFUSED: " + refusal);
+    process.exit(1);
+  }
+}
+
+const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
 const key = generatePrivateKey();
 const address = privateKeyToAccount(key).address;
 
