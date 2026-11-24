@@ -164,7 +164,7 @@ test("the steps are in the load-bearing order, there is no migration, no D1 comm
   assert.equal((code.match(/--data-binary/g) ?? []).length, 2, "exactly two request bodies: Get-InitInstructions and Get-JsonPost");
   assert.ok(code.includes('--data-binary "@$req"'), "the initialize body is sent from a temp file");
   assert.ok(code.includes('$curlArgs += ("@" + $req)'), "every JSON-RPC body is sent from a temp file, never as a quoted argument");
-  assert.equal((code.match(/\bGet-JsonPost\b/g) ?? []).length, 1 + 2 + 5 + 1, "one definition, two calls in Send-CountedPost, five refused /a2a bodies in Test-A2aUncounted, one null body in Test-McpUncounted");
+  assert.equal((code.match(/\bGet-JsonPost\b/g) ?? []).length, 1 + 5 + 1 + 3 + 2 + 1, "one definition, five refused /a2a bodies in Test-A2aUncounted, one null body in Test-McpUncounted, three counted sends in Send-A2aCounted, two in Send-McpCounted, one in Resend-McpUnknown");
   // The only credential-shaped string is the bearer that is no citizen's secret, sent once per refusal check (Test-RotateRefusals, Test-WalletRefusals).
   assert.equal((code.match(/Bearer/g) ?? []).length, 2, "one Bearer in each refusal check");
   assert.equal((code.match(/\("Bearer " \+ \$NOT_A_SECRET\)/g) ?? []).length, 2, "the bearer is $NOT_A_SECRET, both times");
@@ -614,19 +614,22 @@ test("the script's probe doors and bodies are the source's own: PROBE_DOORS, the
   assert.ok(PROBE_DOOR_DAILY_CAP === 200);
 });
 
-test("static: the counted requests are never sent from inside a Confirm-Reads block (a retry would add to the count), and the counted functions are called once each, in one place", () => {
+test("static: every counted request goes through Invoke-Counted (retried until its judge passes, up to $RIDE_TRIES, no status-code special case), never from inside a Confirm-Reads block, and the old send-once wording is gone", () => {
   const ride2 = code.slice(code.indexOf("function Invoke-WaveRide("));
   for (const m of ride2.matchAll(/Confirm-Reads \{([\s\S]*?)\} \$?[A-Za-z0-9_]+ /g)) {
-    assert.equal(/Send-|Get-JsonPost|Send-CountedPost|Get-CardAnswer/.test(m[1]), false, `a Confirm-Reads block sends no counted request: ${m[1].slice(0, 60)}`);
+    assert.equal(/Send-|Resend-|Get-JsonPost|Invoke-Counted/.test(m[1]), false, `a Confirm-Reads block sends no counted request: ${m[1].slice(0, 60)}`);
   }
-  for (const fn of ["Send-Cards", "Send-A2aCounted", "Send-McpCounted"]) assert.equal((code.match(new RegExp(`\\b${fn}\\b`, "g")) ?? []).length, 2, `${fn}: one definition and one call`);
-  const countedPosts = code.slice(code.indexOf("function Send-A2aCounted("), code.indexOf("function Test-A2aUncounted"));
-  assert.equal(/Get-JsonPost/.test(countedPosts.replace(/Send-CountedPost/g, "")), false, "the counted functions post only through Send-CountedPost");
-  const sendFn = code.slice(code.indexOf("function Send-CountedPost("), code.indexOf("function Test-RpcError("));
-  assert.ok(sendFn.includes('[string]$ans.Code -ceq "404"'), "only a 404 is sent again");
-  assert.equal(/Confirm-Reads/.test(sendFn), false);
+  for (const fn of ["Send-Cards", "Send-A2aCounted", "Send-McpCounted", "Resend-McpUnknown"]) assert.equal((code.match(new RegExp(`\\b${fn}\\b`, "g")) ?? []).length, 2, `${fn}: one definition and one call`);
+  const countedFns = code.slice(code.indexOf("function Send-Cards("), code.indexOf("function Test-A2aUncounted"));
+  assert.equal((countedFns.match(/Invoke-Counted "/g) ?? []).length, 1 + 3 + 2 + 1, "one call site for the cards, three for a2a, two for mcp, one for the resend");
+  assert.deepEqual(countedFns.split("\n").filter((l) => l.includes("Get-JsonPost") && !l.includes("Invoke-Counted")), [], "no counted function posts outside Invoke-Counted");
+  const fn = code.slice(code.indexOf("function Invoke-Counted("), code.indexOf("function Test-RpcError("));
+  assert.ok(fn.includes("$n -le $RIDE_TRIES") && fn.includes("& $judge $ans") && fn.includes("Start-Sleep -Seconds $RIDE_DELAY_SECONDS"), "bounded by $RIDE_TRIES, judged, with the delay");
+  assert.equal(/-ceq "404"|\.Code -c?(eq|ne)|\.Exit/.test(fn), false, "no status-code or exit-code special case in the retry: the judge decides");
+  assert.equal(/Confirm-Reads/.test(fn), false);
+  assert.equal(/never repeated|none was repeated|never retried through Confirm-Reads|sent ONCE|each sent once|each once/i.test(script), false, "the send-once wording is gone everywhere");
+  assert.ok(script.includes("ATTEMPTS") && script.includes("PROVED"));
 });
-
 // A local HTTP server that wraps the REAL worker (src/index.ts over a real local D1). intercept() may answer instead of the worker (a stale edge); after() may alter the worker's answer (a broken wave).
 interface Seen {
   method: string;
@@ -688,6 +691,10 @@ async function withWave<T>(fx: Fixture, run: (port: number, d1: ReturnType<typeo
         ans = { status: r.status, headers: out, body: await r.text() };
         ans = fx.after?.(seen, ans, n) ?? ans;
       }
+      if (ans.status === 0) {
+        req.socket.destroy(); // a connection closed with no answer: curl exits non-zero
+        return;
+      }
       res.writeHead(ans.status, ans.headers);
       res.end(ans.status === 204 ? undefined : ans.body);
     });
@@ -713,7 +720,7 @@ const rideHarness = (port: number, tries: number, tail: string[]): string[] => [
 const rideTail = (times = 1): string[] => [
   "$docs = Get-DocsHashes",
   'if ($docs.Why -ne "") { Write-Host ("DOCS-FAIL " + $docs.Why); exit 2 }',
-  ...Array.from({ length: times }, () => 'Start-Sleep -Seconds 0; $res = Invoke-WaveRide $docs; Write-Host ("WHY [" + $res.Why + "]"); Write-Host ("SENT " + $res.Sent["agent_card"] + " " + $res.Sent["a2a_send"] + " " + $res.Sent["mcp_a2a_probe"] + " " + $res.Sent["mcp_unknown_method"] + " ROUNDS " + $res.Rounds)'),
+  ...Array.from({ length: times }, () => 'Start-Sleep -Seconds 0; $res = Invoke-WaveRide $docs; Write-Host ("WHY [" + $res.Why + "]"); Write-Host ("SENT ATT " + $res.Attempts["agent_card"] + " " + $res.Attempts["a2a_send"] + " " + $res.Attempts["mcp_a2a_probe"] + " " + $res.Attempts["mcp_unknown_method"] + " PROV " + $res.Proved["agent_card"] + " " + $res.Proved["a2a_send"] + " " + $res.Proved["mcp_a2a_probe"] + " " + $res.Proved["mcp_unknown_method"] + " ROUNDS " + $res.Rounds)'),
 ];
 interface RideOut {
   whys: string[];
@@ -741,12 +748,12 @@ test("THE RIDE against the real handlers passes, sends exactly 2 / 3 / 2 / 2 cou
   // Mutations that redden this: make Test-A2aUncounted send a counted body (the totals exceed 9); send the notification with an id (a2a_send 2, the notification check reds); drop `$sent["a2a_send"]` increments (SENT reads 0).
   const r = await ride3({}, { times: 2 });
   assert.deepEqual(r.whys, ["", ""], r.out);
-  assert.deepEqual(r.sents, ["2 3 2 2 ROUNDS 1", "2 3 2 2 ROUNDS 1"], "each ride sent 2 card GETs, 3 accepted /a2a sends, 2 message/send to the MCP doors and 2 unknown methods");
+  assert.deepEqual(r.sents, ["ATT 2 3 2 2 PROV 2 3 2 2 ROUNDS 1", "ATT 2 3 2 2 PROV 2 3 2 2 ROUNDS 1"], "each ride sent 2 card GETs, 3 accepted /a2a sends, 2 message/send to the MCP doors and 2 unknown methods");
   assert.equal(r.counts.agent_card, 4, "agent_card: 2 per ride, nothing else");
   assert.equal(r.counts.a2a_send, 6, "a2a_send: 3 per ride; SendMessage without a header, 9.9, undefined, malformed and contextId added nothing");
   assert.equal(r.counts.mcp_a2a_probe, 4);
   assert.equal(r.counts.mcp_unknown_method, 4, "and the JSON null bodies added nothing");
-  assert.match(r.out, /\[ride\] round 1: baseline read for UTC day \d{4}-\d{2}-\d{2}; sending the counted requests ONCE each/);
+  assert.match(r.out, /\[ride\] round 1: baseline read for UTC day \d{4}-\d{2}-\d{2}; sending the counted requests, each retried until its answer passes/);
 });
 
 test("the ride passes through a stale edge: the first answers for /a2a and the card paths are 404 (never reached the worker, so never counted), the uncounted checks are retried and the counted requests are re-sent only on a 404, with the counters still exactly 2 / 3 / 2 / 2", async (t) => {
@@ -762,7 +769,9 @@ test("the ride passes through a stale edge: the first answers for /a2a and the c
   };
   const r = await ride3(stale, { tries: 8 });
   assert.deepEqual(r.whys, [""], r.out);
-  assert.deepEqual(r.sents, ["2 3 2 2 ROUNDS 1"]);
+  const att = /^ATT (\d+) (\d+) (\d+) (\d+) PROV 2 3 2 2 ROUNDS 1$/.exec(r.sents[0]);
+  assert.ok(att, r.sents[0]);
+  assert.ok(att.slice(1).reduce((a, b) => a + Number(b), 0) > 9, "the stale answers were extra attempts");
   assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 2, 2]);
 });
 
@@ -893,13 +902,13 @@ const failing: Array<{ name: string; fx: Fixture; why: RegExp; mutation: string 
         },
       };
     })(),
-    why: /the door agent_card reads 5, expected at least 7 \(baseline 5 \+ 2 sent\) or at_cap true/,
+    why: /the door agent_card reads 5, expected at least 7 \(baseline 5 \+ 2 proved\) or at_cap true/,
     mutation: "change `$row.N -lt $want` to `$row.N -lt 0` in Test-DoorRise",
   },
   {
     name: "a door row ABSENT after the sends (something was sent to it)",
     fx: { after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows = j.rows.filter((r: { door: string }) => r.door !== "mcp_a2a_probe"))) : undefined) },
-    why: /the door mcp_a2a_probe has no row for the day, although the ride sent 2 request\(s\) to it/,
+    why: /the door mcp_a2a_probe has no row for the day, although the ride proved 2 request\(s\) to it/,
     mutation: "delete the `-not $row.Present` check in Test-DoorRise",
   },
 ];
@@ -942,7 +951,7 @@ test("the UTC day changes between the baseline and the end of the sends: the rid
   };
   const changed = await ride3(dated([yesterday, today, today, today]));
   assert.deepEqual(changed.whys, [""], changed.out);
-  assert.deepEqual(changed.sents, ["4 6 4 4 ROUNDS 2"], "the batch ran twice and the total says so");
+  assert.deepEqual(changed.sents, ["ATT 4 6 4 4 PROV 4 6 4 4 ROUNDS 2"], "the batch ran twice and the total says so");
   assert.match(changed.out, /the UTC day changed between the baseline \(\d{4}-\d{2}-\d{2}\) and the end of the sends \(\d{4}-\d{2}-\d{2}\): the counts are split across two days and are not judged\. Taking a NEW baseline/);
   assert.deepEqual([changed.counts.agent_card, changed.counts.a2a_send], [4, 6], "the real counters took both rounds");
   const twice = await ride3(dated([yesterday, today, today, tomorrow]));
@@ -973,9 +982,9 @@ test("the door judge and the day parser, run for real on canned rows: an absent 
   const r = runPs(lines)!;
   assert.match(r.out, /OTHERDAY False 0 AGENT 5/, r.out);
   assert.match(r.out, /RISE \[\]/);
-  assert.match(r.out, /SHORT \[the door agent_card reads 6, expected at least 7 \(baseline 5 \+ 2 sent\) or at_cap true\]/);
+  assert.match(r.out, /SHORT \[the door agent_card reads 6, expected at least 7 \(baseline 5 \+ 2 proved\) or at_cap true\]/);
   assert.match(r.out, /CAP \[\]/, "at_cap true passes");
-  assert.match(r.out, /ABSENT \[the door a2a_send has no row for the day, although the ride sent 1 request\(s\) to it\]/);
+  assert.match(r.out, /ABSENT \[the door a2a_send has no row for the day, although the ride proved 1 request\(s\) to it\]/);
   assert.match(r.out, /UNSENT \[\]/);
   assert.match(r.out, /DAY \[2026-11-24\] \[2026-11-25\] \[\] \[\]/, r.out);
 });
@@ -1006,4 +1015,105 @@ test("the counted bodies are valid JSON-RPC and ASCII, each notification has no 
   assert.equal(body("NULL_BODY"), "null");
   assert.equal(JSON.parse(body("CONTEXT_BODY")).params.message.contextId, "x");
   assert.equal(/-d\s|--data\s|--data-raw|--json/.test(code), false, "no inline body argument anywhere");
+});
+
+// ---------- the counted requests are retried until their answers pass (hub review of f7c9eac2) ----------
+
+// The seven counted request kinds, told apart exactly as the script sends them (the uncounted /a2a bodies differ by header or body).
+const countedKind = (s: Seen): string | null => {
+  const b = parseBody(s);
+  if (s.method === "GET" && s.path === "/.well-known/agent-card.json") return "card1";
+  if (s.method === "GET" && s.path === "/.well-known/agent.json") return "card03";
+  if (isA2aPost(s) && s.headers["a2a-version"] === "1.0" && b?.method === "SendMessage") return "a2a-v1";
+  if (isA2aPost(s) && !s.headers["a2a-version"] && b?.method === "message/send" && b?.id === "ride-2") return "a2a-v03";
+  if (isA2aPost(s) && !s.headers["a2a-version"] && b?.method === "message/send" && !("id" in b) && !b?.params?.message?.contextId) return "a2a-notify";
+  if (s.method === "POST" && (s.path === "/mcp" || s.path === "/mcp/read") && b?.method === "message/send") return "mcp-send" + s.path;
+  if (s.method === "POST" && (s.path === "/mcp" || s.path === "/mcp/read") && b?.method === "ride/unknown") return "mcp-unknown" + s.path;
+  return null;
+};
+const BAD_503: Ans = { status: 503, headers: { "content-type": "text/plain" }, body: "unavailable" };
+const BAD_CLOSE: Ans = { status: 0, headers: {}, body: "" };
+const OLD_MCP_TEXT: Ans = jsonAns({ jsonrpc: "2.0", id: 7, error: { code: -32601, message: "method 'message/send' not found" } });
+
+test("each counted request answered wrongly once or twice (a closed connection, a 503, the old -32601 text) and then rightly: the ride passes, ATTEMPTS exceed PROVED, and the real counters hold exactly the proved requests", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  // Mutations that redden this: Invoke-Counted tries once (`$n -le 1`); the proved increment dropped (PROV reads 0); the attempts increment dropped (ATT equals PROV).
+  const plan: Record<string, Ans[]> = {
+    card1: [BAD_CLOSE, BAD_503],
+    card03: [BAD_503, BAD_CLOSE],
+    "a2a-v1": [BAD_503],
+    "a2a-v03": [BAD_CLOSE],
+    "a2a-notify": [BAD_503, BAD_CLOSE],
+    "mcp-send/mcp": [OLD_MCP_TEXT],
+    "mcp-send/mcp/read": [OLD_MCP_TEXT],
+    "mcp-unknown/mcp": [BAD_503],
+    "mcp-unknown/mcp/read": [BAD_CLOSE],
+  };
+  const used = new Map<string, number>();
+  const r = await ride3({
+    intercept: (s) => {
+      const k = countedKind(s);
+      if (!k || !plan[k]) return undefined;
+      const i = used.get(k) ?? 0;
+      used.set(k, i + 1);
+      return plan[k][i];
+    },
+  });
+  assert.deepEqual(r.whys, [""], r.out);
+  // cards 2 + 2 + 1 + 1 extra = 6 attempts for 2 proved; a2a 1 + 1 + 2 + 3 proved ... = (2 + 2 + 3) = 7 for 3; mcp-send (2 + 2) = 4 for 2; mcp-unknown (2 + 2) = 4 for 2.
+  assert.deepEqual(r.sents, ["ATT 6 7 4 4 PROV 2 3 2 2 ROUNDS 1"], r.out);
+  assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 2, 2], "the wrong answers never reached the worker, so only the proved requests are in the counters");
+});
+
+test("a counted request answered wrongly EVERY time fails the ride with that reason after exactly $RIDE_TRIES attempts (the server saw exactly that many), and the later requests are not sent", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  // Mutations that redden this: the loop bound `-le ($RIDE_TRIES + 1)` (five attempts); `-le 1` (one attempt); no failure return (the ride goes on).
+  let seen = 0;
+  const r = await ride3({
+    intercept: (s) => {
+      if (countedKind(s) !== "a2a-v1") return undefined;
+      seen++;
+      return BAD_503;
+    },
+  });
+  assert.equal(r.whys.length, 1, r.out);
+  assert.match(r.whys[0], /POST \/a2a SendMessage with A2A-Version: 1\.0 answered HTTP 503, expected 200/);
+  assert.equal(seen, 4, "the harness sets $RIDE_TRIES to 4: exactly four attempts reached the server");
+  assert.deepEqual(r.sents, ["ATT 2 4 0 0 PROV 2 0 0 0 ROUNDS 1"], "the cards were proved, the failing request was attempted four times, nothing after it was sent");
+});
+
+test("a stale unknown-method answer (the right text from an old worker: proved, but not counted the first time) is sent once more to each MCP door and then passes, with what is wanted unraised", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  // Mutations that redden this: the resend branch off (`if ($false)` on the single-door condition) leaves mcp_unknown_method short; Resend-McpUnknown sending nothing.
+  const used = new Map<string, number>();
+  const OLD_UNKNOWN = jsonAns({ jsonrpc: "2.0", id: 8, error: { code: -32601, message: "method 'ride/unknown' not found" } });
+  const r = await ride3({
+    intercept: (s) => {
+      const k = countedKind(s);
+      if (!k || !k.startsWith("mcp-unknown")) return undefined;
+      const i = used.get(k) ?? 0;
+      used.set(k, i + 1);
+      return i === 0 ? OLD_UNKNOWN : undefined;
+    },
+  });
+  assert.deepEqual(r.whys, [""], r.out);
+  assert.deepEqual(r.sents, ["ATT 2 3 2 4 PROV 2 3 2 2 ROUNDS 1"], "two unknown-method attempts proved, two more resent: ATTEMPTS 4, what is wanted stays 2");
+  assert.equal(r.counts.mcp_unknown_method, 2, "only the resends were counted by the real worker");
+  assert.match(r.out, /only mcp_unknown_method is short/);
+});
+
+test("a door that never rises, even after the resend, fails: the unknown-method answers are stale every time, so mcp_unknown_method stays short and the ride says so (and a different door short alone gets no resend)", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  // Mutations that redden this: after the resend, the second door check replaced by `$why = ""` (the ride passes); the single-door condition loosened to `$true` (the absent-row fixture below is then resent: ATT 2 3 2 4).
+  const OLD_UNKNOWN = jsonAns({ jsonrpc: "2.0", id: 8, error: { code: -32601, message: "method 'ride/unknown' not found" } });
+  const never = await ride3({ intercept: (s) => (countedKind(s)?.startsWith("mcp-unknown") ? OLD_UNKNOWN : undefined) });
+  assert.equal(never.whys.length, 1, never.out);
+  assert.match(never.whys[0], /the door mcp_unknown_method (has no row for the day, although the ride proved 2|reads 0, expected at least 2)/);
+  assert.deepEqual(never.sents, ["ATT 2 3 2 4 PROV 2 3 2 2 ROUNDS 1"], never.out);
+  assert.match(never.out, /only mcp_unknown_method is short/);
+  const other = await ride3({ after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows = j.rows.filter((r2: { door: string }) => r2.door !== "mcp_a2a_probe"))) : undefined) });
+  assert.equal(other.whys.length, 1, other.out);
+  assert.match(other.whys[0], /the door mcp_a2a_probe has no row/);
+  assert.deepEqual(other.sents, ["ATT 2 3 2 2 PROV 2 3 2 2 ROUNDS 1"], "another door short alone is not resent");
+  assert.equal(/only mcp_unknown_method is short/.test(other.out), false);
 });

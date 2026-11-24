@@ -13,12 +13,15 @@
 # refusals for the rest, a 204 with no body to a notification, and, per gate C2, a -32601 naming message/send to a v1.0 SendMessage that carries NO A2A-Version header, which a version-less client is treated as 0.3), /mcp and /mcp/read answer the two A2A
 # send methods with the new text and any other unknown method with today's text and refuse a JSON null body with 400 and -32600, the four probe-door counters in the managed D1 rise by what the ride sent (so the counters ARE exercised, by the ride itself), the three routes
 # are listed in /llms.txt and /api/surface and the two cards (not /a2a) in /openapi.json, and /skill.md and /heartbeat.md are byte-identical to before. It does NOT prove that any real A2A client can use the endpoint: NO REAL A2A CLIENT WAS RUN. The first real client is the first test of that.
-# THE COUNTED REQUESTS. Requests that add to a counter are sent a FIXED number of times, counted in variables ($sent per round, $total across rounds) and used in the door check and in the closing note; they are never retried through Confirm-Reads (a retry would add to the count).
-# By the code: agent_card counts every 200 GET of either card (2 sent: one each); a2a_send counts every ACCEPTED send, a notification included (3 sent: SendMessage with the 1.0 header, message/send with no header, and a message/send notification with no id; the gate's "exactly two" counted only the first two and left the notification
-# send out, which the code counts: src/a2a.ts); mcp_a2a_probe counts an A2A send method received by an MCP door (2 sent: one to /mcp, one to /mcp/read); mcp_unknown_method counts any other string method an MCP door does not define (2 sent: one each). Everything else the ride sends to these routes
-# is refused before the count (a v1.0 SendMessage without the header, A2A-Version 9.9, an undefined method, a malformed body, a contextId, GET /a2a, the JSON null bodies) and is retried freely. Each counted request is sent once; only a 404 (the route not there yet, never counted) is re-sent.
-# THE DOOR CHECK reads GET /api/doors for the baseline and again after the sends, in a bounded loop, until each probe door shows at least baseline + what the ride sent, or at_cap true; a door with no row for the day is never passed when something was sent for it. The UTC day is the one in the Date header
-# of the /api/doors answer (the server's clock, never this machine's). If the UTC day changes between the baseline and the end of the sends, the ride says so, takes a NEW baseline and sends the same fixed batch once more (so the batch can run twice, at most; both are in $total); it never judges across two days.
+# THE COUNTED REQUESTS (L-167). Every request that adds to a probe-door counter is retried UNTIL ITS ANSWER PASSES ITS JUDGE, up to $RIDE_TRIES attempts $RIDE_DELAY_SECONDS apart, and the ride fails only after those tries, with the last reason: one curl failure, one 5xx or one answer from an edge still
+# running the old code is "not yet", never "failed". Re-sending is safe: the door check wants AT LEAST baseline + what was PROVED, the doors cap at 200, and an old worker counts nothing. Two figures are kept per probe door: ATTEMPTS (every request actually sent) and PROVED (answers that passed their judge); the door check wants baseline + PROVED (or at_cap),
+# and the day's figures may hold up to ATTEMPTS. The round line and the closing note report both.
+# By the code, a clean ride PROVES: agent_card 2 (a 200 GET of each card); a2a_send 3 (every ACCEPTED send, a notification included: SendMessage with the 1.0 header, message/send with no header, and a message/send notification with no id; the gate's "exactly two" counted only the first two and left the notification
+# send out, which the code counts: src/a2a.ts); mcp_a2a_probe 2 (an A2A send method received by an MCP door: one to /mcp, one to /mcp/read); mcp_unknown_method 2 (any other string method an MCP door does not define: one each). Everything else the ride sends to these routes
+# is refused before the count (a v1.0 SendMessage without the header, A2A-Version 9.9, an undefined method, a malformed body, a contextId, GET /a2a, the JSON null bodies) and is retried through Confirm-Reads.
+# THE UNKNOWN-METHOD CASE. An ordinary unknown method answers the same text from old and new code, so a stale answer can be PROVED without having been counted. If the door check still fails after its retries ONLY for mcp_unknown_method, that request is sent a second time to each MCP door (ATTEMPTS rise, what is wanted does not) and the door check is run once more; then it judges.
+# THE DOOR CHECK reads GET /api/doors for the baseline and again after the sends, in a bounded loop, until each probe door shows at least baseline + what was PROVED, or at_cap true; a door with no row for the day is never passed when something was proved for it. The UTC day is the one in the Date header
+# of the /api/doors answer (the server's clock, never this machine's). If the UTC day changes between the baseline and the end of the sends, the ride says so, takes a NEW baseline and sends the same batch once more (so the batch can run twice, at most; both are in the totals); it never judges across two days.
 # THESE REQUESTS ARE IN THE DAY'S FIGURES: the probe-door counts, and the fixed doors for /skill.md and /heartbeat.md, include this ride's own requests; see the [note] at the end.
 # L-167: EVERY UNCOUNTED READ AFTER THE DEPLOY IS RETRIED. A single read straight after a write is "not yet seen", never "failed". The poll and every ride check need $GOOD_READS_NEEDED consecutive good reads,
 # within a bounded number of tries, before they judge; no stop message names a rollback until those retries have run out, and even then it says to read the deployments list first.
@@ -387,14 +390,22 @@ function Get-JsonPost($url, $bodyText, $headerLines) {
     Remove-Item $req -ErrorAction SilentlyContinue
   }
 }
-# A POST that ADDS TO A COUNTER: sent once. Only a 404 (the route is not there yet, which no counter ever counts) is sent again, up to $RIDE_TRIES times; any other answer, a curl failure included, is returned as it is, so a request is never repeated into a count.
-function Send-CountedPost($url, $bodyText, $headerLines) {
-  $ans = Get-JsonPost $url $bodyText $headerLines
-  for ($n = 1; $n -lt $RIDE_TRIES -and $ans.Exit -eq 0 -and [string]$ans.Code -ceq "404"; $n++) {
-    Start-Sleep -Seconds $RIDE_DELAY_SECONDS
-    $ans = Get-JsonPost $url $bodyText $headerLines
+# A COUNTED request (it adds to a probe-door counter), retried UNTIL ITS ANSWER PASSES ITS JUDGE (L-167: one curl failure, one 5xx or one answer from an edge still running the old code is "not yet", never "failed"),
+# up to $RIDE_TRIES attempts, $RIDE_DELAY_SECONDS apart. $send runs the request and returns the captured answer; $judge ($ans) returns "" when the answer is the right one, otherwise the reason. The judge decides, never a status code.
+# $attempts is raised for EVERY request actually sent; $proved is raised once, when an answer passes. Returns "" or the LAST reason once the tries are exhausted. Re-sending is safe: the door check wants AT LEAST baseline + $proved (or at_cap), the doors cap at 200, and an old worker counts nothing.
+function Invoke-Counted($door, $attempts, $proved, $send, $judge) {
+  $last = "never sent"
+  for ($n = 1; $n -le $RIDE_TRIES; $n++) {
+    $attempts[$door] = $attempts[$door] + 1
+    $ans = & $send
+    $last = [string](& $judge $ans)
+    if ($last -eq "") {
+      $proved[$door] = $proved[$door] + 1
+      return ""
+    }
+    if ($n -lt $RIDE_TRIES) { Start-Sleep -Seconds $RIDE_DELAY_SECONDS }
   }
-  return $ans
+  return $last
 }
 # "" when the captured answer $ans is HTTP $httpCode carrying a JSON-RPC error with code $errCode whose message contains $needle (ordinal; "" asks for none), otherwise the reason it is not.
 function Test-RpcError($ans, $label, $httpCode, $errCode, $needle) {
@@ -476,60 +487,67 @@ function Wait-ServedName {
   }
   return ""
 }
-# A card GET: only a 200 is counted by the server, so a non-200 (the route not there yet) is read again, up to $RIDE_TRIES times; the first 200 is the one counted request and is judged once.
-function Get-CardAnswer($path) {
-  $r = Get-Text ($BASE + $path) 30
-  for ($n = 1; $n -lt $RIDE_TRIES -and [string]$r.Code -cne "200"; $n++) {
-    Start-Sleep -Seconds $RIDE_DELAY_SECONDS
-    $r = Get-Text ($BASE + $path) 30
-  }
-  return $r
+# "" when the captured GET answer $r is a 200 card for $version carrying the required fields and the society name, otherwise the reason it is not.
+function Test-CardAnswer($r, $version, $name, $path) {
+  if ([string]$r.Code -cne "200") { return ("GET " + $path + " answered " + $r.Code + ", expected 200") }
+  return (Test-CardServed $r $version $name)
 }
-# COUNTED: GET each card once (agent_card). $sent is the round's hashtable of what was sent per probe door; the 200 is added to it when it was answered. Returns "" or the reason.
-function Send-Cards($name, $sent) {
+# "" when $ans is an MCP door's answer to message/send at $path: -32601 naming this host's /a2a and the guest_enter instruction.
+function Test-McpA2aAnswer($ans, $path) {
+  $label = "POST " + $path + " message/send"
+  $why = Test-RpcError $ans $label "200" "-32601" ($BASE + $A2A_PATH)
+  if ($why -ne "") { return $why }
+  return (Test-RpcError $ans $label "200" "-32601" ("POST " + $BASE + "/mcp and call guest_enter"))
+}
+# "" when $ans is an MCP door's answer to an ordinary unknown method at $path: -32601 with exactly today's text.
+function Test-McpUnknownAnswer($ans, $path) {
+  $label = "POST " + $path + " with an ordinary unknown method"
+  $why = Test-RpcError $ans $label "200" "-32601" ""
+  if ($why -ne "") { return $why }
+  $unknownText = [string](Read-JsonBody $ans).error.message
+  if ($unknownText -cne $MCP_UNKNOWN_TEXT) { return ($label + ": the error message is '" + $unknownText + "', expected exactly today's text '" + $MCP_UNKNOWN_TEXT + "'") }
+  return ""
+}
+# COUNTED: GET each card (agent_card), each retried until it passes. Returns "" or the last reason.
+function Send-Cards($name, $attempts, $proved) {
   foreach ($spec in @(@("1.0", $CARD_V1_PATH), @("0.3", $CARD_V03_PATH))) {
-    $r = Get-CardAnswer $spec[1]
-    if ([string]$r.Code -cne "200") { return ("GET " + $spec[1] + " answered " + $r.Code + ", expected 200") }
-    $sent["agent_card"] = $sent["agent_card"] + 1
-    $why = Test-CardServed $r $spec[0] $name
+    $version = $spec[0]
+    $path = $spec[1]
+    $why = Invoke-Counted "agent_card" $attempts $proved { Get-Text ($BASE + $path) 30 } { param($ans) Test-CardAnswer $ans $version $name $path }
     if ($why -ne "") { return $why }
   }
   return ""
 }
-# COUNTED: the three accepted sends to /a2a (a2a_send). Each is added to $sent once its answer proves it was accepted. Returns "" or the reason.
-function Send-A2aCounted($sent) {
+# COUNTED: the three accepted sends to /a2a (a2a_send), each retried until it passes. Returns "" or the last reason.
+function Send-A2aCounted($attempts, $proved) {
   $url = $BASE + $A2A_PATH
-  $ans = Send-CountedPost $url $SEND_V1_BODY $V1_HEADER
-  $why = Test-A2aSuccess $ans "POST /a2a SendMessage with A2A-Version: 1.0" "1.0" "ride-1"
+  $why = Invoke-Counted "a2a_send" $attempts $proved { Get-JsonPost $url $SEND_V1_BODY $V1_HEADER } { param($ans) Test-A2aSuccess $ans "POST /a2a SendMessage with A2A-Version: 1.0" "1.0" "ride-1" }
   if ($why -ne "") { return $why }
-  $sent["a2a_send"] = $sent["a2a_send"] + 1
-  $ans = Send-CountedPost $url $SEND_V03_BODY $NO_HEADER
-  $why = Test-A2aSuccess $ans "POST /a2a message/send with no A2A-Version header" "0.3" "ride-2"
+  $why = Invoke-Counted "a2a_send" $attempts $proved { Get-JsonPost $url $SEND_V03_BODY $NO_HEADER } { param($ans) Test-A2aSuccess $ans "POST /a2a message/send with no A2A-Version header" "0.3" "ride-2" }
   if ($why -ne "") { return $why }
-  $sent["a2a_send"] = $sent["a2a_send"] + 1
-  $ans = Send-CountedPost $url $NOTIFY_V03_BODY $NO_HEADER
-  $why = Test-Notification $ans "POST /a2a message/send notification (no id)"
+  $why = Invoke-Counted "a2a_send" $attempts $proved { Get-JsonPost $url $NOTIFY_V03_BODY $NO_HEADER } { param($ans) Test-Notification $ans "POST /a2a message/send notification (no id)" }
   if ($why -ne "") { return $why }
-  $sent["a2a_send"] = $sent["a2a_send"] + 1
   return ""
 }
-# COUNTED: to each MCP door, one message/send (mcp_a2a_probe, the new text) and one ordinary unknown method (mcp_unknown_method, today's text). Returns "" or the reason.
-function Send-McpCounted($sent) {
+# COUNTED: to each MCP door, one message/send (mcp_a2a_probe, the new text) and one ordinary unknown method (mcp_unknown_method, today's text), each retried until it passes. Returns "" or the last reason.
+function Send-McpCounted($attempts, $proved) {
   foreach ($path in $MCP_DOOR_PATHS) {
     $url = $BASE + $path
-    $label = "POST " + $path + " message/send"
-    $ans = Send-CountedPost $url $MCP_A2A_BODY $NO_HEADER
-    $why = Test-RpcError $ans $label "200" "-32601" ($BASE + $A2A_PATH)
-    if ($why -eq "") { $why = Test-RpcError $ans $label "200" "-32601" ("POST " + $BASE + "/mcp and call guest_enter") }
+    $why = Invoke-Counted "mcp_a2a_probe" $attempts $proved { Get-JsonPost $url $MCP_A2A_BODY $NO_HEADER } { param($ans) Test-McpA2aAnswer $ans $path }
     if ($why -ne "") { return $why }
-    $sent["mcp_a2a_probe"] = $sent["mcp_a2a_probe"] + 1
-    $label = "POST " + $path + " with an ordinary unknown method"
-    $ans = Send-CountedPost $url $MCP_UNKNOWN_BODY $NO_HEADER
-    $why = Test-RpcError $ans $label "200" "-32601" ""
+    $why = Invoke-Counted "mcp_unknown_method" $attempts $proved { Get-JsonPost $url $MCP_UNKNOWN_BODY $NO_HEADER } { param($ans) Test-McpUnknownAnswer $ans $path }
     if ($why -ne "") { return $why }
-    $unknownText = [string](Read-JsonBody $ans).error.message
-    if ($unknownText -cne $MCP_UNKNOWN_TEXT) { return ($label + ": the error message is '" + $unknownText + "', expected exactly today's text '" + $MCP_UNKNOWN_TEXT + "'") }
-    $sent["mcp_unknown_method"] = $sent["mcp_unknown_method"] + 1
+  }
+  return ""
+}
+# The ordinary unknown method answers the same text from old and new code, so a stale answer can pass its judge without having been counted. When the door check still fails ONLY for mcp_unknown_method, this sends that
+# request once more to each MCP door (until it passes again). It raises ATTEMPTS only: what the door check wants (PROVED) is not raised. Returns "" or the last reason.
+function Resend-McpUnknown($attempts) {
+  $unraised = @{ mcp_unknown_method = 0 }
+  foreach ($path in $MCP_DOOR_PATHS) {
+    $url = $BASE + $path
+    $why = Invoke-Counted "mcp_unknown_method" $attempts $unraised { Get-JsonPost $url $MCP_UNKNOWN_BODY $NO_HEADER } { param($ans) Test-McpUnknownAnswer $ans $path }
+    if ($why -ne "") { return $why }
   }
   return ""
 }
@@ -679,66 +697,106 @@ function ConvertTo-DoorCounts($rows, $day) {
   }
   return $out
 }
-# "" when every probe door the round sent to shows at least baseline + what was sent, or is at_cap; a missing row for a door something was sent to is never a pass. Pure: two parsed row sets and the sent counts.
-function Test-DoorRise($baseCounts, $nowCounts, $sent) {
+# Every probe door the round has PROVED a request for that does not show at least baseline + proved, and is not at_cap: @{ Door; Why } each, in door order. Pure: two parsed row sets and the proved counts.
+# A missing row for a door something was proved for is never a pass.
+function Get-DoorShortfalls($baseCounts, $nowCounts, $proved) {
+  $out = @()
   foreach ($door in $PROBE_DOOR_NAMES) {
-    $n = [int]$sent[$door]
+    $n = [int]$proved[$door]
     if ($n -le 0) { continue }
     $row = $nowCounts[$door]
-    if (-not $row.Present) { return ("the door " + $door + " has no row for the day, although the ride sent " + $n + " request(s) to it") }
-    $want = [int]$baseCounts[$door].N + $n
-    if ($row.N -lt $want -and -not $row.AtCap) { return ("the door " + $door + " reads " + $row.N + ", expected at least " + $want + " (baseline " + $baseCounts[$door].N + " + " + $n + " sent) or at_cap true") }
+    if (-not $row.Present) {
+      $out += @{ Door = $door; Why = ("the door " + $door + " has no row for the day, although the ride proved " + $n + " request(s) to it") }
+    } elseif ($row.N -lt ([int]$baseCounts[$door].N + $n) -and -not $row.AtCap) {
+      $out += @{ Door = $door; Why = ("the door " + $door + " reads " + $row.N + ", expected at least " + ([int]$baseCounts[$door].N + $n) + " (baseline " + $baseCounts[$door].N + " + " + $n + " proved) or at_cap true") }
+    }
   }
+  return $out
+}
+# "" when every probe door the round proved a request for shows at least baseline + proved, or is at_cap, otherwise the first reason.
+function Test-DoorRise($baseCounts, $nowCounts, $proved) {
+  $short = @(Get-DoorShortfalls $baseCounts $nowCounts $proved)
+  if ($short.Count -gt 0) { return [string]$short[0].Why }
   return ""
 }
-# THE WAVE RIDE. Returns @{ Why; Sent; Rounds }: Why is "" when everything passed; Sent is the TOTAL per probe door across rounds. Order: the uncounted checks first (each retried), then the counted requests (each sent once),
-# then the door check (retried). If the UTC day changes between the baseline and the end of the sends it says so, takes a new baseline and sends the fixed batch once more (at most one re-baseline).
+function Format-Counts($counts) {
+  return ("agent_card " + $counts["agent_card"] + ", a2a_send " + $counts["a2a_send"] + ", mcp_a2a_probe " + $counts["mcp_a2a_probe"] + ", mcp_unknown_method " + $counts["mcp_unknown_method"])
+}
+# The attempts and the proved counts of every round, added up: @{ Attempts; Proved }.
+function Get-RoundTotals($roundList) {
+  $attempts = @{ agent_card = 0; a2a_send = 0; mcp_a2a_probe = 0; mcp_unknown_method = 0 }
+  $proved = @{ agent_card = 0; a2a_send = 0; mcp_a2a_probe = 0; mcp_unknown_method = 0 }
+  foreach ($one in @($roundList)) {
+    foreach ($door in $PROBE_DOOR_NAMES) {
+      $attempts[$door] = $attempts[$door] + $one.Attempts[$door]
+      $proved[$door] = $proved[$door] + $one.Proved[$door]
+    }
+  }
+  return @{ Attempts = $attempts; Proved = $proved }
+}
+# THE WAVE RIDE. Returns @{ Why; Attempts; Proved; Rounds }: Why is "" when everything passed; Attempts is every counted request actually sent and Proved the answers that passed, per probe door, TOTAL across rounds.
+# Order: the uncounted checks first (each retried), then the counted requests (each retried until its answer passes), then the door check (retried), then, only if the door check failed for mcp_unknown_method alone, one resend of that request
+# to each MCP door and the door check once more. If the UTC day changes between the baseline and the end of the sends it says so, takes a new baseline and sends the batch once more (at most one re-baseline).
 function Invoke-WaveRide($docsBefore) {
-  $total = @{ agent_card = 0; a2a_send = 0; mcp_a2a_probe = 0; mcp_unknown_method = 0 }
+  $roundList = @()
   $why = Confirm-Reads { return (Test-A2aUncounted) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
-  if ($why -ne "") { return @{ Why = $why; Sent = $total; Rounds = 0 } }
+  if ($why -ne "") { return @{ Why = $why; Attempts = (Get-RoundTotals $roundList).Attempts; Proved = (Get-RoundTotals $roundList).Proved; Rounds = 0 } }
   Say "[ride] GET /a2a -> 405; POST /a2a: SendMessage with no A2A-Version header -> -32601 naming message/send (gate C2), A2A-Version 9.9 -> -32009, an undefined method -> -32601, a malformed body -> 400 -32700, a contextId -> -32004 ($GOOD_READS_NEEDED good reads in a row; none of these reaches a counter)"
   $why = Confirm-Reads { return (Test-McpUncounted) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
-  if ($why -ne "") { return @{ Why = $why; Sent = $total; Rounds = 0 } }
+  if ($why -ne "") { return @{ Why = $why; Attempts = (Get-RoundTotals $roundList).Attempts; Proved = (Get-RoundTotals $roundList).Proved; Rounds = 0 } }
   Say "[ride] POST /mcp and POST /mcp/read with a JSON null body -> 400 -32600 ($GOOD_READS_NEEDED good reads in a row)"
   $why = Confirm-Reads { return (Test-DocsUnchanged $docsBefore) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
-  if ($why -ne "") { return @{ Why = $why; Sent = $total; Rounds = 0 } }
+  if ($why -ne "") { return @{ Why = $why; Attempts = (Get-RoundTotals $roundList).Attempts; Proved = (Get-RoundTotals $roundList).Proved; Rounds = 0 } }
   Say "[ride] /skill.md and /heartbeat.md are byte-identical (SHA-256) to before the deploy"
   $why = Confirm-Reads { return (Test-DiscoveryServed) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
-  if ($why -ne "") { return @{ Why = $why; Sent = $total; Rounds = 0 } }
+  if ($why -ne "") { return @{ Why = $why; Attempts = (Get-RoundTotals $roundList).Attempts; Proved = (Get-RoundTotals $roundList).Proved; Rounds = 0 } }
   Say "[ride] /llms.txt names both card paths and POST /a2a; /api/surface lists the three routes; /openapi.json lists the two card GETs and not /a2a"
   $name = Wait-ServedName
-  if ($name -ceq "") { return @{ Why = "GET /api/official served no society name, so the cards' name cannot be compared"; Sent = $total; Rounds = 0 } }
+  if ($name -ceq "") { return @{ Why = "GET /api/official served no society name, so the cards' name cannot be compared"; Attempts = (Get-RoundTotals $roundList).Attempts; Proved = (Get-RoundTotals $roundList).Proved; Rounds = 0 } }
   $why = ""
   $rounds = 0
   for ($round = 1; $round -le 2; $round++) {
     $rounds = $round
-    $sent = @{ agent_card = 0; a2a_send = 0; mcp_a2a_probe = 0; mcp_unknown_method = 0 }
+    $attempts = @{ agent_card = 0; a2a_send = 0; mcp_a2a_probe = 0; mcp_unknown_method = 0 }
+    $proved = @{ agent_card = 0; a2a_send = 0; mcp_a2a_probe = 0; mcp_unknown_method = 0 }
+    $roundList += @{ Attempts = $attempts; Proved = $proved }
     $baseRead = Wait-DoorsRead
     if ($baseRead.Why -ne "") { $why = $baseRead.Why; break }
     $baseCounts = ConvertTo-DoorCounts $baseRead.Rows $baseRead.Day
-    Say ("[ride] round " + $round + ": baseline read for UTC day " + $baseRead.Day + "; sending the counted requests ONCE each: GET of each card, three accepted sends to /a2a, message/send and one unknown method to each MCP door")
-    $why = Send-Cards $name $sent
-    if ($why -eq "") { $why = Send-A2aCounted $sent }
-    if ($why -eq "") { $why = Send-McpCounted $sent }
-    foreach ($door in $PROBE_DOOR_NAMES) { $total[$door] = $total[$door] + $sent[$door] }
+    Say ("[ride] round " + $round + ": baseline read for UTC day " + $baseRead.Day + "; sending the counted requests, each retried until its answer passes (up to " + $RIDE_TRIES + " attempts): GET of each card, three accepted sends to /a2a, message/send and one unknown method to each MCP door")
+    $why = Send-Cards $name $attempts $proved
+    if ($why -eq "") { $why = Send-A2aCounted $attempts $proved }
+    if ($why -eq "") { $why = Send-McpCounted $attempts $proved }
     if ($why -ne "") { break }
-    Say ("[ride] round " + $round + " sent: agent_card " + $sent["agent_card"] + ", a2a_send " + $sent["a2a_send"] + ", mcp_a2a_probe " + $sent["mcp_a2a_probe"] + ", mcp_unknown_method " + $sent["mcp_unknown_method"])
+    Say ("[ride] round " + $round + " ATTEMPTS (every request sent): " + (Format-Counts $attempts) + "; PROVED (answers that passed): " + (Format-Counts $proved))
     $endRead = Wait-DoorsRead
     if ($endRead.Why -ne "") { $why = $endRead.Why; break }
     if ([string]$endRead.Day -cne [string]$baseRead.Day) {
       if ($round -eq 2) { $why = "the UTC day changed again during the second round (" + $baseRead.Day + " -> " + $endRead.Day + "); the door counts cannot be judged across two days"; break }
-      Say ("[ride] the UTC day changed between the baseline (" + $baseRead.Day + ") and the end of the sends (" + $endRead.Day + "): the counts are split across two days and are not judged. Taking a NEW baseline and sending the same fixed batch once more (it now runs twice in total).")
+      Say ("[ride] the UTC day changed between the baseline (" + $baseRead.Day + ") and the end of the sends (" + $endRead.Day + "): the counts are split across two days and are not judged. Taking a NEW baseline and sending the same batch once more (it now runs twice in total).")
       continue
     }
-    $why = Confirm-Reads {
+    $riseCheck = {
       $now = Get-DoorsRead
       if ($now.Why -ne "") { return $now.Why }
-      return (Test-DoorRise $baseCounts (ConvertTo-DoorCounts $now.Rows $baseRead.Day) $sent)
-    } 2 $RIDE_TRIES $RIDE_DELAY_SECONDS
+      return (Test-DoorRise $baseCounts (ConvertTo-DoorCounts $now.Rows $baseRead.Day) $proved)
+    }
+    $why = Confirm-Reads $riseCheck 2 $RIDE_TRIES $RIDE_DELAY_SECONDS
+    if ($why -ne "") {
+      $nowRead = Wait-DoorsRead
+      if ($nowRead.Why -eq "") {
+        $short = @(Get-DoorShortfalls $baseCounts (ConvertTo-DoorCounts $nowRead.Rows $baseRead.Day) $proved)
+        if ($short.Count -eq 1 -and [string]$short[0].Door -ceq "mcp_unknown_method") {
+          Say "[ride] only mcp_unknown_method is short: that request answers the same text from old and new code, so a stale answer can pass without being counted. Sending it once more to each MCP door (attempts rise, what is wanted does not), then the door check once more."
+          $whyResend = Resend-McpUnknown $attempts
+          if ($whyResend -ne "") { $why = $whyResend } else { $why = Confirm-Reads $riseCheck 2 $RIDE_TRIES $RIDE_DELAY_SECONDS }
+        }
+      }
+    }
     break
   }
-  return @{ Why = $why; Sent = $total; Rounds = $rounds }
+  $totals = Get-RoundTotals $roundList
+  return @{ Why = $why; Attempts = $totals.Attempts; Proved = $totals.Proved; Rounds = $rounds }
 }
 # END-OF-DEFINITIONS (nothing above runs git, npm, wrangler or the network)
 
@@ -885,7 +943,7 @@ if ($docsBefore.Why -ne "") { Stop-Here ("before the deploy, " + $docsBefore.Why
 Say "[live] before: /skill.md and /heartbeat.md read; their SHA-256 are kept for the ride (each GET attempts a count on its own door)"
 
 if ($DryRun) {
-  Say "[dry-run] every pin, git, source, test and live check passed. Step 2 itself already sent one GET /operators, two credential-free initialize POSTs (the door counts operators_page, mcp_initialize and mcp_read_initialize rose by those) three refused rotate requests and three refused wallet requests (which write nothing), one GET of /skill.md and one of /heartbeat.md (read for their SHA-256; both are counted doors, so each attempts a count), and three GETs (the two card paths and /a2a) that must answer 404 and are never counted. It sent NONE of the ride's POSTs to /a2a, /mcp or /mcp/read (the only POSTs to /mcp and /mcp/read are the two initialize reads above), no JSON-RPC send, and no wrangler command at all (this script reads no D1). would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id, GET /operators the page and both initialise answers the pointer; then ride the rotate and wallet refusals, the earlier waves, the public reads and the A2A wave (the uncounted checks each retried up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row; then the COUNTED requests, each sent once: GET of each card (2, agent_card), SendMessage with the 1.0 header, message/send with no header and a message/send notification (3, a2a_send), message/send to /mcp and to /mcp/read (2, mcp_a2a_probe), one ordinary unknown method to each (2, mcp_unknown_method); and the door check). Those 9 counted requests would be in the day's door figures. Nothing was deployed."
+  Say "[dry-run] every pin, git, source, test and live check passed. Step 2 itself already sent one GET /operators, two credential-free initialize POSTs (the door counts operators_page, mcp_initialize and mcp_read_initialize rose by those) three refused rotate requests and three refused wallet requests (which write nothing), one GET of /skill.md and one of /heartbeat.md (read for their SHA-256; both are counted doors, so each attempts a count), and three GETs (the two card paths and /a2a) that must answer 404 and are never counted. It sent NONE of the ride's POSTs to /a2a, /mcp or /mcp/read (the only POSTs to /mcp and /mcp/read are the two initialize reads above), no JSON-RPC send, and no wrangler command at all (this script reads no D1). would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id, GET /operators the page and both initialise answers the pointer; then ride the rotate and wallet refusals, the earlier waves, the public reads and the A2A wave (the uncounted checks each retried up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row; then the COUNTED requests, each retried until its answer passes (up to $RIDE_TRIES attempts): GET of each card (2, agent_card), SendMessage with the 1.0 header, message/send with no header and a message/send notification (3, a2a_send), message/send to /mcp and to /mcp/read (2, mcp_a2a_probe), one ordinary unknown method to each (2, mcp_unknown_method); and the door check). A clean ride proves 9 counted requests, and any retry adds to the attempts; all of them would be in the day's door figures. Nothing was deployed."
   exit 0
 }
 
@@ -938,15 +996,13 @@ Say "[ride] /mcp and /mcp/read initialize -> each carries the operators pointer 
 $whyNote = Confirm-Reads { return (Test-NoteServed) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whyNote -ne "") { Stop-Here ("GET /llms.txt was not confirmed to carry the operator-note sentence in " + $RIDE_TRIES + " reads (last: " + $whyNote + "). Read npx wrangler deployments list and re-read it by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say "[ride] GET /llms.txt -> 200 and still carries the operator-note sentence"
-# The A2A wave: the uncounted checks (retried), the counted requests (each sent once) and the door check. See the header and Invoke-WaveRide.
+# The A2A wave: the uncounted checks (retried), the counted requests (each retried until its answer passes) and the door check. See the header and Invoke-WaveRide.
 $rideResult = Invoke-WaveRide $docsBefore
 $whyWave = [string]$rideResult.Why
-if ($whyWave -ne "") { Stop-Here ("the A2A wave ride did not pass: " + $whyWave + ". Its uncounted checks were retried up to " + $RIDE_TRIES + " reads; its counted requests add to counters and were each sent once, so none was repeated (sent so far: agent_card " + $rideResult.Sent["agent_card"] + ", a2a_send " + $rideResult.Sent["a2a_send"] + ", mcp_a2a_probe " + $rideResult.Sent["mcp_a2a_probe"] + ", mcp_unknown_method " + $rideResult.Sent["mcp_unknown_method"] + "). Read npx wrangler deployments list and the failing route by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
-$sentCards = [string]$rideResult.Sent["agent_card"]
-$sentA2a = [string]$rideResult.Sent["a2a_send"]
-$sentMcpA2a = [string]$rideResult.Sent["mcp_a2a_probe"]
-$sentMcpUnknown = [string]$rideResult.Sent["mcp_unknown_method"]
-Say ("[ride] A2A wave: both cards 200 with the required fields and the live society name; POST /a2a accepted SendMessage (1.0 header) and message/send (no header) with the fixed directions and answered the notification 204 with no body; /mcp and /mcp/read answered message/send with the new text and an ordinary unknown method with today's text; the door counts rose by what was sent in " + $rideResult.Rounds + " round(s): agent_card " + $sentCards + ", a2a_send " + $sentA2a + ", mcp_a2a_probe " + $sentMcpA2a + ", mcp_unknown_method " + $sentMcpUnknown)
+$attemptsLine = Format-Counts $rideResult.Attempts
+$provedLine = Format-Counts $rideResult.Proved
+if ($whyWave -ne "") { Stop-Here ("the A2A wave ride did not pass: " + $whyWave + ". Its uncounted checks were retried up to " + $RIDE_TRIES + " reads, and each of its counted requests up to " + $RIDE_TRIES + " attempts, before this stop (ATTEMPTS so far: " + $attemptsLine + "; PROVED so far: " + $provedLine + "). Read npx wrangler deployments list and the failing route by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
+Say ("[ride] A2A wave: both cards 200 with the required fields and the live society name; POST /a2a accepted SendMessage (1.0 header) and message/send (no header) with the fixed directions and answered the notification 204 with no body; /mcp and /mcp/read answered message/send with the new text and an ordinary unknown method with today's text; the door counts rose by what was proved, in " + $rideResult.Rounds + " round(s). ATTEMPTS (every request sent): " + $attemptsLine + ". PROVED (answers that passed): " + $provedLine)
 $sweepPaths = @("/", "/operators", "/api/official", "/openapi.json", "/treasury", "/api/listings", "/api/stats", "/api/topics", "/api/guest/due", "/api/citizens", "/api/doors", "/api/council", "/api/residents", "/heartbeat.md", "/skill.md", "/llms.txt", "/privacy", "/api/proposal/8")
 $whySweep = Confirm-Reads {
   $bad = @()
@@ -959,9 +1015,9 @@ $whySweep = Confirm-Reads {
 } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whySweep -ne "") { Stop-Here ("the public reads were not all 200 after the deploy (version " + $versionId + ") in " + $RIDE_TRIES + " sweeps (last: " + $whySweep + "). Read npx wrangler deployments list and the failing paths by hand first. Only if the new version is at 100% and a read that answered before still fails: " + $ROLLBACK_LINE) }
 Say "[ride] 18 public reads -> 200 ($GOOD_READS_NEEDED sweeps in a row)"
-Say ("[note] WHAT THIS RIDE PROVED: the stamped commit is serving, both cards and POST /a2a answer as the brief says (including gate C2: a v1.0 SendMessage with no A2A-Version header is -32601 naming message/send), /mcp and /mcp/read answer the A2A send methods with the new text and refuse a JSON null body, the routes are listed, /skill.md and /heartbeat.md are unchanged, and the four probe-door counters in the managed D1 rose by what the ride sent. WHAT IT DID NOT PROVE: NO REAL A2A CLIENT WAS RUN; the first real client is the first test that one can use the endpoint. " +
-  "THE COUNTED REQUESTS THIS RIDE SENT (each once, in " + $rideResult.Rounds + " round(s)), AND THEY ARE IN THE DAY'S FIGURES: agent_card " + $sentCards + " (a GET of each card), a2a_send " + $sentA2a + " (SendMessage with the 1.0 header, message/send with no header, and a message/send notification with no id: a notification is an accepted send and the code counts it), mcp_a2a_probe " + $sentMcpA2a + " (message/send to /mcp and to /mcp/read), mcp_unknown_method " + $sentMcpUnknown + " (one ordinary unknown method to each MCP door). " +
-  "So GET /api/doors for today shows at least those added to the four probe doors: they are not visitors. The uncounted requests (the refusals, GET /a2a, the null bodies) were refused before any count. The two initialize POSTs per read (pre-deploy check, poll and ride) add to mcp_initialize and mcp_read_initialize, " +
+Say ("[note] WHAT THIS RIDE PROVED: the stamped commit is serving, both cards and POST /a2a answer as the brief says (including gate C2: a v1.0 SendMessage with no A2A-Version header is -32601 naming message/send), /mcp and /mcp/read answer the A2A send methods with the new text and refuse a JSON null body, the routes are listed, /skill.md and /heartbeat.md are unchanged, and the four probe-door counters in the managed D1 rose by what the ride proved. WHAT IT DID NOT PROVE: NO REAL A2A CLIENT WAS RUN; the first real client is the first test that one can use the endpoint. " +
+  "THE COUNTED REQUESTS THIS RIDE SENT, in " + $rideResult.Rounds + " round(s), AND THEY ARE IN THE DAY'S FIGURES. ATTEMPTS (every request actually sent, a stale answer or a retry included): " + $attemptsLine + ". PROVED (answers that passed their judge; the door check wanted baseline + these): " + $provedLine + ". A clean ride proves agent_card 2 (a GET of each card), a2a_send 3 (SendMessage with the 1.0 header, message/send with no header, and a message/send notification with no id: a notification is an accepted send and the code counts it), mcp_a2a_probe 2 (message/send to /mcp and to /mcp/read), mcp_unknown_method 2 (one ordinary unknown method to each MCP door). " +
+  "So the day's figures may hold up to the ATTEMPTS added to the four probe doors (an attempt answered by an edge still running the old code, or lost, was not counted): GET /api/doors for today shows at least the PROVED, and they are not visitors. The uncounted requests (the refusals, GET /a2a, the null bodies) were refused before any count. The two initialize POSTs per read (pre-deploy check, poll and ride) add to mcp_initialize and mcp_read_initialize, " +
   "and /skill.md, /heartbeat.md and /operators are counted doors that each GET attempts to count: the pre-deploy reads, the ride's byte comparison and the sweeps added to them, and a commit_days stamp row for today's date and the new commit can be written. GET /api/doors commits_by_day may show two stamps for today (the old commit and the new one), which is expected. " +
   "The rotate and wallet refusals wrote nothing (authenticate() throws before any write). This script ran no wrangler command but the deploy and read no D1.")
 Say "[done] agent card / A2A wave deployed and ridden over HTTP (no real A2A client was run). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."
