@@ -168,6 +168,7 @@ function Get-Page($url, $maxTime) {
   $hdr = [System.IO.Path]::GetTempFileName()
   try {
     $meta = (curl.exe -s --max-time $maxTime -D $hdr -o $tmp -w "%{http_code}|%{content_type}" $url)
+    $exit = $LASTEXITCODE
     $parts = ([string]$meta).Split("|", 2)
     $body = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
     if ($null -eq $body) { $body = "" }
@@ -182,7 +183,10 @@ function Get-Page($url, $maxTime) {
     }
     $type = ""
     if ($parts.Count -gt 1) { $type = [string]$parts[1] }
-    return @{ Code = [string]$parts[0]; Type = $type; Csp = $csp; Nosniff = $nosniff; Body = $body }
+    # As in Get-Text: a curl failure is a failed read, never the status its headers carried.
+    $code = [string]$parts[0]
+    if ($exit -ne 0) { $code = "000" }
+    return @{ Code = $code; Type = $type; Csp = $csp; Nosniff = $nosniff; Body = $body; Exit = $exit }
   } finally {
     Remove-Item $tmp -ErrorAction SilentlyContinue
     Remove-Item $hdr -ErrorAction SilentlyContinue

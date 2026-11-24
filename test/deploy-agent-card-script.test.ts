@@ -186,7 +186,8 @@ test("the steps are in the load-bearing order, there is no migration, no D1 comm
   assert.equal(/d1 execute|Invoke-Bounded|D1_SQL_ARG|--remote|wrangler d1/i.test(code), false, "no D1 command, no bounded command runner, no SQL");
   assert.equal(/migtest|scratch/i.test(code), false, "no scratch database anywhere in the executable code");
   assert.equal((code.match(/= \(npx wrangler /g) ?? []).length, 1, "exactly one executed wrangler command (the other mentions are text in messages)");
-  assert.equal((code.match(/\bnpx wrangler\b/g) ?? []).length >= 1, true);
+  // Assigned or not: a command at the start of a line, or after = ( or ; { | or &, counts too. Mutation that reds this: add a bare `npx wrangler d1 list` line.
+  assert.equal((code.match(/(?:^|= \(|[;{|&])[ \t]*npx wrangler /gm) ?? []).length, 1, "no other executed wrangler command, assigned or not");
   assert.match(code, /npx wrangler deploy --var "CODE_COMMIT:\$headSha"/);
   assert.equal(/Invoke-WebRequest|Invoke-RestMethod|-Method\s+Post/i.test(code), false, "no PowerShell web cmdlets; every HTTP call is curl.exe");
   assert.equal((code.match(/-X POST/g) ?? []).length, 2, "exactly two bodiless POSTs, both in Get-PostAnswer");
@@ -1101,13 +1102,10 @@ const failing: Array<{ name: string; fx: Fixture; why: RegExp; mutation: string 
 ];
 
 test("the failing fixtures: each judged item reddens the ride with its own reason (the real worker's answers, one altered)", async (t) => {
-  // FIXTURE_FILTER (a substring of a fixture name) runs only the matching fixtures: the mutation runner uses it to keep each run short; unset, all of them run.
-  const list = process.env.FIXTURE_FILTER ? failing.filter((f) => f.name.includes(process.env.FIXTURE_FILTER!)) : failing;
-  assert.ok(list.length > 0, "the filter matched a fixture");
   if (!POWERSHELL) return t.skip("no PowerShell available");
   const results: Array<Awaited<ReturnType<typeof ride3>>> = [];
-  for (let i = 0; i < list.length; i += 10) results.push(...(await Promise.all(list.slice(i, i + 10).map((f) => ride3(f.fx)))));
-  list.forEach((f, i) => {
+  for (let i = 0; i < failing.length; i += 10) results.push(...(await Promise.all(failing.slice(i, i + 10).map((f) => ride3(f.fx)))));
+  failing.forEach((f, i) => {
     const r = results[i];
     assert.equal(r.whys.length, 1, `${f.name}: the ride answered ${r.out.slice(0, 400)}`);
     assert.match(r.whys[0], f.why, `${f.name} (mutation that turns this green: ${f.mutation}): ${r.whys[0]}`);
@@ -1341,8 +1339,8 @@ test("step 0b STOPS in the last half hour of a UTC day, before any git, npm, wra
   }
 });
 
-test("Get-Text treats a curl failure after a 200 header as a failed read (Code 000), never the status its headers carried", async (t) => {
-  // Mutation that reddens this: delete the `if ($exit -ne 0) { $code = "000" }` line in Get-Text.
+test("Get-Text and Get-Page treat a curl failure after a 200 header as a failed read (Code 000), never the status its headers carried", async (t) => {
+  // Mutations that redden this: delete the `if ($exit -ne 0) { $code = "000" }` line in Get-Text, or the one in Get-Page.
   const server = createServer((req, res) => {
     if (req.url === "/cut") {
       res.writeHead(200, { "content-length": "1000", "content-type": "text/plain" });
@@ -1356,7 +1354,7 @@ test("Get-Text treats a curl failure after a 200 header as a failed read (Code 0
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
   const port = (server.address() as { port: number }).port;
   try {
-    const fns = slice("# The status code, content type and body of a GET", "function Get-Json");
+    const fns = slice("# The status code, content type and body of a GET", "function Get-Json") + slice("function Get-Page(", '# "" when $r is GET /operators answering');
     const run = await runPsAsync([
       "$ErrorActionPreference = 'Stop'",
       fns,
@@ -1364,10 +1362,16 @@ test("Get-Text treats a curl failure after a 200 header as a failed read (Code 0
       'Write-Host ("CUT [" + $cut.Code + "] exit [" + $cut.Exit + "]")',
       `$ok = Get-Text "http://127.0.0.1:${port}/ok" 20`,
       'Write-Host ("OK [" + $ok.Code + "] exit [" + $ok.Exit + "] body [" + $ok.Body + "]")',
+      `$pcut = Get-Page "http://127.0.0.1:${port}/cut" 20`,
+      'Write-Host ("PCUT [" + $pcut.Code + "] exit [" + $pcut.Exit + "]")',
+      `$pok = Get-Page "http://127.0.0.1:${port}/ok" 20`,
+      'Write-Host ("POK [" + $pok.Code + "] exit [" + $pok.Exit + "] body [" + $pok.Body + "]")',
     ]);
     if (!run) return t.skip("no PowerShell available");
-    assert.match(run.out, /CUT \[000\] exit \[(?!0\])\d+\]/, run.out);
-    assert.match(run.out, /OK \[200\] exit \[0\] body \[fine\]/, run.out);
+    assert.match(run.out, /^CUT \[000\] exit \[(?!0\])\d+\]/m, run.out);
+    assert.match(run.out, /^OK \[200\] exit \[0\] body \[fine\]/m, run.out);
+    assert.match(run.out, /^PCUT \[000\] exit \[(?!0\])\d+\]/m, run.out);
+    assert.match(run.out, /^POK \[200\] exit \[0\] body \[fine\]/m, run.out);
   } finally {
     server.close();
   }
