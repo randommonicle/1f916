@@ -3,7 +3,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
@@ -49,7 +49,7 @@ test("the two books are counted apart, and payments from the operator's wallet a
   const d1 = createLocalD1();
   try {
     seed(d1);
-    const out = await paymentsOut(d1.DB as never, OPERATOR_WALLET);
+    const out = await paymentsOut(d1.DB as never, OPERATOR_WALLET.toUpperCase().replace("0X", "0x"));
     assert.deepEqual(out.from_treasury, { recorded_payouts: 3, total_cents: 291, code_can_pay: false, book: "GET /payouts" });
     assert.deepEqual(out.listing_bounties, { paid: 4, total_cents: 3500, paid_from_operator_wallet: { paid: 2, total_cents: 2700, wallet: OPERATOR_WALLET }, book: "GET /api/listings/payments" });
     assert.equal(out.note, PAYMENTS_OUT_NOTE);
@@ -138,75 +138,83 @@ test("no file under src/ names the treasury key or signs or broadcasts a transfe
 
 // Any edit to the note comes through here: re-derive each sentence before changing the hash.
 test("the note is the text that was reviewed", () => {
-  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "76e41c7cda21aa0ec88739ea51d65ce4788e9d318c463c6ceda54308e8426a1d");
+  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "adedd2355e31c8f3c970b035e21e013012334067979b9001763d70dfa3298570");
 });
 
 test("the script does with the key what the note says: it is generated, its address derived, and it is piped to wrangler's stdin, and nothing else", () => {
   const code = readFileSync(join(ROOT, "scripts", "put-treasury-key.mjs"), "utf8").replace(/^\s*\/\/.*$/gm, "");
-  const uses = code.split("\n").filter((l) => /\bkey\b/.test(l.replace(/"[^"]*"/g, ""))).map((l) => l.trim());
+  const uses = code.split("\n").filter((l) => /\bkey\b/.test(l.replace(/"(?:\\.|[^"\\])*"/g, ""))).map((l) => l.trim());
   assert.deepEqual(uses, ["const key = generatePrivateKey();", "const address = privateKeyToAccount(key).address;", "input: key,"]);
 });
 
 // ---------- scripts/put-treasury-key.mjs ----------
 
-test("the guard refuses unless every mention of TREASURY_ADDRESS is blank and there is one", () => {
-  const addr = "0xD9E17995352EF13F9Ba467e2F36C7614A45e7011";
-  const blank = '{ "TREASURY_ADDRESS": "" }';
-  for (const text of [
-    `{ "vars": { "TREASURY_ADDRESS": "${addr}" } }`,
-    `{ TREASURY_ADDRESS : '${addr}' }`,
-    `// "TREASURY_ADDRESS": "${addr}"\n${blank}`,
-    `${blank}\n{ "TREASURY_ADDRESS": " ${addr} " }`,
-  ]) {
-    assert.match(treasuryKeyRefusal(text) ?? "", /names a treasury \(0xD9E17995352EF13F9Ba467e2F36C7614A45e7011\)/, text);
+test("the guard goes on only for a readable list that does not hold TREASURY_KEY", () => {
+  const list = (...names: string[]) => JSON.stringify(names.map((name) => ({ name, type: "secret_text" })));
+  for (const ok of [list(), list("MAINTAINER_SECRET", "TREASURY_KEY_OLD")]) assert.equal(treasuryKeyRefusal(0, ok), null, ok);
+  assert.match(treasuryKeyRefusal(0, list("MAINTAINER_SECRET", "TREASURY_KEY")) ?? "", /already holds TREASURY_KEY/);
+  for (const [status, out] of [
+    [1, list()],
+    [null, list()],
+    [0, ""],
+    [0, "not json"],
+    [0, "{}"],
+    [0, "null"],
+    [0, "[null]"],
+    [0, '["TREASURY_KEY"]'],
+    [0, undefined],
+  ] as const) {
+    assert.match(treasuryKeyRefusal(status, out as never) ?? "", /gave no answer this check can read/, `${status} ${out}`);
   }
-  for (const text of [`${blank}\n{ "TREASURY_ADDRESS": 12 }`, `// TREASURY_ADDRESS = ${addr}\n${blank}`, '{ "TREASURY_ADDRESS": 12 }', '{ TREASURY_ADDRESS: "" }', '{ "name": "x" }', ""]) {
-    assert.match(treasuryKeyRefusal(text) ?? "", /does not say plainly that there is no treasury/, text);
-  }
-  for (const text of [null, undefined]) assert.match(treasuryKeyRefusal(text as never) ?? "", /could not be read/);
-  for (const text of [blank, "{ 'TREASURY_ADDRESS' : ' ' }"]) assert.equal(treasuryKeyRefusal(text), null, text);
 });
 
-test("the committed wrangler.jsonc refuses, so this repository's own treasury is protected", () => {
-  assert.match(treasuryKeyRefusal(readFileSync(join(ROOT, "wrangler.jsonc"), "utf8")) ?? "", /names a treasury/);
-});
-
-test("wrangler is told to use the file the guard read", () => {
-  const code = readFileSync(join(ROOT, "scripts", "put-treasury-key.mjs"), "utf8");
-  assert.equal(code.split("configPath").length - 1, 3, "defined once, read by the guard once, passed to wrangler once");
-  assert.ok(code.includes('spawnSync(`npx wrangler secret put TREASURY_KEY --config "${configPath}"`, {'));
-  assert.ok(code.includes('config = readFileSync(configPath, "utf8");'));
-});
-
-// Runs the real script in a temp tree with no node_modules and no PATH, so it can reach neither viem nor wrangler whatever the guard does.
-function runKeyScript(jsonc: string | null, args: string[] = []) {
+// Runs the real script in a temp tree with no node_modules, from another directory, with a stub npx that logs its arguments. It can reach neither viem nor wrangler whatever the guard does.
+function runKeyScript(answer: string, args: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "treasury-key-"));
   try {
-    mkdirSync(join(dir, "scripts"));
+    for (const d of ["scripts", "bin", "elsewhere"]) mkdirSync(join(dir, d));
     for (const f of ["put-treasury-key.mjs", "treasury-key-guard.mjs"]) copyFileSync(join(ROOT, "scripts", f), join(dir, "scripts", f));
-    if (jsonc !== null) writeFileSync(join(dir, "wrangler.jsonc"), jsonc);
-    const r = spawnSync(process.execPath, [join(dir, "scripts", "put-treasury-key.mjs"), ...args], { cwd: dir, env: { SystemRoot: process.env.SystemRoot ?? "" }, encoding: "utf8" });
-    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    const log = join(dir, "npx.log");
+    writeFileSync(join(dir, "answer.json"), answer);
+    const stub = join(dir, "bin", "stub.mjs");
+    writeFileSync(stub, `import { appendFileSync, readFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write(readFileSync(${JSON.stringify(join(dir, "answer.json"))}, "utf8"));\n`);
+    writeFileSync(join(dir, "bin", "npx.cmd"), `@"${process.execPath}" "${stub}" %*\r\n`);
+    writeFileSync(join(dir, "bin", "npx"), `#!/bin/sh\nexec "${process.execPath}" "${stub}" "$@"\n`, { mode: 0o755 });
+    const r = spawnSync(process.execPath, [join(dir, "scripts", "put-treasury-key.mjs"), ...args], {
+      cwd: join(dir, "elsewhere"),
+      env: { SystemRoot: process.env.SystemRoot ?? "", ComSpec: process.env.ComSpec ?? "", PATHEXT: ".CMD;.EXE", PATH: join(dir, "bin") },
+      encoding: "utf8",
+    });
+    const calls = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[]) : [];
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, calls, config: join(dir, "wrangler.jsonc") };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("put-treasury-key.mjs refuses before it loads a key library, when a treasury is configured or the config cannot be read", () => {
-  for (const [jsonc, want] of [
-    ['{ "TREASURY_ADDRESS": "0xabc" }', /names a treasury \(0xabc\)/],
-    [null, /could not be read/],
+test("put-treasury-key.mjs asks this Worker first, and refuses before it loads a key library or stores anything", () => {
+  for (const [answer, want] of [
+    ['[{"name":"TREASURY_KEY","type":"secret_text"}]', /REFUSED: this Worker already holds TREASURY_KEY/],
+    ["oops", /REFUSED: wrangler secret list gave no answer/],
   ] as const) {
-    const r = runKeyScript(jsonc);
+    const r = runKeyScript(answer);
     assert.equal(r.status, 1, r.out);
     assert.match(r.out, want);
     assert.doesNotMatch(r.out, /viem/, "it must stop before it needs viem");
+    assert.deepEqual(r.calls, [["wrangler", "secret", "list", "--format", "json", "--config", r.config]], "one call, a list, on the config beside the script whatever the working directory");
   }
 });
 
-test("put-treasury-key.mjs goes past the guard with a blank address, and a dry run is never guarded (both then need viem, absent here)", () => {
-  for (const r of [runKeyScript('{ "TREASURY_ADDRESS": "" }'), runKeyScript('{ "TREASURY_ADDRESS": "0xabc" }', ["--dry-run"])]) {
-    assert.match(r.out, /Cannot find package 'viem'/);
-    assert.doesNotMatch(r.out, /REFUSED/);
-  }
+test("put-treasury-key.mjs goes past the guard when the Worker holds no TREASURY_KEY (it then needs viem, absent here), and a dry run asks nothing", () => {
+  const fresh = runKeyScript('[{"name":"MAINTAINER_SECRET","type":"secret_text"}]');
+  assert.match(fresh.out, /Cannot find package 'viem'/);
+  assert.equal(fresh.calls.length, 1);
+  const dry = runKeyScript('[{"name":"TREASURY_KEY","type":"secret_text"}]', ["--dry-run"]);
+  assert.match(dry.out, /Cannot find package 'viem'/);
+  assert.deepEqual(dry.calls, []);
+});
+
+test("the put names the same config file as the list", () => {
+  const code = readFileSync(join(ROOT, "scripts", "put-treasury-key.mjs"), "utf8");
+  assert.ok(code.includes('spawnSync(`npx wrangler secret put TREASURY_KEY --config "${configPath}"`, {'));
 });

@@ -299,7 +299,7 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/mcp.ts", sha: "1ba4a37af7e78126f9c6693c24976fcce0a1de448c7e90ac1043cb33bd92fcac", note: "citizens tool description: last_assertion_at, null for a secret-held seat or none recorded; no auth instruction" },
   { file: "src/society.ts", sha: "1c05f1f8018ca3fbbc784860ec6b508da348b05c9379026affd72b5df17cce6b", note: "LAST_ASSERTION_NOTE (brief A1): null on a row with no public_key means a secret-held seat; no auth instruction" },
   { file: "src/treasury-out.ts", sha: "c3c544ad3b443077aea3a7132cfb7d59d19ae7b20af4c9e579d5da783400d2dd", note: "where the treasury key is kept: a Worker secret, not a citizen credential" },
-  { file: "src/treasury-out.ts", sha: "eca514fbc1ca7d3bbff49fae1f57e941c16c20f6db5556bb93b7d79cd279547c", note: "deployed code can read a Worker secret" },
+  { file: "src/treasury-out.ts", sha: "58b68abbd7075972afb620ad2aedd2500e27a2c4716a5c76120fb474a2ca1c01", note: "deployed code can read a Worker secret" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);
 const PROSE_KEYS = new Set(PROSE_ALLOW.map((e) => e.file + "\n" + e.sha));

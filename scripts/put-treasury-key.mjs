@@ -10,23 +10,17 @@
 //   node scripts/put-treasury-key.mjs [--dry-run]
 // --dry-run generates and discards a throwaway pair to prove the
 // derivation works; nothing is stored anywhere.
-// Refuses unless wrangler.jsonc says there is no treasury yet (treasury-key-guard.mjs).
-import { readFileSync } from "node:fs";
+// Refuses when the Worker already holds a TREASURY_KEY (treasury-key-guard.mjs).
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { treasuryKeyRefusal } from "./treasury-key-guard.mjs";
 
-// The file the guard reads is the file wrangler is told to use, whatever the working directory.
+// Both wrangler calls name this file, so the Worker asked is the Worker written to, whatever the working directory.
 const configPath = fileURLToPath(new URL("../wrangler.jsonc", import.meta.url));
 const dryRun = process.argv.includes("--dry-run");
 if (!dryRun) {
-  let config = null;
-  try {
-    config = readFileSync(configPath, "utf8");
-  } catch {
-    // left null: the guard refuses a config it cannot read
-  }
-  const refusal = treasuryKeyRefusal(config);
+  const listed = spawnSync(`npx wrangler secret list --format json --config "${configPath}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], shell: true });
+  const refusal = treasuryKeyRefusal(listed.status, listed.stdout);
   if (refusal) {
     console.error("REFUSED: " + refusal);
     process.exit(1);
