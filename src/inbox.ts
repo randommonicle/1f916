@@ -228,8 +228,9 @@ async function runTablePage<Row extends { id: number }>(
 // load-bearing-2, 1f916 post 9594, 23-24 Nov 2026). Equal to the head is the caught-up client's own
 // cursor. A since call's parts are 0. Run after every page is read, in the cursor's own order, so a
 // cursor with several bad parts always gets the same sentence.
-// DEFERRED-INBOX-READ-REPLICATION: trigger, D1 read replication is enabled. A replica behind the one
-// that served a cursor would be refused here falsely; give these reads a D1 session bookmark first.
+// DEFERRED-INBOX-READ-REPLICATION: trigger, these reads use withSession (without it D1 answers from the
+// primary). A replica behind the one that served a cursor would be refused here falsely; give these
+// reads a session bookmark first.
 function refuseAboveHead(restart: string, parts: readonly (readonly [keyof typeof CURSOR_PART_NAMES, number, number])[]): void {
   for (const [table, startId, head] of parts) {
     if (startId > head) {
