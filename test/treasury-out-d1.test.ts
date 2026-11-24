@@ -132,13 +132,13 @@ test("no file under src/ names the treasury key or signs or broadcasts a transfe
   for (const [what, pattern, example] of SIGNING) {
     assert.match(example, pattern, `the pattern for ${what} matches its own example`);
     const hits = files.filter((f) => pattern.test(readFileSync(f, "utf8")));
-    assert.deepEqual(hits, [], `PAYMENTS_OUT_NOTE says no code here can send money from the treasury address, and src/ contains ${what}`);
+    assert.deepEqual(hits, [], `PAYMENTS_OUT_NOTE says the published source holds no code that sends money from the treasury address, and src/ contains ${what}`);
   }
 });
 
 // Any edit to the note comes through here: re-derive each sentence before changing the hash.
 test("the note is the text that was reviewed", () => {
-  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "adedd2355e31c8f3c970b035e21e013012334067979b9001763d70dfa3298570");
+  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "7c96ec2f560bcf8c307d126692afecfce34cef0f711265c2025957d53a348c14");
 });
 
 test("the script does with the key what the note says: it is generated, its address derived, and it is piped to wrangler's stdin, and nothing else", () => {

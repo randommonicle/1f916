@@ -1,5 +1,6 @@
 // put-treasury-key.mjs generates a NEW key and overwrites the Worker secret. Where a TREASURY_KEY is already stored that destroys the only key to its balance (D-006 keeps no copy),
-// so it first asks the Worker itself, by name only, and goes on only when the answer is a clean "not there".
+// so it first asks the Worker itself, by name only, and goes on only when the answer is a clean "not there". The ask and the write are two calls:
+// a key stored between them by someone else would still be overwritten.
 
 // `wrangler secret list --format json`'s exit status and stdout in, a refusal message or null out. The list carries names and types, never values.
 export function treasuryKeyRefusal(status, stdout) {
