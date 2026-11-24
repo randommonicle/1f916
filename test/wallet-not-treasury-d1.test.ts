@@ -2,7 +2,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createLocalD1, type LocalD1 } from "./helpers/local-d1.ts";
+import { createLocalD1, insertCitizen, insertListing, insertSubmission, type LocalD1 } from "./helpers/local-d1.ts";
+import { declareTestWallet } from "./helpers/wallet-pin.ts";
+import { atomicFromCents, paymentHeaderFor } from "./helpers/x402-payload.ts";
+import { handlePayListing } from "../src/listings.ts";
 import { type Env } from "../src/society.ts";
 import { declareWallet } from "../src/wallets.ts";
 import worker from "../src/index.ts";
@@ -13,8 +16,8 @@ const OTHER = "0x00000000000000000000000000000000000000aa";
 const SECRET = "test-secret-for-this-file-only";
 const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
 
-function setup(d1: LocalD1, treasury: string | undefined = TREASURY) {
-  const env = { DB: d1.DB, TREASURY_ADDRESS: treasury, FACILITATOR_URL: "https://facilitator.invalid", REGISTRATION_MODE: "open" } as unknown as Env;
+function setup(d1: LocalD1, vars: { TREASURY_ADDRESS?: string } = { TREASURY_ADDRESS: TREASURY }) {
+  const env = { DB: d1.DB, ...vars, FACILITATOR_URL: "https://facilitator.invalid", REGISTRATION_MODE: "open" } as unknown as Env;
   const hash = createHash("sha256").update(SECRET).digest("hex");
   const id = Number(d1.raw.prepare("INSERT INTO citizens (handle, model, secret_hash, created_at, last_seen_at) VALUES ('w', 'm', ?, 1, 1)").run(hash).lastInsertRowid);
   const rows = () => ({
@@ -62,23 +65,79 @@ test("a table that already holds the treasury's address for a citizen does not m
   }
 });
 
-test("an address one character away is accepted, and so is any address where no treasury is configured", async () => {
-  for (const treasury of [TREASURY, undefined, ""]) {
+test("an address one character away is accepted", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { env, id } = setup(d1);
+    const near = TREASURY.slice(0, -1).toLowerCase() + "2";
+    assert.equal((await declareWallet(env, { id }, near, null)).address, near);
+  } finally {
+    d1.close();
+  }
+});
+
+test("where no treasury is configured (absent, undefined or blank) nothing is refused; a padded configuration still refuses", async () => {
+  for (const vars of [{}, { TREASURY_ADDRESS: undefined }, { TREASURY_ADDRESS: "" }, { TREASURY_ADDRESS: " " }]) {
     const d1 = createLocalD1();
     try {
-      const { env, id } = setup(d1, treasury);
-      const near = TREASURY.slice(0, -1).toLowerCase() + "2";
-      assert.equal((await declareWallet(env, { id }, near, null)).address, near);
+      const { env, id } = setup(d1, vars);
+      assert.equal((await declareWallet(env, { id }, TREASURY, null)).address, TREASURY.toLowerCase(), JSON.stringify(vars));
     } finally {
       d1.close();
     }
   }
   const d1 = createLocalD1();
   try {
-    const env = { DB: d1.DB } as unknown as Env;
-    const id = Number(d1.raw.prepare("INSERT INTO citizens (handle, model, secret_hash, created_at, last_seen_at) VALUES ('w', 'm', 'h', 1, 1)").run().lastInsertRowid);
-    assert.equal((await declareWallet(env, { id }, TREASURY, null)).address, TREASURY.toLowerCase());
+    const { env, id } = setup(d1, { TREASURY_ADDRESS: ` ${TREASURY} ` });
+    await assert.rejects(declareWallet(env, { id }, TREASURY, null), isRefusal);
   } finally {
+    d1.close();
+  }
+});
+
+test("the refusal comes before the signed intent: a key citizen is not asked to sign for an address that will be refused", async () => {
+  const d1 = createLocalD1();
+  try {
+    const { env, id } = setup(d1);
+    const unbound = `ch1.${Buffer.from(JSON.stringify({ c: "w" })).toString("base64url")}.AA`;
+    await assert.rejects(declareWallet(env, { id }, OTHER, unbound), (e: any) => e.code !== "wallet_is_treasury" && e.status === 403, "the same credential on another address is refused for its intent");
+    await assert.rejects(declareWallet(env, { id }, TREASURY, unbound), isRefusal);
+  } finally {
+    d1.close();
+  }
+});
+
+// A row written before this rule (or by a database edit): table and chained row agree, and the pin is right, so nothing else would stop it.
+test("the pay route refuses a submitter whose wallet row is the treasury, on the probe and on a signed payment, and reserves and settles nothing", async () => {
+  const d1 = createLocalD1();
+  const realFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    return new Response("{}", { status: 500 });
+  }) as typeof fetch;
+  try {
+    const { env } = setup(d1);
+    const funderId = insertCitizen(d1);
+    const reviewerId = insertCitizen(d1);
+    const funder = d1.raw.prepare("SELECT id, handle, model, karma, created_at, last_seen_at FROM citizens WHERE id = ?").get(funderId) as never;
+    const listingId = insertListing(d1, { funder_citizen_id: funderId, bounty_cents: 1200 });
+    const submissionId = insertSubmission(d1, { listing_id: listingId, citizen_id: reviewerId });
+    const ask = async (wallet: string, pay: boolean) => {
+      const row = await declareTestWallet(d1, reviewerId, wallet);
+      const headers: Record<string, string> = { "content-type": "application/json", ...(pay ? { "X-PAYMENT": paymentHeaderFor(wallet, atomicFromCents(1200)) } : {}) };
+      const req = new Request(`https://x.test/api/listing/${listingId}/pay`, { method: "POST", headers, body: JSON.stringify({ submission_id: submissionId, wallet_row_id: row.id, wallet_row_hash: row.hash }) });
+      return handlePayListing(req, env, funder, listingId);
+    };
+    assert.equal((await ask(OTHER, false)).status, 402, "the same request for another wallet is answered with payment requirements");
+    for (const pay of [false, true]) {
+      await assert.rejects(ask(TREASURY.toLowerCase(), pay), (e: any) => e.status === 409 && e.code === "wallet_is_treasury", `pay=${pay}`);
+    }
+    assert.equal(fetches, 0, "the facilitator was never called");
+    assert.equal((d1.raw.prepare("SELECT status FROM listings WHERE id = ?").get(listingId) as { status: string }).status, "open");
+    assert.equal((d1.raw.prepare("SELECT COUNT(*) AS n FROM listing_payments").get() as { n: number }).n, 0);
+  } finally {
+    globalThis.fetch = realFetch;
     d1.close();
   }
 });
@@ -92,7 +151,7 @@ test("POST /api/wallet answers 400 with the code and writes nothing; another add
     const refused = await post(TREASURY);
     assert.equal(refused.status, 400);
     const body = (await refused.json()) as { error: string; code?: string };
-    assert.match(JSON.stringify(body), /wallet_is_treasury/);
+    assert.equal(body.code, "wallet_is_treasury");
     assert.deepEqual(rows(), { wallets: [], events: 0 });
     const ok = await post(OTHER);
     assert.ok(ok.status >= 200 && ok.status < 300, `${ok.status}`);

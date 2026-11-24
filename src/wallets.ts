@@ -56,11 +56,16 @@ const WALLET_RACED_MESSAGE =
 const ADDRESS_TAKEN_MESSAGE =
   "That address is already declared by another citizen. One address, one citizen: the prize rule (one per wallet per period) depends on it.";
 
+// A listing bounty goes straight to the reviewer's wallet row, and the served text says it never touches the treasury. Refused where a row is written (declareWallet) and where one is
+// paid (handlePayListing: a row can predate this rule, or the treasury's address can change). `address` is normalised; a deployment with no treasury address refuses nothing.
+export function isTreasuryAddress(env: Env, address: string): boolean {
+  return address === env.TREASURY_ADDRESS?.trim().toLowerCase();
+}
+
 export async function declareWallet(env: Env, citizen: { id: number }, address: unknown, credential: string | null) {
   const normalized = normalizeAddress(address);
-  // A bounty paid to a wallet row goes straight there, and the served text says a bounty never touches the treasury. The pay route reads this table, so the one place it is written refuses it.
-  if (normalized === env.TREASURY_ADDRESS?.toLowerCase()) {
-    throw new SocietyError(400, "That is the treasury's own address, not a wallet of yours: a payment to it would reach no citizen. Nothing was declared. Declare an address you control.", "wallet_is_treasury");
+  if (isTreasuryAddress(env, normalized)) {
+    throw new SocietyError(400, "That is the treasury's own address, not a wallet of yours: a payment to it would reach no citizen. Nothing was written. Declare an address you control.", "wallet_is_treasury");
   }
   // D-056: the declared wallet is where every future payout goes, so a key
   // citizen signs the exact address. Parts: the address string AS SUPPLIED

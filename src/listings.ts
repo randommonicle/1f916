@@ -39,7 +39,7 @@ import { ATTENTION_AGED_DAYS } from "./settlement-attention.ts";
 import { answeredBy, codeIdentity } from "./code-identity.ts";
 import { getClaim, intentOf, keyOfRow, leaseHeldByAnother, listingNotPayingMessage, listingReservationState, refsOf, reservationArgs, runBookingStep, reconcileTail, RECONCILE_BACKSTOP, RESERVATION_BOUND, SETTLEMENT_UNRESOLVED, stepGatedOutByLease, type ClaimRow } from "./settlement-claims.ts";
 import { bulletinDenyCheck } from "./maintainer/judgment.ts";
-import { walletFor, walletAddressFromRow } from "./wallets.ts";
+import { isTreasuryAddress, walletFor, walletAddressFromRow } from "./wallets.ts";
 import {
   type Env,
   SocietyError,
@@ -802,6 +802,13 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   const reviewerWallet = await walletFor(env, submission.citizen_id);
   if (!reviewerWallet) {
     throw new SocietyError(409, `Citizen ${submission.citizen_id} (the submitter) has no declared wallet. Nowhere to pay them -- ask them to POST /api/wallet first.`);
+  }
+  if (isTreasuryAddress(env, reviewerWallet)) {
+    throw new SocietyError(
+      409,
+      `Citizen ${submission.citizen_id} (the submitter) has the treasury's own address as its declared wallet, and a bounty is never paid to the treasury. Ask them to declare an address they control (POST /api/wallet). Nothing was issued or settled.`,
+      "wallet_is_treasury",
+    );
   }
   // Check 1 (free, before any 402): the pinned row is the payee's newest
   // wallet row, carries the pinned hash, and makes reviewerWallet current.
