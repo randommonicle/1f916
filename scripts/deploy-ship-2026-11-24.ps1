@@ -105,7 +105,7 @@ function Get-Text($url, $maxTime) {
     $meta = (curl.exe -s --max-time $maxTime -o $tmp -w "%{http_code}|%{content_type}" $url)
     $exit = $LASTEXITCODE
     $parts = ([string]$meta).Split("|", 2)
-    $body = (Get-Content $tmp -Raw -ErrorAction SilentlyContinue)
+    $body = (Get-Content $tmp -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     if ($null -eq $body) { $body = "" }
     $type = ""
     if ($parts.Count -gt 1) { $type = [string]$parts[1] }
@@ -132,9 +132,9 @@ function Get-AttestReason($att) {
   if ($null -eq $att -or $null -eq $att.constitution -or -not $att.constitution.template_hash) { return "GET /api/attest was unreadable (this is NOT a minting signal)" }
   if ([string]$att.constitution.version -ne "6") { return ("constitution is version " + $att.constitution.version + ", expected 6: investigate before anything else") }
   if ($att.constitution.template_hash -cne $V6_HASH) { return ("template_hash is " + $att.constitution.template_hash + ", expected v6 " + $V6_HASH + ": investigate before anything else (this ship mints nothing)") }
-  if ($att.ok -ne $true) { return ("GET /api/attest ok is '" + $att.ok + "', expected true") }
+  if ($att.ok -isnot [bool] -or $att.ok -ne $true) { return ("GET /api/attest ok is '" + $att.ok + "', expected true") }
   foreach ($chain in "identity_log", "treasury", "payouts", "ballots") {
-    if ($att.$chain.ok -ne $true) { return ("chain " + $chain + " ok is '" + $att.$chain.ok + "', expected true: investigate") }
+    if ($null -eq $att.$chain -or $att.$chain.ok -isnot [bool] -or $att.$chain.ok -ne $true) { return ("chain " + $chain + " ok is '" + $att.$chain.ok + "', expected true: investigate") }
   }
   return ""
 }
@@ -216,7 +216,7 @@ function Get-PostAnswer($url, $auth) {
       $code = (curl.exe -s --max-time 30 -o $out -w "%{http_code}" -X POST -H ("Authorization: " + $auth) $url)
     }
     $exit = $LASTEXITCODE
-    $body = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+    $body = (Get-Content $out -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     if ($null -eq $body) { $body = "" }
     return @{ Code = [string]$code; Exit = $exit; Body = [string]$body }
   } finally {
@@ -232,7 +232,7 @@ function Get-JsonPost($url, $bodyText) {
     $curlArgs = @("-s", "--max-time", "30", "-o", $out, "-w", "%{http_code}", "-H", "Content-Type: application/json", "--data-binary", ("@" + $req), $url)
     $code = (curl.exe @curlArgs)
     $exit = $LASTEXITCODE
-    $body = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+    $body = (Get-Content $out -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     if ($null -eq $body) { $body = "" }
     return @{ Code = [string]$code; Exit = $exit; Body = [string]$body }
   } finally {
@@ -427,7 +427,9 @@ function Test-OpenApiCursorText {
   foreach ($path in "/api/inbox", "/api/guest/inbox") {
     $item = $j.paths.PSObject.Properties[$path].Value
     if ($null -eq $item -or $null -eq $item.get) { return ("GET /openapi.json lists no get operation for " + $path) }
-    $text = [string](ConvertTo-Json -InputObject $item.get.parameters -Compress -Depth 20)
+    $cursorParams = @(@($item.get.parameters) | Where-Object { [string]$_.name -ceq "cursor" })
+    if ($cursorParams.Count -ne 1) { return ("GET /openapi.json: " + $path + " declares " + $cursorParams.Count + " cursor parameters, expected 1") }
+    $text = [string](ConvertTo-Json -InputObject $cursorParams[0] -Compress -Depth 20)
     if (-not $text.Contains($CURSOR_ABOVE_SENTENCE)) { return ("GET /openapi.json: the cursor parameter of " + $path + " does not contain '" + $CURSOR_ABOVE_SENTENCE + "'") }
   }
   return ""
@@ -494,8 +496,8 @@ function Test-PaymentsOutJudge($po, $payouts, $payments) {
   $ft = $po.from_treasury
   $lb = $po.listing_bounties
   if ($ft.code_can_pay -isnot [bool] -or $ft.code_can_pay -ne $false) { return ("from_treasury.code_can_pay is '" + $ft.code_can_pay + "', expected the boolean false") }
-  if ($null -eq $payouts -or $null -eq $payouts.total_paid_cents) { return "GET /payouts was not the payouts book" }
-  if ($null -eq $payments -or $null -eq $payments.total_paid_cents) { return "GET /api/listings/payments was not the payments book" }
+  if ($null -eq $payouts -or -not (Test-IsWhole $payouts.total_paid_cents) -or $payouts.entries -isnot [array]) { return "GET /payouts was not the payouts book" }
+  if ($null -eq $payments -or -not (Test-IsWhole $payments.total_paid_cents) -or $payments.entries -isnot [array]) { return "GET /api/listings/payments was not the payments book" }
   foreach ($name in "recorded_payouts", "total_cents") {
     if (-not (Test-IsWhole $ft.$name)) { return ("from_treasury." + $name + " is '" + $ft.$name + "', expected a whole number") }
   }
@@ -518,6 +520,7 @@ function Test-PaymentsOutJudge($po, $payouts, $payments) {
     $n = 0
     $cents = 0
     foreach ($row in $paymentRows) {
+      if ($null -eq $row -or -not (Test-IsWhole $row.amount_cents)) { return "GET /api/listings/payments carried a row whose amount_cents is not a whole number" }
       if (([string]$row.payer_address).ToLowerInvariant() -ceq [string]$op.wallet) { $n = $n + 1; $cents = $cents + [long]$row.amount_cents }
     }
     if ([long]$op.paid -ne $n -or [long]$op.total_cents -ne $cents) { return ("paid_from_operator_wallet is " + $op.paid + " payments, " + $op.total_cents + " cents; recomputed from GET /api/listings/payments rows whose payer_address is " + $op.wallet + ": " + $n + " payments, " + $cents + " cents") }
@@ -697,7 +700,7 @@ $whyAttest = Confirm-Reads {
   if ($m -ne "") { return $m }
   return (Test-CodeIdentityServed $a.code $headSha $versionId)
 } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
-if ($whyAttest -ne "") { Stop-Here ("GET /api/attest was not confirmed after the deploy in " + $RIDE_TRIES + " reads (last: " + $whyAttest + "). Read npx wrangler deployments list by hand first: another deploy may have taken over, or the edge is still catching up. Only if that shows the new version is not live: " + $ROLLBACK_LINE) }
+if ($whyAttest -ne "") { Stop-Here ("GET /api/attest was not confirmed after the deploy in " + $RIDE_TRIES + " reads (last: " + $whyAttest + "). Read npx wrangler deployments list by hand first: another deploy may have taken over, or the edge is still catching up. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say ("[ride] attest: v6 " + $V6_HASH.Substring(0, 8) + " unchanged; every chain ok; code.commit " + $headSha.Substring(0, 8) + ", code.version_id " + $versionId + " ($GOOD_READS_NEEDED good reads in a row)")
 $whyRotate = Confirm-Reads { return (Test-RouteRefusals $ROTATE_URL "/api/rotate") } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whyRotate -ne "") { Stop-Here ("the rotate route was not confirmed to refuse as before in " + $RIDE_TRIES + " reads (last: " + $whyRotate + "). Read npx wrangler deployments list and POST /api/rotate by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
@@ -733,6 +736,6 @@ $mcpPostsMin = 2 * $GOOD_READS_NEEDED
 $cardGetsMin = $CARD_PATHS.Count * $GOOD_READS_NEEDED
 Say ("[note] WHAT THIS RIDE PROVED: the stamped commit is serving; payments_out is one identical object on the five surfaces and agrees with GET /payouts and GET /api/listings/payments (the row counts and the operator-wallet recompute only where a page is under its " + $BOOK_PAGE_CAP + "-row cap); code_can_pay is false; the inbox cursor refusal is live on both inbox routes as the inbox gate's ride sets it out; /openapi.json and /api/surface carry the new text; the rotate and wallet routes still refuse a caller with no credential; both agent cards answer. " +
   "WHAT IT DID NOT PROVE: the refusal of the treasury's own address in POST /api/wallet and POST /api/listing/:id/pay. That needs a citizen's credential, which this ride does not hold; the first real attempt is its ride. " +
-  "WHAT THIS RIDE ADDED TO THE DOOR FIGURES: the two official tools/call POSTs per good read are POSTs to /mcp and /mcp/read and add to those doors' counts: at least " + $mcpPostsMin + " (" + $GOOD_READS_NEEDED + " good reads, one POST to each door), more for every retried read. The two agent card GETs per good read add to the agent_card door: at least " + $cardGetsMin + ". The pre-deploy GETs added nothing but the plain-read counts every request attempts, and the sweep reads /skill.md, /heartbeat.md and /operators, which are counted doors. " +
-  "The rotate and wallet refusals wrote nothing (authenticate() throws before any write). This script ran no wrangler command but the deploy and ran no D1 command of its own (the routes it called read D1 as they always do).")
+  "WHAT THIS RIDE ADDED TO THE DOOR FIGURES: the two official tools/call POSTs per good read are POSTs to /mcp and /mcp/read and add to those doors' call counts and to their per-tool counts for official: at least " + $mcpPostsMin + " (" + $GOOD_READS_NEEDED + " good reads, one POST to each door), more for every retried read. The two agent card GETs per good read add to the agent_card door: at least " + $cardGetsMin + ". The pre-deploy GETs added nothing but the plain-read counts every request attempts, and the sweep reads /skill.md, /heartbeat.md and /operators, which are counted doors. " +
+  "The rotate and wallet refusals wrote nothing (authenticate() throws before any write). This script ran no wrangler command but the deploy and ran no D1 command of its own (the routes it called read D1 as they always do, and the counted doors write their counts).")
 Say "[done] treasury disclosure, inbox cursor refusal and treasury-address refusal deployed and ridden over HTTP (the refusal itself not ridden). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines in HANDOVER.md."

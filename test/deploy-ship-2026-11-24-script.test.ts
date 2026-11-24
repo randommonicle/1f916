@@ -392,6 +392,9 @@ test("L-167 is structural: every post-deploy check goes through Confirm-Reads, n
   assert.equal((ride.match(/= Confirm-Reads /g) ?? []).length, 8, "attest, rotate, wallet, payments_out, cursor ride, documents, cards, sweep");
   assert.equal(sites.sites, 8);
   for (const b of sites.blocks) assert.ok(b.length > 0, "every Confirm-Reads call has a block");
+  const rideStops = [...ride.matchAll(/Stop-Here \(([^\n]*)\)/g)];
+  assert.deepEqual([rideStops.length, ride.split("Stop-Here").length - 1], [8, 8], "every stop in the ride is one this test reads");
+  assert.ok(rideStops.every((m) => !/is not live: "/.test(m[1])), "no ride stop names the rollback for a version that is NOT live");
   assert.equal([...ride.matchAll(/Stop-Here \(([^\n]*)\)/g)].filter((m) => !/deployments list/.test(m[1])).length, 0, "every ride stop says to read the deployments list by hand");
   for (const m of ride.matchAll(/Stop-Here \(([^\n]*)\)/g)) {
     const text = m[1];
@@ -403,7 +406,9 @@ test("L-167 is structural: every post-deploy check goes through Confirm-Reads, n
   const sweep = /^\$sweepPaths = @\((.*)\)$/m.exec(script)![1].split(",").map((s) => s.trim());
   assert.equal(sweep.length, 17, "17 public reads");
   assert.equal(new Set(sweep).size, 17);
-  assert.equal(/Confirm-Reads/.test(slice("function Confirm-Reads", "# Polls until")) && /Stop-Here|exit \d|ROLL ?BACK/i.test(slice("function Confirm-Reads", "# Polls until")), false, "the retry itself neither stops nor names a remedy");
+  const confirmBody = slice("function Confirm-Reads", "# Polls until");
+  assert.match(confirmBody, /Confirm-Reads/);
+  assert.equal(/Stop-Here|exit \d|ROLL ?BACK/i.test(confirmBody), false, "the retry itself neither stops nor names a remedy");
 });
 
 // ---------- L-167 run for real ----------
@@ -585,6 +590,33 @@ function wallet(d1: LocalD1, citizen: number, previous: string | null, next: str
 const WORLD: Fixture = { seed: worldSeed() };
 const TREASURY_SERVED = "0x0000000000000000000000000000000000000001";
 
+test("Get-AttestReason, run for real: the good answer passes, and a wrong version, hash, flag or chain, or a flag that is a string, is a reason", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  const V6 = lit("V6_HASH");
+  const chains = (v: string) => `identity_log = @{ ok = ${v} }; treasury = @{ ok = $true }; payouts = @{ ok = $true }; ballots = @{ ok = $true }`;
+  const att = (ok = "$true", first = "$true", version = "6", hash = V6) => `@{ constitution = @{ version = ${version}; template_hash = "${hash}" }; ok = ${ok}; ${chains(first)} }`;
+  const r = (await runPsAsync([
+    defs,
+    R("good", `Get-AttestReason (${att()})`),
+    R("flag", `Get-AttestReason (${att("$false")})`),
+    R("flagString", `Get-AttestReason (${att('"true"')})`),
+    R("flagOne", `Get-AttestReason (${att("1")})`),
+    R("chain", `Get-AttestReason (${att("$true", "$false")})`),
+    R("chainString", `Get-AttestReason (${att("$true", '"true"')})`),
+    R("chainGone", `Get-AttestReason (@{ constitution = @{ version = 6; template_hash = "${V6}" }; ok = $true })`),
+    R("version", `Get-AttestReason (${att("$true", "$true", "7")})`),
+    R("hash", `Get-AttestReason (${att("$true", "$true", "6", V6.toUpperCase())})`),
+    R("none", "Get-AttestReason $null"),
+  ]))!;
+  const at = (label: string): string => new RegExp(`^RES ${label} \\[(.*)\\]\\r?$`, "m").exec(r.out)?.[1] ?? `<<no ${label}: ${r.out}>>`;
+  assert.equal(at("good"), "");
+  for (const l of ["flag", "flagString", "flagOne"]) assert.match(at(l), /GET \/api\/attest ok is/, l);
+  for (const l of ["chain", "chainString", "chainGone"]) assert.match(at(l), /chain identity_log ok is/, l);
+  assert.match(at("version"), /constitution is version 7, expected 6/);
+  assert.match(at("hash"), /template_hash is/);
+  assert.match(at("none"), /unreadable/);
+});
+
 test("Get-WalletEvents and Test-WalletRowsClear, run for real over the real route and rows written by the real walletLogEntry: clear, the treasury declared, the treasury as the NEW address of a change in any letter case, a change AWAY from it, an unreadable row, a capped read and an unapplied filter", async (t) => {
   if (!POWERSHELL) return t.skip("no PowerShell available");
   const tail = [
@@ -675,7 +707,7 @@ test("Test-CursorDefectPresent and Test-CursorRide, run for real: the real worke
   assert.equal(none.at("visitor"), "");
   assert.match(none.at("ride"), /no visitor number could be read from GET \/api\/guest\/due/);
   const noGuestPart = await res({ seed: worldSeed(), after: (s, r) => (s.path.includes("since=9999999999999") ? mutateJson(r, (j) => { j.next_cursor = String(j.next_cursor).replace(/-g\d+$/, ""); }) : undefined) }, [R("ride", "Test-CursorRide '1'")]);
-  assert.doesNotMatch(noGuestPart.at("ride"), /guest row id/, "with no guest part in the heads the guest-row step is skipped, not failed");
+  assert.equal(noGuestPart.at("ride"), "", "with no guest part in the heads the guest-row step is skipped and the rest passes: " + noGuestPart.out);
 });
 
 const poTail = [R("pay", "Test-PaymentsOutServed")];
@@ -706,6 +738,17 @@ test("Test-PaymentsOutServed, run for real over the real surfaces (the REAL paym
     alter("note lacks the copy words", (po) => { po.note = po.note.replace("no copy of it anywhere else", "a copy elsewhere"); }, /the payments_out note lacks the words 'no copy of it anywhere else'/),
     ["GET /payouts down", { seed: worldSeed(), intercept: (s) => (s.path === "/payouts" ? jsonAns({ error: "x" }, 503) : undefined) }, /GET \/payouts answered 503/],
     ["a payments book that is not one", { seed: worldSeed(), intercept: (s) => (s.path === "/api/listings/payments" ? jsonAns({ entries: [] }) : undefined) }, /GET \/api\/listings\/payments was not the payments book/],
+    ["/payouts omits entries", { seed: worldSeed(), after: (s, r) => (s.path === "/payouts" ? mutateJson(r, (j) => { delete j.entries; }) : undefined) }, /GET \/payouts was not the payouts book/],
+    ["/payouts entries is null", { seed: worldSeed(), after: (s, r) => (s.path === "/payouts" ? mutateJson(r, (j) => { j.entries = null; }) : undefined) }, /GET \/payouts was not the payouts book/],
+    ["/payouts entries is an object", { seed: worldSeed(), after: (s, r) => (s.path === "/payouts" ? mutateJson(r, (j) => { j.entries = {}; }) : undefined) }, /GET \/payouts was not the payouts book/],
+    ["/payouts total is a string", { seed: worldSeed(), after: (s, r) => (s.path === "/payouts" ? mutateJson(r, (j) => { j.total_paid_cents = String(j.total_paid_cents); }) : undefined) }, /GET \/payouts was not the payouts book/],
+    ["/payouts total is words", { seed: worldSeed(), after: (s, r) => (s.path === "/payouts" ? mutateJson(r, (j) => { j.total_paid_cents = "n/a"; }) : undefined) }, /GET \/payouts was not the payouts book/],
+    ["/api/listings/payments omits entries", { seed: worldSeed(), after: (s, r) => (s.path === "/api/listings/payments" ? mutateJson(r, (j) => { delete j.entries; }) : undefined) }, /GET \/api\/listings\/payments was not the payments book/],
+    ["/api/listings/payments entries is null", { seed: worldSeed(), after: (s, r) => (s.path === "/api/listings/payments" ? mutateJson(r, (j) => { j.entries = null; }) : undefined) }, /GET \/api\/listings\/payments was not the payments book/],
+    ["/api/listings/payments entries is an object", { seed: worldSeed(), after: (s, r) => (s.path === "/api/listings/payments" ? mutateJson(r, (j) => { j.entries = {}; }) : undefined) }, /GET \/api\/listings\/payments was not the payments book/],
+    ["/api/listings/payments total is a string", { seed: worldSeed(), after: (s, r) => (s.path === "/api/listings/payments" ? mutateJson(r, (j) => { j.total_paid_cents = String(j.total_paid_cents); }) : undefined) }, /GET \/api\/listings\/payments was not the payments book/],
+    ["/api/listings/payments total is words", { seed: worldSeed(), after: (s, r) => (s.path === "/api/listings/payments" ? mutateJson(r, (j) => { j.total_paid_cents = "n/a"; }) : undefined) }, /GET \/api\/listings\/payments was not the payments book/],
+    ["a payment row with a string amount", { seed: worldSeed(), after: (s, r) => (s.path === "/api/listings/payments" ? mutateJson(r, (j) => { j.entries[0].amount_cents = "n/a"; }) : undefined) }, /carried a row whose amount_cents is not a whole number/],
   ];
   for (const [name, fx, re] of cases) assert.match((await res(fx, poTail)).at("pay"), re, name);
 });
@@ -728,7 +771,9 @@ test("Test-OpenApiCursorText, Test-SurfaceWalletNote, Test-CardsServed and Test-
   for (const l of ["openapi", "surface", "cards", "rotate", "wallet"]) assert.equal(ok.at(l), "", `${l}: ${ok.out}`);
   const noSentence = await res({ seed: worldSeed(), after: (s, r) => (s.path === "/openapi.json" ? { ...r, body: r.body.split("or above the newest row id of its table, is refused with 400").join("x") } : undefined) }, tail);
   assert.match(noSentence.at("openapi"), /the cursor parameter of \/api\/inbox does not contain 'or above the newest row id of its table, is refused with 400'/);
-  const oneOnly = await res({ seed: worldSeed(), after: (s, r) => (s.path === "/openapi.json" ? mutateJson(r, (j) => { j.paths["/api/guest/inbox"].get.parameters = [{ name: "guest" }]; }) : undefined) }, tail);
+  const noCursor = await res({ seed: worldSeed(), after: (s, r) => (s.path === "/openapi.json" ? mutateJson(r, (j) => { j.paths["/api/inbox"].get.parameters = j.paths["/api/inbox"].get.parameters.filter((p: any) => p.name !== "cursor"); }) : undefined) }, tail);
+  assert.ok(noCursor.out.includes("GET /openapi.json: /api/inbox declares 0 cursor parameters, expected 1"), noCursor.out);
+  const oneOnly = await res({ seed: worldSeed(), after: (s, r) => (s.path === "/openapi.json" ? mutateJson(r, (j) => { const ps = j.paths["/api/guest/inbox"].get.parameters; const cur = ps.find((p: any) => p.name === "cursor"); ps.push({ name: "other", description: cur.description }); cur.description = "nothing"; }) : undefined) }, tail);
   assert.match(oneOnly.at("openapi"), /the cursor parameter of \/api\/guest\/inbox does not contain/);
   const noNote = await res({ seed: worldSeed(), after: (s, r) => (s.path === "/api/surface" ? mutateJson(r, (j) => { for (const x of j.routes) if (x.path === "/api/wallet") x.note = "assertion intent binding"; }) : undefined) }, tail);
   assert.match(noNote.at("surface"), /POST \/api\/wallet but its note does not name wallet_is_treasury/);
