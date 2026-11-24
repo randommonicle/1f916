@@ -522,7 +522,7 @@ function Test-CardAnswer($r, $version, $name, $path) {
   if ([string]$r.Code -cne "200") { return ("GET " + $path + " answered " + $r.Code + ", expected 200") }
   return (Test-CardServed $r $version $name)
 }
-# "" when $ans is an MCP door's answer to message/send at $path: -32601 naming this host's /a2a and the guest_enter instruction.
+# "" when $ans is an MCP door's answer to the A2A send method $method at $path: -32601 naming this host's /a2a and the guest_enter instruction.
 function Test-McpA2aAnswer($ans, $path, $method, $wantId) {
   $label = "POST " + $path + " " + $method
   $why = Test-RpcError $ans $label "200" "-32601" ($BASE + $A2A_PATH) $wantId $false
@@ -559,7 +559,7 @@ function Send-A2aCounted($attempts, $proved) {
   if ($why -ne "") { return $why }
   return ""
 }
-# COUNTED: to each MCP door, one message/send (mcp_a2a_probe, the new text) and one ordinary unknown method (mcp_unknown_method, today's text), each retried until it passes. Returns "" or the last reason.
+# COUNTED: to each MCP door, one message/send and one SendMessage (mcp_a2a_probe, the new text) and one ordinary unknown method (mcp_unknown_method, today's text), each retried until it passes. Returns "" or the last reason.
 function Send-McpCounted($attempts, $proved) {
   foreach ($path in $MCP_DOOR_PATHS) {
     $url = $BASE + $path
@@ -811,7 +811,7 @@ function Invoke-WaveRide($docsBefore) {
     if ($baseRead.Why -ne "") { $why = $baseRead.Why; break }
     $baseCounts = ConvertTo-DoorCounts $baseRead.Rows $baseRead.Day
     if ([string]$baseCounts["_Why"] -ne "") { $why = [string]$baseCounts["_Why"]; break }
-    Say ("[ride] round " + $round + ": baseline read for UTC day " + $baseRead.Day + "; sending the counted requests, each retried until its answer passes (up to " + $RIDE_TRIES + " attempts): GET of each card, three accepted sends to /a2a, message/send and one unknown method to each MCP door")
+    Say ("[ride] round " + $round + ": baseline read for UTC day " + $baseRead.Day + "; sending the counted requests, each retried until its answer passes (up to " + $RIDE_TRIES + " attempts): GET of each card, three accepted sends to /a2a, message/send, SendMessage and one unknown method to each MCP door")
     $why = Send-Cards $name $attempts $proved
     if ($why -eq "") { $why = Send-A2aCounted $attempts $proved }
     if ($why -eq "") { $why = Send-McpCounted $attempts $proved }

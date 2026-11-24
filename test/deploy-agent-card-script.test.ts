@@ -783,9 +783,9 @@ const seedDoor = (door: string, times: number) => async (env: Env): Promise<void
 };
 const POWERSHELL = spawnSync("powershell", ["-NoProfile", "-Command", "1"], { encoding: "utf8" }).status === 0;
 
-test("THE RIDE against the real handlers passes, sends exactly 2 / 3 / 2 / 2 counted requests, the real D1 counters rise by exactly those (the uncounted refusals add nothing), and a second ride over the same day's baseline passes too", async (t) => {
+test("THE RIDE against the real handlers passes, sends exactly 2 / 3 / 4 / 2 counted requests, the real D1 counters rise by exactly those (the uncounted refusals add nothing), and a second ride over the same day's baseline passes too", async (t) => {
   if (!POWERSHELL) return t.skip("no PowerShell available");
-  // Mutations that redden this: make Test-A2aUncounted send a counted body (the totals exceed 9); send the notification with an id (a2a_send 2, the notification check reds); drop `$sent["a2a_send"]` increments (SENT reads 0).
+  // Mutations that redden this: make Test-A2aUncounted send a counted body (the totals exceed 11); send the notification with an id (a2a_send 2, the notification check reds); drop `$sent["a2a_send"]` increments (SENT reads 0).
   const r = await ride3({}, { times: 2 });
   assert.deepEqual(r.whys, ["", ""], r.out);
   assert.deepEqual(r.sents, ["ATT 2 3 4 2 PROV 2 3 4 2 ROUNDS 1", "ATT 2 3 4 2 PROV 2 3 4 2 ROUNDS 1"], "each ride sent 2 card GETs, 3 accepted /a2a sends, 4 A2A send calls to the MCP doors (message/send and SendMessage, each to both) and 2 unknown methods");
