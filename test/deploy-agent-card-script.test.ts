@@ -811,7 +811,7 @@ test("the ride passes through a stale edge: the first answers for /a2a, the card
   assert.deepEqual(r.whys, [""], r.out);
   const att = /^ATT (\d+) (\d+) (\d+) (\d+) PROV 2 3 4 2 ROUNDS 1$/.exec(r.sents[0]);
   assert.ok(att, r.sents[0]);
-  assert.ok(att.slice(1).reduce((a, b) => a + Number(b), 0) > 9, "the stale answers were extra attempts");
+  assert.ok(att.slice(1).reduce((a, b) => a + Number(b), 0) > 11, "the stale answers were extra attempts");
   assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 4, 2]);
 });
 
@@ -1194,7 +1194,7 @@ test("before the deploy: Test-WaveAbsent passes only when both card paths and GE
 
 test("the counted bodies are valid JSON-RPC and ASCII, each notification has no id member, and every counted request is sent from a temp file", () => {
   const body = (name: string): string => new RegExp(`^\\$${name} = '(.*)'$`, "m").exec(script)![1];
-  for (const n of ["SEND_V1_BODY", "SEND_V03_BODY", "NOTIFY_V03_BODY", "UNDEFINED_BODY", "CONTEXT_BODY", "MCP_A2A_BODY", "MCP_UNKNOWN_BODY"]) {
+  for (const n of ["SEND_V1_BODY", "SEND_V03_BODY", "NOTIFY_V03_BODY", "UNDEFINED_BODY", "CONTEXT_BODY", "MCP_A2A_BODY", "MCP_SENDMESSAGE_BODY", "MCP_UNKNOWN_BODY"]) {
     const j = JSON.parse(body(n));
     assert.equal(j.jsonrpc, "2.0", n);
     assert.equal(/[^\x00-\x7f]/.test(body(n)), false, n);
@@ -1296,7 +1296,7 @@ test("a stale unknown-method answer (the right text from an old worker: proved, 
 
 test("a door that never rises, even after the resend, fails: the unknown-method answers are stale every time, so mcp_unknown_method stays short and the ride says so (and a different door short alone gets no resend)", async (t) => {
   if (!POWERSHELL) return t.skip("no PowerShell available");
-  // Mutations that redden this: after the resend, the second door check replaced by `$why = ""` (the ride passes); the single-door condition loosened to `$true` (the absent-row fixture below is then resent: ATT 2 3 2 4).
+  // Mutations that redden this: after the resend, the second door check replaced by `$why = ""` (the ride passes); the single-door condition loosened to `$true` (the absent-row fixture below is then resent: ATT 2 3 4 4).
   const OLD_UNKNOWN = jsonAns({ jsonrpc: "2.0", id: 8, error: { code: -32601, message: "method 'ride/unknown' not found" } });
   const never = await ride3({ intercept: (s) => (countedKind(s)?.startsWith("mcp-unknown") ? OLD_UNKNOWN : undefined) });
   assert.equal(never.whys.length, 1, never.out);
