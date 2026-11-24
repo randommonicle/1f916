@@ -1,0 +1,14 @@
+# D-018 gate (Sonnet): treasury disclosure, 24 Nov 2026
+
+Head `0318ce62`, base `097a4a89`. Verdict: **DEPLOYABLE WITH CONDITIONS**. HIGH 0, MEDIUM 1, LOW 2.
+
+1. **Note against source.** Each claim checked against code or test: payer match by `lower()` on the operator wallet, newest-200 pages, `POST /api/wallet` accepting the treasury address (tested), `POST /api/payout` only recording (maintainer-only, no signer), script generates, derives, pipes to stdin and prints only the address. The "no signer" sentence is bounded to a name search and says so. MEDIUM M1 (raise to Ben, not fixed here): `src/society.ts:2039` "the treasury receives the FEE only, never the bounty" and the `sanctioned_money_in` siblings sit beside a wallet route that accepts the treasury address; `src/doc.ts:329` (attested template) still says the treasury pays bounties, which the note answers by name. The note says "no route here holds it in the treasury" as a routing fact, which is true.
+2. **No mint.** `src/doc.ts` is not in the diff. `test/constitution-v6-d1.test.ts:208` pins template_hash `dc5f4821...`; green in the full suite.
+3. **officialAnswer.** Spread of `officialFacts`, only `treasury` gains a key; test compares remaining key lists. `officialFacts` callers (discovery.ts x6, doc.ts) unchanged; index.ts, mcp.ts, mcp-read.ts switched. Mutations 7-9 reverting each caller went red.
+4. **Query and cost.** One SELECT, two scalar subqueries, no catalogue or compound terms. Counted by proxy: `officialFacts` 18 D1 statements, `officialAnswer` 19, `treasury()` 8 plus up to 4 RPC fetches, all far under 50. NOT run on real D1 (no wrangler, by brief): the ride must.
+5. **Guard.** Refuses on non-zero exit, unparseable or non-array output, or TREASURY_KEY listed; dry run asks nothing. LOW L1: `secret put`/`secret bulk` by hand and a check-then-write race are outside any script guard (the guard file says so). LOW L2: real `wrangler secret list --format json` output unverified (a banner on stdout would refuse, the safe direction).
+6. **Mutations: 17, all killed** (case-sensitive match, amount ignored, sum to count, code_can_pay true, note edit, three callers reverted, payments_out dropped from officialAnswer and treasury(), wrong wallet, no lowercase, guard ignores name, guard accepts failure, guard skipped, put without --config, key name added to src). Baseline run green first.
+7. **Suite.** `npm test`: 3550 tests, 3549 pass, 0 fail, 1 skipped. Typecheck clean.
+8. **Ride (GET only).** `/treasury`, `/api/treasury`, `/api/official`, `official` on `/mcp` and `/mcp/read`: identical `payments_out`; counts equal `/payouts` and `/api/listings/payments` row counts (watch the 200 cap); `/api/attest` template_hash unchanged. Rollback: redeploy the current live worker `7c1bf0d2` (commit `097a4a89`); no migration.
+
+Conditions: C1 M1 put to Ben. C2 the real-D1 reads on the ride.
