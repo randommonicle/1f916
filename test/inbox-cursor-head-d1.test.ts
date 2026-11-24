@@ -45,9 +45,9 @@ function addComment(d1: LocalD1, post: number, citizen: number, body: string): n
 
 const head = (d1: LocalD1, table: string): number => Number((d1.raw.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM ${table}`).get() as { m: number }).m);
 
-async function mcpGuestInbox(env: Env, door: "/mcp" | "/mcp/read", args: Record<string, unknown>): Promise<{ isError: boolean; text: string }> {
+async function mcpTool(env: Env, door: "/mcp" | "/mcp/read", name: "guest_inbox" | "inbox", args: Record<string, unknown>): Promise<{ isError: boolean; text: string }> {
   const res = await worker.fetch(
-    new Request(`https://example.test${door}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "guest_inbox", arguments: args } }) }),
+    new Request(`https://example.test${door}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) }),
     env,
   );
   const body = (await res.json()) as { result: { content: { text: string }[]; isError?: boolean } };
@@ -65,7 +65,7 @@ const ROUTES = [
     path: "/api/inbox",
     base: () => "handle=alice",
     cursor: (g: number, c: number, p: number) => `c${c}-p${p}-g${g}`,
-    restart: "pass since=<ms> to start again",
+    restart: "pass since=<ms> instead of cursor to start again",
   },
 ] as const;
 
@@ -76,12 +76,13 @@ const PARTS = [
 ] as const;
 
 test("each part, on both routes: one above the newest row of its own table is refused with 400, the safe-integer ceiling included, and the served head itself is 200", async () => {
-  // Mutations that redden this: delete the `startId > head` check in runTablePage; `>` -> `>=` (the served head is then refused); compare against another table's head (the parts below differ per table).
+  // Mutations that redden this: delete the `startId > head` check in refuseAboveHead; `>` -> `>=` (the served head is then refused); compare against another table's head (the parts below differ per table).
   const w = await world();
   try {
-    addComment(w.d1, w.topic, 3, "a second comment, so the three tables' heads differ");
+    for (let i = 0; i < 2; i++) addComment(w.d1, w.topic, 3, `comment ${i}: the three heads differ`);
+    seedPost(w.d1, 2);
     const heads = [head(w.d1, "guest_thread"), head(w.d1, "comments"), head(w.d1, "posts")] as [number, number, number];
-    assert.notEqual(heads[0], heads[1], "the fixture's heads differ, so a check against the wrong table shows");
+    assert.equal(new Set(heads).size, 3, "the fixture's three heads are pairwise different, so a check against the wrong table shows");
     for (const r of ROUTES) {
       const served = (await call(w.env, "GET", `${r.path}?${r.base(w)}&cursor=${r.cursor(...heads)}`)) as { status: number; body: any };
       assert.equal(served.status, 200, `${r.path} at the head`);
@@ -134,13 +135,30 @@ test("both MCP doors refuse it with the same sentence, and the since path never 
   try {
     const g = head(w.d1, "guest_thread");
     for (const door of ["/mcp", "/mcp/read"] as const) {
-      const r = await mcpGuestInbox(w.env, door, { guest: w.visitor, cursor: `g${g + 1}-c0-p0` });
-      assert.equal(r.isError, true, r.text);
-      assert.match(r.text, new RegExp(`cursor's guest row id is ${g + 1}, above the newest one here \\(${g}\\)`));
+      for (const [name, args] of [["guest_inbox", { guest: w.visitor, cursor: `g${g + 1}-c0-p0` }], ["inbox", { handle: "alice", cursor: `c0-p0-g${g + 1}` }]] as const) {
+        const r = await mcpTool(w.env, door, name, args);
+        assert.equal(r.isError, true, `${door} ${name}: ${r.text}`);
+        assert.match(r.text, new RegExp(`cursor's guest row id is ${g + 1}, above the newest one here \\(${g}\\)`));
+      }
     }
     // a since in the future starts at the head (it is turned into a row id inside the query), so it is not refused
     const future = await call(w.env, "GET", `/api/inbox?handle=alice&since=${Date.now() + 86_400_000_000}`);
     assert.equal(future.status, 200, JSON.stringify(future.body));
+  } finally {
+    w.d1.close();
+  }
+});
+
+test("several parts above their heads: the same sentence every time, the cursor's first bad part", async () => {
+  // Mutation that reddens this: run the check inside each page's own read again (which part wins is then a race), or reorder a route's list.
+  const w = await world();
+  try {
+    const g = await call(w.env, "GET", `/api/guest/inbox?guest=${w.visitor}&cursor=g900-c901-p902`);
+    assert.match(g.body.error, /^cursor's guest row id is 900,/);
+    const c = await call(w.env, "GET", "/api/inbox?handle=alice&cursor=c901-p902-g900");
+    assert.match(c.body.error, /^cursor's comment id is 901,/);
+    const p = await call(w.env, "GET", "/api/inbox?handle=alice&cursor=c0-p902-g900");
+    assert.match(p.body.error, /^cursor's post id is 902,/);
   } finally {
     w.d1.close();
   }
@@ -169,6 +187,7 @@ test("served text: both cursor notes bound the claim to a served cursor and name
     const guest = (await call(w.env, "GET", `/api/guest/inbox?guest=${w.visitor}`)).body.cursor_note as string;
     for (const note of [citizen, guest]) {
       assert.equal(/nothing committed after this page can be skipped/.test(note), false, "the unbounded sentence is gone");
+      assert.match(note, /apart from what note says moderation can hide/);
       assert.match(note, /A part above the newest row of its table is refused with 400/);
     }
     const doc = (await call(w.env, "GET", "/openapi.json")).body;

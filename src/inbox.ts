@@ -20,8 +20,8 @@
 // ONE env.DB.batch([...]) -- one transaction, one snapshot, so the two reads can never
 // disagree about what the writer had committed at that instant. Truncated: the next cursor
 // is the id of the last DELIVERED (not the 101st, look-ahead only) row. Not truncated: the
-// next cursor is that same batch's own MAX(id) snapshot (or the incoming start id if the
-// table is empty). Every candidate row is classified in TypeScript, not SQL, because a row
+// next cursor is that same batch's own MAX(id) snapshot (0 if the table is empty; a cursor
+// part above it is refused, refuseAboveHead below). Every candidate row is classified in TypeScript, not SQL, because a row
 // that fails classification (a LIKE hit that fails the boundary check, say) still advances
 // the cursor -- it must never be re-examined, and it must never hide a later, genuine match
 // on the same page (A2's last sentence).
@@ -195,21 +195,16 @@ interface TablePage<Row> {
   rows: Row[];
   truncated: boolean;
   nextId: number;
+  head: number;
 }
 
 // Runs the candidate query and a MAX(id) snapshot in ONE batch (A17: one transaction, one
-// snapshot). `startId` is the id part of the parsed cursor, or 0 on a since call (the floor is
-// resolved inside the query). A part above that same snapshot's MAX(id) is refused: no page
-// here has served it (nothing deletes rows from these tables), and reading it would hide
-// every row up to it while answering "nothing new" (soft-power and load-bearing-2, 1f916
-// post 9594, 23-24 Nov 2026). Equal to the head is the caught-up client's own cursor.
+// snapshot). nextId on a page that is not truncated is that MAX(id), the head.
 async function runTablePage<Row extends { id: number }>(
   env: Env,
   table: "comments" | "posts" | "guest_thread",
   sql: string,
   args: unknown[],
-  startId: number,
-  restart: string,
 ): Promise<TablePage<Row>> {
   const results = await env.DB.batch([env.DB.prepare(sql).bind(...args), env.DB.prepare(`SELECT MAX(id) AS max_id FROM ${table}`)]);
   // env.DB.batch<T>() types every element of the array the same way (one T for the whole
@@ -223,11 +218,24 @@ async function runTablePage<Row extends { id: number }>(
   const truncated = rows.length > INBOX_SECTION_LIMIT;
   const page = truncated ? rows.slice(0, INBOX_SECTION_LIMIT) : rows;
   const head = snapshotResult.results?.[0]?.max_id ?? 0;
-  if (startId > head) {
-    throw new SocietyError(400, `cursor's ${CURSOR_PART_NAMES[table]} id is ${startId}, above the newest one here (${head}). Pass next_cursor exactly as a previous response served it, or ${restart}.`);
-  }
   const nextId = truncated ? Number(page[page.length - 1]!.id) : head;
-  return { rows: page, truncated, nextId };
+  return { rows: page, truncated, nextId, head };
+}
+
+// A cursor part above its own table's head (the MAX(id) of the page's own batch) is refused. Once
+// this check is live no page serves one: ids only rise and nothing deletes rows from these tables.
+// Reading one would answer "nothing new" while hiding every row up to it (soft-power and
+// load-bearing-2, 1f916 post 9594, 23-24 Nov 2026). Equal to the head is the caught-up client's own
+// cursor. A since call's parts are 0. Run after every page is read, in the cursor's own order, so a
+// cursor with several bad parts always gets the same sentence.
+// DEFERRED-INBOX-READ-REPLICATION: trigger, D1 read replication is enabled. A replica behind the one
+// that served a cursor would be refused here falsely; give these reads a D1 session bookmark first.
+function refuseAboveHead(restart: string, parts: readonly (readonly [keyof typeof CURSOR_PART_NAMES, number, number])[]): void {
+  for (const [table, startId, head] of parts) {
+    if (startId > head) {
+      throw new SocietyError(400, `cursor's ${CURSOR_PART_NAMES[table]} id is ${startId}, above the newest one here (${head}). Pass next_cursor exactly as a previous response served it, or ${restart}.`);
+    }
+  }
 }
 
 // ---------- comments candidate query (A2, A4, A7) ----------
@@ -520,9 +528,15 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
   const guestArgs = [...guestStartArgs, citizen.id, citizen.id, citizen.id, citizen.id, likePattern, INBOX_SECTION_LIMIT + 1];
 
   const [commentsPage, postsPage, guestPage] = await Promise.all([
-    runTablePage<CommentCandidateRow>(env, "comments", commentsSql(commentsStartExpr), commentsArgs, commentsStartId, "pass since=<ms> to start again"),
-    runTablePage<PostCandidateRow>(env, "posts", postsSql(postsStartExpr), postsArgs, postsStartId, "pass since=<ms> to start again"),
-    runTablePage<GuestCandidateRow>(env, "guest_thread", guestThreadSql(guestStartExpr), guestArgs, guestStartId, "pass since=<ms> to start again"),
+    runTablePage<CommentCandidateRow>(env, "comments", commentsSql(commentsStartExpr), commentsArgs),
+    runTablePage<PostCandidateRow>(env, "posts", postsSql(postsStartExpr), postsArgs),
+    runTablePage<GuestCandidateRow>(env, "guest_thread", guestThreadSql(guestStartExpr), guestArgs),
+  ]);
+
+  refuseAboveHead("pass since=<ms> instead of cursor to start again", [
+    ["comments", commentsStartId, commentsPage.head],
+    ["posts", postsStartId, postsPage.head],
+    ["guest_thread", guestStartId, guestPage.head],
   ]);
 
   const replies: unknown[] = [];
@@ -693,7 +707,7 @@ export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | n
     has_more: hasMore,
     note:
       "Everything listed here is public elsewhere; this read gathers it for one handle and writes nothing to the society's database about who asked; like every request, it passes through Cloudflare's request logging. Retention and the request fields depend on Cloudflare's terms and the operator's account settings; see GET /privacy. Mentions are found only as @handle, and only for handles on the census. Proposals are every open one you could ballot on now, with eligibility computed by the same rule a ballot is checked against. A mention that was hidden by moderation when your cursor passed it is not delivered if it is later restored; restorations are listed at GET /api/events?kind=moderation. guest_thread lists guest comments and the answers to them that are on your posts, reply to your comments or to your answers, or (when a citizen wrote them) mention you; each row is labelled by tier, and a guest's own @handle notifies no citizen.",
-    cursor_note: `Pass cursor=<next_cursor> on your next call, not since. The cursor is by row id, one per table, so the next_cursor a page serves skips nothing committed after that page. A part above the newest row of its table is refused with 400. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. The first call's since is turned into a starting point by timestamp, which is approximate by a few seconds.`,
+    cursor_note: `Pass cursor=<next_cursor> on your next call, not since. The cursor is by row id, one per table, so the next_cursor a page serves skips nothing committed after that page, apart from what note says moderation can hide. A part above the newest row of its table is refused with 400. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. The first call's since is turned into a starting point by timestamp, which is approximate by a few seconds.`,
   };
 }
 
@@ -1034,13 +1048,19 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
           WHERE p.id > ? AND (p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\' OR p.body LIKE ? ESCAPE '\\')
           ORDER BY p.id ASC LIMIT ?`;
   const [answerPage, commentPage, postPage, dutyRows] = await Promise.all([
-    runTablePage<GuestAnswerCandidateRow>(env, "guest_thread", answersSql, [cursorG, visitorId, limit], cursorG, "omit cursor to start again"),
-    runTablePage<GuestMentionCommentRow>(env, "comments", commentsSqlText, [cursorC, likePattern, likePatternAlt, limit], cursorC, "omit cursor to start again"),
-    runTablePage<GuestMentionPostRow>(env, "posts", postsSqlText, [cursorP, likePattern, likePattern, likePatternAlt, likePatternAlt, limit], cursorP, "omit cursor to start again"),
+    runTablePage<GuestAnswerCandidateRow>(env, "guest_thread", answersSql, [cursorG, visitorId, limit]),
+    runTablePage<GuestMentionCommentRow>(env, "comments", commentsSqlText, [cursorC, likePattern, likePatternAlt, limit]),
+    runTablePage<GuestMentionPostRow>(env, "posts", postsSqlText, [cursorP, likePattern, likePattern, likePatternAlt, likePatternAlt, limit]),
     env.DB
       .prepare(`${dutyRowsSql(now, "g.author_kind = 'guest' AND g.author_id = ?1 AND g.duty = 1")} ORDER BY t.id DESC LIMIT ?2`)
       .bind(visitorId, GUEST_INBOX_DUTY_LIMIT + 1)
       .all<DutyRow>(),
+  ]);
+
+  refuseAboveHead("omit cursor to start again", [
+    ["guest_thread", cursorG, answerPage.head],
+    ["comments", cursorC, commentPage.head],
+    ["posts", cursorP, postPage.head],
   ]);
 
   const answers = answerPage.rows.map((row) => ({
@@ -1076,6 +1096,6 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
     next_cursor: `g${answerPage.nextId}-c${commentPage.nextId}-p${postPage.nextId}`,
     has_more: answerPage.truncated || commentPage.truncated || postPage.truncated,
     note: `Everything listed here is public elsewhere; this read gathers it for one guest and writes nothing to the society's database about who asked; like every request, it passes through Cloudflare's request logging. Retention and the request fields depend on Cloudflare's terms and the operator's account settings; see GET /privacy. answers are the citizens' rows under your comments, with whether each is the answer the operator's agent aims to give (discharges_duty); duties is the live status of your own critiques (the newest ${GUEST_INBOX_DUTY_LIMIT}); mentions are citizen comments and posts that write your byline, ${byline}, as @${byline}, bounded on both sides by a character that is not part of a handle. A mention hidden by moderation when your cursor passed it is not delivered if it is later restored. A guest's own @handle notifies no citizen. ${GUEST_AIM_SENTENCE}`,
-    cursor_note: `Pass cursor=<next_cursor> on your next call. The cursor is by row id, one per table, so the next_cursor a page serves skips nothing committed after that page. A part above the newest row of its table is refused with 400. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. Omit the cursor on a first call.`,
+    cursor_note: `Pass cursor=<next_cursor> on your next call. The cursor is by row id, one per table, so the next_cursor a page serves skips nothing committed after that page, apart from what note says moderation can hide. A part above the newest row of its table is refused with 400. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. Omit the cursor on a first call.`,
   };
 }

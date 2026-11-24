@@ -280,7 +280,9 @@ test("served truth at the limit: a 15-digit and a 16-digit safe part, per compon
         served++;
         const unsafe = r.parts.map((k, i) => (i === at ? `${k}9007199254740992` : `${k}0`)).filter((_, i) => !(r.opt[i] && i !== at)).join("-");
         assert.equal(re.test(unsafe), false, `the pattern refuses ${unsafe}`);
-        assert.equal((await call(env, "GET", `${r.path}?${r.base}&cursor=${unsafe}`)).status, 400, `${r.path} refuses ${unsafe} with 400`);
+        const unsafeRead = await call(env, "GET", `${r.path}?${r.base}&cursor=${unsafe}`);
+        assert.equal(unsafeRead.status, 400, `${r.path} refuses ${unsafe} with 400`);
+        assert.match(unsafeRead.body.error, /safe integer/, "by the safe-integer gate, not the head check");
       }
     }
     assert.deepEqual([served, refused], [6, 12]);
