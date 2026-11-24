@@ -37,6 +37,40 @@ const REVIEWED = "113edd2a6f7b4f34f91c224bfcf971d226e84685";
 const SOCIETY_SRC = readFileSync(here("../src/society.ts"), "utf8");
 const INDEX_SRC = readFileSync(here("../src/index.ts"), "utf8");
 
+// An ordering check that cannot pass on a missing anchor: indexOf returns -1 for an absent string, and -1 is less than every real index.
+const before = (a: number, b: number, msg: string): void => {
+  assert.ok(a >= 0 && b >= 0, `${msg} (both anchors must be present: ${a}, ${b})`);
+  assert.ok(a < b, msg);
+};
+// The text between the braces that open at src[open].
+function braceBlock(src: string, open: number): string {
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) return src.slice(open + 1, i);
+    }
+  }
+  return "";
+}
+// Every Confirm-Reads call site in src with its scriptblock: a literal block, or the block a variable was assigned (`$name = {`). sites counts the calls; blocks holds what was found for each.
+function confirmReadsBlocks(src: string): { sites: number; blocks: string[] } {
+  const blocks: string[] = [];
+  let sites = 0;
+  for (const m of src.matchAll(/Confirm-Reads\s*(\{|\$[A-Za-z0-9_]+)/g)) {
+    sites++;
+    let open = -1;
+    if (m[1] === "{") open = m.index! + m[0].length - 1;
+    else {
+      const def = src.indexOf(`${m[1]} = {`);
+      open = def >= 0 ? src.indexOf("{", def) : -1;
+    }
+    blocks.push(open >= 0 ? braceBlock(src, open) : "");
+  }
+  return { sites, blocks };
+}
+
 function runPs(lines: string[]): { code: number | null; out: string } | null {
   const dir = mkdtempSync(join(tmpdir(), "deploy-agent-card-"));
   try {
@@ -102,7 +136,7 @@ test("the pins: the v6 hash, the live base 0090313a, the reviewed pin is the pla
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, new RegExp(`^\\$LIVE_BASE_COMMIT = "${LIVE}"$`, "m"));
   assert.match(script, /^\$LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"$/m);
-  // Setting the pin (the hub's later edit) must not red the suite: the line may hold the placeholder or a full sha.
+  // The reviewed pin is set below; step 0a still STOPS on the placeholder form, so this line is accepted in either shape.
   assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m);
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(script, new RegExp(`^\\$REVIEWED_COMMIT = "${REVIEWED}"$`, "m"), "the reviewed pin is the full sha of 113edd2a");
@@ -136,7 +170,7 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   const ok = runPs(harness(LIVE, FULL))!;
   assert.equal(ok.code, 0);
   assert.match(ok.out, /\[PASSED-PINS\]/);
-  // The hub has not set the reviewed pin: the script refuses to deploy until it does (this is the builder's state; after the hub sets it the line holds a full sha and the check above still passes).
+  // The reviewed pin is set (113edd2a, asserted in full above); this only checks the line's shape.
   assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m, "the reviewed pin is the placeholder or a full lower-case sha");
 });
 
@@ -173,7 +207,10 @@ test("the steps are in the load-bearing order, there is no migration, no D1 comm
   assert.ok(code.includes("src/doc.ts") && code.includes("migrations schema.sql"), "the no-mint and no-migration check names src/doc.ts, migrations and schema.sql");
   assert.ok(code.includes("git merge-base --is-ancestor $LIVE_BASE_COMMIT HEAD"), "HEAD must contain the live base");
   assert.ok(code.includes("[string]$attBefore.code.commit -cne $LIVE_BASE_COMMIT"), "the live worker is proven to be the pinned base");
-  assert.ok(code.indexOf("$whyAbsent = Test-WaveAbsent") < code.indexOf("if ($DryRun)") && code.indexOf("$docsBefore = Get-DocsHashes") < code.indexOf("if ($DryRun)"), "the 404 and docs reads are before the dry-run exit");
+  before(code.indexOf("$whyAbsent = Test-WaveAbsent"), code.indexOf("if ($DryRun)"), "the 404 read is before the dry-run exit");
+  before(code.indexOf("$docsBefore = Get-DocsHashes"), code.indexOf("if ($DryRun)"), "the docs read is before the dry-run exit");
+  before(script.indexOf("# END-PIN-CHECK"), script.indexOf("# BEGIN-CLOCK-CHECK"), "the clock check follows the pin check");
+  before(script.indexOf("# END-CLOCK-CHECK"), script.indexOf("git fetch origin"), "the clock check is before the first git (network) command");
 });
 
 test("the source checks name literals the checkout carries: this wave's anchors, the earlier waves' anchors, and every Select-String literal is in its file", () => {
@@ -308,11 +345,9 @@ test("the script's literals are the served constants, byte for byte, and the pre
   assert.ok(code.includes('if ([string]$pageBefore.Code -cne "200") { Stop-Here'));
   assert.ok(code.includes("$whyPointerBefore = Test-PointerServed"), "before the deploy the previous wave's pointer must already serve");
   assert.ok(code.includes("$whyRotateBefore = Test-RotateRefusals"), "before the deploy the ride's refusals must already hold");
-  assert.ok(script.indexOf("$whyRotateBefore = Test-RotateRefusals") < script.indexOf("if ($DryRun)"), "and the dry run reads them");
+  before(script.indexOf("$whyRotateBefore = Test-RotateRefusals"), script.indexOf("if ($DryRun)"), "and the dry run reads them");
   assert.ok(code.includes("$whyWalletBefore = Test-WalletRefusals"), "before the deploy the wallet refusals must already hold");
-  assert.ok(script.indexOf("$whyWalletBefore = Test-WalletRefusals") < script.indexOf("if ($DryRun)"), "and the dry run reads them");
-  assert.ok(script.indexOf("$walletCounts = Test-WalletLogConsistency") < script.indexOf("if ($DryRun)"), "and the dry run runs the consistency read");
-  assert.ok(script.indexOf("$walletCounts = Test-WalletLogConsistency") < script.indexOf("# BEGIN-DEPLOY-AND-POLL"), "which comes before the deploy");
+  before(script.indexOf("$whyWalletBefore = Test-WalletRefusals"), script.indexOf("if ($DryRun)"), "and the dry run reads them");
   assert.ok(code.includes("Test-OperatorsServed (Get-Page $PAGE_URL 30) (Get-ServedOfficial)"));
   assert.ok(code.includes("$why = Test-PointerServed"), "the poll judges the pointer too");
 });
@@ -494,11 +529,11 @@ test("L-167, the ride: every post-deploy check goes through Confirm-Reads, no ri
   assert.equal((ride.match(/= Confirm-Reads /g) ?? []).length, 7, "attest, the rotate refusals, the wallet refusals, the page, the pointer, the llms.txt sentence and the sweep");
   assert.equal(ride.includes("Assert-Attest"), false, "the single-read attest assertion is for before the deploy only");
   const stops = ride.split("\n").filter((l) => l.includes("Stop-Here"));
-  assert.equal(stops.length, 8, "one stop per retried check, plus the wave ride (its uncounted checks are retried inside Invoke-WaveRide and its counted requests are never repeated)");
+  assert.equal(stops.length, 8, "one stop per retried check, plus the wave ride (its uncounted checks are retried inside Invoke-WaveRide and each of its counted requests is retried until its answer passes)");
   for (const l of stops) {
     assert.match(l, /^if \(\$why[A-Za-z]* -ne ""\) \{ Stop-Here/, `a ride stop is raised only from a retry result: ${l.slice(0, 60)}`);
     assert.ok(l.includes("by hand first"), `it says to read by hand first: ${l.slice(0, 60)}`);
-    assert.ok(l.indexOf("by hand first") < l.indexOf("$ROLLBACK_LINE"), `the rollback comes after the instruction to read first: ${l.slice(0, 60)}`);
+    before(l.indexOf("by hand first"), l.indexOf("$ROLLBACK_LINE"), `the rollback comes after the instruction to read first: ${l.slice(0, 60)}`);
     assert.match(l, /Only if /, "and the rollback is conditional");
   }
   assert.match(script, /Read 'npx wrangler deployments list' and GET \/api\/attest by hand first[^\n]*Only if the new version is not at 100%/);
@@ -592,7 +627,7 @@ test("the wallet refusal literals: the route is POST only in the source, so GET 
   assert.equal(/"\/api\/wallet"[^\n]*method === "GET"|method === "GET"[^\n]*"\/api\/wallet"/.test(INDEX_SRC), false, "no GET handler on /api/wallet");
   const at = INDEX_SRC.indexOf('path === "/api/wallet" && method === "POST"');
   const blk = INDEX_SRC.slice(at, at + 400);
-  assert.ok(blk.indexOf("authenticate(env, credential)") > 0 && blk.indexOf("authenticate(env, credential)") < blk.indexOf("declareWallet("), "authenticate runs first");
+  before(blk.indexOf("authenticate(env, credential)"), blk.indexOf("declareWallet("), "authenticate runs first");
 });
 
 
@@ -616,8 +651,12 @@ test("the script's probe doors and bodies are the source's own: PROBE_DOORS, the
 
 test("static: every counted request goes through Invoke-Counted (retried until its judge passes, up to $RIDE_TRIES, no status-code special case), never from inside a Confirm-Reads block, and the old send-once wording is gone", () => {
   const ride2 = code.slice(code.indexOf("function Invoke-WaveRide("));
-  for (const m of ride2.matchAll(/Confirm-Reads \{([\s\S]*?)\} \$?[A-Za-z0-9_]+ /g)) {
-    assert.equal(/Send-|Resend-|Get-JsonPost|Invoke-Counted/.test(m[1]), false, `a Confirm-Reads block sends no counted request: ${m[1].slice(0, 60)}`);
+  const found = confirmReadsBlocks(ride2);
+  assert.equal(found.sites, 6 + 7, "Confirm-Reads call sites from Invoke-WaveRide on: 4 literal blocks and 2 uses of $riseCheck in the function, 7 at the top level");
+  assert.equal(found.blocks.length, found.sites);
+  for (const b of found.blocks) {
+    assert.ok(b.length > 0, "every call site's scriptblock was found, literal or variable");
+    assert.equal(/Send-|Resend-|Get-JsonPost|Invoke-Counted/.test(b), false, `a Confirm-Reads block sends no counted request: ${b.slice(0, 60)}`);
   }
   for (const fn of ["Send-Cards", "Send-A2aCounted", "Send-McpCounted", "Resend-McpUnknown"]) assert.equal((code.match(new RegExp(`\\b${fn}\\b`, "g")) ?? []).length, 2, `${fn}: one definition and one call`);
   const countedFns = code.slice(code.indexOf("function Send-Cards("), code.indexOf("function Test-A2aUncounted"));
@@ -748,17 +787,17 @@ test("THE RIDE against the real handlers passes, sends exactly 2 / 3 / 2 / 2 cou
   // Mutations that redden this: make Test-A2aUncounted send a counted body (the totals exceed 9); send the notification with an id (a2a_send 2, the notification check reds); drop `$sent["a2a_send"]` increments (SENT reads 0).
   const r = await ride3({}, { times: 2 });
   assert.deepEqual(r.whys, ["", ""], r.out);
-  assert.deepEqual(r.sents, ["ATT 2 3 2 2 PROV 2 3 2 2 ROUNDS 1", "ATT 2 3 2 2 PROV 2 3 2 2 ROUNDS 1"], "each ride sent 2 card GETs, 3 accepted /a2a sends, 2 message/send to the MCP doors and 2 unknown methods");
+  assert.deepEqual(r.sents, ["ATT 2 3 4 2 PROV 2 3 4 2 ROUNDS 1", "ATT 2 3 4 2 PROV 2 3 4 2 ROUNDS 1"], "each ride sent 2 card GETs, 3 accepted /a2a sends, 4 A2A send calls to the MCP doors (message/send and SendMessage, each to both) and 2 unknown methods");
   assert.equal(r.counts.agent_card, 4, "agent_card: 2 per ride, nothing else");
   assert.equal(r.counts.a2a_send, 6, "a2a_send: 3 per ride; SendMessage without a header, 9.9, undefined, malformed and contextId added nothing");
-  assert.equal(r.counts.mcp_a2a_probe, 4);
+  assert.equal(r.counts.mcp_a2a_probe, 8, "mcp_a2a_probe: 4 per ride");
   assert.equal(r.counts.mcp_unknown_method, 4, "and the JSON null bodies added nothing");
   assert.match(r.out, /\[ride\] round 1: baseline read for UTC day \d{4}-\d{2}-\d{2}; sending the counted requests, each retried until its answer passes/);
 });
 
-test("the ride passes through a stale edge: the first answers for /a2a and the card paths are 404 (never reached the worker, so never counted), the uncounted checks are retried and the counted requests are re-sent only on a 404, with the counters still exactly 2 / 3 / 2 / 2", async (t) => {
+test("the ride passes through a stale edge: the first answers for /a2a, the card paths and the MCP send are 404 (never reached the worker, so never counted), the uncounted checks are retried and each counted request is retried until its answer passes, with the real counters still exactly 2 / 3 / 4 / 2", async (t) => {
   if (!POWERSHELL) return t.skip("no PowerShell available");
-  // Mutation that redden this: in Send-CountedPost, retry on any non-200 (no mutation of the counts here, but the 404-only rule is static-tested); in Get-CardAnswer drop the loop (a card 404 stops the ride).
+  // Mutations that redden this: Invoke-Counted tries once (`$n -le 1`: the first 404 stops the ride); the uncounted checks not retried (Confirm-Reads tries 1).
   const gone = new Set<string>();
   const first = (k: string): boolean => (gone.has(k) ? false : (gone.add(k), true));
   const stale: Fixture = {
@@ -769,15 +808,19 @@ test("the ride passes through a stale edge: the first answers for /a2a and the c
   };
   const r = await ride3(stale, { tries: 8 });
   assert.deepEqual(r.whys, [""], r.out);
-  const att = /^ATT (\d+) (\d+) (\d+) (\d+) PROV 2 3 2 2 ROUNDS 1$/.exec(r.sents[0]);
+  const att = /^ATT (\d+) (\d+) (\d+) (\d+) PROV 2 3 4 2 ROUNDS 1$/.exec(r.sents[0]);
   assert.ok(att, r.sents[0]);
   assert.ok(att.slice(1).reduce((a, b) => a + Number(b), 0) > 9, "the stale answers were extra attempts");
-  assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 2, 2]);
+  assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 4, 2]);
 });
 
 // ---------- failing fixtures: one per judged item ----------
 
 const isA2aPost = (s: Seen): boolean => s.method === "POST" && s.path === "/a2a";
+const OLD_SENDMESSAGE = jsonAns({ jsonrpc: "2.0", id: 9, error: { code: -32601, message: "method 'SendMessage' not found" } });
+const a2aV1 = (s: Seen): boolean => isA2aPost(s) && s.headers["a2a-version"] === "1.0" && parseBody(s)?.method === "SendMessage";
+const a2aV03 = (s: Seen): boolean => isA2aPost(s) && !s.headers["a2a-version"] && parseBody(s)?.id === "ride-2";
+const cardV1 = (s: Seen): boolean => s.path === "/.well-known/agent-card.json";
 const failing: Array<{ name: string; fx: Fixture; why: RegExp; mutation: string }> = [
   {
     name: "a card missing a field (v1.0 defaultOutputModes)",
@@ -908,15 +951,163 @@ const failing: Array<{ name: string; fx: Fixture; why: RegExp; mutation: string 
   {
     name: "a door row ABSENT after the sends (something was sent to it)",
     fx: { after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows = j.rows.filter((r: { door: string }) => r.door !== "mcp_a2a_probe"))) : undefined) },
-    why: /the door mcp_a2a_probe has no row for the day, although the ride proved 2 request\(s\) to it/,
+    why: /the door mcp_a2a_probe has no row for the day, although the ride proved 4 request\(s\) to it/,
     mutation: "delete the `-not $row.Present` check in Test-DoorRise",
+  },
+  {
+    name: "/mcp answers SendMessage with the OLD text (message/send is right)",
+    fx: { after: (s) => (s.method === "POST" && s.path === "/mcp" && parseBody(s)?.method === "SendMessage" ? OLD_SENDMESSAGE : undefined) },
+    why: /POST \/mcp SendMessage: the error message 'method 'SendMessage' not found' does not contain/,
+    mutation: "drop the SendMessage entry from the Send-McpCounted method list",
+  },
+  {
+    name: "/mcp/read answers SendMessage with the old text",
+    fx: { after: (s) => (s.method === "POST" && s.path === "/mcp/read" && parseBody(s)?.method === "SendMessage" ? OLD_SENDMESSAGE : undefined) },
+    why: /POST \/mcp\/read SendMessage: the error message .* does not contain/,
+    mutation: "drop the SendMessage entry from the Send-McpCounted method list",
+  },
+  {
+    name: "an accepted v1.0 send echoing the WRONG id",
+    fx: { after: (s, res) => (a2aV1(s) ? mutateJson(res, (j) => (j.id = "wrong")) : undefined) },
+    why: /SendMessage with A2A-Version: 1\.0: the answer's id is 'wrong', expected 'ride-1' echoed/,
+    mutation: "delete the $j.id -cne $wantId check in Test-A2aSuccess",
+  },
+  {
+    name: "an accepted v1.0 send with the wrong role",
+    fx: { after: (s, res) => (a2aV1(s) ? mutateJson(res, (j) => (j.result.message.role = "ROLE_USER")) : undefined) },
+    why: /the v1\.0 result is not a message with role ROLE_AGENT/,
+    mutation: "delete the ROLE_AGENT check in Test-A2aSuccess",
+  },
+  {
+    name: "an accepted v1.0 send with empty parts",
+    fx: { after: (s, res) => (a2aV1(s) ? mutateJson(res, (j) => (j.result.message.parts = [])) : undefined) },
+    why: /the message has no part/,
+    mutation: "delete the parts count check in Test-A2aSuccess",
+  },
+  {
+    name: "an accepted v1.0 send whose text has no guest_enter",
+    fx: { after: (s, res) => (a2aV1(s) ? mutateJson(res, (j) => (j.result.message.parts = [{ text: "hello" }])) : undefined) },
+    why: /the message text does not name guest_enter/,
+    mutation: 'delete the Contains("guest_enter") check in Test-A2aSuccess',
+  },
+  {
+    name: "an accepted v1.0 send with no jsonrpc member",
+    fx: { after: (s, res) => (a2aV1(s) ? mutateJson(res, (j) => delete j.jsonrpc) : undefined) },
+    why: /SendMessage with A2A-Version: 1\.0: the answer's jsonrpc is '', expected 2\.0/,
+    mutation: 'delete the jsonrpc check in Test-A2aSuccess',
+  },
+  {
+    name: "an accepted v1.0 send with no messageId",
+    fx: { after: (s, res) => (a2aV1(s) ? mutateJson(res, (j) => delete j.result.message.messageId) : undefined) },
+    why: /the message has no messageId/,
+    mutation: "delete the messageId check in Test-A2aSuccess",
+  },
+  {
+    name: "an accepted v0.3 send whose part kind is not text",
+    fx: { after: (s, res) => (a2aV03(s) ? mutateJson(res, (j) => (j.result.parts[0].kind = "file")) : undefined) },
+    why: /the v0\.3 part's kind is 'file', expected text/,
+    mutation: "delete the v0.3 parts[0].kind check in Test-A2aSuccess",
+  },
+  {
+    name: "GET /a2a answered 200, not 405",
+    fx: { after: (s, res) => (s.method === "GET" && s.path === "/a2a" ? { ...res, status: 200 } : undefined) },
+    why: /GET \/a2a answered 200, expected 405/,
+    mutation: 'change the "405" in Test-A2aUncounted to "200"',
+  },
+  {
+    name: "A2A-Version 9.9 answered with -32601, not -32009",
+    fx: { after: (s, res) => (isA2aPost(s) && s.headers["a2a-version"] === "9.9" ? mutateJson(res, (j) => (j.error.code = -32601)) : undefined) },
+    why: /with A2A-Version 9\.9: the error code is -32601, expected -32009/,
+    mutation: "delete the 9.9 Test-RpcError call in Test-A2aUncounted",
+  },
+  {
+    name: "an /a2a refusal whose error.data carries no directions",
+    fx: { after: (s, res) => (isA2aPost(s) && parseBody(s)?.method === "ride/undefined" ? mutateJson(res, (j) => delete j.error.data) : undefined) },
+    why: /with an undefined method: error\.data does not carry the directions/,
+    mutation: "delete the $needData block in Test-RpcError",
+  },
+  {
+    name: "an /a2a refusal echoing the wrong id",
+    fx: { after: (s, res) => (isA2aPost(s) && parseBody(s)?.params?.message?.contextId === "x" ? mutateJson(res, (j) => (j.id = "zzz")) : undefined) },
+    why: /with a contextId: the answer's id is 'zzz', expected 'ride-5' echoed/,
+    mutation: "delete the id comparison in Test-RpcError",
+  },
+  {
+    name: "an /a2a refusal with no jsonrpc member (the malformed body)",
+    fx: { after: (s, res) => (isA2aPost(s) && s.body === '{"jsonrpc":"2.0",' ? mutateJson(res, (j) => delete j.jsonrpc) : undefined) },
+    why: /with a malformed body: the answer's jsonrpc is '', expected 2\.0/,
+    mutation: "delete the jsonrpc check in Test-RpcError",
+  },
+  {
+    name: "the malformed-body refusal carrying a non-null id",
+    fx: { after: (s, res) => (isA2aPost(s) && s.body === '{"jsonrpc":"2.0",' ? mutateJson(res, (j) => (j.id = "x")) : undefined) },
+    why: /with a malformed body: the answer's id is 'x', expected null/,
+    mutation: 'delete the `"null"` branch in Test-RpcError',
+  },
+  {
+    name: "a card whose version is not 1.0.0",
+    fx: { after: (s, res) => (cardV1(s) ? mutateJson(res, (j) => (j.version = "2.0.0")) : undefined) },
+    why: /v1\.0 agent card: version is '2\.0\.0', expected 1\.0\.0/,
+    mutation: 'delete the "1.0.0" version check in Test-CardServed',
+  },
+  {
+    name: "a card whose provider.organization is not the society name",
+    fx: { after: (s, res) => (cardV1(s) ? mutateJson(res, (j) => (j.provider.organization = "Other Body")) : undefined) },
+    why: /provider\.organization is not the society name/,
+    mutation: "delete the provider.organization check in Test-CardServed",
+  },
+  {
+    name: "a card whose documentationUrl does not end /llms.txt",
+    fx: { after: (s, res) => (cardV1(s) ? mutateJson(res, (j) => (j.documentationUrl = "https://docs.example/readme")) : undefined) },
+    why: /documentationUrl is 'https:\/\/docs\.example\/readme', expected it to end \/llms\.txt/,
+    mutation: "delete the documentationUrl check in Test-CardServed",
+  },
+  {
+    name: "a card declaring streaming true",
+    fx: { after: (s, res) => (cardV1(s) ? mutateJson(res, (j) => (j.capabilities.streaming = true)) : undefined) },
+    why: /capabilities\.streaming is 'True', expected the boolean false/,
+    mutation: "delete the capabilities flag loop in Test-CardServed",
+  },
+  {
+    name: "a card whose pushNotifications is the STRING false",
+    fx: { after: (s, res) => (cardV1(s) ? mutateJson(res, (j) => (j.capabilities.pushNotifications = "false")) : undefined) },
+    why: /capabilities\.pushNotifications is 'false', expected the boolean false/,
+    mutation: "replace the `-isnot [bool]` test in the capabilities loop with `$false`",
+  },
+  {
+    name: "/openapi.json lists a card path without a get operation",
+    fx: { after: (s, res) => (s.path === "/openapi.json" ? mutateJson(res, (j) => (j.paths["/.well-known/agent.json"] = {})) : undefined) },
+    why: /lists \/\.well-known\/agent\.json without a get operation/,
+    mutation: "delete the get-operation check in Test-DiscoveryServed",
+  },
+  {
+    name: "GET /api/doors with a null rows member",
+    fx: { after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows = null)) : undefined) },
+    why: /GET \/api\/doors carried a null rows member/,
+    mutation: "delete the null rows check in Get-DoorsRead",
+  },
+  {
+    name: "a door row whose n is not a number (a read failure with a reason, never an uncaught stop)",
+    fx: { seed: seedDoor("agent_card", 1), after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows.find((r: { door: string }) => r.door === "agent_card").n = "many")) : undefined) },
+    why: /the row for agent_card has a non-numeric n \('many'\)/,
+    mutation: "delete the non-numeric n branch in ConvertTo-DoorCounts (the [int] cast then stops the script)",
+  },
+  {
+    name: "a door row whose at_cap is the string true",
+    fx: { seed: seedDoor("agent_card", 1), after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows.find((r: { door: string }) => r.door === "agent_card").at_cap = "true")) : undefined) },
+    why: /the row for agent_card has an at_cap that is not a boolean \('true'\)/,
+    mutation: "delete the at_cap -isnot [bool] branch in ConvertTo-DoorCounts",
   },
 ];
 
 test("the failing fixtures: each judged item reddens the ride with its own reason (the real worker's answers, one altered)", async (t) => {
+  // FIXTURE_FILTER (a substring of a fixture name) runs only the matching fixtures: the mutation runner uses it to keep each run short; unset, all of them run.
+  const list = process.env.FIXTURE_FILTER ? failing.filter((f) => f.name.includes(process.env.FIXTURE_FILTER!)) : failing;
+  assert.ok(list.length > 0, "the filter matched a fixture");
   if (!POWERSHELL) return t.skip("no PowerShell available");
-  const results = await Promise.all(failing.map((f) => ride3(f.fx)));
-  failing.forEach((f, i) => {
+  const results: Array<Awaited<ReturnType<typeof ride3>>> = [];
+  for (let i = 0; i < list.length; i += 10) results.push(...(await Promise.all(list.slice(i, i + 10).map((f) => ride3(f.fx)))));
+  list.forEach((f, i) => {
     const r = results[i];
     assert.equal(r.whys.length, 1, `${f.name}: the ride answered ${r.out.slice(0, 400)}`);
     assert.match(r.whys[0], f.why, `${f.name} (mutation that turns this green: ${f.mutation}): ${r.whys[0]}`);
@@ -929,7 +1120,7 @@ test("a door AT CAP passes without rising (at_cap true), and the other three doo
   const r = await ride3({ seed: seedDoor("a2a_send", PROBE_DOOR_DAILY_CAP) });
   assert.deepEqual(r.whys, [""], r.out);
   assert.equal(r.counts.a2a_send, PROBE_DOOR_DAILY_CAP, "the capped door stayed at its cap");
-  assert.deepEqual([r.counts.agent_card, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 2, 2]);
+  assert.deepEqual([r.counts.agent_card, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 4, 2]);
 });
 
 test("the UTC day changes between the baseline and the end of the sends: the ride says so, takes a new baseline, sends the fixed batch once more (twice in total) and judges only the second day; a second change is a stop", async (t) => {
@@ -951,7 +1142,7 @@ test("the UTC day changes between the baseline and the end of the sends: the rid
   };
   const changed = await ride3(dated([yesterday, today, today, today]));
   assert.deepEqual(changed.whys, [""], changed.out);
-  assert.deepEqual(changed.sents, ["ATT 4 6 4 4 PROV 4 6 4 4 ROUNDS 2"], "the batch ran twice and the total says so");
+  assert.deepEqual(changed.sents, ["ATT 4 6 8 4 PROV 4 6 8 4 ROUNDS 2"], "the batch ran twice and the total says so");
   assert.match(changed.out, /the UTC day changed between the baseline \(\d{4}-\d{2}-\d{2}\) and the end of the sends \(\d{4}-\d{2}-\d{2}\): the counts are split across two days and are not judged\. Taking a NEW baseline/);
   assert.deepEqual([changed.counts.agent_card, changed.counts.a2a_send], [4, 6], "the real counters took both rounds");
   const twice = await ride3(dated([yesterday, today, today, tomorrow]));
@@ -1028,6 +1219,7 @@ const countedKind = (s: Seen): string | null => {
   if (isA2aPost(s) && !s.headers["a2a-version"] && b?.method === "message/send" && b?.id === "ride-2") return "a2a-v03";
   if (isA2aPost(s) && !s.headers["a2a-version"] && b?.method === "message/send" && !("id" in b) && !b?.params?.message?.contextId) return "a2a-notify";
   if (s.method === "POST" && (s.path === "/mcp" || s.path === "/mcp/read") && b?.method === "message/send") return "mcp-send" + s.path;
+  if (s.method === "POST" && (s.path === "/mcp" || s.path === "/mcp/read") && b?.method === "SendMessage") return "mcp-sendmsg" + s.path;
   if (s.method === "POST" && (s.path === "/mcp" || s.path === "/mcp/read") && b?.method === "ride/unknown") return "mcp-unknown" + s.path;
   return null;
 };
@@ -1046,6 +1238,8 @@ test("each counted request answered wrongly once or twice (a closed connection, 
     "a2a-notify": [BAD_503, BAD_CLOSE],
     "mcp-send/mcp": [OLD_MCP_TEXT],
     "mcp-send/mcp/read": [OLD_MCP_TEXT],
+    "mcp-sendmsg/mcp": [BAD_503],
+    "mcp-sendmsg/mcp/read": [BAD_CLOSE],
     "mcp-unknown/mcp": [BAD_503],
     "mcp-unknown/mcp/read": [BAD_CLOSE],
   };
@@ -1060,9 +1254,9 @@ test("each counted request answered wrongly once or twice (a closed connection, 
     },
   });
   assert.deepEqual(r.whys, [""], r.out);
-  // cards 2 + 2 + 1 + 1 extra = 6 attempts for 2 proved; a2a 1 + 1 + 2 + 3 proved ... = (2 + 2 + 3) = 7 for 3; mcp-send (2 + 2) = 4 for 2; mcp-unknown (2 + 2) = 4 for 2.
-  assert.deepEqual(r.sents, ["ATT 6 7 4 4 PROV 2 3 2 2 ROUNDS 1"], r.out);
-  assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 2, 2], "the wrong answers never reached the worker, so only the proved requests are in the counters");
+  // cards 2 + 2 + 1 + 1 extra = 6 attempts for 2 proved; a2a 1 + 1 + 2 + 3 proved ... = (2 + 2 + 3) = 7 for 3; mcp-send and mcp-sendmsg (2 + 2 + 2 + 2) = 8 for 4; mcp-unknown (2 + 2) = 4 for 2.
+  assert.deepEqual(r.sents, ["ATT 6 7 8 4 PROV 2 3 4 2 ROUNDS 1"], r.out);
+  assert.deepEqual([r.counts.agent_card, r.counts.a2a_send, r.counts.mcp_a2a_probe, r.counts.mcp_unknown_method], [2, 3, 4, 2], "the wrong answers never reached the worker, so only the proved requests are in the counters");
 });
 
 test("a counted request answered wrongly EVERY time fails the ride with that reason after exactly $RIDE_TRIES attempts (the server saw exactly that many), and the later requests are not sent", async (t) => {
@@ -1097,7 +1291,7 @@ test("a stale unknown-method answer (the right text from an old worker: proved, 
     },
   });
   assert.deepEqual(r.whys, [""], r.out);
-  assert.deepEqual(r.sents, ["ATT 2 3 2 4 PROV 2 3 2 2 ROUNDS 1"], "two unknown-method attempts proved, two more resent: ATTEMPTS 4, what is wanted stays 2");
+  assert.deepEqual(r.sents, ["ATT 2 3 4 4 PROV 2 3 4 2 ROUNDS 1"], "two unknown-method attempts proved, two more resent: ATTEMPTS 4, what is wanted stays 2");
   assert.equal(r.counts.mcp_unknown_method, 2, "only the resends were counted by the real worker");
   assert.match(r.out, /only mcp_unknown_method is short/);
 });
@@ -1109,11 +1303,144 @@ test("a door that never rises, even after the resend, fails: the unknown-method 
   const never = await ride3({ intercept: (s) => (countedKind(s)?.startsWith("mcp-unknown") ? OLD_UNKNOWN : undefined) });
   assert.equal(never.whys.length, 1, never.out);
   assert.match(never.whys[0], /the door mcp_unknown_method (has no row for the day, although the ride proved 2|reads 0, expected at least 2)/);
-  assert.deepEqual(never.sents, ["ATT 2 3 2 4 PROV 2 3 2 2 ROUNDS 1"], never.out);
+  assert.deepEqual(never.sents, ["ATT 2 3 4 4 PROV 2 3 4 2 ROUNDS 1"], never.out);
   assert.match(never.out, /only mcp_unknown_method is short/);
   const other = await ride3({ after: (s, res) => (s.path === "/api/doors" ? mutateJson(res, (j) => (j.rows = j.rows.filter((r2: { door: string }) => r2.door !== "mcp_a2a_probe"))) : undefined) });
   assert.equal(other.whys.length, 1, other.out);
   assert.match(other.whys[0], /the door mcp_a2a_probe has no row/);
-  assert.deepEqual(other.sents, ["ATT 2 3 2 2 PROV 2 3 2 2 ROUNDS 1"], "another door short alone is not resent");
+  assert.deepEqual(other.sents, ["ATT 2 3 4 2 PROV 2 3 4 2 ROUNDS 1"], "another door short alone is not resent");
   assert.equal(/only mcp_unknown_method is short/.test(other.out), false);
+});
+
+// ---------- step 0b: the UTC clock; the day check around the resend; robustness of the door reads ----------
+
+test("step 0b STOPS in the last half hour of a UTC day, before any git, npm, wrangler or network command (the clock block is run for real, with the clock overridden): 22:45 and 23:29 pass, 23:30 and 23:59 stop, 00:00 passes", (t) => {
+  // Mutations that redden this: `$utcNow.Minute -ge 30` -> `-ge 31` (23:30 passes); `$utcNow.Hour -eq 23` -> `-ge 22` (22:45 stops); the Stop-Here line removed (23:30 and 23:59 pass).
+  const fns = script.slice(script.indexOf("# The UTC clock"), script.indexOf("# END-OF-DEFINITIONS"));
+  const block = script.slice(script.indexOf("# BEGIN-CLOCK-CHECK"), script.indexOf("# END-CLOCK-CHECK"));
+  assert.ok(fns.includes("function Get-UtcNow") && block.includes("Get-UtcNow"), "the clock is read through Get-UtcNow");
+  const harness = (h: number, m: number): string[] => [
+    "$ErrorActionPreference = 'Stop'",
+    ...["git", "npm", "npx", "curl.exe"].map((n) => `function ${n} { throw "${n} must not run in the clock check" }`),
+    'function Stop-Here($msg) { Write-Host "[STOP] $msg"; exit 1 }',
+    fns,
+    `function Get-UtcNow { return [System.DateTime]::new(2026, 11, 24, ${h}, ${m}, 0, [System.DateTimeKind]::Utc) }`,
+    block,
+    'Write-Host "[PASSED-CLOCK]"',
+  ];
+  const first = runPs(harness(23, 29));
+  if (!first) return t.skip("no PowerShell available");
+  assert.equal(first.code, 0, first.out);
+  assert.match(first.out, /\[PASSED-CLOCK\]/);
+  for (const [h, m] of [[22, 45], [0, 0], [12, 30]] as const) assert.match(runPs(harness(h, m))!.out, /\[PASSED-CLOCK\]/, `${h}:${m} passes`);
+  for (const [h, m, text] of [[23, 30, "23:30"], [23, 59, "23:59"]] as const) {
+    const r = runPs(harness(h, m))!;
+    assert.equal(r.code, 1, `${h}:${m}: ${r.out}`);
+    assert.match(r.out, new RegExp(`\\[STOP\\] the UTC time is ${text}, 23:30 or later: run it after midnight UTC; the ride compares one UTC day's counts`));
+    assert.equal(/PASSED-CLOCK|must not run/.test(r.out), false);
+  }
+});
+
+test("Get-Text treats a curl failure after a 200 header as a failed read (Code 000), never the status its headers carried", async (t) => {
+  // Mutation that reddens this: delete the `if ($exit -ne 0) { $code = "000" }` line in Get-Text.
+  const server = createServer((req, res) => {
+    if (req.url === "/cut") {
+      res.writeHead(200, { "content-length": "1000", "content-type": "text/plain" });
+      res.write("0123456789");
+      setTimeout(() => res.destroy(), 30);
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("fine");
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const fns = slice("# The status code, content type and body of a GET", "function Get-Json");
+    const run = await runPsAsync([
+      "$ErrorActionPreference = 'Stop'",
+      fns,
+      `$cut = Get-Text "http://127.0.0.1:${port}/cut" 20`,
+      'Write-Host ("CUT [" + $cut.Code + "] exit [" + $cut.Exit + "]")',
+      `$ok = Get-Text "http://127.0.0.1:${port}/ok" 20`,
+      'Write-Host ("OK [" + $ok.Code + "] exit [" + $ok.Exit + "] body [" + $ok.Body + "]")',
+    ]);
+    if (!run) return t.skip("no PowerShell available");
+    assert.match(run.out, /CUT \[000\] exit \[(?!0\])\d+\]/, run.out);
+    assert.match(run.out, /OK \[200\] exit \[0\] body \[fine\]/, run.out);
+  } finally {
+    server.close();
+  }
+});
+
+test("the door counts and the day parser, run for real on canned input: a non-numeric n, a non-boolean at_cap and a boolean n are READ FAILURES with a reason (never an uncaught stop), and the LAST Date header is the day", (t) => {
+  // Mutations that redden this: delete the `-is [bool] -or -not (...)` n check (the [int] cast then stops the script, no RESULT line); `-isnot [bool]` -> `$false` for at_cap; Get-HeaderDay returning on the first Date line.
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  const lines = [
+    "$ErrorActionPreference = 'Stop'",
+    doorsFns.slice(0, doorsFns.indexOf("# THE WAVE RIDE.")),
+    "function Row($day, $door, $n, $cap) { return [pscustomobject]@{ day = $day; door = $door; n = $n; at_cap = $cap } }",
+    '$a = ConvertTo-DoorCounts @((Row "2026-11-24" "agent_card" "many" $false)) "2026-11-24"; Write-Host ("BADN [" + $a["_Why"] + "]")',
+    '$b = ConvertTo-DoorCounts @((Row "2026-11-24" "agent_card" 3 "true")) "2026-11-24"; Write-Host ("BADCAP [" + $b["_Why"] + "]")',
+    '$c = ConvertTo-DoorCounts @((Row "2026-11-24" "agent_card" 3 1)) "2026-11-24"; Write-Host ("INTCAP [" + $c["_Why"] + "]")',
+    '$d = ConvertTo-DoorCounts @((Row "2026-11-24" "agent_card" $true $false)) "2026-11-24"; Write-Host ("BOOLN [" + $d["_Why"] + "]")',
+    '$e = ConvertTo-DoorCounts @((Row "2026-11-23" "agent_card" "many" "x"), (Row "2026-11-24" "agent_card" 3 $false)) "2026-11-24"; Write-Host ("OTHERDAYBAD [" + $e["_Why"] + "] N " + $e["agent_card"].N)',
+    '$f = ConvertTo-DoorCounts @((Row "2026-11-24" "agent_card" 3 $false)) "2026-11-24"; Write-Host ("GOOD [" + $f["_Why"] + "] N " + $f["agent_card"].N)',
+    'Write-Host ("LAST [" + (Get-HeaderDay "HTTP/1.1 200 Connection established`r`nDate: Mon, 23 Nov 2026 23:59:59 GMT`r`n`r`nHTTP/2 200`r`nDate: Tue, 24 Nov 2026 00:00:01 GMT`r`n") + "] [" + (Get-HeaderDay "Date: Mon, 23 Nov 2026 10:00:00 GMT`r`nDate: garbage") + "]")',
+  ];
+  const r = runPs(lines)!;
+  assert.match(r.out, /BADN \[GET \/api\/doors: the row for agent_card has a non-numeric n \('many'\)\]/, r.out);
+  assert.match(r.out, /BADCAP \[GET \/api\/doors: the row for agent_card has an at_cap that is not a boolean \('true'\)\]/);
+  assert.match(r.out, /INTCAP \[GET \/api\/doors: the row for agent_card has an at_cap that is not a boolean \('1'\)\]/);
+  assert.match(r.out, /BOOLN \[GET \/api\/doors: the row for agent_card has a non-numeric n \('True'\)\]/);
+  assert.match(r.out, /OTHERDAYBAD \[\] N 3/, "a bad row of another day is never read");
+  assert.match(r.out, /GOOD \[\] N 3/);
+  assert.match(r.out, /LAST \[2026-11-24\] \[\]/, "the last Date header wins, and an unparseable last one is no day");
+});
+
+// The UTC day changes AFTER the door check began, so the counts cannot be judged: the reason says that, never "a door did not rise".
+const datedAt = (days: string[]): Fixture => {
+  let reads = 0;
+  return {
+    after: (s, res) => {
+      if (s.path !== "/api/doors") return undefined;
+      reads++;
+      return { ...res, headers: { ...res.headers, date: days[Math.min(reads, days.length) - 1] } };
+    },
+  };
+};
+const staleUnknown = (): Fixture["intercept"] => (s) => (countedKind(s)?.startsWith("mcp-unknown") ? jsonAns({ jsonrpc: "2.0", id: 8, error: { code: -32601, message: "method 'ride/unknown' not found" } }) : undefined);
+
+test("the UTC day changes during the door check or during the resend: the ride fails with a reason that says the day changed and the counts could not be judged, not 'a door did not rise'", async (t) => {
+  if (!POWERSHELL) return t.skip("no PowerShell available");
+  // Mutations that redden this: delete the `$nowRead.Day -cne $baseRead.Day` branch (the first fixture then resends and fails with a door reason); delete the `$afterRead.Day -cne $baseRead.Day` branch (the second then reads the baseline day's rows and reports a door short).
+  const rfc = (ms: number): string => new Date(ms).toUTCString();
+  const today = rfc(Date.now());
+  const tomorrow = rfc(Date.now() + 86_400_000);
+  // Reads: 1 baseline, 2 end of sends, 3-6 the door check (the unknown-method answers are stale, so it fails), 7 the read after the failure, 8 the read after the resend.
+  const duringCheck = await ride3({ ...datedAt([today, today, today, today, today, today, tomorrow]), intercept: staleUnknown() });
+  assert.equal(duringCheck.whys.length, 1, duringCheck.out);
+  assert.match(duringCheck.whys[0], /the UTC day changed during the door check \(\d{4}-\d{2}-\d{2} -> \d{4}-\d{2}-\d{2}\), so the door counts could not be judged; this is not a finding that a door did not rise/);
+  assert.equal(/only mcp_unknown_method is short/.test(duringCheck.out), false, "no resend once the day has moved");
+  const duringResend = await ride3({ ...datedAt([today, today, today, today, today, today, today, tomorrow]), intercept: staleUnknown() });
+  assert.equal(duringResend.whys.length, 1, duringResend.out);
+  assert.match(duringResend.whys[0], /the UTC day changed during the resend \(\d{4}-\d{2}-\d{2} -> \d{4}-\d{2}-\d{2}\), so the door counts could not be judged; this is not a finding that a door did not rise/);
+  assert.match(duringResend.out, /only mcp_unknown_method is short/);
+});
+
+test("wording: nothing is overstated (counters, uncounted routes, D1, /operators, dry run, /openapi.json), and every count the script states is the one the ride sends", () => {
+  // Mutations that redden this: put back "read no D1" in the closing note; put back "rose by what the ride proved"; put back "none of these reaches a counter"; put back the old /operators sentence; drop "commit_days" from the dry-run text.
+  assert.equal(/NO D1 READ|read no D1|reads no D1/.test(script), false, "the D1 claim is 'no D1 command of its own'");
+  assert.ok(script.includes("ran no D1 command of its own") && script.includes("runs no D1 command of its own") && script.includes("NO D1 COMMAND OF ITS OWN"));
+  assert.equal(/rose by what|rise by what the ride sent/.test(script), false, "the counters line says at least baseline + PROVED for the round judged");
+  assert.ok(script.includes("or was at its cap") && script.includes("the totals span two days"));
+  assert.equal(script.includes("none of these reaches a counter"), false);
+  assert.ok(script.includes("do not count by the code and by the local tests") && script.includes("does not measure that"));
+  assert.equal(script.includes("and /skill.md, /heartbeat.md and /operators are counted doors"), false, "/operators is not named beside the byte comparison");
+  assert.ok(script.includes("the poll's page check, the ride's page check and the sweeps"));
+  const dry = script.split("\n").find((l) => l.includes('Say "[dry-run]'))!;
+  assert.ok(dry.includes("attempts a count") && dry.includes("commit_days stamp row") && dry.includes("plain reads that count nothing (GET /api/attest"), "the dry-run text says attempts a count, names the commit_days row and lists the uncounted reads");
+  assert.ok(dry.includes("message/send and SendMessage, each to /mcp and to /mcp/read (4, mcp_a2a_probe)") && dry.includes("A clean ride proves 11 counted requests"));
+  assert.ok(script.includes("/openapi.json lists the two card GETs and not /a2a"), "the sentence is kept, and Test-DiscoveryServed now checks each card carries a get operation");
+  assert.ok(script.includes("mcp_a2a_probe 4 (each of the two A2A send methods"), "the header states 4 for the MCP A2A probe");
 });
