@@ -232,7 +232,7 @@ test("served truth: citizen inbox", async () => {
   }
 });
 
-// ---------- the two inbox cursors: a part up to Number.MAX_SAFE_INTEGER is served back, so the pattern must hold it ----------
+// ---------- the two inbox cursors: the pattern holds every canonical safe integer; a part above its table's newest row id is a 400 and is never served back ----------
 
 const SAFE = "9007199254740991";
 const SAFE_MAX_16 = SAFE;
@@ -250,7 +250,7 @@ test("the inbox cursor patterns accept exactly the canonical decimals 0 to 90071
   assert.equal(SAFE, String(Number.MAX_SAFE_INTEGER));
 });
 
-test("served truth at the limit: a 15-digit and a 16-digit safe part, per component, is served back inside the declared pattern and followed once with 200; an unsafe part is a 400 the pattern also refuses", async () => {
+test("served truth at the limit: a 15-digit and a 16-digit safe part, per component, is inside the declared pattern and refused with 400 as above the newest row; what the route does serve fits the pattern and is followed with 200; an unsafe part is a 400 the pattern also refuses", async () => {
   const { d1, env } = world();
   try {
     const v = await seedVisitor(d1);
@@ -259,6 +259,7 @@ test("served truth at the limit: a 15-digit and a 16-digit safe part, per compon
       { path: "/api/guest/inbox", base: `guest=${v.id}`, parts: ["g", "c", "p"], opt: [false, false, false], extra: "" },
     ];
     let served = 0;
+    let refused = 0;
     for (const r of routes) {
       const declared = paramsOf(r.path).find((p) => p.name === "cursor")!.schema;
       const re = new RegExp(declared.pattern);
@@ -266,20 +267,23 @@ test("served truth at the limit: a 15-digit and a 16-digit safe part, per compon
         for (const value of [FIFTEEN, SAFE_MAX_16]) {
           const cursor = r.parts.map((k, i) => (i === at ? `${k}${value}` : `${k}0`)).filter((_, i) => !(r.opt[i] && i !== at)).join("-");
           assert.ok(re.test(cursor), `${cursor} is inside the declared pattern`);
-          const first = await call(env, "GET", `${r.path}?${r.base}&cursor=${cursor}`);
-          assert.equal(first.status, 200, `${r.path} ${cursor}`);
-          assert.deepEqual(conform(okSchema(r.path), first.body, r.path), [], `${r.path} ${cursor} body against its declared 200`);
-          assert.ok(re.test(first.body.next_cursor), `${r.path} served ${first.body.next_cursor} for ${cursor}: it fits the declared pattern`);
-          const second = await call(env, "GET", `${r.path}?${r.base}&cursor=${first.body.next_cursor}`);
-          assert.equal(second.status, 200, `${r.path} follows ${first.body.next_cursor}`);
-          served++;
+          const above = await call(env, "GET", `${r.path}?${r.base}&cursor=${cursor}`);
+          assert.equal(above.status, 400, `${r.path} ${cursor}`);
+          assert.match(above.body.error, /above the newest one here/);
+          refused++;
         }
+        const first = await call(env, "GET", `${r.path}?${r.base}&cursor=${r.parts.map((k) => `${k}0`).join("-")}`);
+        assert.equal(first.status, 200, `${r.path} zero cursor`);
+        assert.deepEqual(conform(okSchema(r.path), first.body, r.path), [], `${r.path} body against its declared 200`);
+        assert.ok(re.test(first.body.next_cursor), `${r.path} served ${first.body.next_cursor}: it fits the declared pattern`);
+        assert.equal((await call(env, "GET", `${r.path}?${r.base}&cursor=${first.body.next_cursor}`)).status, 200, `${r.path} follows ${first.body.next_cursor}`);
+        served++;
         const unsafe = r.parts.map((k, i) => (i === at ? `${k}9007199254740992` : `${k}0`)).filter((_, i) => !(r.opt[i] && i !== at)).join("-");
         assert.equal(re.test(unsafe), false, `the pattern refuses ${unsafe}`);
         assert.equal((await call(env, "GET", `${r.path}?${r.base}&cursor=${unsafe}`)).status, 400, `${r.path} refuses ${unsafe} with 400`);
       }
     }
-    assert.ok(served >= 12, `served ${served} limit cursors`);
+    assert.deepEqual([served, refused], [6, 12]);
   } finally {
     d1.close();
   }
@@ -290,8 +294,8 @@ test("finding: the handlers also read a part written with leading zeros as the s
   try {
     const v = await seedVisitor(d1);
     for (const [path, base, cursors] of [
-      ["/api/inbox", "handle=alice", ["c0000000000000001-p0", "c00000000000000001-p0"]],
-      ["/api/guest/inbox", `guest=${v.id}`, ["g0000000000000001-c0-p0", "g00000000000000001-c0-p0"]],
+      ["/api/inbox", "handle=alice", ["c0000000000000000-p0", "c00000000000000000-p0"]],
+      ["/api/guest/inbox", `guest=${v.id}`, ["g0000000000000000-c0-p0", "g00000000000000000-c0-p0"]],
     ] as const) {
       const declared = paramsOf(path).find((p) => p.name === "cursor")!;
       for (const c of cursors) {

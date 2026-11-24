@@ -190,8 +190,8 @@ const RESIDENT_ROW_PROPERTIES = {
 // The pattern of every cursor a route serves, one constant per cursor: the parameter that takes it and the response field that carries it both read it, so they cannot drift apart.
 // test/openapi-response-side-d1.test.ts reads both back out of the document and serves a real page of each.
 // The canonical decimal strings of 0 to Number.MAX_SAFE_INTEGER, as a regex fragment generated from the constant (never hand-typed): "0", or 1 to 15 digits with no leading zero,
-// or 16 digits that are numerically at most MAX_SAFE_INTEGER (each alternative fixes a prefix of the maximum and a smaller next digit, then any digits). The two inbox handlers accept
-// a cursor part up to that limit (inbox.ts:468, :987) and echo a start id above the table's own maximum (inbox.ts:221), so a served part can be 16 digits. The handlers also tolerate
+// or 16 digits that are numerically at most MAX_SAFE_INTEGER (each alternative fixes a prefix of the maximum and a smaller next digit, then any digits). The two inbox handlers refuse
+// a cursor part above that limit, and one above its table's newest row id (inbox.ts runTablePage); the pattern declares the first bound only, the second moves with the table. The handlers also tolerate
 // leading zeros ("c0000000000000001-p0" reads as c1-p0); the document declares only the canonical form, which is the only form the handlers ever serve.
 function safeIntegerPattern(): string {
   const max = String(Number.MAX_SAFE_INTEGER);
@@ -460,7 +460,7 @@ export const ROUTES: readonly RouteSpec[] = [
     description: "What is waiting for one guest: the citizens' answers to its comments, the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>.",
     queryParams: [
       { name: "guest", type: "integer", minimum: 1, maximum: 999999999999999, description: "your visitor number: the number after # in your byline guest:<handle>#<number>", required: true },
-      { name: "cursor", type: "string", pattern: GUEST_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call. Each part is a canonical decimal number (no leading zeros) from 0 up to the safe-integer limit 9007199254740991, and that is exactly what the pattern accepts and every cursor the route serves. A part above the limit is refused with 400. The handler also reads a part written with leading zeros as the same number; the document does not declare that form" },
+      { name: "cursor", type: "string", pattern: GUEST_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call. Each part is a canonical decimal number (no leading zeros) from 0 up to the safe-integer limit 9007199254740991, which is what the pattern accepts and covers every cursor the route serves. A part above the limit, or above the newest row id of its table, is refused with 400. The handler also reads a part written with leading zeros as the same number; the document does not declare that form" },
     ],
     note: "public, stateless, read-only; a guest's own @handle notifies no citizen (a citizen sees guests in the guest_thread section of GET /api/inbox)",
     responseSchema: GUEST_INBOX_RESPONSE_SCHEMA,
@@ -624,7 +624,7 @@ export const ROUTES: readonly RouteSpec[] = [
     queryParams: [
       { name: "handle", type: "string", pattern: "^[A-Za-z0-9_-]{2,32}$", description: "the citizen to read the inbox for: 2 to 32 letters, digits, _ or -; anything else is refused with 400", required: true },
       { name: "since", type: "integer", minimum: 0, maximum: 9007199254740991, description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },
-      { name: "cursor", type: "string", pattern: CITIZEN_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist; each part is a canonical decimal number with no leading zeros, from 0 up to the safe-integer limit 9007199254740991, which is exactly what the pattern accepts and every cursor the route serves; a part above the limit is refused with 400, and the handler also reads a part written with leading zeros as the same number, a form the document does not declare), for every call after the first; exactly one of since or cursor is required, never both" },
+      { name: "cursor", type: "string", pattern: CITIZEN_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (c<n>-p<n>, with a -g<n> part once guest rows exist; each part is a canonical decimal number with no leading zeros, from 0 up to the safe-integer limit 9007199254740991, which is what the pattern accepts and covers every cursor the route serves; a part above the limit, or above the newest row id of its table, is refused with 400, and the handler also reads a part written with leading zeros as the same number, a form the document does not declare), for every call after the first; exactly one of since or cursor is required, never both" },
     ],
     responseSchema: CITIZEN_INBOX_RESPONSE_SCHEMA,
     grepFor: 'path === "/api/inbox" && method === "GET"',

@@ -874,15 +874,17 @@ test("F6: 101 topics exercise the POSTS table's own truncation and look-ahead, t
   }
 });
 
-// F6: an empty database (MAX(id) is null on both tables) must keep the incoming cursor
-// unchanged, not crash and not silently step to some other value.
-test("F6: an empty database keeps the incoming cursor unchanged (MAX(id) is null, falls back to the starting id)", async () => {
+// F6: an empty database (MAX(id) is null on both tables) must not crash and not silently step
+// to some other value: the zero cursor comes back unchanged. A part above an empty table's head
+// was echoed until 24 Nov 2026 and is refused now (test/inbox-cursor-head-d1.test.ts).
+test("F6: an empty database keeps the zero cursor unchanged (MAX(id) is null, read as 0) and refuses a part above it", async () => {
   const d1 = createLocalD1();
   try {
     insertCitizen(d1, { handle: "az" });
     const env = makeEnv(d1);
-    const res = await inbox(env, "az", null, "c7-p12");
-    assert.equal(res.next_cursor, "c7-p12", "no rows in either table: the cursor does not move");
+    await expectStatus(() => inbox(env, "az", null, "c7-p12"), 400, "above the newest one here (0)");
+    const res = await inbox(env, "az", null, "c0-p0");
+    assert.equal(res.next_cursor, "c0-p0", "no rows in either table: the cursor does not move");
     assert.equal(res.has_more, false);
     assert.deepEqual(res.mentions, []);
     assert.deepEqual(res.replies, []);

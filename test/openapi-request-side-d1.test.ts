@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { call, createLocalD1, seedCitizens, guestEnv } from "./helpers/guest.ts";
+import { call, createLocalD1, seedCitizens, seedVisitor, guestEnv } from "./helpers/guest.ts";
 import { newResident } from "./helpers/resident.ts";
 import { world } from "./helpers/resident-account.ts";
 import { UNVALIDATED } from "../src/discovery.ts";
@@ -76,8 +76,10 @@ const PATTERN_SAMPLES: Record<string, { valid: string; invalid: string; edge?: s
   "/api/council/thread|after": { valid: "1", invalid: "1x" },
   "/api/guest/thread|after": { valid: "g1", invalid: "17" },
   "/api/settlements/attention|after": { valid: "1:1", invalid: "1" },
-  "/api/inbox|cursor": { valid: "c0-p0", invalid: "c1", edge: "c9007199254740991-p9007199254740991-g9007199254740991" }, // alternation: longestMatch cannot build it, the handler's own limit is the edge
-  "/api/guest/inbox|cursor": { valid: "g0-c0-p0", invalid: "g1", edge: "g9007199254740991-c9007199254740991-p9007199254740991" },
+  // The two inbox cursors have a second bound the document cannot declare: a part above its table's newest row id is a 400 (the description says so). So their edge here is the zero cursor;
+  // the pattern's own ceiling is asserted to be that 400 at the end of this test.
+  "/api/inbox|cursor": { valid: "c0-p0", invalid: "c1", edge: "c0-p0-g0" },
+  "/api/guest/inbox|cursor": { valid: "g0-c0-p0", invalid: "g1", edge: "g0-c0-p0" },
   "/api/search|q": { valid: "x", invalid: " ", edge: "x".repeat(200) },
   "/api/inbox|handle": { valid: "ab", invalid: "!" },
   "/treasury|before_entry_date": { valid: "2026-01-01", invalid: "2026-1-1" },
@@ -112,6 +114,7 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
   try {
     const doc = await getDoc(env);
     BASE["/api/guest/thread"] = { post_id: String(post) };
+    BASE["/api/guest/inbox"] = { guest: String((await seedVisitor(d1)).id) }; // a visitor that exists: a number nobody holds is a 404 before any cursor is read
     let built = 0;
     const failures: string[] = [];
     const seen = new Set<string>();
@@ -179,7 +182,18 @@ test("request_valid_by_parameter_schema_must_not_get_undeclared_status: boundary
     // Where a declared bound is knowingly tighter than the handler, the description says so.
     const attn = paramsOf(doc, "/api/settlements/attention").find((x) => x.name === "after")!;
     assert.match(attn.description ?? "", /safe-integer/i);
-    for (const [path, name] of [["/api/inbox", "cursor"], ["/api/guest/inbox", "cursor"]]) assert.match(paramsOf(doc, path!).find((x) => x.name === name)!.description ?? "", /safe-integer/i, `${path} ${name}`);
+    const M = "9007199254740991";
+    for (const [path, value] of [["/api/inbox", `c${M}-p${M}-g${M}`], ["/api/guest/inbox", `g${M}-c${M}-p${M}`]] as const) {
+      const p = paramsOf(doc, path).find((x) => x.name === "cursor")!;
+      assert.match(p.description ?? "", /safe-integer/i, `${path} cursor`);
+      assert.match(p.description ?? "", /above the newest row id of its table/, `${path} cursor: the moving bound is stated`);
+      assert.ok(new RegExp(p.schema.pattern!).test(value), "the pattern's ceiling");
+      const { cursor: _c, since: _s, ...base } = BASE[path] as Record<string, string>;
+      const r = await call(env, "GET", `${path}?${new URLSearchParams({ ...base, cursor: value })}`);
+      assert.equal(r.status, 400, `${path} ${value}`);
+      assert.ok(declaredStatuses(doc, path).includes("400"));
+      assert.match(r.body.error, /above the newest one here/);
+    }
     assert.match(due.description ?? "", /view decides/i);
     // The profile route: 0 is refused, a number nobody holds is a 404, and both are declared.
     const prof = declaredStatuses(doc, "/api/resident/{number}");
