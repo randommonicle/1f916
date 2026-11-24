@@ -498,7 +498,9 @@ test("Get-WalletEvents and Test-WalletRowsClear, run for real over the real rout
   assert.match(declared.at("clear"), /identity-log row \d+ \(wallet_declared, citizen alice\) makes the treasury's own address 0x0{39}1 a current wallet/);
   const changed = await res({ seed: worldSeed((d1) => wallet(d1, 2, OTHER, TREASURY_SERVED)) }, tail);
   assert.match(changed.at("clear"), /\(wallet_changed, citizen alice\) makes the treasury's own address/);
-  const upper = await res(WORLD, ["$ev = Get-WalletEvents", R("clear", "Test-WalletRowsClear @(@{ id = 9; kind = 'wallet_declared'; detail = 'wallet declared: " + TREASURY_SERVED + "'; citizen = 'x' }) '0X0000000000000000000000000000000000000001'.Replace('0X', '0x').ToUpperInvariant().Replace('0X', '0x')")]);
+  // The row is stored lower case (normalizeAddress); the address a served page carries may have any case.
+  const MIXED = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+  const upper = await res(WORLD, [R("clear", "Test-WalletRowsClear @(@{ id = 9; kind = 'wallet_declared'; detail = '" + walletLogEntry(null, MIXED.toLowerCase()).detail + "'; citizen = 'x' }) '" + MIXED + "'")]);
   assert.match(upper.at("clear"), /makes the treasury's own address/, "the served address in capitals still matches the lower-case row");
   // A change AWAY from the treasury: the previous address is the treasury, the new one is not. The old row is the finding, the new one is clear on its own.
   const away = await res(WORLD, [R("clear", `Test-WalletRowsClear @(@{ id = 5; kind = 'wallet_changed'; detail = '${walletLogEntry(TREASURY_SERVED, OTHER).detail}'; citizen = 'x' }) '${TREASURY_SERVED}'`)]);
