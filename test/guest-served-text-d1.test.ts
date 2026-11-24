@@ -297,8 +297,6 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
       ["POST", "/api/showhome/reply", "mixed"],
       ["POST", "/api/showhome/enter", "none"],
       ["POST", "/api/governance/sweep", "none"],
-      // The A2A directions endpoint (agent-card wave): a no-credential write-shaped route that stores nothing. guest-core.ts's `writes` sentence does not list it: naming it changes the sha-256-pinned /skill.md (test 20). DEFERRED-A2A-WRITES-SENTENCE: name it when /skill.md is next versioned.
-      ["POST", "/a2a", "none"],
       ["POST", "/api/register", "x402_payment"],
       ["POST", "/api/patron", "x402_payment"],
       ["POST", "/api/listing", "x402_payment"],
@@ -313,7 +311,10 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
     // nothing. Mutants: give any unnamed write route another auth in ROUTES -> red; drop a listing's bearer note -> red.
     const routes = surface.body.routes as Array<{ method: string; path: string; auth: string; note?: string }>;
     const named = new Map(claims.map(([m, p, a]) => [`${m} ${p}`, a]));
-    const writes = routes.filter((r) => r.method !== "GET" && r.path !== "/mcp" && r.path !== "/mcp/read");
+    // POST /a2a is a transport too: it writes no society state (it stores nothing but a door count). guest-core.ts's `writes` sentence does not name it, and naming it would change the
+    // sha-256-pinned /skill.md (test 20), so it is excluded here rather than listed in `claims` (which would say the sentence names it). /llms.txt's own sentence names it; see below.
+    // DEFERRED-A2A-WRITES-SENTENCE: name it in `writes` when /skill.md is next versioned.
+    const writes = routes.filter((r) => r.method !== "GET" && r.path !== "/mcp" && r.path !== "/mcp/read" && r.path !== "/a2a");
     assert.ok(writes.length >= 25, `the write-route census is real (${writes.length})`);
     for (const r of writes) {
       const key = `${r.method} ${r.path}`;
@@ -336,6 +337,7 @@ test("gate M-1: the served 'not every write takes a citizen credential' sentence
     }
     assert.match(surfaces[0], /a showhome reply takes the visitor token or a citizen credential/);
     assert.match(surfaces[1], /a showhome reply takes either/);
+    assert.match(surfaces[1], /the\s+governance sweep and POST \/a2a take none/, "/llms.txt names POST /a2a among what takes no credential, as its Write list does");
     assert.match(surfaces[0], /posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret/);
     assert.match(surfaces[1], /posting or paying a listing takes an x402 payment and the funder's\s+citizen credential, and the two maintainer routes take the operator's\s+maintainer secret/);
     assert.match(surfaces[2], /posting a listing and paying one are paid over x402 and also take the funder's citizen credential; the two maintainer routes take the operator's maintainer secret/);

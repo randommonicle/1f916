@@ -22,6 +22,16 @@ const E = {
   versionNotSupported: -32009,
 } as const;
 
+// v1.0 9.5: the reason of an A2A-specific code's ErrorInfo is its error type in UPPER_SNAKE_CASE without "Error". One table, beside the codes. (-32007 and -32009 are listed for
+// completeness: a v1.0-shaped response never carries either, since 1.0 is only the shape once 1.0 was negotiated, and its extended-card refusal is -32004.)
+const ERROR_REASON: Record<number, string> = {
+  [E.taskNotFound]: "TASK_NOT_FOUND",
+  [E.pushNotSupported]: "PUSH_NOTIFICATION_NOT_SUPPORTED",
+  [E.unsupportedOperation]: "UNSUPPORTED_OPERATION",
+  [E.extendedCardNotConfigured]: "EXTENDED_AGENT_CARD_NOT_CONFIGURED",
+  [E.versionNotSupported]: "VERSION_NOT_SUPPORTED",
+};
+
 type Id = string | number | null;
 interface Failure {
   code: number;
@@ -106,8 +116,13 @@ function validPartV03(p: unknown): boolean {
   return false;
 }
 
+// The optional string fields are plain strings (a2a.proto v1.0.0): null or absent is absent, so is an EMPTY string; any other non-string is malformed.
+const optionalString = (v: unknown) => !present(v) || typeof v === "string";
+const optionalStringArray = (v: unknown) => !present(v) || (Array.isArray(v) && v.every((x) => typeof x === "string"));
+
 function validMessage(version: Version, m: unknown): boolean {
   if (!isObj(m) || !nonEmptyString(m.messageId) || !Array.isArray(m.parts) || m.parts.length === 0) return false;
+  if (!optionalString(m.taskId) || !optionalString(m.contextId) || !optionalStringArray(m.referenceTaskIds)) return false;
   if (version === "1.0") return m.role === "ROLE_USER" && m.parts.every(validPartV1);
   return m.kind === "message" && m.role === "user" && m.parts.every(validPartV03);
 }
@@ -116,13 +131,13 @@ function validMessage(version: Version, m: unknown): boolean {
 // Message.referenceTaskIds (v1.0 4.1.4, v0.3 6.4). Neither version's send request (v1.0 SendMessageRequest, v0.3 MessageSendParams 7.1) has a task field of its own. Never a search
 // of the payload: a `taskId` inside metadata or a data part is payload and is ignored.
 function referencesTask(m: Record<string, unknown>): boolean {
-  return present(m.taskId) || (Array.isArray(m.referenceTaskIds) && m.referenceTaskIds.length > 0);
+  return nonEmptyString(m.taskId) || (Array.isArray(m.referenceTaskIds) && m.referenceTaskIds.length > 0);
 }
 
 // A supplied contextId is refused, not echoed and not ignored: this endpoint keeps no contexts. It is not a task id in either version, so it is never TaskNotFound.
 // Our own replies carry NO contextId, a deliberate choice: v1.0 4.1.4's field table marks Message.contextId optional while its prose reads as requiring it on server messages, and
 // a generated one would be a context this endpoint would then refuse.
-const suppliesContext = (m: Record<string, unknown>) => present(m.contextId);
+const suppliesContext = (m: Record<string, unknown>) => nonEmptyString(m.contextId);
 
 // A send that asks for a push callback is refused rather than accepted and silently not honoured (v1.0 3.3.4; v0.3 7.5).
 function asksForPush(params: Record<string, unknown>): boolean {
@@ -159,8 +174,9 @@ function dispatch(version: Version, method: string, params: unknown, origin: str
 function negotiate(request: Request): Version | null {
   const raw = (request.headers.get("A2A-Version") ?? new URL(request.url).searchParams.get("A2A-Version") ?? "").trim();
   if (raw === "") return "0.3";
-  const m = /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(raw);
-  const mm = m ? `${Number(m[1])}.${Number(m[2])}` : "";
+  // Major.Minor as text, no leading zeros ("01.00" is not "1.0"); a patch number is ignored.
+  const m = /^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.\d+)?$/.exec(raw);
+  const mm = m ? `${m[1]}.${m[2]}` : "";
   return mm === "1.0" ? "1.0" : mm === "0.3" ? "0.3" : null;
 }
 
@@ -189,16 +205,21 @@ async function readLimited(request: Request, limit: number): Promise<string | nu
 }
 
 // Every JSON-RPC error this endpoint sends carries the same fixed directions in error.data (a refused sender is the visitor this endpoint is for); it never carries caller text.
-// v1.0 9.5 constrains `data` to an array of objects each with a "@type" (google.rpc.ErrorInfo recommended, extra context allowed): the directions ride in ErrorInfo.metadata.
-// v0.3 leaves `data` free-form: an object. A request whose version is not known to be 1.0 (an envelope error, an unsupported version, 0.3) gets the object.
-function errorData(version: Version | null, origin: string): unknown {
+// v1.0 9.5 constrains `data` to an array of objects each with a "@type". For an A2A-specific code, data[0] is a google.rpc.ErrorInfo with domain "a2a-protocol.org" and the error
+// type in UPPER_SNAKE_CASE without "Error" as its reason (ERROR_REASON, beside the codes); the directions ride in a SECOND ErrorInfo, our own reason SEE_DIRECTIONS under this
+// host's domain, in metadata. For a standard JSON-RPC code (-32700, -32600, -32601, -32602) data is that second entry alone.
+// v0.3 leaves `data` free-form: an object. A response not known to be v1.0-shaped (0.3, no header, an unsupported version) gets the object { directions }.
+const ERROR_INFO = "type.googleapis.com/google.rpc.ErrorInfo";
+function errorData(version: Version | null, origin: string, code: number): unknown {
   const directions = directionsText(origin);
-  if (version === "1.0") return [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "SEE_DIRECTIONS", domain: "a2a-protocol.org", metadata: { directions } }];
-  return { directions };
+  if (version !== "1.0") return { directions };
+  const ours = { "@type": ERROR_INFO, reason: "SEE_DIRECTIONS", domain: new URL(origin).hostname, metadata: { directions } };
+  const reason = Object.hasOwn(ERROR_REASON, code) ? ERROR_REASON[code] : undefined;
+  return reason ? [{ "@type": ERROR_INFO, reason, domain: "a2a-protocol.org" }, ours] : [ours];
 }
 
 function rpc(id: Id, body: { result?: unknown; error?: Failure }, status: number, origin: string, version: Version | null = null): Response {
-  const out = body.error ? { error: { ...body.error, data: errorData(version, origin) } } : body;
+  const out = body.error ? { error: { ...body.error, data: errorData(version, origin, body.error.code) } } : body;
   return Response.json({ jsonrpc: "2.0", id, ...out }, { status, headers: { "Access-Control-Allow-Origin": "*" } });
 }
 
@@ -249,7 +270,7 @@ export function mcpUnknownMethod(method: string, origin: string): { door: ProbeD
   if (method === "message/send" || method === "SendMessage") {
     return {
       door: "mcp_a2a_probe",
-      message: `This is an MCP endpoint and does not speak A2A. A2A: ${origin}${A2A_PATH} (cards at ${origin}${A2A_CARD_V1_PATH} and ${A2A_CARD_V03_PATH}). To take part here, call guest_enter.`,
+      message: `This is an MCP endpoint and does not speak A2A. A2A: ${origin}${A2A_PATH} (cards at ${origin}${A2A_CARD_V1_PATH} and ${A2A_CARD_V03_PATH}). To take part over MCP, POST ${origin}/mcp and call guest_enter.`,
     };
   }
   return { door: "mcp_unknown_method", message: `method '${method}' not found` };

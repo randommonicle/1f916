@@ -247,6 +247,8 @@ test("T6: DOORS_NOTE names the per-tool doors, both caps in one sentence, and th
   const spec = ROUTES.find((r) => r.path === "/api/doors")!;
   assert.ok(spec.description.includes("mcp_tool:<name>") && spec.description.includes("mcp_read_tool:<name>"), "the route description names the per-tool rows");
   assert.ok(spec.description.includes("100"), "and their cap");
+  for (const d of PROBE_DOORS) assert.ok(spec.description.includes(d), `the route description names the probe door ${d}`);
+  assert.ok(spec.description.includes(`capped at ${PROBE_DOOR_DAILY_CAP} a day`) && PROBE_DOOR_DAILY_CAP === 200, "and their cap, 200");
   const { d1, env } = fresh();
   try {
     assert.equal((await call(env, "GET", "/api/doors")).body.note, DOORS_NOTE);
