@@ -141,7 +141,7 @@ test("no file under src/ names the treasury key or signs or broadcasts a transfe
 
 // Any edit to the note comes through here: re-derive each sentence before changing the hash.
 test("the note is the text that was reviewed", () => {
-  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "fc91468881ddaf179d57c662926c2b8bd771d0ef07cc8224b571d52561e1497a");
+  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "45495b7de574ffaa492d1c8a86a834791874fa710d06fd065b82f94581e6e200");
 });
 
 test("the script does with the key what the note says: it is generated, its address derived, and it is piped to wrangler's stdin, and nothing else", () => {
@@ -150,12 +150,12 @@ test("the script does with the key what the note says: it is generated, its addr
   assert.deepEqual(uses, ["const key = generatePrivateKey();", "const address = privateKeyToAccount(key).address;", "input: key,"]);
 });
 
-test("the note's claims about other routes hold: POST /api/wallet accepts the treasury's own address, and both books serve the newest 200", async () => {
+test("the note's claims about other routes hold: POST /api/wallet refuses the treasury's own address, and both books serve the newest 200", async () => {
   const d1 = createLocalD1();
   try {
     const env = makeEnv(d1);
     const c = citizen(d1, "someone");
-    assert.equal((await declareWallet(env, { id: c }, env.TREASURY_ADDRESS, null)).address, env.TREASURY_ADDRESS.toLowerCase());
+    await assert.rejects(declareWallet(env, { id: c }, env.TREASURY_ADDRESS, null), (e: any) => e.status === 400 && e.code === "wallet_is_treasury");
     const lid = insertListing(d1, { funder_citizen_id: c, bounty_cents: 100 });
     const sid = insertSubmission(d1, { listing_id: lid, citizen_id: c });
     for (let i = 1; i <= 201; i++) {
