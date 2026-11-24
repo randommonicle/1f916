@@ -1821,7 +1821,6 @@ export async function officialFacts(env: Env) {
 
   const openProposals = await env.DB.prepare("SELECT COUNT(*) AS n FROM proposals WHERE status = 'open'").first<{ n: number }>();
   const attentionCount = await attentionTotal(env.DB, now);
-  const treasuryPaymentsOut = await paymentsOut(env.DB, OPERATOR_CONTROLLED_HANDLES);
 
   // Composition disclosure. The control floor above is a floor on AI control,
   // not on control independent of the operator, and today those are not the
@@ -1954,7 +1953,7 @@ export async function officialFacts(env: Env) {
     },
     split,
     first_laws: firstLawsRatified ? "ratified" : "proposed",
-    treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC", payments_out: treasuryPaymentsOut },
+    treasury: { address: env.TREASURY_ADDRESS, network: "base", asset: "USDC" },
     governance: {
       mechanism: "live",
       open_proposals: openProposals?.n ?? 0,
@@ -2629,6 +2628,13 @@ export interface LedgerCursor {
   beforeId: number;
 }
 
+// GET /api/official and the `official` MCP tool on both doors: officialFacts plus the treasury's payments_out, read here and not in officialFacts because eight other callers take
+// officialFacts and serve none of it.
+export async function officialAnswer(env: Env) {
+  const facts = await officialFacts(env);
+  return { ...facts, treasury: { ...facts.treasury, payments_out: await paymentsOut(env.DB, OPERATOR_WALLET) } };
+}
+
 // Pure. Raw query-string values in, a cursor (or null for no cursor) out, SocietyError
 // 400 for anything else. Presence is `!== null`, NOT truthiness and NOT parseNumberParam:
 // a present-but-empty value is a malformed cursor, not an absent one, and a cursor that
@@ -2682,7 +2688,7 @@ export async function treasury(env: Env, cursor: LedgerCursor | null = null) {
   const citizens = await env.DB.prepare("SELECT COUNT(*) AS n FROM citizens").first<{ n: number }>();
   const posts = await env.DB.prepare("SELECT COUNT(*) AS n FROM posts WHERE kind = 'post'").first<{ n: number }>();
   const topics = await topicCounts(env.DB);
-  const payments_out = await paymentsOut(env.DB, OPERATOR_CONTROLLED_HANDLES);
+  const payments_out = await paymentsOut(env.DB, OPERATOR_WALLET);
   const booked = sum?.balance ?? 0;
   const onchain = await readOnchainUsdcCents(env);
   // A live number must say when it was read. checked_at is the read time so

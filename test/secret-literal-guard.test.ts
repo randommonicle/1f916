@@ -298,7 +298,8 @@ const PROSE_ALLOW: Array<{ file: string; sha: string; note: string }> = [
   { file: "src/discovery.ts", sha: "4d89f62cbb77f355e111edd03e51cabe649addb7f0469a5c46e8fec80fc97861", note: "llms.txt chunk with the payer_trace paragraph: last_assertion_at, null for a secret-held seat; no auth instruction" },
   { file: "src/mcp.ts", sha: "1ba4a37af7e78126f9c6693c24976fcce0a1de448c7e90ac1043cb33bd92fcac", note: "citizens tool description: last_assertion_at, null for a secret-held seat or none recorded; no auth instruction" },
   { file: "src/society.ts", sha: "1c05f1f8018ca3fbbc784860ec6b508da348b05c9379026affd72b5df17cce6b", note: "LAST_ASSERTION_NOTE (brief A1): null on a row with no public_key means a secret-held seat; no auth instruction" },
-  { file: "src/treasury-out.ts", sha: "c69db8dcd59d408e5a61b12ba447107d263f5a0ac89181fd310937b93668641f", note: "where the treasury key is kept: a Worker secret, not a citizen credential" },
+  { file: "src/treasury-out.ts", sha: "c3c544ad3b443077aea3a7132cfb7d59d19ae7b20af4c9e579d5da783400d2dd", note: "where the treasury key is kept: a Worker secret, not a citizen credential" },
+  { file: "src/treasury-out.ts", sha: "eca514fbc1ca7d3bbff49fae1f57e941c16c20f6db5556bb93b7d79cd279547c", note: "deployed code can read a Worker secret" },
 ];
 const proseKey = (file: string, value: string): string => file + "\n" + sha(value);
 const PROSE_KEYS = new Set(PROSE_ALLOW.map((e) => e.file + "\n" + e.sha));
@@ -355,10 +356,10 @@ test("secret-literal guard: every 'secret' literal in src/ is a reviewed wire to
   // last_assertion_at (D-078 item 4, 4 Nov 2026): four new prose literals say a null stamp means "a secret-held seat" (discovery.ts x2, mcp.ts, the A1 note in society.ts); the privacy entry only changed sha: 84 / 24 / 60.
   // Follow-up wave (14 Nov 2026, W4): post.secret and model.secret said the same reviewed literal twice; both now read SECRET_ARG_DESCRIPTION (src/mcp.ts), so the one literal is counted once: 83 / 24 / 59.
   // rotateKey compare-and-set (23 Nov 2026): the credential read gained secret_hash (one new SQL literal) and the UPDATE's entry only changed sha: 84 / 24 / 60.
-  // Treasury disclosure (24 Nov 2026): payments_out's note says where the treasury key is kept (one new prose literal): 85 / 24 / 61.
-  assert.equal(total, 85,"secret-literal total drifted from the committed baseline (85)");
+  // Treasury disclosure (24 Nov 2026): payments_out's note says where the treasury key is kept (two new prose literals): 86 / 24 / 62.
+  assert.equal(total, 86, "secret-literal total drifted from the committed baseline (86)");
   assert.equal(wire, 24, "exact wire-token count drifted from the committed baseline (24)");
-  assert.equal(prose, 61, "prose-literal count drifted from the committed baseline (61)");
+  assert.equal(prose, 62, "prose-literal count drifted from the committed baseline (62)");
 });
 
 test("secret-literal guard red-proof: catches a novel secret-only instruction, decodes escapes, exempts only exact wire tokens, and forces review on a changed literal", () => {

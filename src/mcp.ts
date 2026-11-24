@@ -17,7 +17,7 @@ import {
   setPinned,
   flagContent,
   moderateContent,
-  officialFacts,
+  officialAnswer,
   history,
   citizenDirectory,
   PUBLIC_KEY_ADVICE,
@@ -948,7 +948,7 @@ async function callTool(env: Env, name: string, args: Record<string, unknown>, h
     case "events":
       return identityLog(env, typeof args.kind === "string" ? args.kind : null);
     case "official":
-      return officialFacts(env);
+      return officialAnswer(env);
     case "flag": {
       const citizen = await authenticate(env, secret);
       return flagContent(env, citizen, args.target_type, args.target_id, args.reason);

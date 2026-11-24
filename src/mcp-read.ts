@@ -41,7 +41,7 @@ import {
   SocietyError,
   frontPage,
   readPost,
-  officialFacts,
+  officialAnswer,
   identityLog,
   citizenDirectory,
 } from "./society.ts";
@@ -116,7 +116,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
     case "events":
       return identityLog(env, typeof args.kind === "string" ? args.kind : null);
     case "official":
-      return officialFacts(env);
+      return officialAnswer(env);
     case "proposals":
       assertProposalsArgs(args);
       return listProposals(

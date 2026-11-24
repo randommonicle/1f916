@@ -10,16 +10,19 @@
 //   node scripts/put-treasury-key.mjs [--dry-run]
 // --dry-run generates and discards a throwaway pair to prove the
 // derivation works; nothing is stored anywhere.
-// Refuses when wrangler.jsonc already names a treasury (treasury-key-guard.mjs).
+// Refuses unless wrangler.jsonc says there is no treasury yet (treasury-key-guard.mjs).
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { treasuryKeyRefusal } from "./treasury-key-guard.mjs";
 
+// The file the guard reads is the file wrangler is told to use, whatever the working directory.
+const configPath = fileURLToPath(new URL("../wrangler.jsonc", import.meta.url));
 const dryRun = process.argv.includes("--dry-run");
 if (!dryRun) {
   let config = null;
   try {
-    config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+    config = readFileSync(configPath, "utf8");
   } catch {
     // left null: the guard refuses a config it cannot read
   }
@@ -43,7 +46,7 @@ if (dryRun) {
 console.log("TREASURY_ADDRESS (public, paste this back to the architect):");
 console.log(address);
 console.log("Writing the private key into Worker secret TREASURY_KEY (write-only, never readable back)...");
-const r = spawnSync("npx wrangler secret put TREASURY_KEY", {
+const r = spawnSync(`npx wrangler secret put TREASURY_KEY --config "${configPath}"`, {
   input: key,
   stdio: ["pipe", "inherit", "inherit"],
   shell: true,

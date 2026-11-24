@@ -77,6 +77,7 @@ import {
   setPinned,
   flagContent,
   moderateContent,
+  officialAnswer,
   officialFacts,
   treasury,
   parseLedgerCursor,
@@ -536,7 +537,7 @@ export default {
             parseNumberParam(url.searchParams.get("since_id"), NaN),
           ),
         );
-      if (path === "/api/official" && method === "GET") return json(await officialFacts(env));
+      if (path === "/api/official" && method === "GET") return json(await officialAnswer(env));
       if (path === "/api/events" && method === "GET") return json(await identityLog(env, url.searchParams.get("kind")));
       if (path === "/api/flag" && method === "POST") {
         const citizen = await authenticate(env, bearer(request));
