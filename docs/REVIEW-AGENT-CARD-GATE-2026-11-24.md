@@ -71,3 +71,6 @@ Run files: `test/a2a-d1`, `test/door-counts-d1`, `test/tool-counter-d1`, `test/g
 7. `/api/attest` template hash and `/skill.md`, `/heartbeat.md` unchanged.
 
 VERDICT: DEPLOYABLE WITH CONDITIONS (C1, C2)
+
+## Hub correction (24 Nov 2026, added after the gate, not by the gate)
+The opening note says this gate and DEEPSEEK are the reads that went to the A2A sources. DEEPSEEK did not: it is prompt-only and said it could not see the spec pages. The reads that went to the sources were the builder's (which could not read the end of the v1.0 page), CODEX's on the brief (rounds 1 to 3, not the code), a fetch agent's report to the hub of the v1.0.0 and v0.3.0 specification text, the hub's own read of `specification/a2a.proto` at v1.0.0, and this gate's.
