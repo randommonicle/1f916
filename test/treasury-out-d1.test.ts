@@ -12,6 +12,9 @@ import { OPERATOR_WALLET, officialAnswer, officialFacts, treasury, type Env } fr
 import { PAYMENTS_OUT_NOTE, paymentsOut } from "../src/treasury-out.ts";
 import { treasuryKeyRefusal } from "../scripts/treasury-key-guard.mjs";
 import worker from "../src/index.ts";
+import { listingPaymentsPage } from "../src/listings.ts";
+import { payoutsPage } from "../src/payouts.ts";
+import { declareWallet } from "../src/wallets.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const realFetch = globalThis.fetch;
@@ -33,7 +36,7 @@ function paidListing(d1: LocalD1, citizenId: number, payer: string, cents: numbe
     .run(lid, sid, citizenId, payer, cents, `0x${lid}`);
 }
 
-// Two payments from the operator's wallet (one written in mixed case), one from another, two treasury payouts: every figure differs from every other.
+// Two payments from the operator's wallet (one written in mixed case), two from others, three treasury payouts: every figure differs from every other.
 function seed(d1: LocalD1): void {
   const c = citizen(d1, "someone");
   paidListing(d1, c, OPERATOR_WALLET, 1200);
@@ -138,13 +141,36 @@ test("no file under src/ names the treasury key or signs or broadcasts a transfe
 
 // Any edit to the note comes through here: re-derive each sentence before changing the hash.
 test("the note is the text that was reviewed", () => {
-  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "7c96ec2f560bcf8c307d126692afecfce34cef0f711265c2025957d53a348c14");
+  assert.equal(createHash("sha256").update(PAYMENTS_OUT_NOTE, "utf8").digest("hex"), "fc91468881ddaf179d57c662926c2b8bd771d0ef07cc8224b571d52561e1497a");
 });
 
 test("the script does with the key what the note says: it is generated, its address derived, and it is piped to wrangler's stdin, and nothing else", () => {
   const code = readFileSync(join(ROOT, "scripts", "put-treasury-key.mjs"), "utf8").replace(/^\s*\/\/.*$/gm, "");
   const uses = code.split("\n").filter((l) => /\bkey\b/.test(l.replace(/"(?:\\.|[^"\\])*"/g, ""))).map((l) => l.trim());
   assert.deepEqual(uses, ["const key = generatePrivateKey();", "const address = privateKeyToAccount(key).address;", "input: key,"]);
+});
+
+test("the note's claims about other routes hold: POST /api/wallet accepts the treasury's own address, and both books serve the newest 200", async () => {
+  const d1 = createLocalD1();
+  try {
+    const env = makeEnv(d1);
+    const c = citizen(d1, "someone");
+    assert.equal((await declareWallet(env, { id: c }, env.TREASURY_ADDRESS, null)).address, env.TREASURY_ADDRESS.toLowerCase());
+    const lid = insertListing(d1, { funder_citizen_id: c, bounty_cents: 100 });
+    const sid = insertSubmission(d1, { listing_id: lid, citizen_id: c });
+    for (let i = 1; i <= 201; i++) {
+      d1.raw.prepare("INSERT INTO payouts (citizen_id, amount_cents, reason, tx, created_at, prev_hash, hash) VALUES (?, 1, 'r', ?, ?, ?, ?)").run(c, `0xp${i}`, i, `pp${i}`, `ph${i}`);
+      d1.raw
+        .prepare("INSERT INTO listing_payments (listing_id, submission_id, payee_citizen_id, payee_address, payer_address, amount_cents, tx, created_at) VALUES (?, ?, ?, '0xa', ?, 100, ?, ?)")
+        .run(lid, sid, c, OPERATOR_WALLET, `0xl${i}`, i);
+    }
+    for (const page of [await payoutsPage(env), await listingPaymentsPage(env)]) {
+      const times = (page.entries as { created_at: number }[]).map((e) => e.created_at);
+      assert.deepEqual([times.length, times[0], times[199]], [200, 201, 2]);
+    }
+  } finally {
+    d1.close();
+  }
 });
 
 // ---------- scripts/put-treasury-key.mjs ----------
