@@ -703,6 +703,11 @@ export interface WalletPin {
   walletRowHash: string;
 }
 
+// How every refusal between the wallet read and the 402 ends. It stands before replayForClaim, so a re-send of an earlier signed payment can meet it: it may speak for this request only
+// (Opus gate L4, 24 Nov 2026; CODEX, 25 Nov 2026).
+const PAY_REFUSED_BEFORE_402 =
+  "This request issued no payment requirements and sent nothing to the facilitator's /settle. That does not establish the outcome of an earlier signed payment: if you are retrying one, do not sign another until its outcome has been checked.";
+
 const WALLET_ROW_HASH_RE = /^[0-9a-f]{64}$/;
 const WALLET_ROW_KINDS = ["wallet_declared", "wallet_changed"] as const;
 
@@ -737,13 +742,13 @@ async function assertWalletPinCurrent(env: Env, pin: WalletPin, payeeCitizenId: 
     .bind(pin.walletRowId)
     .first<{ id: number; citizen_id: number; kind: string; detail: string | null; hash: string | null }>();
   if (!row) {
-    throw new SocietyError(409, `Identity-log row ${pin.walletRowId} does not exist. Re-read the payee's newest wallet row (GET /api/listing/:id) and pin that. Nothing was issued or settled.`, "wallet_row_missing");
+    throw new SocietyError(409, `Identity-log row ${pin.walletRowId} does not exist. Re-read the payee's newest wallet row (GET /api/listing/:id) and pin that. ${PAY_REFUSED_BEFORE_402}`, "wallet_row_missing");
   }
   if (!(WALLET_ROW_KINDS as readonly string[]).includes(row.kind)) {
-    throw new SocietyError(409, `Identity-log row ${row.id} is a '${row.kind}' row, not a wallet row (wallet_declared or wallet_changed). Nothing was issued or settled.`, "wallet_row_kind");
+    throw new SocietyError(409, `Identity-log row ${row.id} is a '${row.kind}' row, not a wallet row (wallet_declared or wallet_changed). ${PAY_REFUSED_BEFORE_402}`, "wallet_row_kind");
   }
   if (row.citizen_id !== payeeCitizenId) {
-    throw new SocietyError(409, `Identity-log row ${row.id} belongs to citizen ${row.citizen_id}, not to the submission's citizen ${payeeCitizenId}. Nothing was issued or settled.`, "wallet_row_citizen");
+    throw new SocietyError(409, `Identity-log row ${row.id} belongs to citizen ${row.citizen_id}, not to the submission's citizen ${payeeCitizenId}. ${PAY_REFUSED_BEFORE_402}`, "wallet_row_citizen");
   }
   const newest = await env.DB.prepare(
     "SELECT MAX(id) AS newest FROM identity_events WHERE citizen_id = ? AND kind IN ('wallet_declared', 'wallet_changed')",
@@ -751,13 +756,13 @@ async function assertWalletPinCurrent(env: Env, pin: WalletPin, payeeCitizenId: 
     .bind(payeeCitizenId)
     .first<{ newest: number | null }>();
   if (newest?.newest !== row.id) {
-    throw new SocietyError(409, `Citizen ${payeeCitizenId} has a newer wallet row (${newest?.newest}) than the pinned row ${row.id}, even if it names the same address again. Re-read the newest row and re-pin. Nothing was issued or settled.`, "wallet_row_superseded");
+    throw new SocietyError(409, `Citizen ${payeeCitizenId} has a newer wallet row (${newest?.newest}) than the pinned row ${row.id}, even if it names the same address again. Re-read the newest row and re-pin. ${PAY_REFUSED_BEFORE_402}`, "wallet_row_superseded");
   }
   if (row.hash !== pin.walletRowHash) {
-    throw new SocietyError(409, `Identity-log row ${row.id}'s stored hash is not the pinned hash: this is not the row the funder read. Nothing was issued or settled.`, "wallet_row_hash");
+    throw new SocietyError(409, `Identity-log row ${row.id}'s stored hash is not the pinned hash: this is not the row the funder read. ${PAY_REFUSED_BEFORE_402}`, "wallet_row_hash");
   }
   if (walletAddressFromRow(row.kind, row.detail ?? "") !== payTo) {
-    throw new SocietyError(409, `Identity-log row ${row.id} does not make ${payTo} (the payee's declared wallet on record) current: the wallet table and the chained row disagree, so nothing is paid until they agree. Nothing was issued or settled.`, "wallet_row_address");
+    throw new SocietyError(409, `Identity-log row ${row.id} does not make ${payTo} (the payee's declared wallet on record) current: the wallet table and the chained row disagree, so nothing is paid until they agree. ${PAY_REFUSED_BEFORE_402}`, "wallet_row_address");
   }
 }
 
@@ -806,7 +811,7 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
   if (isTreasuryAddress(env, reviewerWallet)) {
     throw new SocietyError(
       409,
-      `Citizen ${submission.citizen_id} (the submitter) has the treasury's own address as its declared wallet, and a bounty is never paid to the treasury. Ask them to declare an address they control (POST /api/wallet). Nothing was issued or settled.`,
+      `Citizen ${submission.citizen_id} (the submitter) has the treasury's own address as its declared wallet, and a bounty is never paid to the treasury. Ask them to declare an address they control (POST /api/wallet). ${PAY_REFUSED_BEFORE_402}`,
       "wallet_is_treasury",
     );
   }
