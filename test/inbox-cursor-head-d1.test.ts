@@ -199,3 +199,38 @@ test("served text: both cursor notes bound the claim to a served cursor and name
     w.d1.close();
   }
 });
+
+test("KNOWN LIMIT, not wanted behaviour: a cursor issued by hand one above the head and first sent after the head has passed it is read, and the rows at or below it are not delivered; a cursor the route served delivers them", async () => {
+  // The refusal above only catches a cursor sent while it is still ahead. A client that saved such a value and sent it later gets 200 and
+  // silently misses the rows written up to it; this pins that so a later fix is a deliberate change. The control is the same write sequence
+  // behind a cursor the route itself served. Mutation that reddens the pin: a source change that delivers rows at or below the cursor (e.g. `>` to `>=` in the comments query).
+  for (const r of ROUTES) {
+    const mentionBody = (w: World) => `@alice @guest:wren#${w.visitor} mentioned`;
+    // the pin: the cursor is made up one above the comments head and is NOT sent until the rows exist
+    const w = await world();
+    try {
+      const heads = [head(w.d1, "guest_thread"), head(w.d1, "comments"), head(w.d1, "posts")] as [number, number, number];
+      const handMade = r.cursor(heads[0], heads[1] + 1, heads[2]);
+      const first = addComment(w.d1, w.topic, 3, mentionBody(w));
+      const second = addComment(w.d1, w.topic, 3, mentionBody(w));
+      assert.deepEqual([first, second], [heads[1] + 1, heads[1] + 2], "the head has reached the cursor and passed it");
+      const res = await call(w.env, "GET", `${r.path}?${r.base(w)}&cursor=${handMade}`);
+      assert.equal(res.status, 200, `${r.path}: ${JSON.stringify(res.body)}`);
+      assert.deepEqual(res.body.mentions.map((m: { id: number }) => m.id), [second], `${r.path}: the row at the cursor (${first}) is not in the page`);
+    } finally {
+      w.d1.close();
+    }
+    // the control: the same writes behind a cursor the route served
+    const c = await world();
+    try {
+      const served = (await call(c.env, "GET", r.path === "/api/inbox" ? "/api/inbox?handle=alice&since=0" : `/api/guest/inbox?guest=${c.visitor}`)).body.next_cursor as string;
+      const first = addComment(c.d1, c.topic, 3, mentionBody(c));
+      const second = addComment(c.d1, c.topic, 3, mentionBody(c));
+      const res = await call(c.env, "GET", `${r.path}?${r.base(c)}&cursor=${served}`);
+      assert.equal(res.status, 200, `${r.path}: ${JSON.stringify(res.body)}`);
+      assert.deepEqual(res.body.mentions.map((m: { id: number }) => m.id), [first, second], `${r.path}: a served cursor delivers both`);
+    } finally {
+      c.d1.close();
+    }
+  }
+});
