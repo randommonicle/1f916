@@ -89,8 +89,8 @@ test("3: a repeated known key is 400 repeated_query_parameter, identical values 
   }
 });
 
-test("4: a refused request executes zero D1 statements", async () => {
-  // Mutation that reddens this: move the check after the inbox()/guestInbox() call in index.ts.
+test("4: a refused request executes zero D1 statements; a refused MCP call executes its two door counts (four statements) and nothing else", async () => {
+  // Mutations that redden this: move the check after the inbox()/guestInbox() call in index.ts, mcp.ts or mcp-read.ts.
   let n = 0;
   const { d1, env } = setup({ onExec: () => { n++; } });
   try {
@@ -99,6 +99,14 @@ test("4: a refused request executes zero D1 statements", async () => {
       const r = await call(env, "GET", q);
       assert.equal(r.status, 400, q);
       assert.equal(n, 0, `${q}: ${n} statements ran`);
+    }
+    for (const door of DOORS) {
+      for (const [tool, args] of [["inbox", { handle: "alice", since: 0, limit: 1 }], ["guest_inbox", { guest: 1, limit: 1 }]] as const) {
+        n = 0;
+        const r = await rpc(env, door, tool, args);
+        assert.equal(r.isError, true);
+        assert.equal(n, 4, `${door} ${tool}: ${n} statements ran`); // two door-counting attempts, each one batch of two statements, as for a refused proposals call
+      }
     }
   } finally {
     d1.close();
@@ -141,9 +149,16 @@ test("6: both inbox tools refuse an unknown argument and a non-object on both do
           assert.equal(r.parsed.error, `Unknown argument${named}. The ${tool} tool accepts only: ${accepts} (secret and token are ignored if sent). Nothing was read.`);
           assert.equal(JSON.stringify(r).includes("v-not-echoed"), false, "a refusal names keys, never values");
         }
-        for (const bad of [[], "open", 5, true, null]) {
+        for (const bad of [[], "open", 5, true]) {
           const r = await rpc(env, door, tool, bad);
           assert.equal(r.isError, true, `${door} ${tool} ${JSON.stringify(bad)}`);
+          assert.equal(r.parsed.error, `The ${tool} tool takes an object with ${accepts}.`, `${door} ${tool} ${JSON.stringify(bad)}`);
+        }
+        // the doors turn a null or absent arguments into {} first, so these meet the read's own refusal of a missing handle or visitor number
+        for (const r of [await rpc(env, door, tool, null), await rpc(env, door, tool, undefined, false)]) {
+          assert.equal(r.isError, true, `${door} ${tool}`);
+          assert.equal(/takes an object|Unknown argument/.test(r.parsed.error), false, r.parsed.error);
+          assert.match(r.parsed.error, tool === "inbox" ? /handle/ : /guest|visitor/);
         }
         const ok = await rpc(env, door, tool, good);
         assert.equal(ok.isError, false, `${door} ${tool}: ${JSON.stringify(ok.parsed)}`);
@@ -236,13 +251,13 @@ test("8: every inbox URL a served document or a source file prints carries only 
   try {
     const v = await seedVisitor(d1, "wren");
     const texts: Array<[string, string]> = [];
-    for (const d of ["/heartbeat.md", "/skill.md", "/operators", "/", "/llms.txt", "/api/surface", "/openapi.json", "/.well-known/agent-card.json"]) {
+    for (const d of ["/heartbeat.md", "/skill.md", "/operators", "/", "/llms.txt", "/api/surface", "/openapi.json", "/.well-known/agent-card.json", "/api/official"]) {
       const r = await call(env, "GET", d);
       assert.ok(r.status === 200, `${d} answered ${r.status}`);
       texts.push([d, typeof r.body?._text === "string" ? r.body._text : JSON.stringify(r.body)]);
     }
     const srcDir = join(import.meta.dirname, "..", "src");
-    for (const f of readdirSync(srcDir).filter((x) => x.endsWith(".ts"))) texts.push([`src/${f}`, readFileSync(join(srcDir, f), "utf8")]);
+    for (const f of readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter((x) => x.endsWith(".ts"))) texts.push([`src/${f.replaceAll("\\", "/")}`, readFileSync(join(srcDir, f), "utf8")]);
     const isSource = (name: string) => name.startsWith("src/");
     const seenIn = new Map<string, number>();
     let read = 0;

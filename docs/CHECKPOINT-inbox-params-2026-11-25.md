@@ -31,4 +31,6 @@ The branch was rebased on `c085b7a1` (one test file); the commit hashes above ar
 - Test 8 was partly blind: a placeholder with a space cut the URL short, and an unfilled one was skipped. It now takes a placeholder as one atom, fills every one or fails, and checks the keys of every inbox URL printed by `src/*.ts`. The cap test asserts the exact page, then the remainder.
 - Mutations (`scratch/mut-inbox.py` in the hub): 38 run, 38 RED, all restored.
 
+GEMINI round 1, taken (`exchange/REVIEW_inbox-params-2026-11-25.md` in the hub): the citizen cursor_note named `open_proposals`, which is no key of the answer: it is `ballots`. Test 6 could not go red for its non-object check and put `null` with the refused shapes. Its optionals too: the refused MCP call's statement count, the stale mutation comment, a recursive scan and /api/official in test 8.
+
 Open: a client that sends any other stray key to these two tools or routes is now refused; the cost the operator accepted on 25 Nov.
