@@ -43,6 +43,15 @@ async function guestOn(d1: LocalD1, env: Env, topic: number, handle: string, bod
 
 // ---------- the guest inbox ----------
 
+// A walk of 132 guest rows: page one is cut at the limit and its g part is the 100th row served, below the head; page two takes the rest and its g part is the head.
+function assertGuestPartOfCutPage(d1: LocalD1, walk: Array<{ n: number; more: boolean; g: number; last: number }>) {
+  const head = Number((d1.raw.prepare("SELECT MAX(id) AS m FROM guest_thread").get() as { m: number }).m);
+  assert.deepEqual(walk.map((p) => [p.n, p.more]), [[INBOX_SECTION_LIMIT, true], [132 - INBOX_SECTION_LIMIT, false]]);
+  assert.equal(walk[0].g, walk[0].last, "the cut page's g part is the last row it served");
+  assert.ok(walk[0].g < head, "and it is below the head, or this pins nothing");
+  assert.equal(walk[1].g, head, "the last page's g part is the head");
+}
+
 test("19: a guest's inbox lists the citizens' answers to ITS rows only, with the duty status and whether each discharges; another guest's rows never appear; no credential is needed", async () => {
   const { d1, env } = await setup();
   try {
@@ -121,9 +130,11 @@ test("19: the guest cursor is exact by id: a follow-up call returns only what is
     const seen: string[] = [];
     let cursor: string | null = null;
     let pages = 0;
+    const walk: Array<{ n: number; more: boolean; g: number; last: number }> = [];
     for (;;) {
       const page: any = (await call(env, "GET", `/api/guest/inbox?guest=${a.visitor}${cursor ? `&cursor=${cursor}` : ""}`)).body;
       seen.push(...page.answers.map((r: any) => r.id));
+      walk.push({ n: page.answers.length, more: page.has_more, g: Number(/^g(\d+)-/.exec(page.next_cursor)![1]), last: Number(page.answers.at(-1).id.slice(1)) });
       pages++;
       if (!page.has_more) break;
       cursor = page.next_cursor;
@@ -132,6 +143,9 @@ test("19: the guest cursor is exact by id: a follow-up call returns only what is
     assert.equal(seen.length, 132);
     assert.equal(new Set(seen).size, 132, "no repeat");
     assert.ok(pages >= 2 && INBOX_SECTION_LIMIT === 100);
+    // the g part of a cut page is the last row served, not the head (load-bearing-2, 1f916 159869); the last page's is the head.
+    // Mutation that reddens this: make runTablePage's nextId the head on a truncated page.
+    assertGuestPartOfCutPage(d1, walk);
   } finally {
     d1.close();
   }
@@ -277,14 +291,17 @@ test("19/A8: the citizen cursor gains an OPTIONAL -g part: an old c<n>-p<n> curs
     for (let i = 0; i < 130; i++) ins.run(alicePost, 9000 + i, `bulk ${i}`, Date.now() + i);
     const seen: string[] = [];
     let cursor: string | null = null;
+    const walk: Array<{ n: number; more: boolean; g: number; last: number }> = [];
     for (let guard = 0; guard < 10; guard++) {
       const page: any = cursor ? await inbox(env, "alice", null, cursor) : await inbox(env, "alice", "0", null);
       seen.push(...page.guest_thread.map((r: any) => r.id));
+      walk.push({ n: page.guest_thread.length, more: page.has_more, g: Number(/-g(\d+)$/.exec(page.next_cursor)![1]), last: Number(page.guest_thread.at(-1).id.slice(1)) });
       if (!page.has_more) break;
       cursor = page.next_cursor;
     }
     assert.equal(new Set(seen).size, 132, "every guest row exactly once");
     assert.equal(seen.length, 132);
+    assertGuestPartOfCutPage(d1, walk);
     for (const bad of ["c1-p2-g", "c1-p2-gx", "c1-p2-g1-x", "c1-p2-g99999999999999999999"]) {
       await assert.rejects(() => inbox(env, "alice", null, bad), (e: { status?: number }) => e.status === 400, bad);
     }
