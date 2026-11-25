@@ -188,7 +188,7 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   const ok = runPs(harness(LIVE, FULL))!;
   assert.equal(ok.code, 0);
   assert.match(ok.out, /\[PASSED-PINS\]/);
-  // The script as committed holds the placeholder, so it cannot deploy until the hub sets the pin.
+  // The script as committed holds the reviewed sha in full.
   assert.match(script, /^\$REVIEWED_COMMIT = "a72aeadbf7959471e059a2820b131bd5f0c7a54e"$/m);
 });
 
@@ -223,6 +223,7 @@ test("every stop in the body fires on exactly its reviewed condition", () => {
     "$LIVE_BASE_COMMIT -cnotmatch '^[0-9a-f]{40}$'",
     "$REVIEWED_COMMIT -ceq $REVIEWED_COMMIT_PLACEHOLDER",
     "$REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$'",
+    "$ExpectedCommit -cnotmatch '^[0-9a-f]{40}$'",
     "$LASTEXITCODE -ne 0",
     "$branch -cne \"main\"",
     "$expectedCode -ne 0 -or -not $expectedSha",
@@ -732,6 +733,9 @@ test("Test-CursorRide, run for real: the real worker passes it; the pre-24-Nov b
   assert.equal(live.at("ride"), "", live.out);
   const oldCursor: Fixture = { seed: worldSeed(), after: (s, r) => (/[?&]cursor=/.test(s.path) && r.status === 400 ? jsonAns({ handle: "x", next_cursor: "c0-p0", has_more: false, replies: [] }) : undefined) };
   assert.match((await res(oldCursor, tail)).at("ride"), /GET \/api\/inbox with comment id head\+1 answered 200, expected 400/);
+  // a guest inbox page cut at the limit serves a comment part below the head: the ride must still pass (it would otherwise stop a good deploy)
+  const cut: Fixture = { seed: worldSeed(), after: (s, r) => (/^\/api\/guest\/inbox\?guest=\d+$/.test(s.path) && r.status === 200 ? mutateJson(r, (j) => { j.has_more = true; j.next_cursor = j.next_cursor.replace(/-c(\d+)-/, (_: string, n: string) => { assert.ok(Number(n) > 0, "the fixture has a comment head"); return `-c${Number(n) - 1}-`; }); }) : undefined) };
+  assert.equal((await res(cut, tail)).at("ride"), "", "a cut guest page");
   const ride2 = (name: string, fx: Fixture, re: RegExp) => ({ name, fx, re });
   const cases = [
     ride2("head cursor refused", { seed: worldSeed(), after: (s, r) => (/[?&]cursor=c(\d+)-p(\d+)-g(\d+)$/.test(s.path) && r.status === 200 && s.path.startsWith("/api/inbox?handle=commonhold-agent&cursor=") ? jsonAns({ error: "no" }, 400) : undefined) }, /GET \/api\/inbox with the head cursor itself answered 400, expected 200/),
@@ -814,6 +818,10 @@ test("Test-McpTools, run for real over both doors of the real worker: it passes;
     ["guest_inbox limit refused in other words", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isGuest(b) && hasLimit(b), (j) => setText(j, { error: "Nope." })) }, "mcp", /POST \/mcp guest_inbox with limit: the refusal is 'Nope\./],
     ["inbox with secret and token refused", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isInbox(b) && hasSecret(b), (j) => { j.result.isError = true; setText(j, { error: "Unknown argument for inbox: secret." }); }) }, "mcp", /POST \/mcp inbox with secret and token answered isError true: /],
     ["inbox with secret and token has no next_cursor", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isInbox(b) && hasSecret(b), (j) => setText(j, { replies: [] })) }, "read", /POST \/mcp\/read inbox with secret and token carried no next_cursor/],
+    ["inbox with secret and token answered by the old worker", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isInbox(b) && hasSecret(b), (j) => setText(j, { next_cursor: "c1-p1", cursor_note: "Pass cursor=<next_cursor> on your next call, not since." })) }, "mcp", /POST \/mcp inbox with secret and token: the cursor_note does not contain the cap sentence/],
+    ["inbox without them answered by the old worker (read door)", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isInbox(b) && plain(b), (j) => setText(j, { next_cursor: "c1-p1" })) }, "read", /POST \/mcp\/read inbox without them: the cursor_note does not contain the cap sentence/],
+    ["guest_inbox with secret and token answered by the old worker (read door)", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isGuest(b) && hasSecret(b), (j) => setText(j, { next_cursor: "g0-c1-p1", cursor_note: "x" })) }, "read", /POST \/mcp\/read guest_inbox with secret and token: the cursor_note does not contain the cap sentence/],
+    ["guest_inbox without them answered by the old worker", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isGuest(b) && plain(b), (j) => setText(j, { next_cursor: "g0-c1-p1" })) }, "mcp", /POST \/mcp guest_inbox without them: the cursor_note does not contain the cap sentence/],
     ["inbox without them answers 500", { seed: worldSeed(), intercept: (s) => (s.method === "POST" && s.path === "/mcp" && isInbox(s.body) && plain(s.body) ? jsonAns({ error: "x" }, 500) : undefined) }, "mcp", /POST \/mcp inbox without them answered 500, expected 200/],
     ["guest_inbox with secret and token refused", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isGuest(b) && hasSecret(b), (j) => { j.result.isError = true; setText(j, { error: "x" }); }) }, "read", /POST \/mcp\/read guest_inbox with secret and token answered isError true/],
     ["guest_inbox without them has no result", { seed: worldSeed(), intercept: (s) => (s.method === "POST" && s.path === "/mcp" && isGuest(s.body) && plain(s.body) ? jsonAns({ jsonrpc: "2.0", id: 1, result: {} }) : undefined) }, "mcp", /POST \/mcp guest_inbox without them carried no result\.content/],
@@ -890,6 +898,6 @@ test("the dry run's text is accurate: it names only GETs, says it sends no POST 
   assert.ok(!/replication/.test(dry), "inbox gate C1 is checked in step 0, not handed to a reminder");
   const beforeStep2 = code.slice(code.indexOf("$attBefore = Read-Attest"), code.indexOf("if ($DryRun)"));
   assert.equal(/Get-PostAnswer|Get-JsonPost|"-X", "POST"|Test-McpTools|Test-ToolsListSchemas|Test-RouteRefusals/.test(beforeStep2), false, "no POST before the dry-run exit");
-  assert.ok(script.includes("The pre-deploy GETs added nothing"), "the closing note says what the dry run did to the door figures");
+  assert.ok(script.includes("The pre-deploy GETs read no counted door"), "the closing note says what the dry run did to the door figures");
   assert.equal(/agent_card|a2a_send|payments_out|wallet_is_treasury/i.test(code), false, "no leftover from the earlier ships");
 });

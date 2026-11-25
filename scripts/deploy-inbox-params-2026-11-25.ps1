@@ -247,7 +247,7 @@ function Wait-NewWorker($commit, $versionId, $tries, $delaySeconds) {
     }
     if ($n -lt $tries) { Start-Sleep -Seconds $delaySeconds }
   }
-  Stop-Here ("the new worker was not shown live in " + $tries + " reads (last: " + $last + "). Read 'npx wrangler deployments list' and GET /api/attest by hand first, with the [ray] lines above as the evidence: stale reads right after a deploy are common, and the deploy may be live. Only if the new version is not at 100% or fresh reads still disagree: " + $ROLLBACK_LINE)
+  Stop-Here ("the new worker was not shown live in " + $tries + " reads (last: " + $last + "). Read 'npx wrangler deployments list' and GET /api/attest by hand first, with the [ray] lines above as the evidence: stale reads right after a deploy are common, and the deploy may be live. Only if the new version is serving, in whole or in part, and fresh reads still disagree: " + $ROLLBACK_LINE)
 }
 # The status and body of a POST to $url with no body, by curl.exe like every other HTTP call here, and one ray line. $auth is the whole Authorization header value, or "" to send none. Never stops.
 function Get-PostAnswer($url, $auth) {
@@ -324,7 +324,7 @@ function Format-CitizenCursor($c, $p, $g, $hasG) {
   if ($hasG) { $text = $text + "-g" + $g }
   return $text
 }
-# The visitor number of the newest guest critique GET /api/guest/due lists (the number after # in its author byline), or "" when none can be read. A public answer, never a guess.
+# The visitor number of the first guest critique GET /api/guest/due lists (the number after # in its author byline), or "" when none can be read. A public answer, never a guess.
 function Get-VisitorNumber {
   $r = Get-Text ($BASE + "/api/guest/due?view=history&limit=1") 30
   if ([string]$r.Code -cne "200") { return "" }
@@ -386,7 +386,8 @@ function Test-CursorRide($visitor) {
   if ($null -eq $gj) { return "GET /api/guest/inbox was not JSON" }
   $gm = [regex]::Match([string]$gj.next_cursor, '^g(\d+)-c(\d+)-p(\d+)$')
   if (-not $gm.Success) { return ("GET /api/guest/inbox served next_cursor '" + $gj.next_cursor + "', expected g<n>-c<n>-p<n>") }
-  $gC = [long]$gm.Groups[2].Value
+  # The comment HEAD, not the comment part of this page's next_cursor: a page cut at the limit carries the last row it served, and one above that is not above the head.
+  $gC = $h.C
   $why = Test-Reads200 ($GUEST_INBOX_URL + $visitor + "&cursor=" + [string]$gj.next_cursor) "GET /api/guest/inbox replaying its next_cursor"
   if ($why -ne "") { return $why }
   $above = "g" + $gm.Groups[1].Value + "-c" + ($gC + 1) + "-p" + $gm.Groups[3].Value
@@ -479,12 +480,14 @@ function Test-ToolRefusal($a, $label, $text) {
   return ""
 }
 # "" when the tools/call answer $a is NOT an error and its content[0].text is a JSON body with a next_cursor, otherwise the reason.
-function Test-ToolAccepts($a, $label) {
+function Test-ToolAccepts($a, $label, $capSentence) {
   $t = Read-ToolAnswer $a $label
   if ($t.Why -ne "") { return $t.Why }
   if ($t.IsError) { return ($label + " answered isError true: " + $t.Text) }
   try { $inner = ($t.Text | ConvertFrom-Json) } catch { return ($label + ": the body text was not JSON") }
   if ($null -eq $inner -or [string]$inner.next_cursor -ceq "") { return ($label + " carried no next_cursor") }
+  # the old worker answers this call too: only its cursor_note says which worker did
+  if (-not ([string]$inner.cursor_note).Contains($capSentence)) { return ($label + ": the cursor_note does not contain the cap sentence, so this answer is not the new worker's") }
   return ""
 }
 # "" when tools/list on $path lists inbox and guest_inbox once each, with no additionalProperties member, exactly the accepted property names and the exception sentence in the description, otherwise the reason.
@@ -514,15 +517,15 @@ function Test-McpTools($path, $visitor) {
   $url = $BASE + $path
   $why = Test-ToolRefusal (Get-JsonPost $url $INBOX_BODY_LIMIT) ("POST " + $path + " inbox with limit") $ERR_TOOL_INBOX
   if ($why -ne "") { return $why }
-  $why = Test-ToolAccepts (Get-JsonPost $url $INBOX_BODY_SECRET) ("POST " + $path + " inbox with secret and token")
+  $why = Test-ToolAccepts (Get-JsonPost $url $INBOX_BODY_SECRET) ("POST " + $path + " inbox with secret and token") $CAP_CITIZEN_SENTENCE
   if ($why -ne "") { return $why }
-  $why = Test-ToolAccepts (Get-JsonPost $url $INBOX_BODY_PLAIN) ("POST " + $path + " inbox without them")
+  $why = Test-ToolAccepts (Get-JsonPost $url $INBOX_BODY_PLAIN) ("POST " + $path + " inbox without them") $CAP_CITIZEN_SENTENCE
   if ($why -ne "") { return $why }
   $why = Test-ToolRefusal (Get-JsonPost $url ($GUEST_BODY_HEAD + $visitor + $GUEST_TAIL_LIMIT)) ("POST " + $path + " guest_inbox with limit") $ERR_TOOL_GUEST
   if ($why -ne "") { return $why }
-  $why = Test-ToolAccepts (Get-JsonPost $url ($GUEST_BODY_HEAD + $visitor + $GUEST_TAIL_SECRET)) ("POST " + $path + " guest_inbox with secret and token")
+  $why = Test-ToolAccepts (Get-JsonPost $url ($GUEST_BODY_HEAD + $visitor + $GUEST_TAIL_SECRET)) ("POST " + $path + " guest_inbox with secret and token") $CAP_GUEST_SENTENCE
   if ($why -ne "") { return $why }
-  $why = Test-ToolAccepts (Get-JsonPost $url ($GUEST_BODY_HEAD + $visitor + $GUEST_TAIL_PLAIN)) ("POST " + $path + " guest_inbox without them")
+  $why = Test-ToolAccepts (Get-JsonPost $url ($GUEST_BODY_HEAD + $visitor + $GUEST_TAIL_PLAIN)) ("POST " + $path + " guest_inbox without them") $CAP_GUEST_SENTENCE
   if ($why -ne "") { return $why }
   return (Test-ToolsListSchemas $path)
 }
@@ -545,6 +548,7 @@ if ($LIVE_BASE_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$LIVE_BASE_COMM
 if ($REVIEWED_COMMIT -ceq $REVIEWED_COMMIT_PLACEHOLDER) { Stop-Here "`$REVIEWED_COMMIT still holds the placeholder '$REVIEWED_COMMIT_PLACEHOLDER': the hub sets it to the commit the review converged on." }
 if ($REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "`$REVIEWED_COMMIT '$REVIEWED_COMMIT' is not 40 lower-case hex. Nothing was read or written." }
 # END-PIN-CHECK
+if ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$') { Stop-Here "-ExpectedCommit '$ExpectedCommit' is not 40 lower-case hex: a branch name would always agree with itself. Pass the sha you were given. Nothing was read or written." }
 
 # 0. the commit: fetch, then main, origin/main and the expected sha must be ONE commit, on a clean tree
 Say "[git] git fetch origin"
@@ -641,7 +645,7 @@ if ($paramsWhy -ne "") { Stop-Here ("before the deploy, " + $paramsWhy + ".") }
 Say "[live] before: limit=1 answers 200 on both inbox routes, GET /api/proposals?limit=1 answers 400 (the control), and neither cursor_note carries the cap sentence"
 
 if ($DryRun) {
-  Say "[dry-run] every pin, git, source, test and live check passed. Every live read was a GET: /api/attest, /api/guest/due, /api/inbox (limit=1 and since=0), /api/guest/inbox (limit=1 and the plain read) and /api/proposals?limit=1, each with its [ray] line. It sent NO POST, no JSON-RPC body, no wrangler command at all (this script runs no D1 command of its own) and wrote nothing. would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id; then ride (each check retried up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row): the rotate and wallet 401 refusals, the inbox cursor ride, the two routes' refusals and cap sentences, the inbox and guest_inbox tools on /mcp and /mcp/read, the route sentences in /openapi.json, /llms.txt and /api/surface, and the public reads. Nothing was deployed."
+  Say "[dry-run] every pin, git, source, test and live check passed. Every live read was a GET: /api/attest, /api/guest/due, /api/inbox (limit=1 and since=0), /api/guest/inbox (limit=1 and the plain read) and /api/proposals?limit=1, each with its [ray] line. It sent NO POST, no JSON-RPC body, no wrangler command at all (this script runs no D1 command of its own) and wrote nothing. would now: run npx wrangler deploy --var CODE_COMMIT:<the full sha> and capture its Current Version ID (refusing to continue without one); poll up to $POLL_TRIES times, $POLL_DELAY_SECONDS s apart, until $GOOD_READS_NEEDED reads in a row show GET /api/attest serving that commit and version id; then ride (each check retried up to $RIDE_TRIES reads, $GOOD_READS_NEEDED good in a row): the attested code, constitution and chains, the rotate and wallet 401 refusals, the inbox cursor ride, the two routes' refusals and cap sentences, the inbox and guest_inbox tools on /mcp and /mcp/read, the route sentences in /openapi.json, /llms.txt and /api/surface, and the public reads. Nothing was deployed."
   exit 0
 }
 
@@ -684,7 +688,7 @@ Say "[ride] POST /api/rotate -> 401 No credentials, 401 Unknown secret; GET /api
 $whyWallet = Confirm-Reads { return (Test-RouteRefusals $WALLET_URL "/api/wallet") } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whyWallet -ne "") { Stop-Here ("the wallet route was not confirmed to refuse as before in " + $RIDE_TRIES + " reads (last: " + $whyWallet + "). Read npx wrangler deployments list and POST /api/wallet by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say "[ride] POST /api/wallet -> 401 No credentials, 401 Unknown secret; GET /api/wallet -> 404 ($GOOD_READS_NEEDED good reads in a row)"
-$whyCursor = Confirm-Reads { return (Test-CursorRide (Get-VisitorNumber)) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
+$whyCursor = Confirm-Reads { return (Test-CursorRide $visitorNumber) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
 if ($whyCursor -ne "") { Stop-Here ("the inbox cursor ride was not confirmed in " + $RIDE_TRIES + " reads (last: " + $whyCursor + "). A regression check: the 24 Nov cursor refusal must still work. Read npx wrangler deployments list and the two inbox routes by hand first. Only if the new version is at 100% and fresh reads still disagree: " + $ROLLBACK_LINE) }
 Say "[ride] inbox cursor ride (regression): head cursor 200; comment, post and guest-row id one above the head 400 with the gate's text; since=0 200 with the cursor_note sentence and its served next_cursor 200; /api/guest/inbox 200, replay 200, comment id above the head 400 ($GOOD_READS_NEEDED good reads in a row)"
 $whyRoutes = Confirm-Reads { return (Test-RouteParams $visitorNumber) } $GOOD_READS_NEEDED $RIDE_TRIES $RIDE_DELAY_SECONDS
@@ -713,6 +717,6 @@ $mcpListsMin = $MCP_LISTS_PER_READ * $GOOD_READS_NEEDED
 $mcpPostsMin = 2 * ($mcpCallsMin + $mcpListsMin)
 Say ("[note] WHAT THIS RIDE PROVED: the stamped commit is serving; both inbox routes refuse an unknown or repeated query parameter with the code and the exact text, and still serve the plain shapes; both cursor_notes carry the cap sentence; the inbox and guest_inbox tools refuse an unknown argument on both doors, answer a call that carries secret and token (that they are not used is shown by the tests, not by this ride), and list schemas with no additionalProperties and the exception sentence; /openapi.json, /llms.txt and /api/surface carry both route sentences; the 24 Nov cursor refusal still works; the rotate and wallet routes still refuse a caller with no credential. " +
   "WHAT IT DID NOT PROVE: item 4, the wording of the pay-route refusals (PAY_REFUSED_BEFORE_402) and of the pay reservation refusal. They need a citizen's credential and a signed payment, which this ride does not hold; the first real refusal is their ride. " +
-  "WHAT THIS RIDE ADDED TO THE DOOR FIGURES: per good read each door took " + $MCP_CALLS_PER_READ + " tools/call POSTs (three inbox, three guest_inbox: counted on receipt, refusals included, in mcp_tool_call or mcp_read_tool_call and in the per-tool rows mcp_tool:inbox, mcp_tool:guest_inbox, mcp_read_tool:inbox, mcp_read_tool:guest_inbox) and " + $MCP_LISTS_PER_READ + " tools/list POST (mcp_tools_list, mcp_read_tools_list). With " + $GOOD_READS_NEEDED + " good reads that is at least " + $mcpCallsMin + " tool calls and " + $mcpListsMin + " tools/list per door, " + $mcpPostsMin + " POSTs to /mcp and /mcp/read in all, more for every retried read (a failed read stops at its first bad call, so a retry adds fewer). " +
-  "The pre-deploy GETs added nothing but the plain-read counts every request attempts, and the sweep reads /skill.md, /heartbeat.md and /operators, which are counted doors. The rotate and wallet refusals wrote nothing (authenticate() throws before any write). This script ran no wrangler command but the deploy and ran no D1 command of its own (the routes it called read D1 as they always do, and the counted doors write their counts).")
+  "WHAT THIS RIDE ADDED TO THE DOOR FIGURES: per good read each door took " + $MCP_CALLS_PER_READ + " tools/call POSTs (three inbox, three guest_inbox: counted on receipt, refusals included, in mcp_tool_call or mcp_read_tool_call and in the per-tool rows mcp_tool:inbox, mcp_tool:guest_inbox, mcp_read_tool:inbox, mcp_read_tool:guest_inbox) and " + $MCP_LISTS_PER_READ + " tools/list POST (mcp_tools_list, mcp_read_tools_list). With " + $GOOD_READS_NEEDED + " good reads that is at least " + $mcpCallsMin + " tool calls and " + $mcpListsMin + " tools/list per door, " + $mcpPostsMin + " POSTs to /mcp and /mcp/read in all, more for every retried read (a retry adds at most the same again). " +
+  "The pre-deploy GETs read no counted door, and the sweep reads /skill.md, /heartbeat.md and /operators, which are counted doors. The rotate and wallet refusals wrote nothing (authenticate() throws before any write). This script ran no wrangler command but the deploy and ran no D1 command of its own (the routes it called read D1 as they always do, and the counted doors write their counts).")
 Say "[done] inbox parameters wave deployed and ridden over HTTP (the pay refusal wording not ridden). Log version id $versionId, commit $($headSha.Substring(0, 8)) and these lines, the [ray] lines included, in HANDOVER.md."
