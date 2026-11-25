@@ -12,6 +12,7 @@ import { declareTestWallet } from "./helpers/wallet-pin.ts";
 import { atomicFromCents } from "./helpers/x402-payload.ts";
 import {
   TEST_PAYER,
+  authStateAnswer,
   TREASURY_ADDRESS,
   TX,
   count,
@@ -285,6 +286,35 @@ test("listing create: one claim, one fee line, one listing; a failure after sett
     await finishListingCreateBooking(testEnv(d1), d1.raw.prepare("SELECT * FROM settlement_claims").get() as unknown as ClaimRow, "test-reconciler");
     assert.equal(count(d1, "listings"), 1);
     assert.equal(count(d1, "ledger"), 1);
+  } finally {
+    stub.restore();
+    d1.close();
+  }
+});
+
+// DEFERRED-PAY-RESERVATION-WORDING (closed 25 Nov 2026): the reservation refusal used to end "Nothing was settled", false of the loser of two
+// overlapping identical payments while the winner settles. It now speaks for the request it answers only.
+test("10b. pay listing: two overlapping identical payments, the loser's answer says only that ITS request settled nothing, while the winner settles", async () => {
+  const d1 = createLocalD1();
+  const stub = stubFacilitator({ verifyDelayMs: 15, settleDelayMs: 40, rpc: () => authStateAnswer(false) });
+  try {
+    const fx = await payFixture(d1);
+    const header = fx.header();
+    const [a, b] = await Promise.all([fx.pay(header), fx.pay(header)]);
+    const winner = a.status === 200 ? a : b;
+    const loser = a.status === 200 ? b : a;
+    assert.equal(winner.status, 200, JSON.stringify([a, b]));
+    assert.equal(stub.calls.settle, 1, "exactly one request reached /settle: the winner's payment settled while the loser was being answered");
+    assert.equal(loser.status, 409, JSON.stringify(loser.body));
+    assert.match(String(loser.body.error), /^This listing can no longer be paid: /);
+    assert.ok(
+      String(loser.body.error).endsWith(
+        "This request settled nothing. That does not establish the outcome of an earlier or overlapping signed payment: if you are retrying one, do not sign another until its outcome has been checked.",
+      ),
+      loser.body.error,
+    );
+    assert.equal(/Nothing was settled/.test(String(loser.body.error)), false, "the old sentence is gone");
+    assert.equal(fx.listing().status, "paid");
   } finally {
     stub.restore();
     d1.close();

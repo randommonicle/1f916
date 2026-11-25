@@ -517,7 +517,7 @@ test("excluded free refusals: x402.ts:541, register-gate.ts:154 (as the afterVer
       record("excluded listings:918 reservation refused", res.status, body);
       assert.equal(res.status, 409);
       assert.deepEqual(Object.keys(body), ["error"]);
-      assert.match(String(body.error), /^This listing can no longer be paid: .*Nothing was settled\.$/);
+      assert.match(String(body.error), /^This listing can no longer be paid: .*newest\. This request settled nothing\. That does not establish the outcome of an earlier or overlapping signed payment: if you are retrying one, do not sign another until its outcome has been checked\.$/);
     } finally {
       stub.restore();
       d1.close();
@@ -664,7 +664,7 @@ test("sweep, positive controls: it goes red on an unmarked uncoded error in x402
   assert.equal(sweep({ "listings.ts": "throw new SocietyError(500, `Your payment settled (tx ${tx}) but recording it failed.`);" }).length, 1, "a settled-money message, unmarked, in another file");
   assert.deepEqual(sweep({ "listings.ts": "throw new SocietyError(500, `Your payment settled (tx ${tx}) but recording it failed.`, undefined, true);" }), [], "marked");
   assert.deepEqual(sweep({ "listings.ts": "// throw new SocietyError(500, `Your payment settled (tx ${tx})`);\nreturn 1;" }), [], "a comment");
-  assert.deepEqual(sweep({ "listings.ts": 'throw new SocietyError(409, "This listing can no longer be paid. Nothing was settled.");' }), [], "a free refusal that says 'Nothing was settled' is not a money answer");
+  assert.deepEqual(sweep({ "listings.ts": 'throw new SocietyError(409, "This listing can no longer be paid. This request settled nothing. That does not establish the outcome of an earlier or overlapping signed payment: if you are retrying one, do not sign another until its outcome has been checked.");' }), [], "a free refusal that says 'This request settled nothing' is not a money answer");
   // multi-line, with a ternary message and the marker on its own lines, as register-gate.ts writes it
   const multi = "throw new SocietyError(\n  500,\n  cond\n    ? `a ${b} settled (tx ${tx}) x`\n    : `c`,\n  undefined,\n  true,\n);";
   assert.deepEqual(sweep({ "register-gate.ts": multi }), [], "multi-line marked");

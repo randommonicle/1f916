@@ -1042,7 +1042,7 @@ test("handlePayListing: a listing that EXPIRES during /verify is refused 409 at 
 
     await assert.rejects(
       () => handlePayListing(payRequest(d1, listingId, submissionId), env, funder, listingId),
-      (e: unknown) => e instanceof SocietyError && e.status === 409 && /expired/.test(e.message) && /Nothing was settled/.test(e.message),
+      (e: unknown) => e instanceof SocietyError && e.status === 409 && /expired/.test(e.message) && e.message.endsWith("newest. This request settled nothing. That does not establish the outcome of an earlier or overlapping signed payment: if you are retrying one, do not sign another until its outcome has been checked."),
     );
     assert.equal(stub.verifyCalls(), 1, "the signed payment did reach /verify");
     assert.equal(stub.settleCalls(), 0, "and never reached /settle");
