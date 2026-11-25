@@ -920,6 +920,8 @@ export async function handlePayListing(request: Request, env: Env, citizen: Citi
       )
         .bind(at, pin.walletRowId, pin.walletRowHash, listingId, at, submissionId, pin.walletRowId, submission.citizen_id, pin.walletRowHash, submission.citizen_id, pin.walletRowId)
         .run();
+      // DEFERRED-PAY-RESERVATION-WORDING (GEMINI, 25 Nov 2026): two overlapping identical requests can both pass replayForClaim; the loser is told "Nothing was settled" while the winner settles. Same class as
+      // PAY_REFUSED_BEFORE_402, after the consult. Not changed here: the sentence is pinned by tests of the free-refusal sweep. Trigger: the next wave that edits this route's refusals.
       if (reserved.meta.changes !== 1) {
         throw new SocietyError(
           409,

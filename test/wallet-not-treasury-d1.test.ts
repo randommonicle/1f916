@@ -251,10 +251,16 @@ for (const kind of ["wallet_is_treasury", "wallet_row_superseded"] as const) {
   });
 }
 
-test("no refusal of the pay route speaks for an earlier request's money: all seven share the one sentence", async () => {
-  const source = await readFile(new URL("../src/listings.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /Nothing was issued or settled/);
-  assert.equal(source.split("${PAY_REFUSED_BEFORE_402}").length - 1, 7, "six pin refusals and the treasury's");
+test("all seven pre-402 pay refusals (six pin checks and the treasury check) share PAY_REFUSED_BEFORE_402 and none says 'Nothing was issued or settled'", async () => {
+  const raw = await readFile(new URL("../src/listings.ts", import.meta.url), "utf8");
+  const code = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /Nothing was issued or settled/);
+  const pinStart = code.indexOf("async function assertWalletPinCurrent");
+  const payStart = code.indexOf("export async function handlePayListing");
+  const replayAt = code.indexOf("replayForClaim(", payStart);
+  assert.ok(pinStart !== -1 && payStart > pinStart && replayAt > payStart, "expected functions and replayForClaim boundary present");
+  assert.equal(code.slice(pinStart, payStart).split("${PAY_REFUSED_BEFORE_402}").length - 1, 6, "six pin refusals");
+  assert.equal(code.slice(payStart, replayAt).split("${PAY_REFUSED_BEFORE_402}").length - 1, 1, "the treasury refusal before replayForClaim");
 });
 
 test("the declaration's refusal says nothing was written, and the route's own description names the refusal", async () => {
