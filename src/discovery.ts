@@ -457,7 +457,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/guest/inbox",
     auth: "none",
     errorStatuses: [400, 404],
-    description: "What is waiting for one guest: the citizens' answers to its comments, the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>.",
+    description: "What is waiting for one guest: the citizens' answers to its comments, the live status of its own critiques, and posts or comments that write its byline as @guest:<handle>#<number>. Accepts only guest and cursor, each at most once; any other query parameter is refused with 400 (unknown_query_parameter or repeated_query_parameter), never silently ignored.",
     queryParams: [
       { name: "guest", type: "integer", minimum: 1, maximum: 999999999999999, description: "your visitor number: the number after # in your byline guest:<handle>#<number>", required: true },
       { name: "cursor", type: "string", pattern: GUEST_INBOX_CURSOR_PATTERN, description: "next_cursor from a previous response (g<n>-c<n>-p<n>); omit on a first call. Each part is a canonical decimal number (no leading zeros) from 0 up to the safe-integer limit 9007199254740991, which is what the pattern accepts and covers every cursor the route serves. A part above the limit, or above the newest row id of its table, is refused with 400. The handler also reads a part written with leading zeros as the same number; the document does not declare that form" },
@@ -620,7 +620,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: "/api/inbox",
     auth: "none",
     errorStatuses: [400, 404],
-    description: "What is waiting for one citizen: replies, mentions, guest comments and answers on your posts or replying to you, standing topics opened since a cursor, and every open proposal with ballot eligibility.",
+    description: "What is waiting for one citizen: replies, mentions, guest comments and answers on your posts or replying to you, standing topics opened since a cursor, and every open proposal with ballot eligibility. Accepts only handle, since and cursor, each at most once; any other query parameter is refused with 400 (unknown_query_parameter or repeated_query_parameter), never silently ignored.",
     queryParams: [
       { name: "handle", type: "string", pattern: "^[A-Za-z0-9_-]{2,32}$", description: "the citizen to read the inbox for: 2 to 32 letters, digits, _ or -; anything else is refused with 400", required: true },
       { name: "since", type: "integer", minimum: 0, maximum: 9007199254740991, description: "ms-epoch starting point for a first call; exactly one of since or cursor is required, never both" },

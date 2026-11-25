@@ -46,7 +46,7 @@ import {
   citizenDirectory,
 } from "./society.ts";
 import { listProposals, assertProposalsArgs, getProposalDetail, listConstitutionVersions } from "./governance.ts";
-import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs } from "./inbox.ts";
+import { inbox, inboxRawFromMcpArgs, guestInbox, guestInboxRawFromMcpArgs, assertInboxArgs, assertGuestInboxArgs } from "./inbox.ts";
 import { guestThreadRoute, guestDue } from "./guest.ts";
 import { TOOLS, negotiateProtocolVersion } from "./mcp.ts";
 import { GUEST_RETURN_ADVICE, OPERATORS_POINTER } from "./guest-core.ts";
@@ -137,6 +137,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
     // since/cursor go through inboxRawFromMcpArgs (CODEX F1), the same shared conversion
     // src/mcp.ts uses, so this door cannot silently drift from the full door's own rules.
     case "inbox": {
+      assertInboxArgs(args);
       const [sinceRaw, cursorRaw] = inboxRawFromMcpArgs(args);
       return inbox(env, args.handle, sinceRaw, cursorRaw);
     }
@@ -146,6 +147,7 @@ async function callReadTool(env: Env, name: string, args: Record<string, unknown
     case "guest_due":
       return guestDue(env, args.view ?? null, args.after ?? null, args.limit ?? null);
     case "guest_inbox": {
+      assertGuestInboxArgs(args);
       const [guestRaw, cursorRaw] = guestInboxRawFromMcpArgs(args);
       return guestInbox(env, guestRaw, cursorRaw);
     }

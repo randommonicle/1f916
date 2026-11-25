@@ -444,6 +444,49 @@ export function inboxRawFromMcpArgs(args: Record<string, unknown>): [sinceRaw: s
   return [sinceRaw, cursorRaw];
 }
 
+// Both inboxes take a fixed set of parameters and refuse anything else, in the order and words assertProposalsQuery (governance.ts)
+// uses for /api/proposals: a parameter a reader expected to filter or page by (?limit=5, ?Since=0) must be told, not served the page as if
+// it had been read. HTTP: unknown keys first (once each, first-seen order, after URL decoding, case-sensitive; an empty or bare key is
+// unknown too); only a request with no unknown key is checked for a repeated known key, identical values included. Runs before any D1 statement.
+export const INBOX_PARAMS = ["handle", "since", "cursor"] as const;
+export const GUEST_INBOX_PARAMS = ["guest", "cursor"] as const;
+
+function assertKnownQuery(params: URLSearchParams, accepted: readonly string[], route: string): void {
+  const list = accepted.join(", ");
+  const unknown = [...new Set([...params.keys()].filter((k) => !accepted.includes(k)))];
+  if (unknown.length > 0)
+    throw new SocietyError(400, `Unknown query parameter${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. ${route} accepts only: ${list}. Nothing was read; remove the parameter and call again.`, "unknown_query_parameter");
+  const repeated = accepted.filter((k) => params.getAll(k).length > 1);
+  if (repeated.length > 0)
+    throw new SocietyError(400, `Repeated query parameter${repeated.length > 1 ? "s" : ""}: ${repeated.join(", ")}. ${route} accepts each of ${list} at most once.`, "repeated_query_parameter");
+}
+
+export function assertInboxQuery(params: URLSearchParams): void {
+  assertKnownQuery(params, INBOX_PARAMS, "GET /api/inbox");
+}
+
+export function assertGuestInboxQuery(params: URLSearchParams): void {
+  assertKnownQuery(params, GUEST_INBOX_PARAMS, "GET /api/guest/inbox");
+}
+
+// MCP: the tool's arguments, after the doors' own `?? {}` normalisation (an explicit null stays allowed and means {}), as assertProposalsArgs does.
+function assertKnownArgs(args: unknown, accepted: readonly string[], tool: string): void {
+  const list = accepted.join(", ");
+  if (args === null || typeof args !== "object" || Array.isArray(args))
+    throw new SocietyError(400, `The ${tool} tool takes an object with ${list}.`, "unknown_argument");
+  const unknown = Object.keys(args).filter((k) => !accepted.includes(k));
+  if (unknown.length > 0)
+    throw new SocietyError(400, `Unknown argument${unknown.length > 1 ? "s" : ""} for ${tool}: ${unknown.join(", ")}. The ${tool} tool accepts only: ${list}. Nothing was read.`, "unknown_argument");
+}
+
+export function assertInboxArgs(args: unknown): void {
+  assertKnownArgs(args, INBOX_PARAMS, "inbox");
+}
+
+export function assertGuestInboxArgs(args: unknown): void {
+  assertKnownArgs(args, GUEST_INBOX_PARAMS, "guest_inbox");
+}
+
 // ---------- GET /api/inbox ----------
 
 export async function inbox(env: Env, handleInput: unknown, sinceRaw: string | null, cursorRaw: string | null) {

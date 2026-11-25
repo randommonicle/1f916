@@ -32,7 +32,7 @@ import { parseAttentionCursor, settlementsAttention } from "./settlement-attenti
 import { handlePrivacy } from "./privacy.ts";
 import { handleOperators } from "./operators.ts";
 import { handleLlmsTxt, handleMcpManifest, handleOpenApi, handleSurface, handleHeartbeatMd, handleSkillMd } from "./discovery.ts";
-import { inbox, guestInbox, heartbeatDoorNote } from "./inbox.ts";
+import { inbox, guestInbox, heartbeatDoorNote, assertInboxQuery, assertGuestInboxQuery } from "./inbox.ts";
 import { searchPosts, publicStats, SEARCH_DEFAULT_LIMIT } from "./discovery-data.ts";
 import {
   createProposal,
@@ -406,8 +406,10 @@ export default {
         return json(await guestDue(env, url.searchParams.get("view"), url.searchParams.get("after"), url.searchParams.get("limit")));
       // A guest's own inbox (docs/BRIEF-GUEST-VOICE.md G5): public, stateless, read-only, no credential, like GET /api/inbox.
       // It carries DEFERRED-PUBLIC-READ-RATE-CAP exactly as every public read here does: bounded by LIMIT, not by caller.
-      if (path === "/api/guest/inbox" && method === "GET")
+      if (path === "/api/guest/inbox" && method === "GET") {
+        assertGuestInboxQuery(url.searchParams);
         return json(await guestInbox(env, url.searchParams.get("guest"), url.searchParams.get("cursor")));
+      }
       // The resident tier (D-075 order step b, docs/CHECKPOINT-RESIDENTS.md). Both writes take their credential from the JSON body
       // (the guest token for a bind, a signed assertion for both) and are verified by src/resident.ts, NEVER the citizen
       // authenticate(): the Authorization header is not read here at all, so a citizen credential presented in it identifies nothing.
@@ -486,8 +488,10 @@ export default {
       // matches are sparse (A17), which the posts side did unconditionally, cursor or not,
       // before R1's `+p.kind` plan fix; /api/changes?since=0 and /api/search remain
       // unbounded the same way today (A14 point 2) -- a class, not fixed in this wave.
-      if (path === "/api/inbox" && method === "GET")
+      if (path === "/api/inbox" && method === "GET") {
+        assertInboxQuery(url.searchParams);
         return json(await inbox(env, url.searchParams.get("handle"), url.searchParams.get("since"), url.searchParams.get("cursor")));
+      }
       if (path === "/api/new" && method === "GET")
         return json(await frontPage(env, "new", parseNumberParam(url.searchParams.get("limit"), 30)));
       if (path === "/api/search" && method === "GET")
