@@ -245,7 +245,7 @@ test("7: the route descriptions, /llms.txt, /openapi.json and /api/surface carry
   }
 });
 
-test("8: every inbox URL a served document or a source file prints carries only parameters the route accepts, each once, and a printed URL, with its placeholders filled, is read with 200", async () => {
+test("8: every inbox URL a served document or a source file prints carries only parameters the route accepts, each once; one a served document prints, with its placeholders filled, is read with 200 (source files and parameter lists are key-checked only)", async () => {
   // Mutations that redden this: add &limit=<n> to one printed URL in inbox.ts, doc.ts, guest.ts or resident.ts; drop a key from INBOX_PARAMS.
   const { d1, env } = setup();
   try {

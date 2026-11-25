@@ -261,6 +261,9 @@ test("all seven pre-402 pay refusals (six pin checks and the treasury check) sha
   assert.ok(pinStart !== -1 && payStart > pinStart && replayAt > payStart, "expected functions and replayForClaim boundary present");
   assert.equal(code.slice(pinStart, payStart).split("${PAY_REFUSED_BEFORE_402}").length - 1, 6, "six pin refusals");
   assert.equal(code.slice(payStart, replayAt).split("${PAY_REFUSED_BEFORE_402}").length - 1, 1, "the treasury refusal before replayForClaim");
+  // the count alone would pass with the sentence moved to another message in the slice (Sonnet gate, 25 Nov 2026): each refusal's own message ends with it
+  for (const c of ["wallet_row_missing", "wallet_row_kind", "wallet_row_citizen", "wallet_row_superseded", "wallet_row_hash", "wallet_row_address", "wallet_is_treasury"])
+    assert.match(code.slice(pinStart, replayAt), new RegExp('\\$\\{PAY_REFUSED_BEFORE_402\\}`,\\s*"' + c + '"'), c);
 });
 
 test("the declaration's refusal says nothing was written, and the route's own description names the refusal", async () => {
