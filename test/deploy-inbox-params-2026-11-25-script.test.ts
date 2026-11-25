@@ -898,6 +898,18 @@ test("the dry run's text is accurate: it names only GETs, says it sends no POST 
   assert.ok(!/replication/.test(dry), "inbox gate C1 is checked in step 0, not handed to a reminder");
   const beforeStep2 = code.slice(code.indexOf("$attBefore = Read-Attest"), code.indexOf("if ($DryRun)"));
   assert.equal(/Get-PostAnswer|Get-JsonPost|"-X", "POST"|Test-McpTools|Test-ToolsListSchemas|Test-RouteRefusals/.test(beforeStep2), false, "no POST before the dry-run exit");
+  // the dry run EXITS: without it the script goes on to the deploy. Mutation that reddens this: delete the exit 0. The block is also run for real.
+  const dryBlock = script.slice(script.indexOf("if ($DryRun) {"), script.indexOf("# 3. deploy the worker"));
+  assert.match(dryBlock, /^if \(\$DryRun\) \{\n  Say "\[dry-run\][^\n]*"\n  exit 0\n\}\n+$/);
+  if (POWERSHELL) {
+    const run = runPs(["function Say($m) { Write-Host $m }", "$DryRun = $true", ...dryBlock.split("\n"), "Write-Host 'WENT-ON'", "exit 7"])!;
+    assert.equal(run.code, 0, run.out);
+    assert.equal(run.out.includes("WENT-ON"), false, "nothing runs after the dry run's block");
+    assert.equal(runPs(["function Say($m) { Write-Host $m }", "$DryRun = $false", ...dryBlock.split("\n"), "Write-Host 'WENT-ON'", "exit 7"])!.code, 7, "the control: a real run goes on");
+  }
+  // both doors are ridden. Mutation that reddens this: drop either call.
+  assert.equal(ride.split('Test-McpTools "/mcp" $visitorNumber').length - 1, 1);
+  assert.equal(ride.split('Test-McpTools "/mcp/read" $visitorNumber').length - 1, 1);
   assert.ok(script.includes("The pre-deploy GETs read no counted door"), "the closing note says what the dry run did to the door figures");
   assert.equal(/agent_card|a2a_send|payments_out|wallet_is_treasury/i.test(code), false, "no leftover from the earlier ships");
 });
