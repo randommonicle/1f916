@@ -89,13 +89,15 @@ test("class 1, its limit: a positional copy of an OPEN proposal is refused by NO
 
 test("class 1, the copy 0007 ships: named columns on both sides carry every value, decided and open", () => {
   const t = live();
-  t.insert(DECIDED);
-  t.insert();
+  for (const tally of [{}, DECIDED, {}]) t.insert(tally);
+  // Ids that do not start at 1 and no column at the value the replacement would default it to, so a column left out of the copy shows.
+  t.db.exec("DELETE FROM proposals WHERE id = 1");
+  t.db.exec("UPDATE proposals SET registration_mode = 'open', founding_ratified = 1, payload = '{\"name\":\"x\"}'");
   const was = t.rows("proposals");
   t.db.exec(CREATE_NEW);
   t.db.exec(NAMED_COPY);
-  assert.equal(was.length, 2);
-  for (const [i, row] of t.rows("proposals_new").entries()) for (const k of Object.keys(was[i]!)) assert.equal(row[k], was[i]![k], k);
+  assert.deepEqual(was.map((r) => r.id), [2, 3]);
+  assert.deepEqual(t.rows("proposals_new"), was);
   t.db.close();
 });
 
@@ -106,9 +108,18 @@ function withDeletedHighest() {
   t.db.exec("DELETE FROM proposals WHERE id = 3");
   return t;
 }
+const REBUILD = [CREATE_NEW, NAMED_COPY, DROP, RENAME];
 const rebuild = (db: DatabaseSync) => {
-  for (const s of [CREATE_NEW, NAMED_COPY, DROP, RENAME]) db.exec(s);
+  for (const s of REBUILD) db.exec(s);
 };
+
+test("class 3, the four statements run here are all of 0007 that touches the proposals table or any mark", () => {
+  const touching = m7
+    .split(";")
+    .map((s) => s.trim())
+    .filter((s) => /\bsqlite_sequence\b/i.test(s) || /\b(TABLE|INTO|UPDATE|FROM)\s+(proposals|proposals_new)\b/i.test(s));
+  assert.deepEqual(touching, REBUILD);
+});
 
 test("class 3, the control: without a rebuild AUTOINCREMENT does not give a deleted highest id out again", () => {
   const t = withDeletedHighest();
