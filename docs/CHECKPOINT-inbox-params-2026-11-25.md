@@ -21,4 +21,14 @@ Decisions and findings:
 
 Mutations (all restored, worktree clean): A1 to A9 RED; B1, B2, B3 RED; C1, C2 RED; D1 to D4 RED. One GREEN along the way (B3's first form), explained above.
 
-Open: a client that sends `secret` or another stray key to the inbox tools is now refused; an agent framework that adds such a key to every call would see errors (same stance as the proposals tool).
+## 25 Nov, the exception and the hub's read (rebased on `c085b7a1`)
+
+The branch was rebased on `c085b7a1` (one test file); the commit hashes above are the ones before the rebase.
+
+- Ruled (D-093 note, 25 Nov): `secret` and `token` stay accepted and unused on the `inbox` and `guest_inbox` tools, both doors. `IGNORED_CREDENTIAL_ARGS` in `src/inbox.ts`; the refusal and both tool descriptions name the exception; a refusal names keys, never values. The two routes refuse both names like any other.
+- `additionalProperties: false` is taken off both schemas, so a client that validates first does not refuse what the server accepts. Neither name is declared as a property: that would ask callers to send a credential to a read that needs none.
+- Guest `cursor_note`: "and duties is outside it" added. `duties` is read from guest_thread too, under its own limit, so the cap sentence as built was not true of the whole answer.
+- Test 8 was partly blind: a placeholder with a space cut the URL short, and an unfilled one was skipped. It now takes a placeholder as one atom, fills every one or fails, and checks the keys of every inbox URL printed by `src/*.ts`. The cap test asserts the exact page, then the remainder.
+- Mutations (`scratch/mut-inbox.py` in the hub): 38 run, 38 RED, all restored.
+
+Open: a client that sends any other stray key to these two tools or routes is now refused; the cost the operator accepted on 25 Nov.

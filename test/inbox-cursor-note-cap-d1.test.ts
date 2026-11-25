@@ -12,7 +12,7 @@ import { call, createLocalD1, insertCitizen, seedCitizens, seedTopic, seedVisito
 import { INBOX_SECTION_LIMIT } from "../src/inbox.ts";
 
 const CITIZEN = `At most ${INBOX_SECTION_LIMIT} candidate rows of each table (comments, posts and guest_thread) are taken for one page; that counts candidate rows, not items delivered, and open_proposals is outside it.`;
-const GUEST = `At most ${INBOX_SECTION_LIMIT} candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered.`;
+const GUEST = `At most ${INBOX_SECTION_LIMIT} candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered, and duties is outside it.`;
 
 test("the cursor_note of each inbox says the cap, in the sentence the operator ruled, and the existing sentences stay", async () => {
   // Mutations that redden this: delete the sentence from either note in src/inbox.ts; change INBOX_SECTION_LIMIT's use in it to a literal 50.
@@ -48,7 +48,10 @@ test("the claim is true: a table with more than the limit of candidates is cut a
     const res = await call(env, "GET", "/api/inbox?handle=alice&since=0");
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.equal(res.body.has_more, true);
-    assert.ok(res.body.mentions.length <= INBOX_SECTION_LIMIT, `${res.body.mentions.length} mentions on one page`);
+    assert.equal(res.body.mentions.length, INBOX_SECTION_LIMIT, "every candidate here is a mention, so the page holds the limit exactly");
+    const rest = await call(env, "GET", `/api/inbox?handle=alice&cursor=${res.body.next_cursor}`);
+    assert.equal(rest.body.mentions.length, 5);
+    assert.equal(rest.body.has_more, false);
   } finally {
     d1.close();
   }

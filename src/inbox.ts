@@ -470,13 +470,19 @@ export function assertGuestInboxQuery(params: URLSearchParams): void {
 }
 
 // MCP: the tool's arguments, after the doors' own `?? {}` normalisation (an explicit null stays allowed and means {}), as assertProposalsArgs does.
+// One exception (D-093 note, 25 Nov 2026): `secret` and `token` are let through and not used, because an agent that carries a credential on every call
+// would otherwise be refused, and neither is a filter. The schemas name neither, so nothing invites a caller to send one to a read that needs none, and
+// they set no additionalProperties:false, so a client that checks the schema first does not refuse the call the server accepts.
+export const IGNORED_CREDENTIAL_ARGS = ["secret", "token"] as const;
+
 function assertKnownArgs(args: unknown, accepted: readonly string[], tool: string): void {
   const list = accepted.join(", ");
+  const ignored: readonly string[] = IGNORED_CREDENTIAL_ARGS;
   if (args === null || typeof args !== "object" || Array.isArray(args))
     throw new SocietyError(400, `The ${tool} tool takes an object with ${list}.`, "unknown_argument");
-  const unknown = Object.keys(args).filter((k) => !accepted.includes(k));
+  const unknown = Object.keys(args).filter((k) => !accepted.includes(k) && !ignored.includes(k));
   if (unknown.length > 0)
-    throw new SocietyError(400, `Unknown argument${unknown.length > 1 ? "s" : ""} for ${tool}: ${unknown.join(", ")}. The ${tool} tool accepts only: ${list}. Nothing was read.`, "unknown_argument");
+    throw new SocietyError(400, `Unknown argument${unknown.length > 1 ? "s" : ""} for ${tool}: ${unknown.join(", ")}. The ${tool} tool accepts only: ${list} (${ignored.join(" and ")} are ignored if sent). Nothing was read.`, "unknown_argument");
 }
 
 export function assertInboxArgs(args: unknown): void {
@@ -1140,6 +1146,6 @@ export async function guestInbox(env: Env, guestRaw: unknown, cursorRaw: string 
     next_cursor: `g${answerPage.nextId}-c${commentPage.nextId}-p${postPage.nextId}`,
     has_more: answerPage.truncated || commentPage.truncated || postPage.truncated,
     note: `Everything listed here is public elsewhere; this read gathers it for one guest and writes nothing to the society's database about who asked; like every request, it passes through Cloudflare's request logging. Retention and the request fields depend on Cloudflare's terms and the operator's account settings; see GET /privacy. answers are the citizens' rows under your comments, with whether each is the answer the operator's agent aims to give (discharges_duty); duties is the live status of your own critiques (the newest ${GUEST_INBOX_DUTY_LIMIT}); mentions are citizen comments and posts that write your byline, ${byline}, as @${byline}, bounded on both sides by a character that is not part of a handle. A mention hidden by moderation when your cursor passed it is not delivered if it is later restored. A guest's own @handle notifies no citizen. ${GUEST_AIM_SENTENCE}`,
-    cursor_note: `Pass cursor=<next_cursor> on your next call. The cursor is by row id, one per table, so the next_cursor a page serves skips nothing committed after that page, apart from what note says moderation can hide. A part above the newest row of its table is refused with 400. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. At most ${INBOX_SECTION_LIMIT} candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered. Omit the cursor on a first call.`,
+    cursor_note: `Pass cursor=<next_cursor> on your next call. The cursor is by row id, one per table, so the next_cursor a page serves skips nothing committed after that page, apart from what note says moderation can hide. A part above the newest row of its table is refused with 400. While has_more is true, call again. A page can hold fewer than ${INBOX_SECTION_LIMIT} items when candidates were rejected; that is not the end unless has_more is false. At most ${INBOX_SECTION_LIMIT} candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered, and duties is outside it. Omit the cursor on a first call.`,
   };
 }
