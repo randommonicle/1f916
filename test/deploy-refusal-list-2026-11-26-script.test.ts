@@ -148,7 +148,7 @@ test("the pins: v6 hash, the live base 9f7fe955 in full, the reviewed pin a plac
   assert.match(script, /^\$LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"$/m);
   // The reviewed pin is the placeholder until the hub sets it to the commit the review converged on, then 40 lower-case hex.
   const reviewed = /^\$REVIEWED_COMMIT = "(acf0eed0c70ec4c4eae1281b4db9858249626cab)"$/m.exec(script);
-  assert.ok(reviewed, "the reviewed pin is the placeholder or 40 lower-case hex");
+  assert.ok(reviewed, "the reviewed pin is acf0eed0 in full");
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-refusal-list-2026-11-26\.ps1", "test\/deploy-refusal-list-2026-11-26-script\.test\.ts", "docs\/REVIEW-REFUSAL-LIST-GATE-2026-11-26\.md"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
@@ -786,9 +786,7 @@ const CIT_RESTART = "pass since=<ms> instead of cursor to start again";
 const GST_RESTART = "omit cursor to start again";
 const CIT_ABOVE = (p: string): boolean => p === "/api/inbox?handle=commonhold-agent&cursor=c999999-p0-g0";
 const GST_ABOVE = (p: string): boolean => /^\/api\/guest\/inbox\?guest=\d+&cursor=g999999-c0-p0$/.test(p);
-const aboveBody = (part: string, tail: string): Record<string, unknown> => JSON.parse(aboveAns(part, tail, false).body);
 const onPath = (pred: (p: string) => boolean, fn: (j: any) => void): Fixture["after"] => (s, r) => (pred(s.path) && r.status === 400 ? mutateJson(r, fn) : undefined);
-const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
 const abTail = [R("absent", "Test-ListAbsent (Get-VisitorNumber)")];
 test("Test-ListAbsent, run for real: the REAL worker of this tree FAILS it (the list is live), the simulated old worker (the live base 9f7fe955) PASSES it, and every altered step has its own reason", async (t) => {
@@ -1076,6 +1074,9 @@ test("the dry run's text is accurate: it names only GETs, says it sends no POST 
   const dry = script.slice(script.indexOf('Say "[dry-run]'), script.indexOf("exit 0", script.indexOf('Say "[dry-run]')));
   assert.ok(dry.includes("Every live read was a GET") && dry.includes("sent NO POST") && dry.includes("no wrangler command at all"));
   assert.ok(dry.includes("[ray] line"), "the dry run says each read logs its ray line");
+  // The read list names exactly the GETs step 2 makes before the dry-run exit, and no other (GEMINI round 1, 26 Nov).
+  assert.ok(dry.includes("Every live read was a GET: /api/attest, /api/guest/due, /api/inbox (since=0) and /api/guest/inbox (the plain read), each with its [ray] line."), "the dry run names the four GETs step 2 makes");
+  assert.ok(!/above-head cursor|\/openapi\.json, \/llms\.txt and \/api\/surface/.test(dry.slice(0, dry.indexOf("would now:"))), "the dry run claims no read step 2 does not make");
   assert.ok(!/replication/.test(dry), "inbox gate C1 is checked in step 0, not handed to a reminder");
   const beforeStep2 = code.slice(code.indexOf("$attBefore = Read-Attest"), code.indexOf("if ($DryRun)"));
   assert.equal(/Get-PostAnswer|Get-JsonPost|"-X", "POST"|Test-McpTools|Test-ToolsListSchemas|Test-RouteRefusals/.test(beforeStep2), false, "no POST before the dry-run exit");
