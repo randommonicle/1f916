@@ -14,8 +14,8 @@ import { createLocalD1, seedCitizens, seedTopic, seedVisitor, guestEnv, guestCom
 import type { Env } from "../src/society.ts";
 
 const TAIL = " A prose-only refusal says nothing about checks it did not run, and a client that keeps only the first refusal never learns of a later failure: fix what it names and call again.";
-const CITIZEN = "Over HTTP three refusals of this route carry a code: unknown_query_parameter, repeated_query_parameter and cursor_above_head; over MCP none does. The rest carry prose only: a missing or malformed handle, since and cursor both or neither, a malformed or out-of-range since or cursor (400), and an unknown handle (404)." + TAIL;
-const GUEST = "Over HTTP three refusals of this route carry a code: unknown_query_parameter, repeated_query_parameter and cursor_above_head; over MCP none does. The rest carry prose only: a missing or malformed guest number, a malformed or out-of-range cursor (400), and an unknown guest number (404)." + TAIL;
+const CITIZEN = "Over HTTP three refusals of this route carry a code: unknown_query_parameter, repeated_query_parameter and cursor_above_head; the rest carry prose only: a missing or malformed handle, since and cursor both or neither, a malformed or out-of-range since or cursor (400), and an unknown handle (404). Over MCP no tool refusal carries a code or an HTTP status: every one, an above-head cursor and an unknown, non-object or wrongly typed argument included, is a tool error carrying prose only." + TAIL;
+const GUEST = "Over HTTP three refusals of this route carry a code: unknown_query_parameter, repeated_query_parameter and cursor_above_head; the rest carry prose only: a missing or malformed guest number, a malformed or out-of-range cursor (400), and an unknown guest number (404). Over MCP no tool refusal carries a code or an HTTP status: every one, an above-head cursor and an unknown, non-object or wrongly typed argument included, is a tool error carrying prose only." + TAIL;
 
 async function world(): Promise<{ d1: LocalD1; env: Env; visitor: number }> {
   const d1 = createLocalD1();
@@ -47,7 +47,11 @@ test("both cursor_notes carry their route's list, over HTTP and over MCP, and th
     assert.ok(String(g.body.cursor_note).includes(GUEST), g.body.cursor_note);
     assert.ok(!String(c.body.cursor_note).includes(GUEST) && !String(g.body.cursor_note).includes(CITIZEN), "each route carries its own list");
     const mg = await mcpTool(w.env, "/mcp/read", "guest_inbox", { guest: w.visitor });
+    assert.equal(mg.isError, false, mg.text);
     assert.ok(String(JSON.parse(mg.text).cursor_note).includes(GUEST));
+    const mc = await mcpTool(w.env, "/mcp", "inbox", { handle: "alice", since: 0 });
+    assert.equal(mc.isError, false, mc.text);
+    assert.ok(String(JSON.parse(mc.text).cursor_note).includes(CITIZEN));
     const doc = readFileSync(join(import.meta.dirname, "..", "docs", "HEARTBEAT-SKILL-TEXT.md"), "utf8").replace(/\r\n/g, "\n");
     assert.ok(doc.includes(CITIZEN));
   } finally {
@@ -103,10 +107,16 @@ test("the list is true over MCP: none of the coded refusals carries a code on ei
   const w = await world();
   try {
     for (const door of ["/mcp", "/mcp/read"] as const) {
-      for (const [name, args] of [["inbox", { handle: "alice", cursor: "c900-p0-g0" }], ["guest_inbox", { guest: w.visitor, cursor: "g900-c0-p0" }], ["inbox", { handle: "alice", since: "0", limit: 1 }]] as const) {
+      for (const [name, args, message] of [
+        ["inbox", { handle: "alice", cursor: "c900-p0-g0" }, /above the newest one here/],
+        ["guest_inbox", { guest: w.visitor, cursor: "g900-c0-p0" }, /above the newest one here/],
+        ["inbox", { handle: "alice", since: 0, limit: 1 }, /limit/],
+        ["guest_inbox", { guest: w.visitor, limit: 1 }, /limit/],
+      ] as const) {
         const r = await mcpTool(w.env, door, name, args);
         assert.equal(r.isError, true, `${door} ${name}: ${r.text}`);
         assert.deepEqual(Object.keys(JSON.parse(r.text)), ["error"], `${door} ${name}: ${r.text}`);
+        assert.match(JSON.parse(r.text).error, message, `${door} ${name}: ${r.text}`);
       }
     }
   } finally {
