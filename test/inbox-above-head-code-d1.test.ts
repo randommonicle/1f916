@@ -35,7 +35,7 @@ async function mcpTool(env: Env, door: "/mcp" | "/mcp/read", name: "guest_inbox"
 }
 
 const SENTENCE =
-  "A part above the newest row of its table is refused: over HTTP with 400, code cursor_above_head; over MCP as a tool error carrying the message only. A refusal reports the first failing check only: the parameters (a tool's arguments, over MCP) are checked before the cursor, so a cursor refused with a parameter was not compared, and of several parts above their heads only the first, in this cursor's own order, is named.";
+  "A part above the newest row of its table is refused with 400 over HTTP, code cursor_above_head, and over MCP as a tool error carrying the message only. A refusal reports the first failing check only: unknown or repeated parameters (over MCP, a tool's unknown argument) are rejected before the cursor is compared, so a cursor refused with a parameter was not compared, and of several parts above their heads only the first, in this cursor's own order, is named.";
 
 test("over HTTP the above-head refusal carries code cursor_above_head on both routes, and nothing else changes in its body", async () => {
   // Mutations that redden this: drop the code argument in refuseAboveHead; give it another code.
