@@ -29,7 +29,7 @@ test("the cursor_note of each inbox says the cap, in the sentence the operator r
     assert.ok(Array.isArray((await call(env, "GET", "/api/inbox?handle=alice&since=0")).body.ballots));
     assert.ok(Array.isArray((await call(env, "GET", `/api/guest/inbox?guest=${v.id}`)).body.duties));
     for (const note of [citizen, guest]) {
-      assert.match(note, /A part above the newest row of its table is refused with 400\./);
+      assert.match(note, /A part above the newest row of its table is refused with 400, code cursor_above_head\./);
       assert.match(note, /A page can hold fewer than 100 items when candidates were rejected; that is not the end unless has_more is false\./);
     }
     assert.equal(INBOX_SECTION_LIMIT, 100, "the sentences above name 100 through the constant; this pins what it is today");
