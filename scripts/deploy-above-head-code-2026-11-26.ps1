@@ -49,7 +49,7 @@ $V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"
 $LIVE_BASE_COMMIT = "445d75979d6f4edde8bc83d8e8a8cdd7343baaaa"
 $LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"
 # THE REVIEWED SOURCE. Step 0 STOPS while this is the placeholder, and while it is not 40 lower-case hex. The hub sets it (the commit the review converged on).
-$REVIEWED_COMMIT = "TO-BE-SET-BY-HUB"
+$REVIEWED_COMMIT = "1462a23c4d1c9dd779128595a78553907712bf15"
 $REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"
 $ALLOWED_PATHS_AFTER_REVIEW = @("scripts/deploy-above-head-code-2026-11-26.ps1", "test/deploy-above-head-code-2026-11-26-script.test.ts", "docs/REVIEW-ABOVE-HEAD-CODE-GATE-2026-11-26.md")
 $ROTATE_URL = "$BASE/api/rotate"
@@ -79,10 +79,9 @@ $ROUTE_FRAGMENT = "cursor_above_head"
 $NOTE_SENTENCE = "A part above the newest row of its table is refused with 400 over HTTP, code cursor_above_head, and over MCP as a tool error carrying the message only. A refusal reports the first failing check only: unknown or repeated parameters (over MCP, a tool's unknown argument) are rejected before the cursor is compared, so a cursor refused with a parameter was not compared, and of several parts above their heads only the first, in this cursor's own order, is named."
 $CITIZEN_RESTART_TAIL = "or pass since=<ms> instead of cursor to start again."
 $GUEST_RESTART_TAIL = "omit cursor to start again."
-# The cap sentence of each cursor_note (the test pins both against src/inbox.ts and INBOX_SECTION_LIMIT). $CAP_FRAGMENT is what the before-state looks for: the base must not carry it.
+# The cap sentence of each cursor_note (the test pins both against src/inbox.ts and INBOX_SECTION_LIMIT).
 $CAP_CITIZEN_SENTENCE = "At most 100 candidate rows of each table (comments, posts and guest_thread) are taken for one page; that counts candidate rows, not items delivered, and ballots is outside it."
 $CAP_GUEST_SENTENCE = "At most 100 candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered, and duties is outside it."
-$CAP_FRAGMENT = "candidate rows of each table"
 # The exact 400 answers the routes serve (src/inbox.ts assertKnownQuery; the test pins them against the source and runs them against the real worker).
 $CODE_UNKNOWN = "unknown_query_parameter"
 $CODE_REPEATED = "repeated_query_parameter"
@@ -426,7 +425,9 @@ function Test-AboveHeadText($e, $label, $partName, $tail) {
   if (-not $text.EndsWith($tail, [System.StringComparison]::Ordinal)) { return ($label + ": the error is '" + $text + "', expected it to end '" + $tail + "'") }
   if ($text.Length -lt ($start.Length + $tail.Length)) { return ($label + ": the error is '" + $text + "', too short to hold the head and the guidance") }
   $middle = $text.Substring($start.Length, $text.Length - $start.Length - $tail.Length)
-  if ($middle -cnotmatch '^[0-9]+\)\. Pass next_cursor exactly as a previous response served it, (or )?$') { return ($label + ": the error is '" + $text + "', expected the head in digits and the guidance 'Pass next_cursor exactly as a previous response served it' between the start and the end") }
+  $guidance = '^[0-9]+\)\. Pass next_cursor exactly as a previous response served it, or $'
+  if ($tail.StartsWith("or ", [System.StringComparison]::Ordinal)) { $guidance = '^[0-9]+\)\. Pass next_cursor exactly as a previous response served it, $' }
+  if ($middle -cnotmatch $guidance) { return ($label + ": the error is '" + $text + "', expected the head in digits and the guidance 'Pass next_cursor exactly as a previous response served it' between the start and the end") }
   return ""
 }
 # "" when the captured GET answer $r is the above-head 400 as THIS wave serves it: JSON keys exactly code and error, code cursor_above_head, the unchanged text.
@@ -573,8 +574,10 @@ function Test-ToolAccepts($a, $label, $capSentence) {
   if ($t.IsError) { return ($label + " answered isError true: " + $t.Text) }
   try { $inner = ($t.Text | ConvertFrom-Json) } catch { return ($label + ": the body text was not JSON") }
   if ($null -eq $inner -or [string]$inner.next_cursor -ceq "") { return ($label + " carried no next_cursor") }
-  # the old worker answers this call too: only its cursor_note says which worker did
+  # the 25 Nov regression: the cap sentence is still served
   if (-not ([string]$inner.cursor_note).Contains($capSentence)) { return ($label + ": the cursor_note does not contain the cap sentence, so this answer is not the new worker's") }
+  # the live base (445d7597) answers this call with the cap sentence too: only the above-head sentence says this answer is the new worker's
+  if (-not ([string]$inner.cursor_note).Contains($NOTE_SENTENCE)) { return ($label + ": the cursor_note does not contain the above-head sentence, so this answer is not the new worker's") }
   return ""
 }
 # "" when tools/list on $path lists inbox and guest_inbox once each, with no additionalProperties member, exactly the accepted property names and the exception sentence in the description, otherwise the reason.

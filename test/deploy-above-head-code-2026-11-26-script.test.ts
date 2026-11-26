@@ -146,9 +146,9 @@ test("the pins: v6 hash, the live base 445d7597 in full, the reviewed pin a plac
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, new RegExp(`^\\$LIVE_BASE_COMMIT = "${LIVE}"$`, "m"));
   assert.match(script, /^\$LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"$/m);
-  // The hub sets the reviewed pin and tightens this to the exact sha; until then the placeholder is allowed.
-  const reviewed = /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m.exec(script);
-  assert.ok(reviewed, "the reviewed pin is the placeholder or 40 lower-case hex");
+  // The hub set the reviewed pin on 26 Nov to the code head both seats and the gate converged on (1462a23c).
+  const reviewed = /^\$REVIEWED_COMMIT = "(1462a23c4d1c9dd779128595a78553907712bf15)"$/m.exec(script);
+  assert.ok(reviewed, "the reviewed pin is 1462a23c in full");
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-above-head-code-2026-11-26\.ps1", "test\/deploy-above-head-code-2026-11-26-script\.test\.ts", "docs\/REVIEW-ABOVE-HEAD-CODE-GATE-2026-11-26\.md"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
@@ -194,8 +194,8 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   const ok = runPs(harness(LIVE, FULL))!;
   assert.equal(ok.code, 0);
   assert.match(ok.out, /\[PASSED-PINS\]/);
-  // The script as committed holds the placeholder or the reviewed sha in full (the hub sets it).
-  assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m);
+  // The script as committed holds the reviewed sha in full.
+  assert.match(script, /^\$REVIEWED_COMMIT = "(1462a23c4d1c9dd779128595a78553907712bf15)"$/m);
 });
 
 test("inbox gate C1, run for real: the session check passes this tree (whose comment names withSession) and STOPS on a call anywhere under src/", (t) => {
@@ -376,7 +376,6 @@ test("the constants the ride compares against are the served ones: the 400 texts
   assert.equal(INBOX_SECTION_LIMIT, 100);
   assert.equal(lit("CAP_CITIZEN_SENTENCE"), `At most ${INBOX_SECTION_LIMIT} candidate rows of each table (comments, posts and guest_thread) are taken for one page; that counts candidate rows, not items delivered, and ballots is outside it.`);
   assert.equal(lit("CAP_GUEST_SENTENCE"), `At most ${INBOX_SECTION_LIMIT} candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered, and duties is outside it.`);
-  assert.ok(lit("CAP_CITIZEN_SENTENCE").includes(lit("CAP_FRAGMENT")) && lit("CAP_GUEST_SENTENCE").includes(lit("CAP_FRAGMENT")));
   assert.ok(INBOX_SRC.includes("At most ${INBOX_SECTION_LIMIT} candidate rows of each table (comments, posts and guest_thread) are taken for one page; that counts candidate rows, not items delivered, and ballots is outside it."));
   assert.ok(INBOX_SRC.includes("At most ${INBOX_SECTION_LIMIT} candidate rows of each table (guest_thread, comments and posts) are taken for one page; that counts candidate rows, not items delivered, and duties is outside it."));
   // The route sentences: discovery.ts is the one place, and it serves them on /openapi.json, /llms.txt and /api/surface.
@@ -632,7 +631,6 @@ const oldWorker = (keep: { code?: string[]; note?: string[]; docs?: string[] } =
   if (DOC_PATHS.includes(p) && !(keep.docs ?? []).includes(p)) {
     let body = r.body;
     for (const tail of ROUTE_TAILS) body = body.split(tail).join("");
-    body = body.split("(cursor_above_head)").join("");
     return { ...r, body };
   }
   return undefined;
@@ -956,6 +954,10 @@ test("Test-McpTools, run for real over both doors of the real worker: it passes;
     ["inbox without them answered by the old worker (read door)", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isInbox(b) && plain(b), (j) => setText(j, { next_cursor: "c1-p1" })) }, "read", /POST \/mcp\/read inbox without them: the cursor_note does not contain the cap sentence/],
     ["guest_inbox with secret and token answered by the old worker (read door)", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isGuest(b) && hasSecret(b), (j) => setText(j, { next_cursor: "g0-c1-p1", cursor_note: "x" })) }, "read", /POST \/mcp\/read guest_inbox with secret and token: the cursor_note does not contain the cap sentence/],
     ["guest_inbox without them answered by the old worker", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isGuest(b) && plain(b), (j) => setText(j, { next_cursor: "g0-c1-p1" })) }, "mcp", /POST \/mcp guest_inbox without them: the cursor_note does not contain the cap sentence/],
+    ["inbox with secret and token answered as 445d7597 serves it", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isInbox(b) && hasSecret(b), (j) => { const inner = JSON.parse(j.result.content[0].text); inner.cursor_note = String(inner.cursor_note).split(NEW_NOTE).join(OLD_NOTE); setText(j, inner); }) }, "mcp", /POST \/mcp inbox with secret and token: the cursor_note does not contain the above-head sentence/],
+    ["inbox without them answered as 445d7597 serves it (read door)", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isInbox(b) && plain(b), (j) => { const inner = JSON.parse(j.result.content[0].text); inner.cursor_note = String(inner.cursor_note).split(NEW_NOTE).join(OLD_NOTE); setText(j, inner); }) }, "read", /POST \/mcp\/read inbox without them: the cursor_note does not contain the above-head sentence/],
+    ["guest_inbox with secret and token answered as 445d7597 serves it (read door)", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isGuest(b) && hasSecret(b), (j) => { const inner = JSON.parse(j.result.content[0].text); inner.cursor_note = String(inner.cursor_note).split(NEW_NOTE).join(OLD_NOTE); setText(j, inner); }) }, "read", /POST \/mcp\/read guest_inbox with secret and token: the cursor_note does not contain the above-head sentence/],
+    ["guest_inbox without them answered as 445d7597 serves it", { seed: worldSeed(), after: toolAfter("/mcp", (b) => isGuest(b) && plain(b), (j) => { const inner = JSON.parse(j.result.content[0].text); inner.cursor_note = String(inner.cursor_note).split(NEW_NOTE).join(OLD_NOTE); setText(j, inner); }) }, "mcp", /POST \/mcp guest_inbox without them: the cursor_note does not contain the above-head sentence/],
     ["inbox without them answers 500", { seed: worldSeed(), intercept: (s) => (s.method === "POST" && s.path === "/mcp" && isInbox(s.body) && plain(s.body) ? jsonAns({ error: "x" }, 500) : undefined) }, "mcp", /POST \/mcp inbox without them answered 500, expected 200/],
     ["guest_inbox with secret and token refused", { seed: worldSeed(), after: toolAfter("/mcp/read", (b) => isGuest(b) && hasSecret(b), (j) => { j.result.isError = true; setText(j, { error: "x" }); }) }, "read", /POST \/mcp\/read guest_inbox with secret and token answered isError true/],
     ["guest_inbox without them has no result", { seed: worldSeed(), intercept: (s) => (s.method === "POST" && s.path === "/mcp" && isGuest(s.body) && plain(s.body) ? jsonAns({ jsonrpc: "2.0", id: 1, result: {} }) : undefined) }, "mcp", /POST \/mcp guest_inbox without them carried no result\.content/],
