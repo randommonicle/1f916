@@ -235,7 +235,8 @@ test("7: the route descriptions, /llms.txt, /openapi.json and /api/surface carry
     const surface = (await call(env, "GET", "/api/surface")).body as { routes: Array<{ method: string; path: string; description: string }> };
     const oa = (await call(env, "GET", "/openapi.json")).body as { paths: Record<string, { get?: { summary?: string } }> };
     for (const [path, only] of [["/api/inbox", "handle, since and cursor"], ["/api/guest/inbox", "guest and cursor"]] as const) {
-      const sentence = `Accepts only ${only}, each at most once; any other query parameter is refused with 400 (unknown_query_parameter or repeated_query_parameter), never silently ignored.`;
+      // 26 Nov (D-094 (2)): the above-head code and the check order follow the refusal sentence.
+      const sentence = `Accepts only ${only}, each at most once; any other query parameter is refused with 400 (unknown_query_parameter or repeated_query_parameter), never silently ignored. A cursor part above the newest row of its table is refused with 400 (cursor_above_head). The parameters are checked before the cursor, and a refusal names the first failure only.`;
       assert.ok(llms.includes(sentence), `llms.txt ${path}`);
       assert.ok(surface.routes.find((r) => r.method === "GET" && r.path === path)?.description.endsWith(sentence), `surface ${path}`);
       assert.ok(oa.paths[path]?.get?.summary?.endsWith(sentence), `openapi ${path}`);
