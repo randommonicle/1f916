@@ -200,7 +200,9 @@ test("served text: both cursor notes bound the claim to a served cursor and name
   }
 });
 
-test("KNOWN LIMIT, not wanted behaviour: a cursor issued by hand one above the head and first sent after the head has passed it is read, and the rows at or below it are not delivered; a cursor the route served delivers them", async () => {
+const UNSERVED_CLAUSE = "Only a served next_cursor carries that promise: a cursor this route did not serve is refused as above the head only while one of its parts is above the newest row of its table; once none is, whether or not it was refused before, it can be accepted, and rows at or below each part are not delivered.";
+
+test("KNOWN LIMIT, not wanted behaviour, stated in both cursor_notes: a cursor issued by hand one above the head and first sent after the head has passed it is read, and the rows at or below it are not delivered; a cursor the route served delivers them", async () => {
   // The refusal above only catches a cursor sent while it is still ahead. A client that saved such a value and sent it later gets 200 and
   // silently misses the rows written up to it; this pins that so a later fix is a deliberate change. The control is the same write sequence
   // behind a cursor the route itself served. Mutation that reddens the pin: a source change that delivers rows at or below the cursor (e.g. `>` to `>=` in the comments query).
@@ -217,6 +219,8 @@ test("KNOWN LIMIT, not wanted behaviour: a cursor issued by hand one above the h
       const res = await call(w.env, "GET", `${r.path}?${r.base(w)}&cursor=${handMade}`);
       assert.equal(res.status, 200, `${r.path}: ${JSON.stringify(res.body)}`);
       assert.deepEqual(res.body.mentions.map((m: { id: number }) => m.id), [second], `${r.path}: the row at the cursor (${first}) is not in the page`);
+      // The limit is served, beside this behaviour (D-094 note 2, 27 Nov; test/inbox-unserved-cursor-d1.test.ts checks the clause on every table).
+      assert.ok(String(res.body.cursor_note).includes(UNSERVED_CLAUSE), `${r.path}: the cursor_note states this limit`);
     } finally {
       w.d1.close();
     }
