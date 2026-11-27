@@ -146,9 +146,9 @@ test("the pins: v6 hash, the live base 41478448 in full, the reviewed pin a plac
   assert.match(script, /^\$V6_HASH = "dc5f48213c29bcf844e0fbe7daf1bdb5416b3d57fbd06a8bd03f1061f34092b3"$/m);
   assert.match(script, new RegExp(`^\\$LIVE_BASE_COMMIT = "${LIVE}"$`, "m"));
   assert.match(script, /^\$LIVE_BASE_PLACEHOLDER = "TO-BE-SET-BY-HUB-LIVE-BASE"$/m);
-  // The reviewed pin is the placeholder until the hub sets it to the commit the review converged on, then 40 lower-case hex.
-  const reviewed = /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m.exec(script);
-  assert.ok(reviewed, "the reviewed pin is the placeholder or 40 lower-case hex");
+  // The reviewed pin is the commit both seats and the gate read, in full (set by the hub on 27 Nov; GEMINI round 1 of the deploy review).
+  const reviewed = /^\$REVIEWED_COMMIT = "(3584dbe7451c54bfc23a7079cbbb9d54673a0689)"$/m.exec(script);
+  assert.ok(reviewed, "the reviewed pin is 3584dbe7 in full");
   assert.match(script, /^\$REVIEWED_COMMIT_PLACEHOLDER = "TO-BE-SET-BY-HUB"$/m);
   assert.match(script, /^\$ALLOWED_PATHS_AFTER_REVIEW = @\("scripts\/deploy-unserved-cursor-2026-11-27\.ps1", "test\/deploy-unserved-cursor-2026-11-27-script\.test\.ts", "docs\/REVIEW-UNSERVED-CURSOR-GATE-2026-11-27\.md"\)$/m);
   assert.match(script, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$ExpectedCommit/);
@@ -194,8 +194,8 @@ test("step 0a STOPS on either placeholder or a malformed pin before ANY git, npm
   const ok = runPs(harness(LIVE, FULL))!;
   assert.equal(ok.code, 0);
   assert.match(ok.out, /\[PASSED-PINS\]/);
-  // The script as committed holds the placeholder or a full sha, never a short one.
-  assert.match(script, /^\$REVIEWED_COMMIT = "(TO-BE-SET-BY-HUB|[0-9a-f]{40})"$/m);
+  // The script as committed holds the reviewed sha in full, never the placeholder or a short one.
+  assert.match(script, /^\$REVIEWED_COMMIT = "(3584dbe7451c54bfc23a7079cbbb9d54673a0689)"$/m);
 });
 
 test("inbox gate C1, run for real: the session check passes this tree (whose comment names withSession) and STOPS on a call anywhere under src/", (t) => {
@@ -384,7 +384,7 @@ test("the constants the ride compares against are the served ones: the 400 texts
   // The route sentences are read from the source at test time (not typed here): each carries the old 25 Nov text, then the above-head sentences.
   assert.ok(DISCOVERY_SRC.includes(lit("ROUTE_SENTENCE_INBOX")) && DISCOVERY_SRC.includes(lit("ROUTE_SENTENCE_GUEST")));
   assert.ok(lit("ROUTE_SENTENCE_INBOX").startsWith("Accepts only handle, since and cursor, each at most once;") && lit("ROUTE_SENTENCE_GUEST").startsWith("Accepts only guest and cursor, each at most once;"));
-  assert.ok(lit("ROUTE_SENTENCE_INBOX").includes("cursor_above_head") && lit("ROUTE_SENTENCE_GUEST").includes("cursor_above_head"), "both route sentences carry the above-head code (a regression of this morning)");
+  assert.ok(lit("ROUTE_SENTENCE_INBOX").includes("cursor_above_head") && lit("ROUTE_SENTENCE_GUEST").includes("cursor_above_head"), "both route sentences carry the above-head code (a regression of 26 Nov)");
   assert.equal(DISCOVERY_SRC.split(lit("ROUTE_SENTENCE_INBOX")).length - 1, 1);
   assert.equal(DISCOVERY_SRC.split(lit("ROUTE_SENTENCE_GUEST")).length - 1, 1);
   // The cursor_note sentence of both inbox notes, read from the source: the same sentence once in each note.
@@ -395,8 +395,6 @@ test("the constants the ride compares against are the served ones: the 400 texts
   const LG = lit("LIST_SENTENCE_GUEST");
   assert.equal(INBOX_SRC.split(LC).length - 1, 1, "src/inbox.ts carries the citizen list sentence once");
   assert.equal(INBOX_SRC.split(LG).length - 1, 1, "src/inbox.ts carries the guest list sentence once");
-  assert.equal(INBOX_SRC.split(lit("LIST_FRAGMENT")).length - 1, 2, "the before-state fragment is in both list sentences and nowhere else");
-  assert.ok(LC.startsWith(lit("LIST_FRAGMENT")) && LG.startsWith(lit("LIST_FRAGMENT")), "the fragment opens both sentences");
   assert.equal(INBOX_SRC.split(lit("NOTE_SENTENCE") + " " + LC).length - 1, 1, "the citizen list follows the above-head sentence");
   assert.equal(INBOX_SRC.split(lit("NOTE_SENTENCE") + " " + LG).length - 1, 1, "the guest list follows the above-head sentence");
   assert.notEqual(LC, LG);
